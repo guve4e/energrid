@@ -1,0 +1,714 @@
+{
+  "version": "6.0",
+  "nxVersion": "22.6.0",
+  "pathMappings": {
+    "@energrid/stt-stream-core": [
+      "packages/stt-stream-core/src/index.ts"
+    ],
+    "@energrid/stt-stream-dev": [
+      "packages/stt-stream-dev/src/index.ts"
+    ],
+    "@energrid/stt-stream-openai": [
+      "packages/stt-stream-openai/src/index.ts"
+    ]
+  },
+  "nxJsonPlugins": [
+    {
+      "name": "@nx/webpack/plugin",
+      "options": {
+        "buildTargetName": "build",
+        "serveTargetName": "serve",
+        "previewTargetName": "preview",
+        "buildDepsTargetName": "build-deps",
+        "watchDepsTargetName": "watch-deps",
+        "serveStaticTargetName": "serve-static"
+      }
+    },
+    {
+      "name": "@nx/eslint/plugin",
+      "options": {
+        "targetName": "lint"
+      }
+    },
+    {
+      "name": "@nx/jest/plugin",
+      "options": {
+        "targetName": "test"
+      }
+    },
+    {
+      "name": "@nx/vite/plugin",
+      "options": {
+        "buildTargetName": "build",
+        "testTargetName": "test",
+        "serveTargetName": "serve",
+        "devTargetName": "dev",
+        "previewTargetName": "preview",
+        "serveStaticTargetName": "serve-static",
+        "typecheckTargetName": "typecheck",
+        "buildDepsTargetName": "build-deps",
+        "watchDepsTargetName": "watch-deps"
+      }
+    },
+    {
+      "name": "@nx/vitest",
+      "version": "22.6.0",
+      "options": {
+        "testTargetName": "test",
+        "ciTargetName": "test-ci",
+        "testMode": "watch"
+      }
+    }
+  ],
+  "fileMap": {
+    "nonProjectFiles": [],
+    "projectFileMap": {
+      "@energrid/stt-stream-dev": [
+        {
+          "file": "packages/stt-stream-dev/package.json",
+          "hash": "8871232977284257650",
+          "deps": [
+            "@energrid/stt-stream-core"
+          ]
+        },
+        {
+          "file": "packages/stt-stream-dev/src/index.ts",
+          "hash": "16674559910992507834",
+          "deps": [
+            "@energrid/stt-stream-core"
+          ]
+        },
+        {
+          "file": "packages/stt-stream-dev/tsconfig.json",
+          "hash": "7018117832097965205"
+        }
+      ],
+      "shared-types": [
+        {
+          "file": "libs/shared-types/README.md",
+          "hash": "11697716873641832873"
+        },
+        {
+          "file": "libs/shared-types/eslint.config.mjs",
+          "hash": "9036454466467975933"
+        },
+        {
+          "file": "libs/shared-types/jest.config.cts",
+          "hash": "1741274135966024512"
+        },
+        {
+          "file": "libs/shared-types/project.json",
+          "hash": "2400839396824375790"
+        },
+        {
+          "file": "libs/shared-types/src/index.ts",
+          "hash": "17477233218007285873"
+        },
+        {
+          "file": "libs/shared-types/src/lib/shared-types.spec.ts",
+          "hash": "8827448832389543054"
+        },
+        {
+          "file": "libs/shared-types/src/lib/shared-types.ts",
+          "hash": "11715063447328923451"
+        },
+        {
+          "file": "libs/shared-types/tsconfig.json",
+          "hash": "10148903843036702529"
+        },
+        {
+          "file": "libs/shared-types/tsconfig.lib.json",
+          "hash": "5839118139819745953"
+        },
+        {
+          "file": "libs/shared-types/tsconfig.spec.json",
+          "hash": "16514264766063949355"
+        }
+      ],
+      "domain-voice": [
+        {
+          "file": "libs/domain-voice/README.md",
+          "hash": "14618164353402874252"
+        },
+        {
+          "file": "libs/domain-voice/eslint.config.mjs",
+          "hash": "9036454466467975933"
+        },
+        {
+          "file": "libs/domain-voice/jest.config.cts",
+          "hash": "1596685544428788670"
+        },
+        {
+          "file": "libs/domain-voice/project.json",
+          "hash": "6493909301555299143"
+        },
+        {
+          "file": "libs/domain-voice/src/index.ts",
+          "hash": "5202512641133504731"
+        },
+        {
+          "file": "libs/domain-voice/src/lib/domain-voice.spec.ts",
+          "hash": "11757114119447024186"
+        },
+        {
+          "file": "libs/domain-voice/src/lib/domain-voice.ts",
+          "hash": "13899916149267625390"
+        },
+        {
+          "file": "libs/domain-voice/tsconfig.json",
+          "hash": "10148903843036702529"
+        },
+        {
+          "file": "libs/domain-voice/tsconfig.lib.json",
+          "hash": "5839118139819745953"
+        },
+        {
+          "file": "libs/domain-voice/tsconfig.spec.json",
+          "hash": "16514264766063949355"
+        }
+      ],
+      "domain-telemetry": [
+        {
+          "file": "libs/domain-telemetry/README.md",
+          "hash": "269376834034197472"
+        },
+        {
+          "file": "libs/domain-telemetry/eslint.config.mjs",
+          "hash": "9036454466467975933"
+        },
+        {
+          "file": "libs/domain-telemetry/jest.config.cts",
+          "hash": "15235301329790971694"
+        },
+        {
+          "file": "libs/domain-telemetry/project.json",
+          "hash": "6792505382268532258"
+        },
+        {
+          "file": "libs/domain-telemetry/src/index.ts",
+          "hash": "10316530959117754898"
+        },
+        {
+          "file": "libs/domain-telemetry/src/lib/domain-telemetry.spec.ts",
+          "hash": "16997232684305666375"
+        },
+        {
+          "file": "libs/domain-telemetry/src/lib/domain-telemetry.ts",
+          "hash": "16670860008301002689"
+        },
+        {
+          "file": "libs/domain-telemetry/tsconfig.json",
+          "hash": "10148903843036702529"
+        },
+        {
+          "file": "libs/domain-telemetry/tsconfig.lib.json",
+          "hash": "5839118139819745953"
+        },
+        {
+          "file": "libs/domain-telemetry/tsconfig.spec.json",
+          "hash": "16514264766063949355"
+        }
+      ],
+      "domain-devices": [
+        {
+          "file": "libs/domain-devices/README.md",
+          "hash": "8476211289685530070"
+        },
+        {
+          "file": "libs/domain-devices/eslint.config.mjs",
+          "hash": "9036454466467975933"
+        },
+        {
+          "file": "libs/domain-devices/jest.config.cts",
+          "hash": "15460178415060212976"
+        },
+        {
+          "file": "libs/domain-devices/project.json",
+          "hash": "6393346033360402449"
+        },
+        {
+          "file": "libs/domain-devices/src/index.ts",
+          "hash": "8996377031344204669"
+        },
+        {
+          "file": "libs/domain-devices/src/lib/domain-devices.spec.ts",
+          "hash": "10236597850001076343"
+        },
+        {
+          "file": "libs/domain-devices/src/lib/domain-devices.ts",
+          "hash": "7842864035071640398"
+        },
+        {
+          "file": "libs/domain-devices/tsconfig.json",
+          "hash": "10148903843036702529"
+        },
+        {
+          "file": "libs/domain-devices/tsconfig.lib.json",
+          "hash": "5839118139819745953"
+        },
+        {
+          "file": "libs/domain-devices/tsconfig.spec.json",
+          "hash": "16514264766063949355"
+        }
+      ],
+      "@energrid/source": [
+        {
+          "file": ".editorconfig",
+          "hash": "5443105041930014821"
+        },
+        {
+          "file": ".gitignore",
+          "hash": "1308244859192235796"
+        },
+        {
+          "file": ".idea/.gitignore",
+          "hash": "18109907959344192685"
+        },
+        {
+          "file": ".idea/energrid.iml",
+          "hash": "11872286644273118759"
+        },
+        {
+          "file": ".idea/modules.xml",
+          "hash": "1676999161154719604"
+        },
+        {
+          "file": ".idea/vcs.xml",
+          "hash": "14600148892634157659"
+        },
+        {
+          "file": ".prettierignore",
+          "hash": "14688272390704683536"
+        },
+        {
+          "file": ".prettierrc",
+          "hash": "16267754514737964994"
+        },
+        {
+          "file": ".vscode/extensions.json",
+          "hash": "4637156562308165301"
+        },
+        {
+          "file": ".vscode/launch.json",
+          "hash": "11839651315924187502"
+        },
+        {
+          "file": "README.md",
+          "hash": "5465233811580890698"
+        },
+        {
+          "file": "eslint.config.mjs",
+          "hash": "8265929868680170462",
+          "deps": [
+            "npm:@nx/eslint-plugin"
+          ]
+        },
+        {
+          "file": "jest.config.ts",
+          "hash": "6870352021923392442",
+          "deps": [
+            "npm:jest",
+            "npm:@nx/jest"
+          ]
+        },
+        {
+          "file": "jest.preset.js",
+          "hash": "9430166341120122740",
+          "deps": [
+            "npm:@nx/jest"
+          ]
+        },
+        {
+          "file": "nx.json",
+          "hash": "8141293406332900754"
+        },
+        {
+          "file": "package.json",
+          "hash": "17716793185415061012"
+        },
+        {
+          "file": "packages/voice-dev-server/public/mic.html",
+          "hash": "13129002308751564498"
+        },
+        {
+          "file": "pnpm-lock.yaml",
+          "hash": "10435001060398355352"
+        },
+        {
+          "file": "pnpm-workspace.yaml",
+          "hash": "4656418769567092828"
+        },
+        {
+          "file": "src/types/wav.d.ts",
+          "hash": "7407624173556359413"
+        },
+        {
+          "file": "tsconfig.base.json",
+          "hash": "13516203653307959406"
+        },
+        {
+          "file": "vitest.workspace.ts",
+          "hash": "4665328684042819579"
+        }
+      ],
+      "shared-utils": [
+        {
+          "file": "libs/shared-utils/README.md",
+          "hash": "7693910817612845176"
+        },
+        {
+          "file": "libs/shared-utils/eslint.config.mjs",
+          "hash": "9036454466467975933"
+        },
+        {
+          "file": "libs/shared-utils/jest.config.cts",
+          "hash": "9494253148631206919"
+        },
+        {
+          "file": "libs/shared-utils/project.json",
+          "hash": "5204367984078711800"
+        },
+        {
+          "file": "libs/shared-utils/src/index.ts",
+          "hash": "2115022695656941492"
+        },
+        {
+          "file": "libs/shared-utils/src/lib/shared-utils.spec.ts",
+          "hash": "524003507553350883"
+        },
+        {
+          "file": "libs/shared-utils/src/lib/shared-utils.ts",
+          "hash": "393383238747502460"
+        },
+        {
+          "file": "libs/shared-utils/tsconfig.json",
+          "hash": "10148903843036702529"
+        },
+        {
+          "file": "libs/shared-utils/tsconfig.lib.json",
+          "hash": "5839118139819745953"
+        },
+        {
+          "file": "libs/shared-utils/tsconfig.spec.json",
+          "hash": "16514264766063949355"
+        }
+      ],
+      "@energrid/stt-stream-core": [
+        {
+          "file": "packages/stt-stream-core/package.json",
+          "hash": "3533843906092628889"
+        },
+        {
+          "file": "packages/stt-stream-core/src/index.ts",
+          "hash": "12154053388315311926"
+        },
+        {
+          "file": "packages/stt-stream-core/tsconfig.json",
+          "hash": "7018117832097965205"
+        }
+      ],
+      "api": [
+        {
+          "file": "apps/api/eslint.config.mjs",
+          "hash": "9036454466467975933"
+        },
+        {
+          "file": "apps/api/jest.config.cts",
+          "hash": "5384018571856810310"
+        },
+        {
+          "file": "apps/api/project.json",
+          "hash": "5218067913552394252"
+        },
+        {
+          "file": "apps/api/src/app/app.controller.spec.ts",
+          "hash": "7647647754668916054",
+          "deps": [
+            "npm:@nestjs/testing"
+          ]
+        },
+        {
+          "file": "apps/api/src/app/app.controller.ts",
+          "hash": "15276891910009544695",
+          "deps": [
+            "npm:@nestjs/common"
+          ]
+        },
+        {
+          "file": "apps/api/src/app/app.module.ts",
+          "hash": "16258701287223558910",
+          "deps": [
+            "npm:@nestjs/common"
+          ]
+        },
+        {
+          "file": "apps/api/src/app/app.service.spec.ts",
+          "hash": "13111976464657524091",
+          "deps": [
+            "npm:@nestjs/testing"
+          ]
+        },
+        {
+          "file": "apps/api/src/app/app.service.ts",
+          "hash": "9967902337593410053",
+          "deps": [
+            "npm:@nestjs/common"
+          ]
+        },
+        {
+          "file": "apps/api/src/app/modules/auth/auth.controller.ts",
+          "hash": "3871312851824179267",
+          "deps": [
+            "npm:@nestjs/common"
+          ]
+        },
+        {
+          "file": "apps/api/src/app/modules/auth/auth.module.ts",
+          "hash": "3003020641297501508",
+          "deps": [
+            "npm:@nestjs/common"
+          ]
+        },
+        {
+          "file": "apps/api/src/app/modules/auth/auth.service.ts",
+          "hash": "10594634315929844396",
+          "deps": [
+            "npm:@nestjs/common"
+          ]
+        },
+        {
+          "file": "apps/api/src/app/modules/auth/dto/login.dto.ts",
+          "hash": "988214816871270386"
+        },
+        {
+          "file": "apps/api/src/app/modules/voice/audio-buffer.service.ts",
+          "hash": "2907929037308891794",
+          "deps": [
+            "npm:@nestjs/common"
+          ]
+        },
+        {
+          "file": "apps/api/src/app/modules/voice/debug-events.service.ts",
+          "hash": "4223810448516485677",
+          "deps": [
+            "npm:@nestjs/common",
+            "npm:ws"
+          ]
+        },
+        {
+          "file": "apps/api/src/app/modules/voice/debug.gateway.ts",
+          "hash": "18017784877659378848",
+          "deps": [
+            "npm:@nestjs/websockets",
+            "npm:ws"
+          ]
+        },
+        {
+          "file": "apps/api/src/app/modules/voice/voice-session.service.spec.ts",
+          "hash": "3178290784495290411",
+          "deps": [
+            "npm:@nestjs/testing"
+          ]
+        },
+        {
+          "file": "apps/api/src/app/modules/voice/voice-session.service.ts",
+          "hash": "17674836673898621842",
+          "deps": [
+            "npm:@nestjs/common"
+          ]
+        },
+        {
+          "file": "apps/api/src/app/modules/voice/voice-stt.service.ts",
+          "hash": "17502069652663817178",
+          "deps": [
+            "npm:@nestjs/common",
+            "@energrid/stt-stream-openai",
+            "@energrid/stt-stream-core"
+          ]
+        },
+        {
+          "file": "apps/api/src/app/modules/voice/voice.gateway.spec.ts",
+          "hash": "9354140592866094975",
+          "deps": [
+            "npm:@nestjs/testing"
+          ]
+        },
+        {
+          "file": "apps/api/src/app/modules/voice/voice.gateway.ts",
+          "hash": "17285972907387811524",
+          "deps": [
+            "npm:@nestjs/websockets",
+            "npm:ws"
+          ]
+        },
+        {
+          "file": "apps/api/src/app/modules/voice/voice.module.ts",
+          "hash": "6559280671820241503",
+          "deps": [
+            "npm:@nestjs/common"
+          ]
+        },
+        {
+          "file": "apps/api/src/assets/.gitkeep",
+          "hash": "3244421341483603138"
+        },
+        {
+          "file": "apps/api/src/main.ts",
+          "hash": "4126097665225672700",
+          "deps": [
+            "npm:@nestjs/core",
+            "npm:@nestjs/platform-ws"
+          ]
+        },
+        {
+          "file": "apps/api/tsconfig.app.json",
+          "hash": "5351041783921143370"
+        },
+        {
+          "file": "apps/api/tsconfig.json",
+          "hash": "3490524966360018312"
+        },
+        {
+          "file": "apps/api/tsconfig.spec.json",
+          "hash": "16514264766063949355"
+        },
+        {
+          "file": "apps/api/webpack.config.js",
+          "hash": "13461169009900279996",
+          "deps": [
+            "npm:@nx/webpack"
+          ]
+        }
+      ],
+      "api-e2e": [
+        {
+          "file": "apps/api-e2e/eslint.config.mjs",
+          "hash": "9036454466467975933"
+        },
+        {
+          "file": "apps/api-e2e/jest.config.cts",
+          "hash": "10367738628900882749"
+        },
+        {
+          "file": "apps/api-e2e/project.json",
+          "hash": "6049247110058724339"
+        },
+        {
+          "file": "apps/api-e2e/src/api/api.spec.ts",
+          "hash": "110394728024017389",
+          "deps": [
+            "npm:axios"
+          ]
+        },
+        {
+          "file": "apps/api-e2e/src/support/global-setup.ts",
+          "hash": "10817858795115919263",
+          "deps": [
+            "npm:@nx/node"
+          ]
+        },
+        {
+          "file": "apps/api-e2e/src/support/global-teardown.ts",
+          "hash": "14210317125869451873",
+          "deps": [
+            "npm:@nx/node"
+          ]
+        },
+        {
+          "file": "apps/api-e2e/src/support/test-setup.ts",
+          "hash": "15521797170623961900",
+          "deps": [
+            "npm:axios"
+          ]
+        },
+        {
+          "file": "apps/api-e2e/tsconfig.json",
+          "hash": "2346920493880922870"
+        },
+        {
+          "file": "apps/api-e2e/tsconfig.spec.json",
+          "hash": "14226830188665428950"
+        }
+      ],
+      "domain-automation": [
+        {
+          "file": "libs/domain-automation/README.md",
+          "hash": "13472722695391043473"
+        },
+        {
+          "file": "libs/domain-automation/eslint.config.mjs",
+          "hash": "9036454466467975933"
+        },
+        {
+          "file": "libs/domain-automation/jest.config.cts",
+          "hash": "5193202455699770829"
+        },
+        {
+          "file": "libs/domain-automation/project.json",
+          "hash": "15904658179975676318"
+        },
+        {
+          "file": "libs/domain-automation/src/index.ts",
+          "hash": "13036795929605622885"
+        },
+        {
+          "file": "libs/domain-automation/src/lib/domain-automation.spec.ts",
+          "hash": "17192450708291887468"
+        },
+        {
+          "file": "libs/domain-automation/src/lib/domain-automation.ts",
+          "hash": "10210042592397305259"
+        },
+        {
+          "file": "libs/domain-automation/tsconfig.json",
+          "hash": "10148903843036702529"
+        },
+        {
+          "file": "libs/domain-automation/tsconfig.lib.json",
+          "hash": "5839118139819745953"
+        },
+        {
+          "file": "libs/domain-automation/tsconfig.spec.json",
+          "hash": "16514264766063949355"
+        }
+      ],
+      "@energrid/stt-stream-openai": [
+        {
+          "file": "packages/stt-stream-openai/package.json",
+          "hash": "324957313289376499",
+          "deps": [
+            "npm:openai",
+            "@energrid/stt-stream-core"
+          ]
+        },
+        {
+          "file": "packages/stt-stream-openai/src/index.ts",
+          "hash": "14920915657970141600",
+          "deps": [
+            "@energrid/stt-stream-core",
+            "npm:ws"
+          ]
+        }
+      ],
+      "@energrid/stt-stream-deepgram": [
+        {
+          "file": "packages/stt-stream-deepgram/package.json",
+          "hash": "12296681188804700046",
+          "deps": [
+            "npm:@deepgram/sdk",
+            "@energrid/stt-stream-core"
+          ]
+        },
+        {
+          "file": "packages/stt-stream-deepgram/src/index.ts",
+          "hash": "112219141259246927",
+          "deps": [
+            "npm:@deepgram/sdk",
+            "@energrid/stt-stream-core"
+          ]
+        }
+      ]
+    }
+  },
+  "externalNodesHash": "8503695657304311546"
+}

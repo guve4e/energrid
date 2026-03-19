@@ -1,0 +1,9 @@
+{
+  "name": "domain-devices",
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "domain-devices/src",
+  "projectType": "library",
+  "tags": [],
+  "// targets": "to see all targets run: nx show project domain-devices --web",
+  "targets": {}
+}

@@ -1,0 +1,25 @@
+> webpack-cli build --node-env=production
+
+[1m[31mERROR[39m[22m in [1m./src/app/modules/voice/voice-stt.service.ts[39m[22m [1m[32m6:19-78[39m[22m
+[1mModule [1m[31mnot found[39m[22m[1m: [1m[31mError[39m[22m[1m: Can't resolve '../../../../packages/stt-stream-dev/src/index.js' in '/Users/valentinkormanov/www/energrid/apps/api/src/app/modules/voice'[39m[22m
+
+[1m[31mERROR[39m[22m in [1m./src/app/modules/voice/voice-stt.service.ts:2:47[39m[22m
+[90mTS2307: [39mCannot find module '../../../../packages/stt-stream-dev/src/index.js' or its corresponding type declarations.
+  [0m [90m 1 |[39m [36mimport[39m { [33mInjectable[39m } [36mfrom[39m [32m'@nestjs/common'[39m
+  [31m[1m>[22m[39m[90m 2 |[39m [36mimport[39m { createDevStreamingSttProvider } [36mfrom[39m [32m'../../../../packages/stt-stream-dev/src/index.js'[39m
+   [90m   |[39m                                               [31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m
+   [90m 3 |[39m [36mimport[39m type {
+   [90m 4 |[39m   [33mStreamingSttEvent[39m[33m,[39m
+   [90m 5 |[39m   [33mStreamingSttSession[39m[33m,[39m[0m
+
+[1m[31mERROR[39m[22m in [1m./src/app/modules/voice/voice-stt.service.ts:6:8[39m[22m
+[90mTS2307: [39mCannot find module '../../../../packages/stt-stream-core/src/index.js' or its corresponding type declarations.
+  [0m [90m 4 |[39m   [33mStreamingSttEvent[39m[33m,[39m
+   [90m 5 |[39m   [33mStreamingSttSession[39m[33m,[39m
+  [31m[1m>[22m[39m[90m 6 |[39m } [36mfrom[39m [32m'../../../../packages/stt-stream-core/src/index.js'[39m
+   [90m   |[39m        [31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m
+   [90m 7 |[39m
+   [90m 8 |[39m [33m@[39m[33mInjectable[39m()
+   [90m 9 |[39m [36mexport[39m [36mclass[39m [33mVoiceSttService[39m {[0m
+
+webpack compiled with [1m[31m3 errors[39m[22m (16979234d1f5ca50)

@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "composite": false,
+    "declarationMap": false,
+    "emitDeclarationOnly": false,
+    "importHelpers": true,
+    "isolatedModules": true,
+    "lib": ["es2022", "dom"],
+    "module": "esnext",
+    "moduleResolution": "node",
+    "noEmitOnError": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noUnusedLocals": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "target": "es2022",
+    "baseUrl": ".",
+    "paths": {
+      "@energrid/stt-stream-core": ["packages/stt-stream-core/src/index.ts"],
+      "@energrid/stt-stream-dev": ["packages/stt-stream-dev/src/index.ts"],
+      "@energrid/stt-stream-openai": ["packages/stt-stream-openai/src/index.ts"]
+    }
+  }
+}

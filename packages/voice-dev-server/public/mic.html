@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<body>
+  <h2>PCM16 24k Mic Test</h2>
+
+  <button onclick="start()">Start Mic</button>
+  <button onclick="stop()">Stop</button>
+
+  <pre id="log"></pre>
+
+  <script>
+    let ws
+    let audioContext
+    let mediaStream
+    let source
+    let processor
+
+    function log(msg) {
+      console.log(msg)
+      document.getElementById('log').textContent += msg + '\n'
+    }
+
+    async function start() {
+      log('starting...')
+
+      ws = new WebSocket('ws://localhost:3000/voice')
+
+      ws.onopen = () => log('ws connected')
+      ws.onclose = () => log('ws closed')
+      ws.onerror = (e) => {
+        log('ws error')
+        console.error(e)
+      }
+
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      log('mic granted')
+
+      audioContext = new (window.AudioContext || window.webkitAudioContext)({
+        sampleRate: 24000,
+      })
+
+      source = audioContext.createMediaStreamSource(mediaStream)
+      processor = audioContext.createScriptProcessor(4096, 1, 1)
+
+      processor.onaudioprocess = (event) => {
+        if (!ws || ws.readyState !== 1) return
+
+        const input = event.inputBuffer.getChannelData(0)
+        const pcm16 = float32ToInt16(input)
+
+        ws.send(pcm16.buffer)
+      }
+
+      source.connect(processor)
+      processor.connect(audioContext.destination)
+
+      log('streaming pcm16 @ 24k...')
+    }
+
+    function stop() {
+      log('stopping...')
+
+      if (processor) processor.disconnect()
+      if (source) source.disconnect()
+
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((t) => t.stop())
+      }
+
+      if (audioContext) {
+        audioContext.close()
+      }
+
+      if (ws && ws.readyState === 1) {
+        ws.close()
+      }
+    }
+
+    function float32ToInt16(float32Array) {
+      const int16Array = new Int16Array(float32Array.length)
+
+      for (let i = 0; i < float32Array.length; i++) {
+        let s = Math.max(-1, Math.min(1, float32Array[i]))
+        int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+      }
+
+      return int16Array
+    }
+  </script>
+</body>
+</html>

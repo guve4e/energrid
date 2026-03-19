@@ -1,0 +1,9 @@
+{
+  "name": "domain-automation",
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "domain-automation/src",
+  "projectType": "library",
+  "tags": [],
+  "// targets": "to see all targets run: nx show project domain-automation --web",
+  "targets": {}
+}

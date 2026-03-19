@@ -1,0 +1,13 @@
+> webpack-cli build --node-env=production
+
+[1m[31mERROR[39m[22m in [1m../../packages/stt-stream-dev/src/index.ts:5:8[39m[22m
+[90mTS2307: [39mCannot find module '../stt-stream-core/src/index.js' or its corresponding type declarations.
+  [0m [90m 3 |[39m   [33mStreamingSttEvent[39m[33m,[39m
+   [90m 4 |[39m   [33mStreamingSttSession[39m[33m,[39m
+  [31m[1m>[22m[39m[90m 5 |[39m } [36mfrom[39m [32m'../stt-stream-core/src/index.js'[39m
+   [90m   |[39m        [31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m
+   [90m 6 |[39m
+   [90m 7 |[39m [36mclass[39m [33mDevStreamingSttSession[39m [36mimplements[39m [33mStreamingSttSession[39m {
+   [90m 8 |[39m   [36mprivate[39m listeners[33m:[39m [33mArray[39m[33m<[39m(event[33m:[39m [33mStreamingSttEvent[39m) [33m=>[39m [36mvoid[39m[33m>[39m [33m=[39m [][0m
+
+webpack compiled with [1m[31m1 error[39m[22m (22506ab6427f4b42)

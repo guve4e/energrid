@@ -1,0 +1,138 @@
+> nx run api:serve:development
+
+
+[2m> [22m[2mnx run[22m api:build:development  [2m[local cache][22m
+
+> webpack-cli build --node-env=development
+
+webpack compiled [1m[32msuccessfully[39m[22m (de35ca76192bfe7d)
+
+[2m[32m—————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————[39m[22m
+
+[7m[1m[32m NX [39m[22m[27m  [32mSuccessfully ran target [1mbuild[22m for project api[39m
+
+[2mNx read the output from the cache instead of running the command for 1 out of 1 tasks.[22m
+
+[1m[31mDebugger listening on ws://localhost:9229/5ea8b332-219c-4160-ac1c-b897d1a54541
+Debugger listening on ws://localhost:9229/5ea8b332-219c-4160-ac1c-b897d1a54541
+For help, see: https://nodejs.org/en/docs/inspector
+[39m[22m
+[32m[Nest] 5180  - [39m03/19/2026, 6:14:17 PM [32m    LOG[39m [38;5;3m[NestFactory] [39m[32mStarting Nest application...[39m
+[32m[Nest] 5180  - [39m03/19/2026, 6:14:17 PM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mAppModule dependencies initialized[39m[38;5;3m +4ms[39m
+[32m[Nest] 5180  - [39m03/19/2026, 6:14:17 PM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mVoiceModule dependencies initialized[39m[38;5;3m +0ms[39m
+[32m[Nest] 5180  - [39m03/19/2026, 6:14:17 PM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mAuthModule dependencies initialized[39m[38;5;3m +0ms[39m
+[32m[Nest] 5180  - [39m03/19/2026, 6:14:17 PM [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mAuthController {/auth}:[39m[38;5;3m +6ms[39m
+[32m[Nest] 5180  - [39m03/19/2026, 6:14:17 PM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/auth/login, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 5180  - [39m03/19/2026, 6:14:17 PM [32m    LOG[39m [38;5;3m[NestApplication] [39m[32mNest application successfully started[39m[38;5;3m +0ms[39m
+API running on http://localhost:3000
+voice client connected
+audio chunk [33m120[39m
+audio chunk [33m395[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m136[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m136[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m136[39m
+audio chunk [33m120[39m
+audio chunk [33m52[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m136[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m136[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m136[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m136[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m136[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m137[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m137[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m137[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m137[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m137[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m120[39m
+audio chunk [33m137[39m
+voice client disconnected
+audio saved: /Users/valentinkormanov/www/energrid/recording.webm
+
+[7m[1m[36m NX [39m[22m[27m [1mFile change detected. Restarting...[22m
+
+[36m⠋[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠙[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠹[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠸[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠼[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠴[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠦[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠧[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠇[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠏[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠋[39m Calculating the project graph on the Nx Daemon[2K[1G
+[2m> [22m[2mnx run[22m api:build:development
+
+> webpack-cli build --node-env=development
+
+[1m[31mERROR[39m[22m in [1m./src/app/modules/voice/voice.gateway.ts:11:22[39m[22m
+[90mTS7016: [39mCould not find a declaration file for module 'wav'. '/Users/valentinkormanov/www/energrid/node_modules/.pnpm/wav@1.0.2/node_modules/wav/index.js' implicitly has an 'any' type.
+  Try `npm i --save-dev @types/wav` if it exists or add a new declaration (.d.ts) file containing `declare module 'wav';`
+  [0m [90m  9 |[39m [36mimport[39m { [33mServer[39m } [36mfrom[39m [32m'ws'[39m[33m;[39m
+   [90m 10 |[39m [36mimport[39m [33m*[39m [36mas[39m fs [36mfrom[39m [32m'fs'[39m[33m;[39m
+  [31m[1m>[22m[39m[90m 11 |[39m [36mimport[39m [33m*[39m [36mas[39m wav [36mfrom[39m [32m'wav'[39m[33m;[39m
+   [90m    |[39m                      [31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m
+   [90m 12 |[39m
+   [90m 13 |[39m [33m@[39m[33mWebSocketGateway[39m({ path[33m:[39m [32m'/voice'[39m })
+   [90m 14 |[39m [36mexport[39m [36mclass[39m [33mVoiceGateway[39m [36mimplements[39m [33mOnGatewayConnection[39m[33m,[39m [33mOnGatewayDisconnect[39m {[0m
+
+webpack compiled with [1m[31m1 error[39m[22m (63892d7e1fa08780)
+
+[2m[31m—————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————[39m[22m
+
+[7m[1m[31m NX [39m[22m[27m  [31mRunning target [1mbuild[22m for project api failed[39m
+
+[2mFailed tasks:[22m
+
+[2m-[22m api:build:development
+
+[2mHint: run the command with[22m --verbose [2mfor more details.[22m
+
+[1m[31mBuild failed, waiting for changes to restart...[39m[22m

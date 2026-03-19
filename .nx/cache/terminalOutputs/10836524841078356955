@@ -1,0 +1,110 @@
+> nx run api:serve:development
+
+
+[2m> [22m[2mnx run[22m api:build:development  [2m[local cache][22m
+
+> webpack-cli build --node-env=development
+
+webpack compiled [1m[32msuccessfully[39m[22m (bb4556d177d078f5)
+
+[2m[32m—————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————[39m[22m
+
+[7m[1m[32m NX [39m[22m[27m  [32mSuccessfully ran target [1mbuild[22m for project api[39m
+
+[2mNx read the output from the cache instead of running the command for 1 out of 1 tasks.[22m
+
+[1m[31mDebugger listening on ws://localhost:9229/af6f16b1-5f1c-4e58-9706-5d7982d1ac46
+Debugger listening on ws://localhost:9229/af6f16b1-5f1c-4e58-9706-5d7982d1ac46
+For help, see: https://nodejs.org/en/docs/inspector
+[39m[22m
+[32m[Nest] 2607  - [39m03/19/2026, 5:34:18 PM [32m    LOG[39m [38;5;3m[NestFactory] [39m[32mStarting Nest application...[39m
+[32m[Nest] 2607  - [39m03/19/2026, 5:34:18 PM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mAppModule dependencies initialized[39m[38;5;3m +4ms[39m
+[32m[Nest] 2607  - [39m03/19/2026, 5:34:18 PM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mVoiceModule dependencies initialized[39m[38;5;3m +0ms[39m
+[32m[Nest] 2607  - [39m03/19/2026, 5:34:18 PM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mAuthModule dependencies initialized[39m[38;5;3m +0ms[39m
+[32m[Nest] 2607  - [39m03/19/2026, 5:34:18 PM [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mAuthController {/auth}:[39m[38;5;3m +30ms[39m
+[32m[Nest] 2607  - [39m03/19/2026, 5:34:18 PM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/auth/login, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 2607  - [39m03/19/2026, 5:34:18 PM [32m    LOG[39m [38;5;3m[NestApplication] [39m[32mNest application successfully started[39m[38;5;3m +0ms[39m
+API listening on http://localhost:3101
+
+[7m[1m[36m NX [39m[22m[27m [1mFile change detected. Restarting...[22m
+
+[36m⠋[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠙[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠹[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠸[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠼[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠴[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠦[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠧[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠇[39m Calculating the project graph on the Nx Daemon[2K[1G
+[2m> [22m[2mnx run[22m api:build:development
+
+> webpack-cli build --node-env=development
+
+[1m[31mERROR[39m[22m in [1m./src/app/modules/voice/voice.gateway.ts:8:35[39m[22m
+[90mTS7016: [39mCould not find a declaration file for module 'ws'. '/Users/valentinkormanov/www/energrid/node_modules/.pnpm/ws@8.19.0/node_modules/ws/index.js' implicitly has an 'any' type.
+  Try `npm i --save-dev @types/ws` if it exists or add a new declaration (.d.ts) file containing `declare module 'ws';`
+  [0m [90m  6 |[39m } [36mfrom[39m [32m'@nestjs/websockets'[39m
+   [90m  7 |[39m
+  [31m[1m>[22m[39m[90m  8 |[39m [36mimport[39m { [33mServer[39m[33m,[39m [33mWebSocket[39m } [36mfrom[39m [32m'ws'[39m
+   [90m    |[39m                                   [31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m
+   [90m  9 |[39m
+   [90m 10 |[39m [33m@[39m[33mWebSocketGateway[39m({
+   [90m 11 |[39m   path[33m:[39m [32m'/voice'[39m[33m,[39m[0m
+
+[1m[31mERROR[39m[22m in [1m./src/app/modules/voice/voice.gateway.ts:22:27[39m[22m
+[90mTS7006: [39mParameter 'data' implicitly has an 'any' type.
+  [0m [90m 20 |[39m     console[33m.[39mlog([32m'voice client connected'[39m)
+   [90m 21 |[39m
+  [31m[1m>[22m[39m[90m 22 |[39m     client[33m.[39mon([32m'message'[39m[33m,[39m (data) [33m=>[39m {
+   [90m    |[39m                           [31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m
+   [90m 23 |[39m       [36mif[39m ([33mBuffer[39m[33m.[39misBuffer(data)) {
+   [90m 24 |[39m         console[33m.[39mlog([32m'audio chunk'[39m[33m,[39m data[33m.[39mlength)
+   [90m 25 |[39m       } [36melse[39m {[0m
+
+webpack compiled with [1m[31m2 errors[39m[22m (5ef956ad0ea4be50)
+
+[2m[31m—————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————[39m[22m
+
+[7m[1m[31m NX [39m[22m[27m  [31mRunning target [1mbuild[22m for project api failed[39m
+
+[2mFailed tasks:[22m
+
+[2m-[22m api:build:development
+
+[2mHint: run the command with[22m --verbose [2mfor more details.[22m
+
+
+[7m[1m[36m NX [39m[22m[27m [1mFile change detected. Restarting...[22m
+
+[1m[31mBuild failed, waiting for changes to restart...[39m[22m
+[36m⠋[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠙[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠹[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠸[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠼[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠴[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠦[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠧[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠇[39m Calculating the project graph on the Nx Daemon[2K[1G
+[2m> [22m[2mnx run[22m api:build:development
+
+> webpack-cli build --node-env=development
+
+[1m[31mERROR[39m[22m in [1m./src/app/modules/voice/voice.gateway.ts:8:35[39m[22m
+[90mTS7016: [39mCould not find a declaration file for module 'ws'. '/Users/valentinkormanov/www/energrid/node_modules/.pnpm/ws@8.19.0/node_modules/ws/index.js' implicitly has an 'any' type.
+  Try `npm i --save-dev @types/ws` if it exists or add a new declaration (.d.ts) file containing `declare module 'ws';`
+  [0m [90m  6 |[39m } [36mfrom[39m [32m'@nestjs/websockets'[39m
+   [90m  7 |[39m
+  [31m[1m>[22m[39m[90m  8 |[39m [36mimport[39m { [33mServer[39m[33m,[39m [33mWebSocket[39m } [36mfrom[39m [32m'ws'[39m
+   [90m    |[39m                                   [31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m
+   [90m  9 |[39m
+   [90m 10 |[39m [33m@[39m[33mWebSocketGateway[39m({
+   [90m 11 |[39m   path[33m:[39m [32m'/voice'[39m[33m,[39m[0m
+
+[1m[31mERROR[39m[22m in [1m./src/app/modules/voice/voice.gateway.ts:22:27[39m[22m
+[90mTS7006: [39mParameter 'data' implicitly has an 'any' type.
+  [0m [90m 20 |[39m     console[33m.[39mlog([32m'voice client connected'[39m)
+   [90m 21 |[39m
+  [31m[1m>[22m[39m[90m 22 |[39m     client[33m.[39mon([32m'message'[39m[33m,[39m (data) [33m=>[39m {
+   [90m    |[39m                           [31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m
+   [90m 23 |[39m       [36mif[39m ([33mBuffer[39m[33m.[39misBuffer(data)) {
+   [90m 24 |[39m         console[33m.[39mlog([32m'audio chunk'[39m[33m,[39m data[33m.[39mlength)
+   [90m 25 |[39m       } [36melse[39m {[0m
+
+webpack compiled with [1m[31m2 errors[39m[22m (7dd8e9143d22a578)
+
+[2m[31m—————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————[39m[22m
+
+[7m[1m[31m NX [39m[22m[27m  [31mRunning target [1mbuild[22m for project api failed[39m
+
+[2mFailed tasks:[22m
+
+[2m-[22m api:build:development
+
+[2mHint: run the command with[22m --verbose [2mfor more details.[22m
+

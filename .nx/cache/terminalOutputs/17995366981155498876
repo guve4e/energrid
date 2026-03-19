@@ -1,0 +1,32 @@
+> webpack-cli build --node-env=production
+
+[1m[31mERROR[39m[22m in [1m./src/app/modules/voice/voice.gateway.ts[39m[22m [1m[32m8:41-58[39m[22m
+[1mModule [1m[31mnot found[39m[22m[1m: [1m[31mError[39m[22m[1m: Can't resolve 'openai' in '/Users/valentinkormanov/www/energrid/apps/api/src/app/modules/voice'[39m[22m
+
+[1m[31mERROR[39m[22m in [1m./src/app/modules/voice/voice.gateway.ts:9:20[39m[22m
+[90mTS2307: [39mCannot find module 'openai' or its corresponding type declarations.
+  [0m [90m  7 |[39m [36mimport[39m { [33mWebSocket[39m } [36mfrom[39m [32m'ws'[39m
+   [90m  8 |[39m [36mimport[39m { [33mAudioBufferService[39m } [36mfrom[39m [32m'./audio-buffer.service'[39m
+  [31m[1m>[22m[39m[90m  9 |[39m [36mimport[39m [33mOpenAI[39m [36mfrom[39m [32m'openai'[39m
+   [90m    |[39m                    [31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m
+   [90m 10 |[39m
+   [90m 11 |[39m [33m@[39m[33mWebSocketGateway[39m({ path[33m:[39m [32m'/voice'[39m })
+   [90m 12 |[39m [36mexport[39m [36mclass[39m [33mVoiceGateway[39m[0m
+
+[1m[31mERROR[39m[22m in [1m./src/app/modules/voice/voice.gateway.ts:41:25[39m[22m
+[90mTS2322: [39mType 'Buffer<ArrayBufferLike>' is not assignable to type 'BlobPart'.
+  Type 'Buffer<ArrayBufferLike>' is not assignable to type 'ArrayBufferView<ArrayBuffer>'.
+    Types of property 'buffer' are incompatible.
+      Type 'ArrayBufferLike' is not assignable to type 'ArrayBuffer'.
+        Type 'SharedArrayBuffer' is not assignable to type 'ArrayBuffer'.
+          Types of property '[Symbol.toStringTag]' are incompatible.
+            Type '"SharedArrayBuffer"' is not assignable to type '"ArrayBuffer"'.
+  [0m [90m 39 |[39m     [36mtry[39m {
+   [90m 40 |[39m       [36mconst[39m resp [33m=[39m [36mawait[39m [36mthis[39m[33m.[39mopenai[33m.[39maudio[33m.[39mtranscriptions[33m.[39mcreate({
+  [31m[1m>[22m[39m[90m 41 |[39m         file[33m:[39m [36mnew[39m [33mBlob[39m([audioBuffer])[33m,[39m
+   [90m    |[39m                         [31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m
+   [90m 42 |[39m         model[33m:[39m [32m'whisper-1'[39m[33m,[39m
+   [90m 43 |[39m       })
+   [90m 44 |[39m[0m
+
+webpack compiled with [1m[31m3 errors[39m[22m (65c5dda8b27290a6)

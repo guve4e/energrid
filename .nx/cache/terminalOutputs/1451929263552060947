@@ -1,0 +1,152 @@
+> nx run api:serve:development
+
+
+[2m> [22m[2mnx run[22m api:build:development
+
+> webpack-cli build --node-env=development
+
+webpack compiled [1m[32msuccessfully[39m[22m (63892d7e1fa08780)
+
+[2m[32m—————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————[39m[22m
+
+[7m[1m[32m NX [39m[22m[27m  [32mSuccessfully ran target [1mbuild[22m for project api[39m
+
+
+
+[7m[1m[33m NX [39m[22m[27m  [33mNx detected a flaky task[39m
+
+  api:build:development
+
+Flaky tasks can disrupt your CI pipeline. Automatically retry them with Nx Cloud. Learn more at https://nx.dev/ci/features/flaky-tasks
+
+[1m[31mDebugger listening on ws://localhost:9229/c0c1c79f-42fa-4a24-bbed-6da4c67a817d
+Debugger listening on ws://localhost:9229/c0c1c79f-42fa-4a24-bbed-6da4c67a817d
+For help, see: https://nodejs.org/en/docs/inspector
+[39m[22m
+[32m[Nest] 5809  - [39m03/19/2026, 6:16:31 PM [32m    LOG[39m [38;5;3m[NestFactory] [39m[32mStarting Nest application...[39m
+[32m[Nest] 5809  - [39m03/19/2026, 6:16:31 PM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mAppModule dependencies initialized[39m[38;5;3m +4ms[39m
+[32m[Nest] 5809  - [39m03/19/2026, 6:16:31 PM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mVoiceModule dependencies initialized[39m[38;5;3m +0ms[39m
+[32m[Nest] 5809  - [39m03/19/2026, 6:16:31 PM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mAuthModule dependencies initialized[39m[38;5;3m +0ms[39m
+[32m[Nest] 5809  - [39m03/19/2026, 6:16:31 PM [32m    LOG[39m [38;5;3m[WebSocketsController] [39m[32mVoiceGateway subscribed to the "audio" message[39m[38;5;3m +4ms[39m
+[32m[Nest] 5809  - [39m03/19/2026, 6:16:31 PM [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mAuthController {/auth}:[39m[38;5;3m +0ms[39m
+[32m[Nest] 5809  - [39m03/19/2026, 6:16:31 PM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/auth/login, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 5809  - [39m03/19/2026, 6:16:31 PM [32m    LOG[39m [38;5;3m[NestApplication] [39m[32mNest application successfully started[39m[38;5;3m +1ms[39m
+API running on http://localhost:3000
+voice client connected
+voice client disconnected
+voice client connected
+voice client disconnected
+
+[7m[1m[36m NX [39m[22m[27m [1mFile change detected. Restarting...[22m
+
+[36m⠋[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠙[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠹[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠸[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠼[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠴[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠦[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠧[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠇[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠏[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠋[39m Calculating the project graph on the Nx Daemon[2K[1G
+[2m> [22m[2mnx run[22m api:build:development
+
+> webpack-cli build --node-env=development
+
+webpack compiled [1m[32msuccessfully[39m[22m (5cc43717378b3fcf)
+
+[2m[32m—————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————[39m[22m
+
+[7m[1m[32m NX [39m[22m[27m  [32mSuccessfully ran target [1mbuild[22m for project api[39m
+
+
+[1m[31mDebugger listening on ws://localhost:9229/c0bdc30c-9869-4cde-87e4-298aa6d0d802
+Debugger listening on ws://localhost:9229/c0bdc30c-9869-4cde-87e4-298aa6d0d802
+For help, see: https://nodejs.org/en/docs/inspector
+[39m[22m
+[32m[Nest] 6149  - [39m03/19/2026, 6:26:22 PM [32m    LOG[39m [38;5;3m[NestFactory] [39m[32mStarting Nest application...[39m
+[32m[Nest] 6149  - [39m03/19/2026, 6:26:22 PM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mAppModule dependencies initialized[39m[38;5;3m +4ms[39m
+[32m[Nest] 6149  - [39m03/19/2026, 6:26:22 PM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mVoiceModule dependencies initialized[39m[38;5;3m +0ms[39m
+[32m[Nest] 6149  - [39m03/19/2026, 6:26:22 PM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mAuthModule dependencies initialized[39m[38;5;3m +0ms[39m
+[32m[Nest] 6149  - [39m03/19/2026, 6:26:22 PM [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mAuthController {/auth}:[39m[38;5;3m +5ms[39m
+[32m[Nest] 6149  - [39m03/19/2026, 6:26:22 PM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/auth/login, POST} route[39m[38;5;3m +2ms[39m
+[32m[Nest] 6149  - [39m03/19/2026, 6:26:22 PM [32m    LOG[39m [38;5;3m[NestApplication] [39m[32mNest application successfully started[39m[38;5;3m +0ms[39m
+API running on http://localhost:3000
+voice client connected
+voice client disconnected
+saved recording.webm [33m0[39m
+
+[7m[1m[36m NX [39m[22m[27m [1mFile change detected. Restarting...[22m
+
+[36m⠋[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠙[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠹[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠸[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠼[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠴[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠦[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠧[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠇[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠏[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠋[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠙[39m Calculating the project graph on the Nx Daemon[2K[1G[36m⠹[39m Calculating the project graph on the Nx Daemon[2K[1G
+[2m> [22m[2mnx run[22m api:build:development
+
+> webpack-cli build --node-env=development
+
+webpack compiled [1m[32msuccessfully[39m[22m (e354443430d62bbf)
+
+[2m[32m—————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————————[39m[22m
+
+[7m[1m[32m NX [39m[22m[27m  [32mSuccessfully ran target [1mbuild[22m for project api[39m
+
+
+[1m[31mDebugger listening on ws://localhost:9229/cbb235fd-4967-4b40-bd95-ccad13a89eca
+Debugger listening on ws://localhost:9229/cbb235fd-4967-4b40-bd95-ccad13a89eca
+For help, see: https://nodejs.org/en/docs/inspector
+[39m[22m
+[32m[Nest] 6293  - [39m03/19/2026, 6:27:26 PM [32m    LOG[39m [38;5;3m[NestFactory] [39m[32mStarting Nest application...[39m
+[32m[Nest] 6293  - [39m03/19/2026, 6:27:26 PM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mAppModule dependencies initialized[39m[38;5;3m +4ms[39m
+[32m[Nest] 6293  - [39m03/19/2026, 6:27:26 PM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mVoiceModule dependencies initialized[39m[38;5;3m +0ms[39m
+[32m[Nest] 6293  - [39m03/19/2026, 6:27:26 PM [32m    LOG[39m [38;5;3m[InstanceLoader] [39m[32mAuthModule dependencies initialized[39m[38;5;3m +0ms[39m
+[32m[Nest] 6293  - [39m03/19/2026, 6:27:26 PM [32m    LOG[39m [38;5;3m[RoutesResolver] [39m[32mAuthController {/auth}:[39m[38;5;3m +4ms[39m
+[32m[Nest] 6293  - [39m03/19/2026, 6:27:26 PM [32m    LOG[39m [38;5;3m[RouterExplorer] [39m[32mMapped {/auth/login, POST} route[39m[38;5;3m +1ms[39m
+[32m[Nest] 6293  - [39m03/19/2026, 6:27:26 PM [32m    LOG[39m [38;5;3m[NestApplication] [39m[32mNest application successfully started[39m[38;5;3m +0ms[39m
+API running on http://localhost:3000
+voice client connected
+chunk [33m395[39m
+chunk [33m120[39m
+chunk [33m120[39m
+chunk [33m120[39m
+chunk [33m120[39m
+chunk [33m136[39m
+chunk [33m120[39m
+chunk [33m120[39m
+chunk [33m120[39m
+chunk [33m120[39m
+chunk [33m136[39m
+chunk [33m120[39m
+chunk [33m120[39m
+chunk [33m120[39m
+chunk [33m120[39m
+chunk [33m136[39m
+chunk [33m120[39m
+chunk [33m120[39m
+chunk [33m120[39m
+chunk [33m120[39m
+chunk [33m136[39m
+chunk [33m120[39m
+chunk [33m120[39m
+chunk [33m120[39m
+chunk [33m120[39m
+chunk [33m136[39m
+chunk [33m120[39m
+chunk [33m120[39m
+voice client disconnected
+saved recording.webm [33m3715[39m
+voice client connected
+chunk [33m1669[39m
+chunk [33m3091[39m
+chunk [33m3424[39m
+chunk [33m3195[39m
+chunk [33m3303[39m
+chunk [33m3503[39m
+chunk [33m2980[39m
+chunk [33m3327[39m
+chunk [33m3510[39m
+chunk [33m3352[39m
+chunk [33m3163[39m
+chunk [33m3244[39m
+chunk [33m3484[39m
+chunk [33m3042[39m
+chunk [33m3614[39m
+chunk [33m3316[39m
+chunk [33m3132[39m
+chunk [33m3152[39m
+chunk [33m3581[39m
+chunk [33m3335[39m
+chunk [33m3173[39m
+chunk [33m3123[39m
+voice client disconnected
+saved recording.webm [33m70713[39m
+[1m[31mFailed to reconnect to daemon after multiple attempts[39m[22m
