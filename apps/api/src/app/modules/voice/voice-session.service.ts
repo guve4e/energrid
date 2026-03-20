@@ -68,7 +68,13 @@ export class VoiceSessionService {
 
     this.sessions.set(client, session)
 
-    this.emitBoth(session, {
+    this.emitToVoiceClient(session.client, {
+      type: 'session_start',
+      sessionId: id,
+      conversationId,
+    })
+
+    this.debugEvents.emit({
       type: 'session_start',
       sessionId: id,
       conversationId,
@@ -102,7 +108,8 @@ export class VoiceSessionService {
       )
     }
 
-    this.emitBoth(session, {
+    // Debug clients may want chunk telemetry, but the device client does not.
+    this.debugEvents.emit({
       type: 'chunk',
       sessionId: session.id,
       conversationId: session.conversationId,
@@ -116,7 +123,32 @@ export class VoiceSessionService {
   async endTurn(client: WebSocket): Promise<void> {
     const session = this.sessions.get(client)
     if (!session) return
+
     if (session.inputEnded) return
+
+    // If we already got final transcript or already sent a reply,
+    // do not try to commit input again.
+    if (session.finalTranscript.trim() || session.replySent) {
+      session.inputEnded = true
+
+      this.logger.log(
+        `[TURN END IGNORED] ${session.id} conversation=${session.conversationId} already finalized`,
+      )
+
+      this.emitToVoiceClient(session.client, {
+        type: 'turn_end_ignored',
+        sessionId: session.id,
+        conversationId: session.conversationId,
+      })
+
+      this.debugEvents.emit({
+        type: 'turn_end_ignored',
+        sessionId: session.id,
+        conversationId: session.conversationId,
+      })
+
+      return
+    }
 
     session.inputEnded = true
 
@@ -124,7 +156,13 @@ export class VoiceSessionService {
       `[TURN END] ${session.id} conversation=${session.conversationId} chunks=${session.chunkCount}`,
     )
 
-    this.emitBoth(session, {
+    this.emitToVoiceClient(session.client, {
+      type: 'turn_end',
+      sessionId: session.id,
+      conversationId: session.conversationId,
+    })
+
+    this.debugEvents.emit({
       type: 'turn_end',
       sessionId: session.id,
       conversationId: session.conversationId,
@@ -145,7 +183,7 @@ export class VoiceSessionService {
       this.logger.log(`[SESSION CLOSING] ${session.id}`)
     }
 
-    if (!session.inputEnded) {
+    if (!session.inputEnded && !session.finalTranscript.trim() && !session.replySent) {
       try {
         await session.sttSession.endInput()
       } catch (e) {
@@ -164,7 +202,17 @@ export class VoiceSessionService {
       `[SESSION END] ${session.id} conversation=${session.conversationId} transcript="${session.finalTranscript.trim()}"`,
     )
 
-    this.emitBoth(session, {
+    this.emitToVoiceClient(session.client, {
+      type: 'session_end',
+      sessionId: session.id,
+      conversationId: session.conversationId,
+      totalChunks: session.chunkCount,
+      finalTranscript: session.finalTranscript.trim(),
+      assistantReply: session.assistantReply,
+      durationMs: Date.now() - session.startedAt,
+    })
+
+    this.debugEvents.emit({
       type: 'session_end',
       sessionId: session.id,
       conversationId: session.conversationId,
@@ -184,7 +232,15 @@ export class VoiceSessionService {
     if (event.type === 'stt_partial') {
       session.partialTranscript += event.text
 
-      this.emitBoth(session, {
+      this.emitToVoiceClient(session.client, {
+        type: 'stt_partial',
+        sessionId: session.id,
+        conversationId: session.conversationId,
+        text: event.text,
+        full: session.partialTranscript,
+      })
+
+      this.debugEvents.emit({
         type: 'stt_partial',
         sessionId: session.id,
         conversationId: session.conversationId,
@@ -197,12 +253,21 @@ export class VoiceSessionService {
 
     if (event.type === 'stt_final') {
       session.finalTranscript = event.text
+      session.inputEnded = true
 
       this.logger.log(
         `[STT FINAL] ${session.id} conversation=${session.conversationId} ${event.text}`,
       )
 
-      this.emitBoth(session, {
+      this.emitToVoiceClient(session.client, {
+        type: 'stt_final',
+        sessionId: session.id,
+        conversationId: session.conversationId,
+        text: event.text,
+        full: session.finalTranscript,
+      })
+
+      this.debugEvents.emit({
         type: 'stt_final',
         sessionId: session.id,
         conversationId: session.conversationId,
@@ -223,7 +288,14 @@ export class VoiceSessionService {
         `[ASSISTANT] ${session.id} conversation=${session.conversationId} ${result.replyText}`,
       )
 
-      this.emitBoth(session, {
+      this.emitToVoiceClient(session.client, {
+        type: 'assistant_final',
+        sessionId: session.id,
+        conversationId: session.conversationId,
+        text: result.replyText,
+      })
+
+      this.debugEvents.emit({
         type: 'assistant_final',
         sessionId: session.id,
         conversationId: session.conversationId,
@@ -236,18 +308,20 @@ export class VoiceSessionService {
     if (event.type === 'stt_error') {
       this.logger.error(`[STT ERROR] ${session.id} ${event.message}`)
 
-      this.emitBoth(session, {
+      this.emitToVoiceClient(session.client, {
+        type: 'stt_error',
+        sessionId: session.id,
+        conversationId: session.conversationId,
+        message: event.message,
+      })
+
+      this.debugEvents.emit({
         type: 'stt_error',
         sessionId: session.id,
         conversationId: session.conversationId,
         message: event.message,
       })
     }
-  }
-
-  private emitBoth(session: ActiveVoiceSession, payload: Record<string, unknown>) {
-    this.emitToVoiceClient(session.client, payload)
-    this.debugEvents.emit(payload)
   }
 
   private emitToVoiceClient(client: WebSocket, payload: Record<string, unknown>) {
