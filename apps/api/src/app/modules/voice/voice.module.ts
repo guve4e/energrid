@@ -3,8 +3,17 @@ import { VoiceGateway } from './voice.gateway'
 import { DebugGateway } from './debug.gateway'
 import { DebugEventsService } from './debug-events.service'
 import { VoiceSttService } from './voice-stt.service'
+import { VoiceSessionService } from './voice-session.service'
+import { VoiceConversationService } from './voice-conversation.service'
 
 @Module({
-  providers: [VoiceGateway, DebugGateway, DebugEventsService, VoiceSttService],
+  providers: [
+    VoiceGateway,
+    DebugGateway,
+    DebugEventsService,
+    VoiceSttService,
+    VoiceSessionService,
+    VoiceConversationService,
+  ],
 })
 export class VoiceModule {}

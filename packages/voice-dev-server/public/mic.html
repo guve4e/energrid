@@ -1,49 +1,239 @@
 <!DOCTYPE html>
 <html>
-<body>
-  <h2>PCM16 24k Mic Test</h2>
-
-  <button onclick="start()">Start Mic</button>
-  <button onclick="stop()">Stop</button>
-
-  <pre id="log"></pre>
-
-  <script>
-    let ws
-    let audioContext
-    let mediaStream
-    let source
-    let processor
-
-    function log(msg) {
-      console.log(msg)
-      document.getElementById('log').textContent += msg + '\n'
+<head>
+  <meta charset="utf-8" />
+  <title>Energrid Voice Debug</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 24px;
+      background: #111;
+      color: #eee;
+      max-width: 900px;
+      margin: 0 auto;
     }
 
-    async function start() {
-      log('starting...')
+    h2 {
+      margin-top: 0;
+    }
 
-      ws = new WebSocket('ws://localhost:3000/voice')
+    button {
+      padding: 10px 16px;
+      margin-right: 10px;
+      cursor: pointer;
+    }
 
-      ws.onopen = () => log('ws connected')
-      ws.onclose = () => log('ws closed')
-      ws.onerror = (e) => {
-        log('ws error')
-        console.error(e)
+    .panel {
+      background: #1b1b1b;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 16px;
+      margin-top: 16px;
+    }
+
+    .label {
+      font-size: 12px;
+      color: #aaa;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .value {
+      font-size: 18px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    #log {
+      background: #0d0d0d;
+      color: #8f8;
+      min-height: 180px;
+      max-height: 320px;
+      overflow: auto;
+      font-family: monospace;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+<h2>Energrid Voice Debug</h2>
+
+<button onclick="start()">Start Mic</button>
+<button onclick="stop()">Stop</button>
+<button onclick="clearUi()">Clear</button>
+
+<div class="panel">
+  <div class="label">Status</div>
+  <div id="status" class="value">idle</div>
+</div>
+
+<div class="panel">
+  <div class="label">Live partial transcript</div>
+  <div id="partial" class="value"></div>
+</div>
+
+<div class="panel">
+  <div class="label">Final transcript</div>
+  <div id="final" class="value"></div>
+</div>
+
+<div class="panel">
+  <div class="label">Assistant reply</div>
+  <div id="assistant" class="value"></div>
+</div>
+
+<div class="panel">
+  <div class="label">Log</div>
+  <pre id="log"></pre>
+</div>
+
+<script>
+  let ws = null
+  let debugWs = null
+  let audioContext = null
+  let mediaStream = null
+  let source = null
+  let processor = null
+  let isStreaming = false
+
+  const statusEl = document.getElementById('status')
+  const partialEl = document.getElementById('partial')
+  const finalEl = document.getElementById('final')
+  const assistantEl = document.getElementById('assistant')
+  const logEl = document.getElementById('log')
+
+  function log(msg) {
+    console.log(msg)
+    logEl.textContent += msg + '\n'
+    logEl.scrollTop = logEl.scrollHeight
+  }
+
+  function setStatus(text) {
+    statusEl.textContent = text
+  }
+
+  function clearUi() {
+    partialEl.textContent = ''
+    finalEl.textContent = ''
+    assistantEl.textContent = ''
+    logEl.textContent = ''
+    setStatus('idle')
+  }
+
+  function float32ToInt16(float32Array) {
+    const int16Array = new Int16Array(float32Array.length)
+
+    for (let i = 0; i < float32Array.length; i++) {
+      let s = Math.max(-1, Math.min(1, float32Array[i]))
+      int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+    }
+
+    return int16Array
+  }
+
+  function ensureDebugSocket() {
+    if (debugWs && (debugWs.readyState === WebSocket.OPEN || debugWs.readyState === WebSocket.CONNECTING)) {
+      return
+    }
+
+    debugWs = new WebSocket('ws://localhost:3000/voice-debug')
+
+    debugWs.onopen = () => {
+      log('[debug] connected')
+    }
+
+    debugWs.onclose = () => {
+      log('[debug] closed')
+    }
+
+    debugWs.onerror = (e) => {
+      log('[debug] error')
+      console.error(e)
+    }
+
+    debugWs.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data)
+
+        if (data.type === 'stt_partial') {
+          partialEl.textContent = data.full || data.text || ''
+          return
+        }
+
+        if (data.type === 'stt_final') {
+          finalEl.textContent = data.full || data.text || ''
+          partialEl.textContent = ''
+          setStatus('processing...')
+          log('[debug] final transcript received')
+
+          // Auto-stop mic on first final transcript for clean turn-taking
+          stopStreamingOnly()
+          return
+        }
+
+        if (data.type === 'assistant_final') {
+          assistantEl.textContent = data.text || ''
+          setStatus('done')
+          log('[debug] assistant reply received')
+          return
+        }
+
+        if (data.type === 'stt_error') {
+          setStatus('stt error')
+          log('[debug] stt error: ' + (data.message || 'unknown'))
+          return
+        }
+
+        if (data.type === 'session_start') {
+          log('[debug] session started')
+          return
+        }
+
+        if (data.type === 'session_end') {
+          log('[debug] session ended')
+          return
+        }
+      } catch (err) {
+        log('[debug] bad event payload')
+        console.error(err)
       }
+    }
+  }
+
+  async function start() {
+    if (isStreaming) {
+      log('already streaming')
+      return
+    }
+
+    clearUi()
+    setStatus('connecting...')
+    ensureDebugSocket()
+
+    log('starting...')
+
+    ws = new WebSocket('ws://localhost:3000/voice')
+
+    ws.onopen = async () => {
+      log('[voice] connected')
+      setStatus('listening')
 
       mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
       log('mic granted')
 
+      // IMPORTANT: match backend sample rate
       audioContext = new (window.AudioContext || window.webkitAudioContext)({
-        sampleRate: 24000,
+        sampleRate: 16000,
       })
 
       source = audioContext.createMediaStreamSource(mediaStream)
       processor = audioContext.createScriptProcessor(4096, 1, 1)
 
       processor.onaudioprocess = (event) => {
-        if (!ws || ws.readyState !== 1) return
+        if (!ws || ws.readyState !== WebSocket.OPEN) return
+        if (!isStreaming) return
 
         const input = event.inputBuffer.getChannelData(0)
         const pcm16 = float32ToInt16(input)
@@ -54,38 +244,60 @@
       source.connect(processor)
       processor.connect(audioContext.destination)
 
-      log('streaming pcm16 @ 24k...')
+      isStreaming = true
+      log('streaming pcm16 @ 16k...')
     }
 
-    function stop() {
-      log('stopping...')
-
-      if (processor) processor.disconnect()
-      if (source) source.disconnect()
-
-      if (mediaStream) {
-        mediaStream.getTracks().forEach((t) => t.stop())
-      }
-
-      if (audioContext) {
-        audioContext.close()
-      }
-
-      if (ws && ws.readyState === 1) {
-        ws.close()
-      }
+    ws.onclose = () => {
+      log('[voice] closed')
     }
 
-    function float32ToInt16(float32Array) {
-      const int16Array = new Int16Array(float32Array.length)
-
-      for (let i = 0; i < float32Array.length; i++) {
-        let s = Math.max(-1, Math.min(1, float32Array[i]))
-        int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7fff
-      }
-
-      return int16Array
+    ws.onerror = (e) => {
+      log('[voice] error')
+      console.error(e)
+      setStatus('error')
     }
-  </script>
+  }
+
+  function stopStreamingOnly() {
+    if (!isStreaming) return
+
+    log('stopping mic stream...')
+
+    isStreaming = false
+
+    if (processor) {
+      processor.disconnect()
+      processor = null
+    }
+
+    if (source) {
+      source.disconnect()
+      source = null
+    }
+
+    if (mediaStream) {
+      mediaStream.getTracks().forEach((t) => t.stop())
+      mediaStream = null
+    }
+
+    if (audioContext) {
+      audioContext.close()
+      audioContext = null
+    }
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.close()
+    }
+
+    ws = null
+  }
+
+  function stop() {
+    log('manual stop...')
+    stopStreamingOnly()
+    setStatus('stopped')
+  }
+</script>
 </body>
 </html>
