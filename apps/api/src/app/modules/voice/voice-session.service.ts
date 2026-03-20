@@ -68,7 +68,7 @@ export class VoiceSessionService {
 
     this.sessions.set(client, session)
 
-    this.debugEvents.emit({
+    this.emitBoth(session, {
       type: 'session_start',
       sessionId: id,
       conversationId,
@@ -102,7 +102,7 @@ export class VoiceSessionService {
       )
     }
 
-    this.debugEvents.emit({
+    this.emitBoth(session, {
       type: 'chunk',
       sessionId: session.id,
       conversationId: session.conversationId,
@@ -124,7 +124,7 @@ export class VoiceSessionService {
       `[TURN END] ${session.id} conversation=${session.conversationId} chunks=${session.chunkCount}`,
     )
 
-    this.debugEvents.emit({
+    this.emitBoth(session, {
       type: 'turn_end',
       sessionId: session.id,
       conversationId: session.conversationId,
@@ -164,7 +164,7 @@ export class VoiceSessionService {
       `[SESSION END] ${session.id} conversation=${session.conversationId} transcript="${session.finalTranscript.trim()}"`,
     )
 
-    this.debugEvents.emit({
+    this.emitBoth(session, {
       type: 'session_end',
       sessionId: session.id,
       conversationId: session.conversationId,
@@ -184,7 +184,7 @@ export class VoiceSessionService {
     if (event.type === 'stt_partial') {
       session.partialTranscript += event.text
 
-      this.debugEvents.emit({
+      this.emitBoth(session, {
         type: 'stt_partial',
         sessionId: session.id,
         conversationId: session.conversationId,
@@ -202,7 +202,7 @@ export class VoiceSessionService {
         `[STT FINAL] ${session.id} conversation=${session.conversationId} ${event.text}`,
       )
 
-      this.debugEvents.emit({
+      this.emitBoth(session, {
         type: 'stt_final',
         sessionId: session.id,
         conversationId: session.conversationId,
@@ -223,7 +223,7 @@ export class VoiceSessionService {
         `[ASSISTANT] ${session.id} conversation=${session.conversationId} ${result.replyText}`,
       )
 
-      this.debugEvents.emit({
+      this.emitBoth(session, {
         type: 'assistant_final',
         sessionId: session.id,
         conversationId: session.conversationId,
@@ -236,12 +236,27 @@ export class VoiceSessionService {
     if (event.type === 'stt_error') {
       this.logger.error(`[STT ERROR] ${session.id} ${event.message}`)
 
-      this.debugEvents.emit({
+      this.emitBoth(session, {
         type: 'stt_error',
         sessionId: session.id,
         conversationId: session.conversationId,
         message: event.message,
       })
+    }
+  }
+
+  private emitBoth(session: ActiveVoiceSession, payload: Record<string, unknown>) {
+    this.emitToVoiceClient(session.client, payload)
+    this.debugEvents.emit(payload)
+  }
+
+  private emitToVoiceClient(client: WebSocket, payload: Record<string, unknown>) {
+    if (client.readyState !== WebSocket.OPEN) return
+
+    try {
+      client.send(JSON.stringify(payload))
+    } catch (e) {
+      this.logger.warn(`[VOICE CLIENT SEND ERROR] ${String(e)}`)
     }
   }
 }

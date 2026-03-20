@@ -1,10 +1,5 @@
 node_modules
-.env
 dist
-recording.webm
+.nx/cache
+.nx/workspace-data
 .env
-
-.env
-node_modules
-dist
-recording.webm

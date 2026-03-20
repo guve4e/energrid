@@ -1,13 +1,0 @@
-> webpack-cli build --node-env=production
-
-[1m[31mERROR[39m[22m in [1m./src/app/modules/voice/voice.gateway.ts:26:34[39m[22m
-[90mTS2339: [39mProperty 'toString' does not exist on type 'never'.
-  [0m [90m 24 |[39m         console[33m.[39mlog([32m'audio chunk'[39m[33m,[39m data[33m.[39mlength)
-   [90m 25 |[39m       } [36melse[39m {
-  [31m[1m>[22m[39m[90m 26 |[39m         console[33m.[39mlog([32m'text'[39m[33m,[39m data[33m.[39mtoString())
-   [90m    |[39m                                  [31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m[31m[1m^[22m[39m
-   [90m 27 |[39m       }
-   [90m 28 |[39m     })
-   [90m 29 |[39m   }[0m
-
-webpack compiled with [1m[31m1 error[39m[22m (81e30588097b9c5b)
