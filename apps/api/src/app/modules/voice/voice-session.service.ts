@@ -13,6 +13,7 @@ import type {
 interface ActiveVoiceSession {
   id: string
   client: WebSocket
+  conversationId: string
   sttSession: StreamingSttSession
   chunkCount: number
   partialTranscript: string
@@ -20,12 +21,15 @@ interface ActiveVoiceSession {
   assistantReply: string
   startedAt: number
   lastChunkAt: number
+  inputEnded: boolean
+  replySent: boolean
 }
 
 @Injectable()
 export class VoiceSessionService {
   private readonly logger = new Logger(VoiceSessionService.name)
   private readonly sessions = new Map<WebSocket, ActiveVoiceSession>()
+  private readonly verbose = process.env.VOICE_VERBOSE_LOGS === 'true'
 
   constructor(
     private readonly sttService: VoiceSttService,
@@ -35,7 +39,9 @@ export class VoiceSessionService {
 
   async openSession(client: WebSocket): Promise<void> {
     const id = randomUUID()
-    this.logger.log(`[SESSION START] ${id}`)
+    const conversationId = randomUUID()
+
+    this.logger.log(`[SESSION START] ${id} conversation=${conversationId}`)
 
     let session!: ActiveVoiceSession
 
@@ -48,6 +54,7 @@ export class VoiceSessionService {
     session = {
       id,
       client,
+      conversationId,
       sttSession,
       chunkCount: 0,
       partialTranscript: '',
@@ -55,6 +62,8 @@ export class VoiceSessionService {
       assistantReply: '',
       startedAt: Date.now(),
       lastChunkAt: Date.now(),
+      inputEnded: false,
+      replySent: false,
     }
 
     this.sessions.set(client, session)
@@ -62,17 +71,32 @@ export class VoiceSessionService {
     this.debugEvents.emit({
       type: 'session_start',
       sessionId: id,
+      conversationId,
     })
+  }
+
+  setConversationId(client: WebSocket, conversationId: string): void {
+    const session = this.sessions.get(client)
+    if (!session) return
+
+    session.conversationId = conversationId
+
+    if (this.verbose) {
+      this.logger.log(
+        `[CONVERSATION ID SET] session=${session.id} conversation=${conversationId}`,
+      )
+    }
   }
 
   async pushAudio(client: WebSocket, buf: Buffer): Promise<void> {
     const session = this.sessions.get(client)
     if (!session) return
+    if (session.inputEnded) return
 
     session.chunkCount++
     session.lastChunkAt = Date.now()
 
-    if (session.chunkCount === 1 || session.chunkCount % 10 === 0) {
+    if (this.verbose && (session.chunkCount === 1 || session.chunkCount % 10 === 0)) {
       this.logger.log(
         `[CHUNK] ${session.id} count=${session.chunkCount} bytes=${buf.length}`,
       )
@@ -81,6 +105,7 @@ export class VoiceSessionService {
     this.debugEvents.emit({
       type: 'chunk',
       sessionId: session.id,
+      conversationId: session.conversationId,
       chunkCount: session.chunkCount,
       bytes: buf.length,
     })
@@ -88,16 +113,45 @@ export class VoiceSessionService {
     await session.sttSession.pushAudio(buf)
   }
 
-  async closeSession(client: WebSocket): Promise<void> {
+  async endTurn(client: WebSocket): Promise<void> {
     const session = this.sessions.get(client)
     if (!session) return
+    if (session.inputEnded) return
 
-    this.logger.log(`[SESSION ENDING] ${session.id}`)
+    session.inputEnded = true
+
+    this.logger.log(
+      `[TURN END] ${session.id} conversation=${session.conversationId} chunks=${session.chunkCount}`,
+    )
+
+    this.debugEvents.emit({
+      type: 'turn_end',
+      sessionId: session.id,
+      conversationId: session.conversationId,
+    })
 
     try {
       await session.sttSession.endInput()
     } catch (e) {
       this.logger.warn(`[STT END INPUT ERROR] ${session.id} ${String(e)}`)
+    }
+  }
+
+  async closeSession(client: WebSocket): Promise<void> {
+    const session = this.sessions.get(client)
+    if (!session) return
+
+    if (this.verbose) {
+      this.logger.log(`[SESSION CLOSING] ${session.id}`)
+    }
+
+    if (!session.inputEnded) {
+      try {
+        await session.sttSession.endInput()
+      } catch (e) {
+        this.logger.warn(`[STT END INPUT ERROR] ${session.id} ${String(e)}`)
+      }
+      session.inputEnded = true
     }
 
     try {
@@ -107,12 +161,13 @@ export class VoiceSessionService {
     }
 
     this.logger.log(
-      `[SESSION END] ${session.id} chunks=${session.chunkCount} transcript="${session.finalTranscript.trim()}" reply="${session.assistantReply}"`,
+      `[SESSION END] ${session.id} conversation=${session.conversationId} transcript="${session.finalTranscript.trim()}"`,
     )
 
     this.debugEvents.emit({
       type: 'session_end',
       sessionId: session.id,
+      conversationId: session.conversationId,
       totalChunks: session.chunkCount,
       finalTranscript: session.finalTranscript.trim(),
       assistantReply: session.assistantReply,
@@ -129,11 +184,10 @@ export class VoiceSessionService {
     if (event.type === 'stt_partial') {
       session.partialTranscript += event.text
 
-      this.logger.log(`[STT PARTIAL] ${session.id} ${event.text}`)
-
       this.debugEvents.emit({
         type: 'stt_partial',
         sessionId: session.id,
+        conversationId: session.conversationId,
         text: event.text,
         full: session.partialTranscript,
       })
@@ -144,27 +198,35 @@ export class VoiceSessionService {
     if (event.type === 'stt_final') {
       session.finalTranscript = event.text
 
-      this.logger.log(`[STT FINAL] ${session.id} ${event.text}`)
+      this.logger.log(
+        `[STT FINAL] ${session.id} conversation=${session.conversationId} ${event.text}`,
+      )
 
       this.debugEvents.emit({
         type: 'stt_final',
         sessionId: session.id,
+        conversationId: session.conversationId,
         text: event.text,
         full: session.finalTranscript,
       })
 
       const result = await this.conversationService.handleFinalTranscript({
         sessionId: session.id,
+        conversationId: session.conversationId,
         transcript: session.finalTranscript,
       })
 
       session.assistantReply = result.replyText
+      session.replySent = true
 
-      this.logger.log(`[ASSISTANT] ${session.id} ${result.replyText}`)
+      this.logger.log(
+        `[ASSISTANT] ${session.id} conversation=${session.conversationId} ${result.replyText}`,
+      )
 
       this.debugEvents.emit({
         type: 'assistant_final',
         sessionId: session.id,
+        conversationId: session.conversationId,
         text: result.replyText,
       })
 
@@ -177,6 +239,7 @@ export class VoiceSessionService {
       this.debugEvents.emit({
         type: 'stt_error',
         sessionId: session.id,
+        conversationId: session.conversationId,
         message: event.message,
       })
     }

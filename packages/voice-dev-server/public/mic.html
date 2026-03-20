@@ -12,17 +12,17 @@
       max-width: 900px;
       margin: 0 auto;
     }
-
-    h2 {
-      margin-top: 0;
-    }
-
+    h2 { margin-top: 0; }
     button {
       padding: 10px 16px;
       margin-right: 10px;
       cursor: pointer;
     }
-
+    #talkBtn {
+      font-size: 16px;
+      font-weight: bold;
+      min-width: 180px;
+    }
     .panel {
       background: #1b1b1b;
       border: 1px solid #333;
@@ -30,7 +30,6 @@
       padding: 16px;
       margin-top: 16px;
     }
-
     .label {
       font-size: 12px;
       color: #aaa;
@@ -38,123 +37,143 @@
       text-transform: uppercase;
       letter-spacing: 0.04em;
     }
-
     .value {
       font-size: 18px;
       line-height: 1.4;
       white-space: pre-wrap;
       word-break: break-word;
     }
-
     #log {
       background: #0d0d0d;
       color: #8f8;
-      min-height: 180px;
-      max-height: 320px;
+      min-height: 150px;
+      max-height: 260px;
       overflow: auto;
       font-family: monospace;
       font-size: 13px;
     }
+    .message {
+      padding: 12px;
+      border-radius: 8px;
+      margin-bottom: 10px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .message.user { background: #1d3557; }
+    .message.assistant { background: #2a2a2a; }
   </style>
 </head>
 <body>
-<h2>Energrid Voice Debug</h2>
+  <h2>Energrid Voice Debug</h2>
 
-<button onclick="start()">Start Mic</button>
-<button onclick="stop()">Stop</button>
-<button onclick="clearUi()">Clear</button>
+  <button id="talkBtn">Hold to Talk</button>
+  <button onclick="clearConversation()">Clear Conversation</button>
 
-<div class="panel">
-  <div class="label">Status</div>
-  <div id="status" class="value">idle</div>
-</div>
+  <div class="panel">
+    <div class="label">Status</div>
+    <div id="status" class="value">idle</div>
+  </div>
 
-<div class="panel">
-  <div class="label">Live partial transcript</div>
-  <div id="partial" class="value"></div>
-</div>
+  <div class="panel">
+    <div class="label">Conversation ID</div>
+    <div id="conversationId" class="value"></div>
+  </div>
 
-<div class="panel">
-  <div class="label">Final transcript</div>
-  <div id="final" class="value"></div>
-</div>
+  <div class="panel">
+    <div class="label">Live partial transcript</div>
+    <div id="partial" class="value"></div>
+  </div>
 
-<div class="panel">
-  <div class="label">Assistant reply</div>
-  <div id="assistant" class="value"></div>
-</div>
+  <div class="panel">
+    <div class="label">Chat</div>
+    <div id="chat"></div>
+  </div>
 
-<div class="panel">
-  <div class="label">Log</div>
-  <pre id="log"></pre>
-</div>
+  <div class="panel">
+    <div class="label">Log</div>
+    <pre id="log"></pre>
+  </div>
 
-<script>
-  let ws = null
-  let debugWs = null
-  let audioContext = null
-  let mediaStream = null
-  let source = null
-  let processor = null
-  let isStreaming = false
+  <script>
+    let ws = null
+    let debugWs = null
+    let audioContext = null
+    let mediaStream = null
+    let source = null
+    let processor = null
 
-  const statusEl = document.getElementById('status')
-  const partialEl = document.getElementById('partial')
-  const finalEl = document.getElementById('final')
-  const assistantEl = document.getElementById('assistant')
-  const logEl = document.getElementById('log')
+    let state = 'idle'
+    let isStreaming = false
+    let currentTurnFinished = false
+    let currentTurnUserText = ''
+    let stopTimer = null
+    let conversationId = crypto.randomUUID()
 
-  function log(msg) {
-    console.log(msg)
-    logEl.textContent += msg + '\n'
-    logEl.scrollTop = logEl.scrollHeight
-  }
+    const RELEASE_TAIL_MS = 900
 
-  function setStatus(text) {
-    statusEl.textContent = text
-  }
+    const statusEl = document.getElementById('status')
+    const partialEl = document.getElementById('partial')
+    const chatEl = document.getElementById('chat')
+    const logEl = document.getElementById('log')
+    const conversationIdEl = document.getElementById('conversationId')
+    const talkBtn = document.getElementById('talkBtn')
 
-  function clearUi() {
-    partialEl.textContent = ''
-    finalEl.textContent = ''
-    assistantEl.textContent = ''
-    logEl.textContent = ''
-    setStatus('idle')
-  }
+    conversationIdEl.textContent = conversationId
 
-  function float32ToInt16(float32Array) {
-    const int16Array = new Int16Array(float32Array.length)
-
-    for (let i = 0; i < float32Array.length; i++) {
-      let s = Math.max(-1, Math.min(1, float32Array[i]))
-      int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+    function log(msg) {
+      console.log(msg)
+      logEl.textContent += msg + '\\n'
+      logEl.scrollTop = logEl.scrollHeight
     }
 
-    return int16Array
-  }
-
-  function ensureDebugSocket() {
-    if (debugWs && (debugWs.readyState === WebSocket.OPEN || debugWs.readyState === WebSocket.CONNECTING)) {
-      return
+    function setState(next) {
+      state = next
+      statusEl.textContent = next
     }
 
-    debugWs = new WebSocket('ws://localhost:3000/voice-debug')
-
-    debugWs.onopen = () => {
-      log('[debug] connected')
+    function appendMessage(role, text) {
+      const div = document.createElement('div')
+      div.className = `message ${role}`
+      div.textContent = `${role === 'user' ? 'You' : 'Assistant'}: ${text}`
+      chatEl.appendChild(div)
     }
 
-    debugWs.onclose = () => {
-      log('[debug] closed')
+    function clearConversation() {
+      chatEl.innerHTML = ''
+      partialEl.textContent = ''
+      logEl.textContent = ''
+      currentTurnUserText = ''
+      conversationId = crypto.randomUUID()
+      conversationIdEl.textContent = conversationId
+      cancelScheduledStop()
+      hardStopStreaming()
+      setState('idle')
+      log('new conversation created')
     }
 
-    debugWs.onerror = (e) => {
-      log('[debug] error')
-      console.error(e)
+    function float32ToInt16(float32Array) {
+      const int16Array = new Int16Array(float32Array.length)
+      for (let i = 0; i < float32Array.length; i++) {
+        let s = Math.max(-1, Math.min(1, float32Array[i]))
+        int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+      }
+      return int16Array
     }
 
-    debugWs.onmessage = (event) => {
-      try {
+    function ensureDebugSocket() {
+      if (debugWs && (debugWs.readyState === WebSocket.OPEN || debugWs.readyState === WebSocket.CONNECTING)) {
+        return
+      }
+
+      debugWs = new WebSocket('ws://localhost:3000/voice-debug')
+      debugWs.onopen = () => log('[debug] connected')
+      debugWs.onclose = () => log('[debug] closed')
+      debugWs.onerror = (e) => {
+        log('[debug] error')
+        console.error(e)
+      }
+
+      debugWs.onmessage = (event) => {
         const data = JSON.parse(event.data)
 
         if (data.type === 'stt_partial') {
@@ -163,26 +182,29 @@
         }
 
         if (data.type === 'stt_final') {
-          finalEl.textContent = data.full || data.text || ''
+          currentTurnUserText = data.full || data.text || ''
           partialEl.textContent = ''
-          setStatus('processing...')
+          appendMessage('user', currentTurnUserText)
+          currentTurnFinished = true
+          cancelScheduledStop()
+          hardStopStreaming()
+          setState('waiting_reply')
           log('[debug] final transcript received')
-
-          // Auto-stop mic on first final transcript for clean turn-taking
-          stopStreamingOnly()
           return
         }
 
         if (data.type === 'assistant_final') {
-          assistantEl.textContent = data.text || ''
-          setStatus('done')
+          appendMessage('assistant', data.text || '')
+          setState('done')
           log('[debug] assistant reply received')
           return
         }
 
         if (data.type === 'stt_error') {
-          setStatus('stt error')
+          setState('error')
           log('[debug] stt error: ' + (data.message || 'unknown'))
+          cancelScheduledStop()
+          hardStopStreaming()
           return
         }
 
@@ -195,109 +217,145 @@
           log('[debug] session ended')
           return
         }
-      } catch (err) {
-        log('[debug] bad event payload')
-        console.error(err)
       }
     }
-  }
 
-  async function start() {
-    if (isStreaming) {
-      log('already streaming')
-      return
+    function cancelScheduledStop() {
+      if (stopTimer) {
+        clearTimeout(stopTimer)
+        stopTimer = null
+      }
     }
 
-    clearUi()
-    setStatus('connecting...')
-    ensureDebugSocket()
-
-    log('starting...')
-
-    ws = new WebSocket('ws://localhost:3000/voice')
-
-    ws.onopen = async () => {
-      log('[voice] connected')
-      setStatus('listening')
-
-      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      log('mic granted')
-
-      // IMPORTANT: match backend sample rate
-      audioContext = new (window.AudioContext || window.webkitAudioContext)({
-        sampleRate: 16000,
-      })
-
-      source = audioContext.createMediaStreamSource(mediaStream)
-      processor = audioContext.createScriptProcessor(4096, 1, 1)
-
-      processor.onaudioprocess = (event) => {
-        if (!ws || ws.readyState !== WebSocket.OPEN) return
-        if (!isStreaming) return
-
-        const input = event.inputBuffer.getChannelData(0)
-        const pcm16 = float32ToInt16(input)
-
-        ws.send(pcm16.buffer)
+    async function startTurn() {
+      if (state === 'recording' || state === 'waiting_final' || state === 'waiting_reply') {
+        return
       }
 
-      source.connect(processor)
-      processor.connect(audioContext.destination)
+      cancelScheduledStop()
+      ensureDebugSocket()
 
-      isStreaming = true
-      log('streaming pcm16 @ 16k...')
+      currentTurnFinished = false
+      currentTurnUserText = ''
+      partialEl.textContent = ''
+
+      log('starting turn...')
+      setState('connecting')
+
+      ws = new WebSocket('ws://localhost:3000/voice')
+
+      ws.onopen = async () => {
+        log('[voice] connected')
+        ws.send(JSON.stringify({
+          type: 'conversation_init',
+          conversationId,
+        }))
+
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        log('mic granted')
+
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({
+          sampleRate: 16000,
+        })
+
+        source = audioContext.createMediaStreamSource(mediaStream)
+        processor = audioContext.createScriptProcessor(4096, 1, 1)
+
+        processor.onaudioprocess = (event) => {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return
+          if (!isStreaming) return
+
+          const input = event.inputBuffer.getChannelData(0)
+          const pcm16 = float32ToInt16(input)
+          ws.send(pcm16.buffer)
+        }
+
+        source.connect(processor)
+        processor.connect(audioContext.destination)
+
+        isStreaming = true
+        setState('recording')
+        log('streaming pcm16 @ 16k...')
+      }
+
+      ws.onclose = () => {
+        log('[voice] closed')
+      }
+
+      ws.onerror = (e) => {
+        log('[voice] error')
+        console.error(e)
+        setState('error')
+      }
     }
 
-    ws.onclose = () => {
-      log('[voice] closed')
+    function scheduleStopAfterRelease() {
+      if (state !== 'recording') return
+
+      setState('waiting_final')
+      log(`release detected, tail=${RELEASE_TAIL_MS}ms`)
+
+      cancelScheduledStop()
+      stopTimer = setTimeout(() => {
+        log('release tail elapsed')
+        hardStopStreaming()
+        if (!currentTurnFinished) {
+          setState('waiting_reply')
+        }
+      }, RELEASE_TAIL_MS)
     }
 
-    ws.onerror = (e) => {
-      log('[voice] error')
-      console.error(e)
-      setStatus('error')
-    }
-  }
+    function hardStopStreaming() {
+      if (!isStreaming && !processor && !source && !mediaStream && !audioContext && !ws) {
+        return
+      }
 
-  function stopStreamingOnly() {
-    if (!isStreaming) return
+      isStreaming = false
 
-    log('stopping mic stream...')
+      if (processor) {
+        processor.disconnect()
+        processor = null
+      }
 
-    isStreaming = false
+      if (source) {
+        source.disconnect()
+        source = null
+      }
 
-    if (processor) {
-      processor.disconnect()
-      processor = null
-    }
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((t) => t.stop())
+        mediaStream = null
+      }
 
-    if (source) {
-      source.disconnect()
-      source = null
-    }
+      if (audioContext) {
+        audioContext.close()
+        audioContext = null
+      }
 
-    if (mediaStream) {
-      mediaStream.getTracks().forEach((t) => t.stop())
-      mediaStream = null
-    }
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close()
+      }
 
-    if (audioContext) {
-      audioContext.close()
-      audioContext = null
-    }
-
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.close()
+      ws = null
     }
 
-    ws = null
-  }
+    talkBtn.addEventListener('mousedown', startTurn)
+    talkBtn.addEventListener('mouseup', scheduleStopAfterRelease)
+    talkBtn.addEventListener('mouseleave', () => {
+      if (state === 'recording') {
+        scheduleStopAfterRelease()
+      }
+    })
 
-  function stop() {
-    log('manual stop...')
-    stopStreamingOnly()
-    setStatus('stopped')
-  }
-</script>
+    talkBtn.addEventListener('touchstart', (e) => {
+      e.preventDefault()
+      startTurn()
+    }, { passive: false })
+
+    talkBtn.addEventListener('touchend', (e) => {
+      e.preventDefault()
+      scheduleStopAfterRelease()
+    }, { passive: false })
+  </script>
 </body>
 </html>

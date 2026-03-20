@@ -13,7 +13,28 @@ export class VoiceGateway implements OnGatewayConnection {
 
     client.on('message', async (data: Buffer, isBinary: boolean) => {
       if (!isBinary) {
-        console.log('[VOICE WS TEXT MESSAGE IGNORED]', data.toString())
+        try {
+          const text = data.toString()
+          const payload = JSON.parse(text)
+
+          if (
+            payload?.type === 'conversation_init' &&
+            typeof payload.conversationId === 'string'
+          ) {
+            this.sessions.setConversationId(client, payload.conversationId)
+            return
+          }
+
+          if (payload?.type === 'end_of_turn') {
+            await this.sessions.endTurn(client)
+            return
+          }
+
+          console.log('[VOICE WS TEXT MESSAGE IGNORED]', text)
+        } catch {
+          console.log('[VOICE WS TEXT MESSAGE IGNORED]')
+        }
+
         return
       }
 
