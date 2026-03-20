@@ -9,6 +9,7 @@ import type {
   StreamingSttEvent,
   StreamingSttSession,
 } from '@energrid/stt-stream-core'
+import {VoiceSynthesisService} from "./voice-synthesis.service";
 
 interface ActiveVoiceSession {
   id: string
@@ -35,6 +36,7 @@ export class VoiceSessionService {
     private readonly sttService: VoiceSttService,
     private readonly debugEvents: DebugEventsService,
     private readonly conversationService: VoiceConversationService,
+    private readonly synthesisService: VoiceSynthesisService,
   ) {}
 
   async openSession(client: WebSocket): Promise<void> {
@@ -253,53 +255,41 @@ export class VoiceSessionService {
 
     if (event.type === 'stt_final') {
       session.finalTranscript = event.text
-      session.inputEnded = true
-
-      this.logger.log(
-        `[STT FINAL] ${session.id} conversation=${session.conversationId} ${event.text}`,
-      )
-
-      this.emitToVoiceClient(session.client, {
-        type: 'stt_final',
-        sessionId: session.id,
-        conversationId: session.conversationId,
-        text: event.text,
-        full: session.finalTranscript,
-      })
 
       this.debugEvents.emit({
         type: 'stt_final',
         sessionId: session.id,
-        conversationId: session.conversationId,
         text: event.text,
         full: session.finalTranscript,
       })
 
+
       const result = await this.conversationService.handleFinalTranscript({
-        sessionId: session.id,
         conversationId: session.conversationId,
+        sessionId: session.id,
         transcript: session.finalTranscript,
       })
 
       session.assistantReply = result.replyText
-      session.replySent = true
-
-      this.logger.log(
-        `[ASSISTANT] ${session.id} conversation=${session.conversationId} ${result.replyText}`,
-      )
-
-      this.emitToVoiceClient(session.client, {
-        type: 'assistant_final',
-        sessionId: session.id,
-        conversationId: session.conversationId,
-        text: result.replyText,
-      })
 
       this.debugEvents.emit({
         type: 'assistant_final',
         sessionId: session.id,
-        conversationId: session.conversationId,
         text: result.replyText,
+      })
+
+      const synthesized = await this.synthesisService.synthesize(result.replyText)
+
+      this.debugEvents.emit({
+        type: 'assistant_audio',
+        sessionId: session.id,
+        format: synthesized.format,
+        audioBase64: synthesized.audioBuffer.toString('base64'),
+      })
+
+      this.debugEvents.emit({
+        type: 'turn_end',
+        sessionId: session.id,
       })
 
       return

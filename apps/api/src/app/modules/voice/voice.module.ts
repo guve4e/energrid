@@ -5,6 +5,7 @@ import { DebugEventsService } from './debug-events.service'
 import { VoiceSttService } from './voice-stt.service'
 import { VoiceSessionService } from './voice-session.service'
 import { VoiceConversationService } from './voice-conversation.service'
+import {VoiceSynthesisService} from "./voice-synthesis.service";
 
 @Module({
   providers: [
@@ -14,6 +15,7 @@ import { VoiceConversationService } from './voice-conversation.service'
     VoiceSttService,
     VoiceSessionService,
     VoiceConversationService,
+    VoiceSynthesisService
   ],
 })
 export class VoiceModule {}
