@@ -143,6 +143,23 @@
       <div class="label">Conversation</div>
       <div id="chat"></div>
     </div>
+
+    <div class="panel">
+      <div class="label">Turn Metrics</div>
+      <table id="turnMetricsTable" style="width: 100%; border-collapse: collapse; font-size: 14px;">
+        <thead>
+        <tr style="color: #aaa; text-align: left; border-bottom: 1px solid #333;">
+          <th style="padding: 8px;">#</th>
+          <th style="padding: 8px;">STT</th>
+          <th style="padding: 8px;">LLM</th>
+          <th style="padding: 8px;">TTS</th>
+          <th style="padding: 8px;">Total</th>
+          <th style="padding: 8px;">Transcript</th>
+        </tr>
+        </thead>
+        <tbody id="turnMetricsBody"></tbody>
+      </table>
+    </div>
   </div>
 
   <div>
@@ -196,6 +213,8 @@
   let endOfTurnSentForCurrentTurn = false
   let streamedChunkCount = 0
   let bufferedAudioSeconds = 0
+  let turnCounter = 0
+  let currentTurnMetrics = null
 
   const RELEASE_TAIL_MS = 400
 
@@ -208,6 +227,7 @@
   const sessionIdEl = document.getElementById('sessionId')
   const partialEl = document.getElementById('partial')
   const bufferedAudioSecondsEl = document.getElementById('bufferedAudioSeconds')
+  const turnMetricsBodyEl = document.getElementById('turnMetricsBody')
   const chatEl = document.getElementById('chat')
   const logEl = document.getElementById('log')
 
@@ -227,6 +247,58 @@
   function updateBufferedAudioSeconds(seconds) {
     bufferedAudioSeconds = seconds
     bufferedAudioSecondsEl.textContent = `${seconds.toFixed(2)}s`
+  }
+
+  function startTurnMetrics() {
+    currentTurnMetrics = {
+      startedAt: Date.now(),
+      sttFinalAt: null,
+      assistantFinalAt: null,
+      assistantAudioAt: null,
+      transcript: '',
+    }
+  }
+
+  function resetTurnMetrics() {
+    currentTurnMetrics = null
+  }
+
+  function addTurnMetricsRow(metrics) {
+    const sttMs = metrics.sttFinalAt
+      ? metrics.sttFinalAt - metrics.startedAt
+      : null
+    const llmMs = metrics.assistantFinalAt && metrics.sttFinalAt
+      ? metrics.assistantFinalAt - metrics.sttFinalAt
+      : null
+    const ttsMs = metrics.assistantAudioAt && metrics.assistantFinalAt
+      ? metrics.assistantAudioAt - metrics.assistantFinalAt
+      : null
+    const totalMs = metrics.assistantAudioAt
+      ? metrics.assistantAudioAt - metrics.startedAt
+      : null
+
+    turnCounter += 1
+
+    const row = document.createElement('tr')
+    row.style.borderBottom = '1px solid #222'
+
+    const values = [
+      String(turnCounter),
+      sttMs !== null ? `${sttMs}ms` : '-',
+      llmMs !== null ? `${llmMs}ms` : '-',
+      ttsMs !== null ? `${ttsMs}ms` : '-',
+      totalMs !== null ? `${totalMs}ms` : '-',
+      metrics.transcript || '-',
+    ]
+
+    values.forEach((value) => {
+      const td = document.createElement('td')
+      td.style.padding = '8px'
+      td.textContent = value
+      row.appendChild(td)
+    })
+
+    turnMetricsBodyEl.prepend(row)
   }
 
   function float32ToInt16(float32Array) {
@@ -318,8 +390,11 @@
     endOfTurnSentForCurrentTurn = false
     streamedChunkCount = 0
     updateBufferedAudioSeconds(0)
+    turnCounter = 0
+    resetTurnMetrics()
 
     chatEl.innerHTML = ''
+    turnMetricsBodyEl.innerHTML = ''
     partialEl.textContent = ''
     conversationIdEl.textContent = conversationId
     sessionIdEl.textContent = ''
@@ -340,6 +415,7 @@
     endOfTurnSentForCurrentTurn = false
     streamedChunkCount = 0
     updateBufferedAudioSeconds(0)
+    startTurnMetrics()
 
     setState('connecting')
     log('starting turn...')
@@ -409,18 +485,30 @@
 
       if (data.type === 'stt_final') {
         finalReceivedForCurrentTurn = true
+        if (currentTurnMetrics) {
+          currentTurnMetrics.sttFinalAt = Date.now()
+          currentTurnMetrics.transcript = data.full || data.text || ''
+        }
         partialEl.textContent = ''
         currentUserMessage = createMessage('user', data.full || data.text || '')
         return
       }
 
       if (data.type === 'assistant_final') {
+        if (currentTurnMetrics) {
+          currentTurnMetrics.assistantFinalAt = Date.now()
+        }
         currentAssistantMessage = createMessage('assistant', data.text || '')
         setState('reply_ready')
         return
       }
 
       if (data.type === 'assistant_audio') {
+        if (currentTurnMetrics) {
+          currentTurnMetrics.assistantAudioAt = Date.now()
+          addTurnMetricsRow(currentTurnMetrics)
+          resetTurnMetrics()
+        }
         addAssistantAudio(currentAssistantMessage, data.audioBase64 || '')
         return
       }
@@ -429,6 +517,7 @@
         log('[voice] turn complete')
         setState('idle')
         streamedChunkCount = 0
+        updateBufferedAudioSeconds(0)
         resetTransportOnly()
         closeSocketIfOpen()
         return
@@ -454,6 +543,7 @@
     ws.onclose = () => {
       log('[voice] closed')
       streamedChunkCount = 0
+      updateBufferedAudioSeconds(0)
       resetTransportOnly()
 
       if (state !== 'error' && state !== 'idle') {

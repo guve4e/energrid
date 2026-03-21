@@ -226,597 +226,650 @@
 </div>
 
 <script>
-  const WS_URL = 'ws://localhost:3000/voice'
-
-  const START_THRESHOLD = 0.03
-  const STOP_THRESHOLD = 0.012
-  const MIN_SPEECH_MS = 500
-  const SILENCE_MS_TO_STOP = 1400
-  const MIN_AUDIO_BEFORE_SEND_MS = 700
-  const MIN_CHUNKS_BEFORE_FINISH = 12
-
-  let conversationId = crypto.randomUUID()
-  let currentSessionId = ''
-
-  let state = 'idle'
-  let listeningArmed = false
-  let utteranceActive = false
-  let ws = null
-
-  let audioContext = null
-  let mediaStream = null
-  let source = null
-  let processor = null
-
-  let currentUserMessage = null
-  let currentAssistantMessage = null
-
-  let currentTurn = null
-  let turnCounter = 0
-
-  let speechStartedAt = 0
-  let silenceStartedAt = 0
-  let utteranceStartedAt = 0
-  let accumulatedAudioMs = 0
-  let streamedChunkCount = 0
-  let isStreamingToSocket = false
-  let finalReceivedForCurrentTurn = false
-  let endOfTurnSentForCurrentTurn = false
-
-  const chatEl = document.getElementById('chat')
-  const statusEl = document.getElementById('status')
-  const conversationIdEl = document.getElementById('conversationId')
-  const sessionIdEl = document.getElementById('sessionId')
-  const partialEl = document.getElementById('partial')
-  const logEl = document.getElementById('log')
-  const vadInfoEl = document.getElementById('vadInfo')
-  const metricsBodyEl = document.getElementById('metricsBody')
-
-  const startBtn = document.getElementById('startBtn')
-  const stopBtn = document.getElementById('stopBtn')
-  const newConversationBtn = document.getElementById('newConversationBtn')
-  const clearLogBtn = document.getElementById('clearLogBtn')
-
-  conversationIdEl.textContent = conversationId
-
-  function nowMs() {
-    return Date.now()
+  const CONFIG = {
+    WS_URL: 'ws://localhost:3000/voice',
+    START_THRESHOLD: 0.045,
+    STOP_THRESHOLD: 0.018,
+    MIN_SPEECH_MS: 700,
+    SILENCE_MS_TO_STOP: 1700,
+    MIN_AUDIO_BEFORE_SEND_MS: 1000,
+    MIN_CHUNKS_BEFORE_FINISH: 16,
+    ASSISTANT_PLAYBACK_GRACE_MS: 1200,
   }
 
-  function log(msg) {
-    console.log(msg)
-    logEl.textContent += msg + '\n'
-    logEl.scrollTop = logEl.scrollHeight
+  const els = {
+    chat: document.getElementById('chat'),
+    status: document.getElementById('status'),
+    conversationId: document.getElementById('conversationId'),
+    sessionId: document.getElementById('sessionId'),
+    partial: document.getElementById('partial'),
+    log: document.getElementById('log'),
+    vadInfo: document.getElementById('vadInfo'),
+    metricsBody: document.getElementById('metricsBody'),
+    startBtn: document.getElementById('startBtn'),
+    stopBtn: document.getElementById('stopBtn'),
+    newConversationBtn: document.getElementById('newConversationBtn'),
+    clearLogBtn: document.getElementById('clearLogBtn'),
   }
 
-  function setState(next) {
-    statusEl.textContent = next
-  }
+  const app = {
+    conversationId: crypto.randomUUID(),
+    currentSessionId: '',
+    state: 'idle',
+    listeningArmed: false,
+    utteranceActive: false,
+    ws: null,
+    audioContext: null,
+    mediaStream: null,
+    source: null,
+    processor: null,
+    currentUserMessage: null,
+    currentAssistantMessage: null,
+    turnCounter: 0,
+    speechStartedAt: 0,
+    silenceStartedAt: 0,
+    utteranceStartedAt: 0,
+    accumulatedAudioMs: 0,
+    streamedChunkCount: 0,
+    isStreamingToSocket: false,
+    finalReceivedForCurrentTurn: false,
+    endOfTurnSentForCurrentTurn: false,
+    assistantAudioPlaying: false,
+    suppressAutoListenUntil: 0,
+    init() {
+      els.conversationId.textContent = this.conversationId
+      els.startBtn.addEventListener('click', () => this.startSession())
+      els.stopBtn.addEventListener('click', () => this.stopSession())
+      els.newConversationBtn.addEventListener('click', () => this.startNewConversation())
+      els.clearLogBtn.addEventListener('click', () => {
+        els.log.textContent = ''
+      })
+      this.setState('idle')
+    },
 
-  function float32ToInt16(float32Array) {
-    const int16Array = new Int16Array(float32Array.length)
-    for (let i = 0; i < float32Array.length; i++) {
-      let s = Math.max(-1, Math.min(1, float32Array[i]))
-      int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7fff
-    }
-    return int16Array
-  }
+    nowMs() {
+      return Date.now()
+    },
 
-  function calcRms(float32Array) {
-    let sum = 0
-    for (let i = 0; i < float32Array.length; i++) {
-      const v = float32Array[i]
-      sum += v * v
-    }
-    return Math.sqrt(sum / float32Array.length)
-  }
+    log(msg) {
+      console.log(msg)
+      els.log.textContent += msg + '\n'
+      els.log.scrollTop = els.log.scrollHeight
+    },
 
-  function isMeaningfulTranscript(text) {
-    const t = (text || '').trim()
+    setState(next) {
+      this.state = next
+      els.status.textContent = next
+    },
 
-    if (!t) return false
-    if (t.length < 2) return false
+    float32ToInt16(float32Array) {
+      const int16Array = new Int16Array(float32Array.length)
+      for (let i = 0; i < float32Array.length; i++) {
+        let s = Math.max(-1, Math.min(1, float32Array[i]))
+        int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+      }
+      return int16Array
+    },
 
-    const fillers = new Set([
-      'м',
-      'мм',
-      'мм.',
-      'а',
-      'а.',
-      'ъ',
-      'ъъ',
-      'eh',
-      'um',
-      'uh',
-    ])
+    calcRms(float32Array) {
+      let sum = 0
+      for (let i = 0; i < float32Array.length; i++) {
+        const v = float32Array[i]
+        sum += v * v
+      }
+      return Math.sqrt(sum / float32Array.length)
+    },
 
-    if (fillers.has(t.toLowerCase())) return false
+    isMeaningfulTranscript(text) {
+      const t = (text || '').trim()
 
-    return /[A-Za-zА-Яа-я]/.test(t)
-  }
+      if (!t) return false
+      if (t.length < 2) return false
 
-  function createMessage(role, text = '') {
-    const wrapper = document.createElement('div')
-    wrapper.className = `message ${role}`
+      const fillers = new Set([
+        'м',
+        'мм',
+        'мм.',
+        'а',
+        'а.',
+        'ъ',
+        'ъъ',
+        'eh',
+        'um',
+        'uh',
+      ])
 
-    const roleEl = document.createElement('div')
-    roleEl.className = 'message-role'
-    roleEl.textContent = role === 'user' ? 'User' : 'Assistant'
+      if (fillers.has(t.toLowerCase())) return false
 
-    const textEl = document.createElement('div')
-    textEl.className = 'message-text'
-    textEl.textContent = text
+      return /[A-Za-zА-Яа-я]/.test(t)
+    },
 
-    wrapper.appendChild(roleEl)
-    wrapper.appendChild(textEl)
-    chatEl.appendChild(wrapper)
+    createMessage(role, text = '') {
+      const wrapper = document.createElement('div')
+      wrapper.className = `message ${role}`
 
-    return { wrapper, textEl }
-  }
+      const roleEl = document.createElement('div')
+      roleEl.className = 'message-role'
+      roleEl.textContent = role === 'user' ? 'User' : 'Assistant'
 
-  function addAssistantAudio(messageRef, base64Audio) {
-    if (!messageRef || !base64Audio) return
+      const textEl = document.createElement('div')
+      textEl.className = 'message-text'
+      textEl.textContent = text
 
-    const audio = document.createElement('audio')
-    audio.controls = true
-    audio.autoplay = true
-    audio.src = `data:audio/wav;base64,${base64Audio}`
-    messageRef.wrapper.appendChild(audio)
-  }
+      wrapper.appendChild(roleEl)
+      wrapper.appendChild(textEl)
+      els.chat.appendChild(wrapper)
 
-  function formatMs(ms) {
-    if (ms == null) return ''
-    return `${Math.round(ms)}ms`
-  }
+      return { wrapper, textEl }
+    },
 
-  function latencyClass(ms) {
-    if (ms == null) return ''
-    if (ms < 800) return 'good'
-    if (ms < 1800) return 'warn'
-    return 'bad'
-  }
+      addAssistantAudio(messageRef, base64Audio) {
+        if (!messageRef || !base64Audio) return
 
-  function pushMetricsRow(turn) {
-    const sttMs =
-      turn.sttFinalAt && turn.audioStartAt
+        const audio = document.createElement('audio')
+        audio.controls = true
+        audio.autoplay = true
+        audio.src = `data:audio/wav;base64,${base64Audio}`
+
+        audio.addEventListener('play', () => {
+          this.assistantAudioPlaying = true
+          this.suppressAutoListenUntil = Math.max(
+            this.suppressAutoListenUntil,
+            this.nowMs() + CONFIG.ASSISTANT_PLAYBACK_GRACE_MS,
+          )
+          this.log('[voice] assistant audio playback started')
+        })
+
+        const markPlaybackEnded = () => {
+          this.assistantAudioPlaying = false
+          this.suppressAutoListenUntil = Math.max(
+            this.suppressAutoListenUntil,
+            this.nowMs() + CONFIG.ASSISTANT_PLAYBACK_GRACE_MS,
+          )
+          this.log('[voice] assistant audio playback ended')
+        }
+
+        audio.addEventListener('ended', markPlaybackEnded)
+        audio.addEventListener('pause', () => {
+          if (audio.ended) return
+          markPlaybackEnded()
+        })
+
+        messageRef.wrapper.appendChild(audio)
+      },
+
+    formatMs(ms) {
+      if (ms == null) return ''
+      return `${Math.round(ms)}ms`
+    },
+
+    latencyClass(ms) {
+      if (ms == null) return ''
+      if (ms < 800) return 'good'
+      if (ms < 1800) return 'warn'
+      return 'bad'
+    },
+
+    pushMetricsRow(turn) {
+      const sttMs = turn.sttFinalAt && turn.audioStartAt
         ? turn.sttFinalAt - turn.audioStartAt
         : null
 
-    const llmMs =
-      turn.assistantFinalAt && turn.sttFinalAt
+      const llmMs = turn.assistantFinalAt && turn.sttFinalAt
         ? turn.assistantFinalAt - turn.sttFinalAt
         : null
 
-    const ttsMs =
-      turn.assistantAudioAt && turn.assistantFinalAt
+      const ttsMs = turn.assistantAudioAt && turn.assistantFinalAt
         ? turn.assistantAudioAt - turn.assistantFinalAt
         : null
 
-    const totalMs =
-      turn.turnEndAt && turn.audioStartAt
+      const totalMs = turn.turnEndAt && turn.audioStartAt
         ? turn.turnEndAt - turn.audioStartAt
         : null
 
-    const row = document.createElement('tr')
-    row.innerHTML = `
+      const row = document.createElement('tr')
+      row.innerHTML = `
         <td>${turn.index}</td>
-        <td class="${latencyClass(sttMs)}">${formatMs(sttMs)}</td>
-        <td class="${latencyClass(llmMs)}">${formatMs(llmMs)}</td>
-        <td class="${latencyClass(ttsMs)}">${formatMs(ttsMs)}</td>
-        <td class="${latencyClass(totalMs)}">${formatMs(totalMs)}</td>
+        <td class="${this.latencyClass(sttMs)}">${this.formatMs(sttMs)}</td>
+        <td class="${this.latencyClass(llmMs)}">${this.formatMs(llmMs)}</td>
+        <td class="${this.latencyClass(ttsMs)}">${this.formatMs(ttsMs)}</td>
+        <td class="${this.latencyClass(totalMs)}">${this.formatMs(totalMs)}</td>
         <td>${(turn.transcript || '').slice(0, 80)}</td>
       `
-    metricsBodyEl.prepend(row)
-  }
+      els.metricsBody.prepend(row)
+    },
 
-  function resetConversationVisuals() {
-    chatEl.innerHTML = ''
-    partialEl.textContent = ''
-    currentUserMessage = null
-    currentAssistantMessage = null
-    metricsBodyEl.innerHTML = ''
-    turnCounter = 0
-  }
+    resetConversationVisuals() {
+      els.chat.innerHTML = ''
+      els.partial.textContent = ''
+      this.currentUserMessage = null
+      this.currentAssistantMessage = null
+      els.metricsBody.innerHTML = ''
+      this.turnCounter = 0
+    },
 
-  function startNewConversation() {
-    conversationId = crypto.randomUUID()
-    conversationIdEl.textContent = conversationId
-    currentSessionId = ''
-    sessionIdEl.textContent = ''
-    resetConversationVisuals()
-    log('new conversation created')
-  }
+    startNewConversation() {
+      this.conversationId = crypto.randomUUID()
+      els.conversationId.textContent = this.conversationId
+      this.currentSessionId = ''
+      els.sessionId.textContent = ''
+      this.resetConversationVisuals()
+      this.assistantAudioPlaying = false
+      this.suppressAutoListenUntil = 0
+      this.log('new conversation created')
+    },
 
-  function cleanupSocketOnly() {
-    isStreamingToSocket = false
-    finalReceivedForCurrentTurn = false
-    endOfTurnSentForCurrentTurn = false
+    cleanupSocketOnly() {
+      this.isStreamingToSocket = false
+      this.finalReceivedForCurrentTurn = false
+      this.endOfTurnSentForCurrentTurn = false
 
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.close()
-    }
-    ws = null
+      this.suppressAutoListenUntil = Math.max(
+        this.suppressAutoListenUntil,
+        this.nowMs() + CONFIG.ASSISTANT_PLAYBACK_GRACE_MS,
+      )
 
-    utteranceActive = false
-    currentSessionId = ''
-    sessionIdEl.textContent = ''
-    speechStartedAt = 0
-    silenceStartedAt = 0
-    utteranceStartedAt = 0
-    accumulatedAudioMs = 0
-    streamedChunkCount = 0
-    currentUserMessage = null
-    currentAssistantMessage = null
-  }
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.close()
+      }
+      this.ws = null
 
-  async function openMic() {
-    if (audioContext) return
+      this.utteranceActive = false
+      this.currentSessionId = ''
+      els.sessionId.textContent = ''
+      this.speechStartedAt = 0
+      this.silenceStartedAt = 0
+      this.utteranceStartedAt = 0
+      this.accumulatedAudioMs = 0
+      this.streamedChunkCount = 0
+      this.currentUserMessage = null
+      this.currentAssistantMessage = null
+    },
 
-    mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-      },
-    })
-    audioContext = new (window.AudioContext || window.webkitAudioContext)()
-    source = audioContext.createMediaStreamSource(mediaStream)
-    processor = audioContext.createScriptProcessor(4096, 1, 1)
+    async openMic() {
+      if (this.audioContext) return
 
-    processor.onaudioprocess = onAudioProcess
+      this.mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+      })
+      this.audioContext = new (window.AudioContext || window.webkitAudioContext)()
+      this.source = this.audioContext.createMediaStreamSource(this.mediaStream)
+      this.processor = this.audioContext.createScriptProcessor(4096, 1, 1)
 
-    source.connect(processor)
-    processor.connect(audioContext.destination)
+      this.processor.onaudioprocess = (event) => this.onAudioProcess(event)
 
-    log('mic open and armed')
-  }
+      this.source.connect(this.processor)
+      this.processor.connect(this.audioContext.destination)
 
-  function closeMic() {
-    if (processor) {
-      processor.disconnect()
-      processor = null
-    }
+      this.log('mic open and armed')
+    },
 
-    if (source) {
-      source.disconnect()
-      source = null
-    }
+    closeMic() {
+      if (this.processor) {
+        this.processor.disconnect()
+        this.processor = null
+      }
 
-    if (mediaStream) {
-      mediaStream.getTracks().forEach((t) => t.stop())
-      mediaStream = null
-    }
+      if (this.source) {
+        this.source.disconnect()
+        this.source = null
+      }
 
-    if (audioContext) {
-      audioContext.close()
-      audioContext = null
-    }
+      if (this.mediaStream) {
+        this.mediaStream.getTracks().forEach((t) => t.stop())
+        this.mediaStream = null
+      }
 
-    log('mic closed')
-  }
+      if (this.audioContext) {
+        this.audioContext.close()
+        this.audioContext = null
+      }
 
-  function createNewTurn() {
-    turnCounter += 1
-    currentTurn = {
-      index: turnCounter,
-      conversationId,
-      sessionId: '',
-      audioStartAt: nowMs(),
-      sttFinalAt: null,
-      assistantFinalAt: null,
-      assistantAudioAt: null,
-      turnEndAt: null,
-      transcript: '',
-      reply: '',
-      isMeaningful: false,
-    }
-  }
+      this.log('mic closed')
+    },
 
-  function startUtterance() {
+    createNewTurn() {
+      this.turnCounter += 1
+      this.currentTurn = {
+        index: this.turnCounter,
+        conversationId: this.conversationId,
+        sessionId: '',
+        audioStartAt: this.nowMs(),
+        sttFinalAt: null,
+        assistantFinalAt: null,
+        assistantAudioAt: null,
+        turnEndAt: null,
+        transcript: '',
+        reply: '',
+        isMeaningful: false,
+      }
+    },
 
-    log(`[voice] creating websocket to ${WS_URL}`)
-    console.log('[voice] location.protocol =', window.location.protocol)
-    console.log('[voice] location.href =', window.location.href)
+    startUtterance() {
+      this.log(`[voice] creating websocket to ${CONFIG.WS_URL}`)
 
-    if (utteranceActive) return
+      if (this.utteranceActive) return
 
-    utteranceActive = true
-    isStreamingToSocket = false
-    finalReceivedForCurrentTurn = false
-    endOfTurnSentForCurrentTurn = false
-    utteranceStartedAt = nowMs()
-    accumulatedAudioMs = 0
-    streamedChunkCount = 0
-    speechStartedAt = nowMs()
-    silenceStartedAt = 0
+      this.utteranceActive = true
+      this.isStreamingToSocket = false
+      this.finalReceivedForCurrentTurn = false
+      this.endOfTurnSentForCurrentTurn = false
+      this.utteranceStartedAt = this.nowMs()
+      this.accumulatedAudioMs = 0
+      this.streamedChunkCount = 0
+      this.speechStartedAt = this.nowMs()
+      this.silenceStartedAt = 0
 
-    partialEl.textContent = ''
-    currentUserMessage = null
-    currentAssistantMessage = null
+      els.partial.textContent = ''
+      this.currentUserMessage = null
+      this.currentAssistantMessage = null
 
-    createNewTurn()
+      this.createNewTurn()
 
-    setState('connecting_turn')
-    log('speech detected -> opening turn socket')
+      this.setState('connecting_turn')
+      this.log('speech detected -> opening turn socket')
 
-    try {
-      ws = new WebSocket(WS_URL)
-      log('[voice] websocket object created')
-    } catch (error) {
-      log(`[voice] websocket constructor failed: ${String(error)}`)
-      console.error(error)
-      cleanupSocketOnly()
-      setState(listeningArmed ? 'armed_listening' : 'error')
-      return
-    }
+      try {
+        this.ws = new WebSocket(CONFIG.WS_URL)
+        this.log('[voice] websocket object created')
+      } catch (error) {
+        this.log(`[voice] websocket constructor failed: ${String(error)}`)
+        console.error(error)
+        this.cleanupSocketOnly()
+        this.setState(this.listeningArmed ? 'armed_listening' : 'error')
+        return
+      }
 
-    ws.onopen = () => {
-      log('[voice] connected')
-      isStreamingToSocket = true
-      setState('streaming_turn')
-    }
+      this.ws.onopen = () => {
+        this.log('[voice] connected')
+        this.isStreamingToSocket = true
+        this.setState('streaming_turn')
+      }
 
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data)
-      log(`[voice] recv: ${data.type}`)
+      this.ws.onmessage = (event) => {
+        const data = JSON.parse(event.data)
+        this.log(`[voice] recv: ${data.type}`)
 
-      if (data.type === 'session_start') {
-        currentSessionId = data.sessionId || ''
-        sessionIdEl.textContent = currentSessionId
+        if (data.type === 'session_start') {
+          this.currentSessionId = data.sessionId || ''
+          els.sessionId.textContent = this.currentSessionId
 
-        if (currentTurn) {
-          currentTurn.sessionId = currentSessionId
-        }
-
-        if (data.conversationId) {
-          conversationId = data.conversationId
-          conversationIdEl.textContent = conversationId
-          if (currentTurn) {
-            currentTurn.conversationId = conversationId
+          if (this.currentTurn) {
+            this.currentTurn.sessionId = this.currentSessionId
           }
-        }
 
-        return
-      }
-
-      if (data.type === 'stt_partial') {
-        partialEl.textContent = data.full || data.text || ''
-        return
-      }
-
-      if (data.type === 'stt_final') {
-        finalReceivedForCurrentTurn = true
-        partialEl.textContent = ''
-
-        const transcript = (data.full || data.text || '').trim()
-        const meaningful = isMeaningfulTranscript(transcript)
-
-        if (currentTurn) {
-          currentTurn.transcript = transcript
-          currentTurn.sttFinalAt = nowMs()
-          currentTurn.isMeaningful = meaningful
-        }
-
-        if (!meaningful) {
-          log(`[voice] ignoring weak transcript: "${transcript}"`)
-          cleanupSocketOnly()
-          setState(listeningArmed ? 'armed_listening' : 'idle')
-          return
-        }
-
-        currentUserMessage = createMessage('user', transcript)
-        setState('waiting_assistant')
-        return
-      }
-
-      if (data.type === 'assistant_final') {
-        if (!currentTurn?.isMeaningful) {
-          log('[voice] ignoring assistant reply for non-meaningful turn')
-          return
-        }
-
-        currentAssistantMessage = createMessage('assistant', data.text || '')
-
-        if (currentTurn) {
-          currentTurn.reply = data.text || ''
-          currentTurn.assistantFinalAt = nowMs()
-        }
-
-        setState('assistant_ready')
-        return
-      }
-
-      if (data.type === 'assistant_audio') {
-        if (!currentTurn?.isMeaningful) {
-          log('[voice] ignoring assistant audio for non-meaningful turn')
-          return
-        }
-
-        addAssistantAudio(currentAssistantMessage, data.audioBase64 || '')
-
-        if (currentTurn) {
-          currentTurn.assistantAudioAt = nowMs()
-        }
-
-        setState('speaking')
-        return
-      }
-
-      if (data.type === 'turn_end') {
-        log('[voice] turn complete')
-
-        if (currentTurn) {
-          currentTurn.turnEndAt = nowMs()
-          if (currentTurn.isMeaningful) {
-            pushMetricsRow(currentTurn)
+          if (data.conversationId) {
+            this.conversationId = data.conversationId
+            els.conversationId.textContent = this.conversationId
+            if (this.currentTurn) {
+              this.currentTurn.conversationId = this.conversationId
+            }
           }
-        }
-
-        cleanupSocketOnly()
-        setState(listeningArmed ? 'armed_listening' : 'idle')
-        return
-      }
-
-      if (data.type === 'error') {
-        const msg = data.message || 'unknown'
-        const ignorableBufferError =
-          msg.includes('buffer too small') && finalReceivedForCurrentTurn
-
-        if (ignorableBufferError) {
-          log(`[voice] ignored benign error: ${msg}`)
           return
         }
 
-        log(`[voice] server error: ${msg}`)
-        cleanupSocketOnly()
-        setState(listeningArmed ? 'armed_listening' : 'error')
+        if (data.type === 'stt_partial') {
+          els.partial.textContent = data.full || data.text || ''
+          return
+        }
+
+        if (data.type === 'stt_final') {
+          this.finalReceivedForCurrentTurn = true
+          els.partial.textContent = ''
+
+          const transcript = (data.full || data.text || '').trim()
+          const meaningful = this.isMeaningfulTranscript(transcript)
+
+          if (this.currentTurn) {
+            this.currentTurn.transcript = transcript
+            this.currentTurn.sttFinalAt = this.nowMs()
+            this.currentTurn.isMeaningful = meaningful
+          }
+
+          if (!meaningful) {
+            this.log(`[voice] ignoring weak transcript: "${transcript}"`)
+            this.cleanupSocketOnly()
+            this.setState(this.listeningArmed ? 'armed_listening' : 'idle')
+            return
+          }
+
+          this.currentUserMessage = this.createMessage('user', transcript)
+          this.setState('waiting_assistant')
+          return
+        }
+
+        if (data.type === 'assistant_final') {
+          if (!this.currentTurn?.isMeaningful) {
+            this.log('[voice] ignoring assistant reply for non-meaningful turn')
+            return
+          }
+
+          this.currentAssistantMessage = this.createMessage('assistant', data.text || '')
+
+          if (this.currentTurn) {
+            this.currentTurn.reply = data.text || ''
+            this.currentTurn.assistantFinalAt = this.nowMs()
+          }
+
+          this.setState('assistant_ready')
+          return
+        }
+
+        if (data.type === 'assistant_audio') {
+          if (!this.currentTurn?.isMeaningful) {
+            this.log('[voice] ignoring assistant audio for non-meaningful turn')
+            return
+          }
+
+          this.addAssistantAudio(this.currentAssistantMessage, data.audioBase64 || '')
+
+          if (this.currentTurn) {
+            this.currentTurn.assistantAudioAt = this.nowMs()
+          }
+
+          this.setState('speaking')
+          return
+        }
+
+        if (data.type === 'turn_end') {
+          this.log('[voice] turn complete')
+
+          if (this.currentTurn) {
+            this.currentTurn.turnEndAt = this.nowMs()
+            if (this.currentTurn.isMeaningful) {
+              this.pushMetricsRow(this.currentTurn)
+            }
+          }
+
+          this.cleanupSocketOnly()
+          this.setState(this.listeningArmed ? 'armed_listening' : 'idle')
+          return
+        }
+
+        if (data.type === 'error') {
+          const msg = data.message || 'unknown'
+          const ignorableBufferError =
+            msg.includes('buffer too small') && this.finalReceivedForCurrentTurn
+
+          if (ignorableBufferError) {
+            this.log(`[voice] ignored benign error: ${msg}`)
+            return
+          }
+
+          this.log(`[voice] server error: ${msg}`)
+          this.cleanupSocketOnly()
+          this.setState(this.listeningArmed ? 'armed_listening' : 'error')
+        }
       }
-    }
 
-    ws.onclose = () => {
-      log('[voice] closed')
-      if (listeningArmed && state === 'waiting_reply') {
-        setState('armed_listening')
+      this.ws.onclose = () => {
+        this.log('[voice] closed')
+        if (this.listeningArmed && this.state === 'waiting_reply') {
+          this.setState('armed_listening')
+        }
       }
-    }
 
-    ws.onerror = (e) => {
-      log('[voice] error')
-      console.error(e)
-      cleanupSocketOnly()
-      setState(listeningArmed ? 'armed_listening' : 'error')
-    }
-
-    ws.addEventListener('open', () => log('[voice] open event listener fired'))
-    ws.addEventListener('close', (event) =>
-      log(`[voice] close event listener fired code=${event.code} reason=${event.reason || ''}`),
-    )
-    ws.addEventListener('error', () => log('[voice] error event listener fired'))
-  }
-
-  function finishUtterance() {
-    if (!utteranceActive) return
-    if (endOfTurnSentForCurrentTurn) return
-
-    utteranceActive = false
-    isStreamingToSocket = false
-    silenceStartedAt = 0
-
-    setState('waiting_reply')
-    log('silence detected -> sending end_of_turn')
-
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      endOfTurnSentForCurrentTurn = true
-      log('cannot send end_of_turn, socket not open')
-      return
-    }
-
-    if (finalReceivedForCurrentTurn) {
-      endOfTurnSentForCurrentTurn = true
-      log('skipping end_of_turn because stt_final already arrived')
-      return
-    }
-
-    endOfTurnSentForCurrentTurn = true
-    ws.send(JSON.stringify({ type: 'end_of_turn', conversationId }))
-  }
-
-  function onAudioProcess(event) {
-    if (!listeningArmed) return
-
-    const input = event.inputBuffer.getChannelData(0)
-    const rms = calcRms(input)
-    const now = nowMs()
-
-    vadInfoEl.textContent =
-      `rms=${rms.toFixed(4)}\n` +
-      `utteranceActive=${utteranceActive}\n` +
-      `isStreamingToSocket=${isStreamingToSocket}\n` +
-      `accumulatedAudioMs=${Math.round(accumulatedAudioMs)}\n` +
-      `streamedChunkCount=${streamedChunkCount}\n` +
-      `finalReceived=${finalReceivedForCurrentTurn}\n` +
-      `endOfTurnSent=${endOfTurnSentForCurrentTurn}\n` +
-      `conversationId=${conversationId}`
-
-    if (!utteranceActive) {
-      if (
-        listeningArmed &&
-        !ws &&
-        state !== 'waiting_reply' &&
-        state !== 'assistant_ready' &&
-        state !== 'speaking' &&
-        rms >= START_THRESHOLD
-      ) {
-        startUtterance()
+      this.ws.onerror = (e) => {
+        this.log('[voice] error')
+        console.error(e)
+        this.cleanupSocketOnly()
+        this.setState(this.listeningArmed ? 'armed_listening' : 'error')
       }
-      return
-    }
 
-    const bufferDurationMs =
-      (input.length / event.inputBuffer.sampleRate) * 1000
+      this.ws.addEventListener('open', () => this.log('[voice] open event listener fired'))
+      this.ws.addEventListener('close', (event) =>
+        this.log(`[voice] close event listener fired code=${event.code} reason=${event.reason || ''}`),
+      )
+      this.ws.addEventListener('error', () => this.log('[voice] error event listener fired'))
+    },
 
-    if (isStreamingToSocket && ws && ws.readyState === WebSocket.OPEN) {
-      const pcm16 = float32ToInt16(input)
-      ws.send(pcm16.buffer)
-      accumulatedAudioMs += bufferDurationMs
-      streamedChunkCount += 1
-    }
+    finishUtterance() {
+      if (!this.utteranceActive) return
+      if (this.endOfTurnSentForCurrentTurn) return
 
-    if (rms >= STOP_THRESHOLD) {
-      if (!speechStartedAt) {
-        speechStartedAt = now
+      this.utteranceActive = false
+      this.isStreamingToSocket = false
+      this.silenceStartedAt = 0
+
+      this.setState('waiting_reply')
+      this.log('silence detected -> sending end_of_turn')
+      this.log(`[voice] utterance stats audioMs=${Math.round(this.accumulatedAudioMs)} chunks=${this.streamedChunkCount}`)
+
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        this.endOfTurnSentForCurrentTurn = true
+        this.log('cannot send end_of_turn, socket not open')
+        return
       }
-      silenceStartedAt = 0
-      return
-    }
 
-    if (!silenceStartedAt) {
-      silenceStartedAt = now
-    }
+      if (this.finalReceivedForCurrentTurn) {
+        this.endOfTurnSentForCurrentTurn = true
+        this.log('skipping end_of_turn because stt_final already arrived')
+        return
+      }
 
-    const speechDurationMs = speechStartedAt ? now - speechStartedAt : 0
-    const silenceDurationMs = silenceStartedAt ? now - silenceStartedAt : 0
+      this.endOfTurnSentForCurrentTurn = true
+      this.ws.send(JSON.stringify({ type: 'end_of_turn', conversationId: this.conversationId }))
+    },
 
-    if (
-      speechDurationMs >= MIN_SPEECH_MS &&
-      accumulatedAudioMs >= MIN_AUDIO_BEFORE_SEND_MS &&
-      streamedChunkCount >= MIN_CHUNKS_BEFORE_FINISH &&
-      silenceDurationMs >= SILENCE_MS_TO_STOP
-    ) {
-      finishUtterance()
-    }
+    updateVadInfo(rms) {
+      const suppressRemainingMs = Math.max(0, this.suppressAutoListenUntil - this.nowMs())
+
+      els.vadInfo.textContent =
+        `rms=${rms.toFixed(4)}\n` +
+        `utteranceActive=${this.utteranceActive}\n` +
+        `isStreamingToSocket=${this.isStreamingToSocket}\n` +
+        `assistantAudioPlaying=${this.assistantAudioPlaying}\n` +
+        `suppressRemainingMs=${Math.round(suppressRemainingMs)}\n` +
+        `accumulatedAudioMs=${Math.round(this.accumulatedAudioMs)}\n` +
+        `streamedChunkCount=${this.streamedChunkCount}\n` +
+        `finalReceived=${this.finalReceivedForCurrentTurn}\n` +
+        `endOfTurnSent=${this.endOfTurnSentForCurrentTurn}\n` +
+        `conversationId=${this.conversationId}`
+    },
+
+    shouldStartUtterance(rms) {
+      const now = this.nowMs()
+
+      return (
+        this.listeningArmed &&
+        !this.ws &&
+        !this.utteranceActive &&
+        !this.assistantAudioPlaying &&
+        now >= this.suppressAutoListenUntil &&
+        this.state !== 'waiting_reply' &&
+        this.state !== 'assistant_ready' &&
+        this.state !== 'speaking' &&
+        rms >= CONFIG.START_THRESHOLD
+      )
+    },
+
+    shouldFinishUtterance(now) {
+      const speechDurationMs = this.speechStartedAt ? now - this.speechStartedAt : 0
+      const silenceDurationMs = this.silenceStartedAt ? now - this.silenceStartedAt : 0
+
+      return (
+        speechDurationMs >= CONFIG.MIN_SPEECH_MS &&
+        this.accumulatedAudioMs >= CONFIG.MIN_AUDIO_BEFORE_SEND_MS &&
+        this.streamedChunkCount >= CONFIG.MIN_CHUNKS_BEFORE_FINISH &&
+        silenceDurationMs >= CONFIG.SILENCE_MS_TO_STOP
+      )
+    },
+
+    onAudioProcess(event) {
+      if (!this.listeningArmed) return
+
+      const input = event.inputBuffer.getChannelData(0)
+      const rms = this.calcRms(input)
+      const now = this.nowMs()
+
+      this.updateVadInfo(rms)
+
+      if (!this.utteranceActive) {
+        if (this.shouldStartUtterance(rms)) {
+          this.startUtterance()
+        }
+        return
+      }
+
+      const bufferDurationMs =
+        (input.length / event.inputBuffer.sampleRate) * 1000
+
+      if (this.isStreamingToSocket && this.ws && this.ws.readyState === WebSocket.OPEN) {
+        const pcm16 = this.float32ToInt16(input)
+        this.ws.send(pcm16.buffer)
+        this.accumulatedAudioMs += bufferDurationMs
+        this.streamedChunkCount += 1
+      }
+
+      if (rms >= CONFIG.STOP_THRESHOLD) {
+        if (!this.speechStartedAt) {
+          this.speechStartedAt = now
+        }
+        this.silenceStartedAt = 0
+        return
+      }
+
+      if (!this.silenceStartedAt) {
+        this.silenceStartedAt = now
+      }
+
+      if (this.shouldFinishUtterance(now)) {
+        this.finishUtterance()
+      }
+    },
+
+    async startSession() {
+      if (this.listeningArmed) return
+
+      try {
+        await this.openMic()
+        this.listeningArmed = true
+        this.setState('armed_listening')
+        this.log('session armed')
+      } catch (error) {
+        console.error(error)
+        this.log(`start session failed: ${String(error)}`)
+        this.setState('error')
+      }
+    },
+
+    stopSession() {
+      this.listeningArmed = false
+      this.cleanupSocketOnly()
+      this.closeMic()
+      this.setState('idle')
+      this.log('session stopped')
+      this.assistantAudioPlaying = false
+      this.suppressAutoListenUntil = 0
+    },
   }
 
-  async function startSession() {
-    if (listeningArmed) return
-
-    try {
-      await openMic()
-      listeningArmed = true
-      setState('armed_listening')
-      log('session armed')
-    } catch (error) {
-      console.error(error)
-      log(`start session failed: ${String(error)}`)
-      setState('error')
-    }
-  }
-
-  function stopSession() {
-    listeningArmed = false
-    cleanupSocketOnly()
-    closeMic()
-    setState('idle')
-    log('session stopped')
-  }
-
-  startBtn.addEventListener('click', startSession)
-  stopBtn.addEventListener('click', stopSession)
-  newConversationBtn.addEventListener('click', startNewConversation)
-  clearLogBtn.addEventListener('click', () => {
-    logEl.textContent = ''
-  })
+  app.init()
 </script>
 </body>
 </html>
