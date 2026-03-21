@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common'
+import { appendVoiceTrace } from './utils/voice-trace.util'
 import OpenAI from 'openai'
 import {
   VoiceConversationInput,
@@ -24,6 +25,13 @@ export class VoiceConversationService {
   async handleFinalTranscript(
     input: VoiceConversationInput,
   ): Promise<VoiceConversationResult> {
+    appendVoiceTrace({
+      type: 'conversation_service_input',
+      sessionId: input.sessionId,
+      conversationId: input.conversationId,
+      transcript: input.transcript,
+    })
+
     const turns = this.history.get(input.conversationId) ?? []
 
     turns.push({
@@ -43,6 +51,16 @@ export class VoiceConversationService {
     if (!process.env.OPENAI_API_KEY) {
       const fallback = `Чух: ${input.transcript}`
       this.appendAssistantTurn(input.conversationId, fallback)
+
+      appendVoiceTrace({
+        type: 'conversation_service_output',
+        sessionId: input.sessionId,
+        conversationId: input.conversationId,
+        transcript: input.transcript,
+        replyText: fallback,
+        mode: 'fallback_no_api_key',
+      })
+
       return { replyText: fallback }
     }
 
@@ -72,6 +90,15 @@ export class VoiceConversationService {
       })),
     ]
 
+    appendVoiceTrace({
+      type: 'conversation_service_request',
+      sessionId: input.sessionId,
+      conversationId: input.conversationId,
+      transcript: input.transcript,
+      historyCount: trimmedTurns.length,
+      history: trimmedTurns,
+    })
+
     const response = await this.openai.responses.create({
       model: 'gpt-4o-mini',
       input: inputMessages,
@@ -81,6 +108,14 @@ export class VoiceConversationService {
       response.output_text?.trim() || 'Съжалявам, не успях да отговоря.'
 
     this.appendAssistantTurn(input.conversationId, replyText)
+
+    appendVoiceTrace({
+      type: 'conversation_service_output',
+      sessionId: input.sessionId,
+      conversationId: input.conversationId,
+      transcript: input.transcript,
+      replyText,
+    })
 
     if (this.verbose) {
       this.logger.log(

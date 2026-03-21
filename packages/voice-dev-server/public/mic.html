@@ -2,360 +2,487 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Energrid Voice Debug</title>
+  <title>Energrid Voice Client</title>
   <style>
     body {
       font-family: Arial, sans-serif;
-      padding: 24px;
+      padding: 20px;
       background: #111;
       color: #eee;
-      max-width: 900px;
-      margin: 0 auto;
+      margin: 0;
     }
-    h2 { margin-top: 0; }
+
+    h1 {
+      margin-top: 0;
+      margin-bottom: 16px;
+      font-size: 32px;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
     button {
-      padding: 10px 16px;
-      margin-right: 10px;
+      padding: 12px 18px;
       cursor: pointer;
+      font-size: 15px;
+      border-radius: 8px;
+      border: 1px solid #444;
+      background: #f1f1f1;
+      color: #111;
     }
+
     #talkBtn {
-      font-size: 16px;
       font-weight: bold;
       min-width: 180px;
     }
-    .panel {
-      background: #1b1b1b;
-      border: 1px solid #333;
-      border-radius: 8px;
-      padding: 16px;
-      margin-top: 16px;
+
+    .layout {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 16px;
+      align-items: start;
     }
+
+    .panel {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 10px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+
     .label {
       font-size: 12px;
       color: #aaa;
-      margin-bottom: 6px;
+      margin-bottom: 8px;
       text-transform: uppercase;
       letter-spacing: 0.04em;
     }
+
     .value {
       font-size: 18px;
       line-height: 1.4;
       white-space: pre-wrap;
       word-break: break-word;
     }
-    #log {
-      background: #0d0d0d;
-      color: #8f8;
-      min-height: 150px;
-      max-height: 260px;
-      overflow: auto;
-      font-family: monospace;
-      font-size: 13px;
+
+    #chat {
+      min-height: 400px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
     }
+
     .message {
-      padding: 12px;
-      border-radius: 8px;
-      margin-bottom: 10px;
+      border-radius: 10px;
+      padding: 14px;
       white-space: pre-wrap;
       word-break: break-word;
     }
-    .message.user { background: #1d3557; }
-    .message.assistant { background: #2a2a2a; }
+
+    .message.user {
+      background: #1d3557;
+    }
+
+    .message.assistant {
+      background: #2a2a2a;
+    }
+
+    .message-role {
+      font-size: 12px;
+      color: #cfcfcf;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+    }
+
+    .message-text {
+      font-size: 26px;
+      line-height: 1.4;
+    }
+
+    .message audio {
+      width: 100%;
+      margin-top: 10px;
+    }
+
+    #log {
+      background: #0d0d0d;
+      color: #8f8;
+      min-height: 200px;
+      max-height: 360px;
+      overflow: auto;
+      font-family: monospace;
+      font-size: 13px;
+      padding: 12px;
+      border-radius: 8px;
+      white-space: pre-wrap;
+    }
+
+    .tiny {
+      font-size: 13px;
+      color: #bbb;
+      line-height: 1.5;
+    }
   </style>
 </head>
 <body>
-  <h2>Energrid Voice Debug</h2>
+<h1>Energrid Voice Client</h1>
 
+<div class="toolbar">
   <button id="talkBtn">Hold to Talk</button>
-  <button onclick="clearConversation()">Clear Conversation</button>
+  <button id="newConversationBtn">New Conversation</button>
+  <button id="clearLogBtn">Clear Log</button>
+</div>
 
-  <div class="panel">
-    <div class="label">Status</div>
-    <div id="status" class="value">idle</div>
+<div class="layout">
+  <div>
+    <div class="panel">
+      <div class="label">Conversation</div>
+      <div id="chat"></div>
+    </div>
   </div>
 
-  <div class="panel">
-    <div class="label">Conversation ID</div>
-    <div id="conversationId" class="value"></div>
+  <div>
+    <div class="panel">
+      <div class="label">Status</div>
+      <div id="status" class="value">idle</div>
+    </div>
+
+    <div class="panel">
+      <div class="label">Conversation ID</div>
+      <div id="conversationId" class="tiny"></div>
+    </div>
+
+    <div class="panel">
+      <div class="label">Current Session ID</div>
+      <div id="sessionId" class="tiny"></div>
+    </div>
+
+    <div class="panel">
+      <div class="label">Live Partial Transcript</div>
+      <div id="partial" class="value"></div>
+    </div>
+
+    <div class="panel">
+      <div class="label">Log</div>
+      <div id="log"></div>
+    </div>
   </div>
+</div>
 
-  <div class="panel">
-    <div class="label">Live partial transcript</div>
-    <div id="partial" class="value"></div>
-  </div>
+<script>
+  let ws = null
+  let audioContext = null
+  let mediaStream = null
+  let source = null
+  let processor = null
 
-  <div class="panel">
-    <div class="label">Chat</div>
-    <div id="chat"></div>
-  </div>
+  let state = 'idle'
+  let isStreaming = false
+  let releaseTailTimer = null
 
-  <div class="panel">
-    <div class="label">Log</div>
-    <pre id="log"></pre>
-  </div>
+  let conversationId = crypto.randomUUID()
+  let currentSessionId = ''
+  let currentUserMessage = null
+  let currentAssistantMessage = null
+  let finalReceivedForCurrentTurn = false
 
-  <script>
-    let ws = null
-    let debugWs = null
-    let audioContext = null
-    let mediaStream = null
-    let source = null
-    let processor = null
+  const RELEASE_TAIL_MS = 600
 
-    let state = 'idle'
-    let isStreaming = false
-    let currentTurnFinished = false
-    let currentTurnUserText = ''
-    let stopTimer = null
-    let conversationId = crypto.randomUUID()
+  const talkBtn = document.getElementById('talkBtn')
+  const newConversationBtn = document.getElementById('newConversationBtn')
+  const clearLogBtn = document.getElementById('clearLogBtn')
 
-    const RELEASE_TAIL_MS = 900
+  const statusEl = document.getElementById('status')
+  const conversationIdEl = document.getElementById('conversationId')
+  const sessionIdEl = document.getElementById('sessionId')
+  const partialEl = document.getElementById('partial')
+  const chatEl = document.getElementById('chat')
+  const logEl = document.getElementById('log')
 
-    const statusEl = document.getElementById('status')
-    const partialEl = document.getElementById('partial')
-    const chatEl = document.getElementById('chat')
-    const logEl = document.getElementById('log')
-    const conversationIdEl = document.getElementById('conversationId')
-    const talkBtn = document.getElementById('talkBtn')
+  conversationIdEl.textContent = conversationId
 
+  function log(msg) {
+    console.log(msg)
+    logEl.textContent += msg + '\n'
+    logEl.scrollTop = logEl.scrollHeight
+  }
+
+  function setState(next) {
+    state = next
+    statusEl.textContent = next
+  }
+
+  function float32ToInt16(float32Array) {
+    const int16Array = new Int16Array(float32Array.length)
+    for (let i = 0; i < float32Array.length; i++) {
+      let s = Math.max(-1, Math.min(1, float32Array[i]))
+      int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+    }
+    return int16Array
+  }
+
+  function createMessage(role, text = '') {
+    const wrapper = document.createElement('div')
+    wrapper.className = `message ${role}`
+
+    const roleEl = document.createElement('div')
+    roleEl.className = 'message-role'
+    roleEl.textContent = role === 'user' ? 'User' : 'Assistant'
+
+    const textEl = document.createElement('div')
+    textEl.className = 'message-text'
+    textEl.textContent = text
+
+    wrapper.appendChild(roleEl)
+    wrapper.appendChild(textEl)
+    chatEl.appendChild(wrapper)
+
+    return { wrapper, textEl }
+  }
+
+  function addAssistantAudio(messageRef, base64Audio) {
+    if (!messageRef || !base64Audio) return
+
+    const audio = document.createElement('audio')
+    audio.controls = true
+    audio.autoplay = true
+    audio.src = `data:audio/wav;base64,${base64Audio}`
+    messageRef.wrapper.appendChild(audio)
+  }
+
+  function cancelReleaseTail() {
+    if (releaseTailTimer) {
+      clearTimeout(releaseTailTimer)
+      releaseTailTimer = null
+    }
+  }
+
+  function resetTransportOnly() {
+    isStreaming = false
+
+    if (processor) {
+      processor.disconnect()
+      processor = null
+    }
+
+    if (source) {
+      source.disconnect()
+      source = null
+    }
+
+    if (mediaStream) {
+      mediaStream.getTracks().forEach((t) => t.stop())
+      mediaStream = null
+    }
+
+    if (audioContext) {
+      audioContext.close()
+      audioContext = null
+    }
+  }
+
+  function closeSocketIfOpen() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.close()
+    }
+    ws = null
+  }
+
+  function startNewConversation() {
+    cancelReleaseTail()
+    resetTransportOnly()
+    closeSocketIfOpen()
+
+    conversationId = crypto.randomUUID()
+    currentSessionId = ''
+    currentUserMessage = null
+    currentAssistantMessage = null
+    finalReceivedForCurrentTurn = false
+
+    chatEl.innerHTML = ''
+    partialEl.textContent = ''
     conversationIdEl.textContent = conversationId
+    sessionIdEl.textContent = ''
+    setState('idle')
 
-    function log(msg) {
-      console.log(msg)
-      logEl.textContent += msg + '\\n'
-      logEl.scrollTop = logEl.scrollHeight
-    }
+    log('new conversation created')
+  }
 
-    function setState(next) {
-      state = next
-      statusEl.textContent = next
-    }
+  async function startTurn() {
+    if (state !== 'idle') return
 
-    function appendMessage(role, text) {
-      const div = document.createElement('div')
-      div.className = `message ${role}`
-      div.textContent = `${role === 'user' ? 'You' : 'Assistant'}: ${text}`
-      chatEl.appendChild(div)
-    }
+    cancelReleaseTail()
+    partialEl.textContent = ''
+    currentSessionId = ''
+    currentUserMessage = null
+    currentAssistantMessage = null
+    finalReceivedForCurrentTurn = false
 
-    function clearConversation() {
-      chatEl.innerHTML = ''
-      partialEl.textContent = ''
-      logEl.textContent = ''
-      currentTurnUserText = ''
-      conversationId = crypto.randomUUID()
-      conversationIdEl.textContent = conversationId
-      cancelScheduledStop()
-      hardStopStreaming()
-      setState('idle')
-      log('new conversation created')
-    }
+    setState('connecting')
+    log('starting turn...')
 
-    function float32ToInt16(float32Array) {
-      const int16Array = new Int16Array(float32Array.length)
-      for (let i = 0; i < float32Array.length; i++) {
-        let s = Math.max(-1, Math.min(1, float32Array[i]))
-        int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+    ws = new WebSocket('ws://localhost:3000/voice')
+
+    ws.onopen = async () => {
+      log('[voice] connected')
+
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      log('mic granted')
+
+      audioContext = new (window.AudioContext || window.webkitAudioContext)({
+        sampleRate: 16000,
+      })
+
+      source = audioContext.createMediaStreamSource(mediaStream)
+      processor = audioContext.createScriptProcessor(4096, 1, 1)
+
+      processor.onaudioprocess = (event) => {
+        if (!isStreaming) {
+          log('[voice] chunk blocked after release')
+          return
+        }
+
+        if (!ws || ws.readyState !== WebSocket.OPEN) return
+
+        const input = event.inputBuffer.getChannelData(0)
+        const pcm16 = float32ToInt16(input)
+        ws.send(pcm16.buffer)
       }
-      return int16Array
+
+      source.connect(processor)
+      processor.connect(audioContext.destination)
+
+      isStreaming = true
+      setState('recording')
+      log('streaming pcm16 @ 16k...')
     }
 
-    function ensureDebugSocket() {
-      if (debugWs && (debugWs.readyState === WebSocket.OPEN || debugWs.readyState === WebSocket.CONNECTING)) {
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data)
+      log(`[voice] recv: ${data.type}`)
+
+      if (data.type === 'session_start') {
+        currentSessionId = data.sessionId || ''
+        sessionIdEl.textContent = currentSessionId
+
+        if (data.conversationId) {
+          conversationId = data.conversationId
+          conversationIdEl.textContent = conversationId
+        }
+
         return
       }
 
-      debugWs = new WebSocket('ws://localhost:3000/voice-debug')
-      debugWs.onopen = () => log('[debug] connected')
-      debugWs.onclose = () => log('[debug] closed')
-      debugWs.onerror = (e) => {
-        log('[debug] error')
-        console.error(e)
-      }
-
-      debugWs.onmessage = (event) => {
-        const data = JSON.parse(event.data)
-
-        if (data.type === 'stt_partial') {
-          partialEl.textContent = data.full || data.text || ''
-          return
-        }
-
-        if (data.type === 'stt_final') {
-          currentTurnUserText = data.full || data.text || ''
-          partialEl.textContent = ''
-          appendMessage('user', currentTurnUserText)
-          currentTurnFinished = true
-          cancelScheduledStop()
-          hardStopStreaming()
-          setState('waiting_reply')
-          log('[debug] final transcript received')
-          return
-        }
-
-        if (data.type === 'assistant_final') {
-          appendMessage('assistant', data.text || '')
-          setState('done')
-          log('[debug] assistant reply received')
-          return
-        }
-
-        if (data.type === 'stt_error') {
-          setState('error')
-          log('[debug] stt error: ' + (data.message || 'unknown'))
-          cancelScheduledStop()
-          hardStopStreaming()
-          return
-        }
-
-        if (data.type === 'session_start') {
-          log('[debug] session started')
-          return
-        }
-
-        if (data.type === 'session_end') {
-          log('[debug] session ended')
-          return
-        }
-      }
-    }
-
-    function cancelScheduledStop() {
-      if (stopTimer) {
-        clearTimeout(stopTimer)
-        stopTimer = null
-      }
-    }
-
-    async function startTurn() {
-      if (state === 'recording' || state === 'waiting_final' || state === 'waiting_reply') {
+      if (data.type === 'stt_partial') {
+        partialEl.textContent = data.full || data.text || ''
         return
       }
 
-      cancelScheduledStop()
-      ensureDebugSocket()
+      if (data.type === 'stt_final') {
+        finalReceivedForCurrentTurn = true
+        partialEl.textContent = ''
+        currentUserMessage = createMessage('user', data.full || data.text || '')
+        return
+      }
 
-      currentTurnFinished = false
-      currentTurnUserText = ''
-      partialEl.textContent = ''
+      if (data.type === 'assistant_final') {
+        currentAssistantMessage = createMessage('assistant', data.text || '')
+        setState('reply_ready')
+        return
+      }
 
-      log('starting turn...')
-      setState('connecting')
+      if (data.type === 'assistant_audio') {
+        addAssistantAudio(currentAssistantMessage, data.audioBase64 || '')
+        return
+      }
 
-      ws = new WebSocket('ws://localhost:3000/voice')
+      if (data.type === 'turn_end') {
+        log('[voice] turn complete')
+        setState('idle')
+        resetTransportOnly()
+        closeSocketIfOpen()
+        return
+      }
 
-      ws.onopen = async () => {
-        log('[voice] connected')
-        ws.send(JSON.stringify({
-          type: 'conversation_init',
-          conversationId,
-        }))
+      if (data.type === 'error') {
+        const msg = data.message || 'unknown'
+        const ignorableBufferError =
+          msg.includes('buffer too small') && finalReceivedForCurrentTurn
 
-        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-        log('mic granted')
-
-        audioContext = new (window.AudioContext || window.webkitAudioContext)({
-          sampleRate: 16000,
-        })
-
-        source = audioContext.createMediaStreamSource(mediaStream)
-        processor = audioContext.createScriptProcessor(4096, 1, 1)
-
-        processor.onaudioprocess = (event) => {
-          if (!ws || ws.readyState !== WebSocket.OPEN) return
-          if (!isStreaming) return
-
-          const input = event.inputBuffer.getChannelData(0)
-          const pcm16 = float32ToInt16(input)
-          ws.send(pcm16.buffer)
+        if (ignorableBufferError) {
+          log(`[voice] ignored benign error: ${msg}`)
+          return
         }
 
-        source.connect(processor)
-        processor.connect(audioContext.destination)
-
-        isStreaming = true
-        setState('recording')
-        log('streaming pcm16 @ 16k...')
-      }
-
-      ws.onclose = () => {
-        log('[voice] closed')
-      }
-
-      ws.onerror = (e) => {
-        log('[voice] error')
-        console.error(e)
+        log(`[voice] server error: ${msg}`)
         setState('error')
+        resetTransportOnly()
+        closeSocketIfOpen()
       }
     }
 
-    function scheduleStopAfterRelease() {
-      if (state !== 'recording') return
+    ws.onclose = () => {
+      log('[voice] closed')
+      resetTransportOnly()
 
-      setState('waiting_final')
-      log(`release detected, tail=${RELEASE_TAIL_MS}ms`)
-
-      cancelScheduledStop()
-      stopTimer = setTimeout(() => {
-        log('release tail elapsed')
-        hardStopStreaming()
-        if (!currentTurnFinished) {
-          setState('waiting_reply')
-        }
-      }, RELEASE_TAIL_MS)
+      if (state !== 'error' && state !== 'idle') {
+        setState('idle')
+      }
     }
 
-    function hardStopStreaming() {
-      if (!isStreaming && !processor && !source && !mediaStream && !audioContext && !ws) {
-        return
-      }
-
-      isStreaming = false
-
-      if (processor) {
-        processor.disconnect()
-        processor = null
-      }
-
-      if (source) {
-        source.disconnect()
-        source = null
-      }
-
-      if (mediaStream) {
-        mediaStream.getTracks().forEach((t) => t.stop())
-        mediaStream = null
-      }
-
-      if (audioContext) {
-        audioContext.close()
-        audioContext = null
-      }
-
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.close()
-      }
-
-      ws = null
+    ws.onerror = (e) => {
+      log('[voice] error')
+      console.error(e)
+      setState('error')
     }
+  }
 
-    talkBtn.addEventListener('mousedown', startTurn)
-    talkBtn.addEventListener('mouseup', scheduleStopAfterRelease)
-    talkBtn.addEventListener('mouseleave', () => {
-      if (state === 'recording') {
-        scheduleStopAfterRelease()
-      }
-    })
+  function finishInputAfterRelease() {
+    resetTransportOnly()
+    setState('waiting_reply')
+    log('[voice] input stopped after release; waiting for server-side finalize')
+  }
 
-    talkBtn.addEventListener('touchstart', (e) => {
-      e.preventDefault()
-      startTurn()
-    }, { passive: false })
+  function scheduleEndOfTurn() {
+    if (state !== 'recording') return
 
-    talkBtn.addEventListener('touchend', (e) => {
-      e.preventDefault()
-      scheduleStopAfterRelease()
-    }, { passive: false })
-  </script>
+    setState('waiting_final')
+    log(`release detected, tail=${RELEASE_TAIL_MS}ms`)
+    log('[voice] mouse/touch released')
+
+    cancelReleaseTail()
+    releaseTailTimer = setTimeout(() => {
+      finishInputAfterRelease()
+    }, RELEASE_TAIL_MS)
+  }
+
+  talkBtn.addEventListener('mousedown', startTurn)
+  talkBtn.addEventListener('mouseup', scheduleEndOfTurn)
+  talkBtn.addEventListener('mouseleave', () => {
+    if (state === 'recording') {
+      scheduleEndOfTurn()
+    }
+  })
+
+  talkBtn.addEventListener('touchstart', (e) => {
+    e.preventDefault()
+    startTurn()
+  }, { passive: false })
+
+  talkBtn.addEventListener('touchend', (e) => {
+    e.preventDefault()
+    scheduleEndOfTurn()
+  }, { passive: false })
+
+  newConversationBtn.addEventListener('click', startNewConversation)
+
+  clearLogBtn.addEventListener('click', () => {
+    logEl.textContent = ''
+  })
+</script>
 </body>
 </html>

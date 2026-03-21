@@ -2,7 +2,9 @@
   "name": "@energrid/source",
   "version": "0.0.0",
   "license": "MIT",
-  "scripts": {},
+  "scripts": {
+    "api": "nx serve api"
+  },
   "private": true,
   "devDependencies": {
     "@eslint/js": "^9.8.0",
