@@ -167,12 +167,16 @@
     </div>
 
     <div class="panel">
+      <div class="label">Buffered Audio Seconds</div>
+      <div id="bufferedAudioSeconds" class="value">0.00s</div>
+    </div>
+
+    <div class="panel">
       <div class="label">Log</div>
       <div id="log"></div>
     </div>
   </div>
 </div>
-
 <script>
   let ws = null
   let audioContext = null
@@ -189,8 +193,11 @@
   let currentUserMessage = null
   let currentAssistantMessage = null
   let finalReceivedForCurrentTurn = false
+  let endOfTurnSentForCurrentTurn = false
+  let streamedChunkCount = 0
+  let bufferedAudioSeconds = 0
 
-  const RELEASE_TAIL_MS = 600
+  const RELEASE_TAIL_MS = 400
 
   const talkBtn = document.getElementById('talkBtn')
   const newConversationBtn = document.getElementById('newConversationBtn')
@@ -200,6 +207,7 @@
   const conversationIdEl = document.getElementById('conversationId')
   const sessionIdEl = document.getElementById('sessionId')
   const partialEl = document.getElementById('partial')
+  const bufferedAudioSecondsEl = document.getElementById('bufferedAudioSeconds')
   const chatEl = document.getElementById('chat')
   const logEl = document.getElementById('log')
 
@@ -216,10 +224,15 @@
     statusEl.textContent = next
   }
 
+  function updateBufferedAudioSeconds(seconds) {
+    bufferedAudioSeconds = seconds
+    bufferedAudioSecondsEl.textContent = `${seconds.toFixed(2)}s`
+  }
+
   function float32ToInt16(float32Array) {
     const int16Array = new Int16Array(float32Array.length)
     for (let i = 0; i < float32Array.length; i++) {
-      let s = Math.max(-1, Math.min(1, float32Array[i]))
+      const s = Math.max(-1, Math.min(1, float32Array[i]))
       int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7fff
     }
     return int16Array
@@ -302,6 +315,9 @@
     currentUserMessage = null
     currentAssistantMessage = null
     finalReceivedForCurrentTurn = false
+    endOfTurnSentForCurrentTurn = false
+    streamedChunkCount = 0
+    updateBufferedAudioSeconds(0)
 
     chatEl.innerHTML = ''
     partialEl.textContent = ''
@@ -321,6 +337,9 @@
     currentUserMessage = null
     currentAssistantMessage = null
     finalReceivedForCurrentTurn = false
+    endOfTurnSentForCurrentTurn = false
+    streamedChunkCount = 0
+    updateBufferedAudioSeconds(0)
 
     setState('connecting')
     log('starting turn...')
@@ -330,7 +349,14 @@
     ws.onopen = async () => {
       log('[voice] connected')
 
-      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+      })
       log('mic granted')
 
       audioContext = new (window.AudioContext || window.webkitAudioContext)({
@@ -341,16 +367,16 @@
       processor = audioContext.createScriptProcessor(4096, 1, 1)
 
       processor.onaudioprocess = (event) => {
-        if (!isStreaming) {
-          log('[voice] chunk blocked after release')
-          return
-        }
-
+        if (!isStreaming) return
         if (!ws || ws.readyState !== WebSocket.OPEN) return
 
         const input = event.inputBuffer.getChannelData(0)
         const pcm16 = float32ToInt16(input)
         ws.send(pcm16.buffer)
+
+        streamedChunkCount += 1
+        const chunkSeconds = pcm16.length / 16000
+        updateBufferedAudioSeconds(streamedChunkCount * chunkSeconds)
       }
 
       source.connect(processor)
@@ -373,7 +399,6 @@
           conversationId = data.conversationId
           conversationIdEl.textContent = conversationId
         }
-
         return
       }
 
@@ -403,6 +428,7 @@
       if (data.type === 'turn_end') {
         log('[voice] turn complete')
         setState('idle')
+        streamedChunkCount = 0
         resetTransportOnly()
         closeSocketIfOpen()
         return
@@ -427,6 +453,7 @@
 
     ws.onclose = () => {
       log('[voice] closed')
+      streamedChunkCount = 0
       resetTransportOnly()
 
       if (state !== 'error' && state !== 'idle') {
@@ -442,9 +469,25 @@
   }
 
   function finishInputAfterRelease() {
+    if (endOfTurnSentForCurrentTurn) return
+
     resetTransportOnly()
     setState('waiting_reply')
-    log('[voice] input stopped after release; waiting for server-side finalize')
+    log('[voice] input stopped after release')
+    log(`[voice] buffered audio seconds: ${bufferedAudioSeconds.toFixed(2)}s`)
+
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      log('[voice] cannot send end_of_turn because socket is not open')
+      return
+    }
+
+    endOfTurnSentForCurrentTurn = true
+    ws.send(JSON.stringify({
+      type: 'end_of_turn',
+      conversationId,
+    }))
+
+    log('[voice] end_of_turn sent')
   }
 
   function scheduleEndOfTurn() {
