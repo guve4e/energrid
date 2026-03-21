@@ -225,15 +225,15 @@
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.wasm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/bundle.min.js"></script>
 <script>
   const CONFIG = {
     WS_URL: 'ws://localhost:3000/voice',
-    START_THRESHOLD: 0.045,
-    STOP_THRESHOLD: 0.018,
-    MIN_SPEECH_MS: 700,
-    SILENCE_MS_TO_STOP: 1700,
-    MIN_AUDIO_BEFORE_SEND_MS: 1000,
-    MIN_CHUNKS_BEFORE_FINISH: 16,
+    VAD_ONNX_WASM_BASE_PATH: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/',
+    VAD_BASE_ASSET_PATH: 'https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/',
+    PCM_SAMPLE_RATE: 16000,
+    PCM_CHUNK_SAMPLES: 4096,
     ASSISTANT_PLAYBACK_GRACE_MS: 1200,
   }
 
@@ -243,8 +243,8 @@
     conversationId: document.getElementById('conversationId'),
     sessionId: document.getElementById('sessionId'),
     partial: document.getElementById('partial'),
-    log: document.getElementById('log'),
     vadInfo: document.getElementById('vadInfo'),
+    log: document.getElementById('log'),
     metricsBody: document.getElementById('metricsBody'),
     startBtn: document.getElementById('startBtn'),
     stopBtn: document.getElementById('stopBtn'),
@@ -256,35 +256,38 @@
     conversationId: crypto.randomUUID(),
     currentSessionId: '',
     state: 'idle',
+
     listeningArmed: false,
-    utteranceActive: false,
     ws: null,
-    audioContext: null,
-    mediaStream: null,
-    source: null,
-    processor: null,
+    vadInstance: null,
+
     currentUserMessage: null,
     currentAssistantMessage: null,
+
     turnCounter: 0,
-    speechStartedAt: 0,
-    silenceStartedAt: 0,
-    utteranceStartedAt: 0,
-    accumulatedAudioMs: 0,
-    streamedChunkCount: 0,
-    isStreamingToSocket: false,
+    currentTurn: null,
+
     finalReceivedForCurrentTurn: false,
-    endOfTurnSentForCurrentTurn: false,
-    assistantAudioPlaying: false,
     suppressAutoListenUntil: 0,
+    assistantAudioPlaying: false,
+
     init() {
       els.conversationId.textContent = this.conversationId
+      this.setState('idle')
+
       els.startBtn.addEventListener('click', () => this.startSession())
       els.stopBtn.addEventListener('click', () => this.stopSession())
       els.newConversationBtn.addEventListener('click', () => this.startNewConversation())
       els.clearLogBtn.addEventListener('click', () => {
         els.log.textContent = ''
       })
-      this.setState('idle')
+
+      this.renderVadInfo({
+        listeningArmed: false,
+        assistantAudioPlaying: false,
+        suppressRemainingMs: 0,
+        state: this.state,
+      })
     },
 
     nowMs() {
@@ -300,48 +303,26 @@
     setState(next) {
       this.state = next
       els.status.textContent = next
+      this.renderVadInfo({
+        listeningArmed: this.listeningArmed,
+        assistantAudioPlaying: this.assistantAudioPlaying,
+        suppressRemainingMs: Math.max(0, this.suppressAutoListenUntil - this.nowMs()),
+        state: this.state,
+      })
     },
 
-    float32ToInt16(float32Array) {
-      const int16Array = new Int16Array(float32Array.length)
-      for (let i = 0; i < float32Array.length; i++) {
-        let s = Math.max(-1, Math.min(1, float32Array[i]))
-        int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7fff
-      }
-      return int16Array
+    renderVadInfo({ listeningArmed, assistantAudioPlaying, suppressRemainingMs, state, lastSpeechBytes, lastSpeechSeconds }) {
+      els.vadInfo.textContent =
+        `listeningArmed=${Boolean(listeningArmed)}\n` +
+        `assistantAudioPlaying=${Boolean(assistantAudioPlaying)}\n` +
+        `suppressRemainingMs=${Math.round(suppressRemainingMs || 0)}\n` +
+        `state=${state || this.state}\n` +
+        `lastSpeechBytes=${lastSpeechBytes ?? '-'}\n` +
+        `lastSpeechSeconds=${lastSpeechSeconds != null ? lastSpeechSeconds.toFixed(2) : '-'}`
     },
 
-    calcRms(float32Array) {
-      let sum = 0
-      for (let i = 0; i < float32Array.length; i++) {
-        const v = float32Array[i]
-        sum += v * v
-      }
-      return Math.sqrt(sum / float32Array.length)
-    },
-
-    isMeaningfulTranscript(text) {
-      const t = (text || '').trim()
-
-      if (!t) return false
-      if (t.length < 2) return false
-
-      const fillers = new Set([
-        'м',
-        'мм',
-        'мм.',
-        'а',
-        'а.',
-        'ъ',
-        'ъъ',
-        'eh',
-        'um',
-        'uh',
-      ])
-
-      if (fillers.has(t.toLowerCase())) return false
-
-      return /[A-Za-zА-Яа-я]/.test(t)
+    isAutoListenSuppressed() {
+      return this.assistantAudioPlaying || this.nowMs() < this.suppressAutoListenUntil
     },
 
     createMessage(role, text = '') {
@@ -363,40 +344,52 @@
       return { wrapper, textEl }
     },
 
-      addAssistantAudio(messageRef, base64Audio) {
-        if (!messageRef || !base64Audio) return
+    addAssistantAudio(messageRef, base64Audio) {
+      if (!messageRef || !base64Audio) return
 
-        const audio = document.createElement('audio')
-        audio.controls = true
-        audio.autoplay = true
-        audio.src = `data:audio/wav;base64,${base64Audio}`
+      const audio = document.createElement('audio')
+      audio.controls = true
+      audio.autoplay = true
+      audio.src = `data:audio/wav;base64,${base64Audio}`
 
-        audio.addEventListener('play', () => {
-          this.assistantAudioPlaying = true
-          this.suppressAutoListenUntil = Math.max(
-            this.suppressAutoListenUntil,
-            this.nowMs() + CONFIG.ASSISTANT_PLAYBACK_GRACE_MS,
-          )
-          this.log('[voice] assistant audio playback started')
+      audio.addEventListener('play', () => {
+        this.assistantAudioPlaying = true
+        this.suppressAutoListenUntil = Math.max(
+          this.suppressAutoListenUntil,
+          this.nowMs() + CONFIG.ASSISTANT_PLAYBACK_GRACE_MS,
+        )
+        this.log('[voice] assistant audio playback started')
+        this.renderVadInfo({
+          listeningArmed: this.listeningArmed,
+          assistantAudioPlaying: this.assistantAudioPlaying,
+          suppressRemainingMs: Math.max(0, this.suppressAutoListenUntil - this.nowMs()),
+          state: this.state,
         })
+      })
 
-        const markPlaybackEnded = () => {
-          this.assistantAudioPlaying = false
-          this.suppressAutoListenUntil = Math.max(
-            this.suppressAutoListenUntil,
-            this.nowMs() + CONFIG.ASSISTANT_PLAYBACK_GRACE_MS,
-          )
-          this.log('[voice] assistant audio playback ended')
-        }
-
-        audio.addEventListener('ended', markPlaybackEnded)
-        audio.addEventListener('pause', () => {
-          if (audio.ended) return
-          markPlaybackEnded()
+      const markPlaybackEnded = () => {
+        this.assistantAudioPlaying = false
+        this.suppressAutoListenUntil = Math.max(
+          this.suppressAutoListenUntil,
+          this.nowMs() + CONFIG.ASSISTANT_PLAYBACK_GRACE_MS,
+        )
+        this.log('[voice] assistant audio playback ended')
+        this.renderVadInfo({
+          listeningArmed: this.listeningArmed,
+          assistantAudioPlaying: this.assistantAudioPlaying,
+          suppressRemainingMs: Math.max(0, this.suppressAutoListenUntil - this.nowMs()),
+          state: this.state,
         })
+      }
 
-        messageRef.wrapper.appendChild(audio)
-      },
+      audio.addEventListener('ended', markPlaybackEnded)
+      audio.addEventListener('pause', () => {
+        if (audio.ended) return
+        markPlaybackEnded()
+      })
+
+      messageRef.wrapper.appendChild(audio)
+    },
 
     formatMs(ms) {
       if (ms == null) return ''
@@ -411,21 +404,25 @@
     },
 
     pushMetricsRow(turn) {
-      const sttMs = turn.sttFinalAt && turn.audioStartAt
-        ? turn.sttFinalAt - turn.audioStartAt
-        : null
+      const sttMs =
+        turn.sttFinalAt && turn.audioStartAt
+          ? turn.sttFinalAt - turn.audioStartAt
+          : null
 
-      const llmMs = turn.assistantFinalAt && turn.sttFinalAt
-        ? turn.assistantFinalAt - turn.sttFinalAt
-        : null
+      const llmMs =
+        turn.assistantFinalAt && turn.sttFinalAt
+          ? turn.assistantFinalAt - turn.sttFinalAt
+          : null
 
-      const ttsMs = turn.assistantAudioAt && turn.assistantFinalAt
-        ? turn.assistantAudioAt - turn.assistantFinalAt
-        : null
+      const ttsMs =
+        turn.assistantAudioAt && turn.assistantFinalAt
+          ? turn.assistantAudioAt - turn.assistantFinalAt
+          : null
 
-      const totalMs = turn.turnEndAt && turn.audioStartAt
-        ? turn.turnEndAt - turn.audioStartAt
-        : null
+      const totalMs =
+        turn.turnEndAt && turn.audioStartAt
+          ? turn.turnEndAt - turn.audioStartAt
+          : null
 
       const row = document.createElement('tr')
       row.innerHTML = `
@@ -439,98 +436,25 @@
       els.metricsBody.prepend(row)
     },
 
-    resetConversationVisuals() {
-      els.chat.innerHTML = ''
-      els.partial.textContent = ''
-      this.currentUserMessage = null
-      this.currentAssistantMessage = null
-      els.metricsBody.innerHTML = ''
-      this.turnCounter = 0
-    },
-
     startNewConversation() {
       this.conversationId = crypto.randomUUID()
-      els.conversationId.textContent = this.conversationId
       this.currentSessionId = ''
-      els.sessionId.textContent = ''
-      this.resetConversationVisuals()
-      this.assistantAudioPlaying = false
-      this.suppressAutoListenUntil = 0
-      this.log('new conversation created')
-    },
-
-    cleanupSocketOnly() {
-      this.isStreamingToSocket = false
-      this.finalReceivedForCurrentTurn = false
-      this.endOfTurnSentForCurrentTurn = false
-
-      this.suppressAutoListenUntil = Math.max(
-        this.suppressAutoListenUntil,
-        this.nowMs() + CONFIG.ASSISTANT_PLAYBACK_GRACE_MS,
-      )
-
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.ws.close()
-      }
-      this.ws = null
-
-      this.utteranceActive = false
-      this.currentSessionId = ''
-      els.sessionId.textContent = ''
-      this.speechStartedAt = 0
-      this.silenceStartedAt = 0
-      this.utteranceStartedAt = 0
-      this.accumulatedAudioMs = 0
-      this.streamedChunkCount = 0
       this.currentUserMessage = null
       this.currentAssistantMessage = null
-    },
+      this.turnCounter = 0
+      this.currentTurn = null
+      this.finalReceivedForCurrentTurn = false
+      this.suppressAutoListenUntil = 0
+      this.assistantAudioPlaying = false
 
-    async openMic() {
-      if (this.audioContext) return
+      els.conversationId.textContent = this.conversationId
+      els.sessionId.textContent = ''
+      els.chat.innerHTML = ''
+      els.partial.textContent = ''
+      els.metricsBody.innerHTML = ''
 
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          channelCount: 1,
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-        },
-      })
-      this.audioContext = new (window.AudioContext || window.webkitAudioContext)()
-      this.source = this.audioContext.createMediaStreamSource(this.mediaStream)
-      this.processor = this.audioContext.createScriptProcessor(4096, 1, 1)
-
-      this.processor.onaudioprocess = (event) => this.onAudioProcess(event)
-
-      this.source.connect(this.processor)
-      this.processor.connect(this.audioContext.destination)
-
-      this.log('mic open and armed')
-    },
-
-    closeMic() {
-      if (this.processor) {
-        this.processor.disconnect()
-        this.processor = null
-      }
-
-      if (this.source) {
-        this.source.disconnect()
-        this.source = null
-      }
-
-      if (this.mediaStream) {
-        this.mediaStream.getTracks().forEach((t) => t.stop())
-        this.mediaStream = null
-      }
-
-      if (this.audioContext) {
-        this.audioContext.close()
-        this.audioContext = null
-      }
-
-      this.log('mic closed')
+      this.log('new conversation created')
+      this.setState(this.listeningArmed ? 'armed_listening' : 'idle')
     },
 
     createNewTurn() {
@@ -546,49 +470,98 @@
         turnEndAt: null,
         transcript: '',
         reply: '',
-        isMeaningful: false,
+        speechBytes: 0,
+        speechSeconds: 0,
       }
     },
 
-    startUtterance() {
-      this.log(`[voice] creating websocket to ${CONFIG.WS_URL}`)
+    floatTo16BitPCM(float32Array) {
+      const int16Array = new Int16Array(float32Array.length)
+      for (let i = 0; i < float32Array.length; i++) {
+        let s = Math.max(-1, Math.min(1, float32Array[i]))
+        int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+      }
+      return int16Array
+    },
 
-      if (this.utteranceActive) return
+    sendPcmAsChunks(ws, audioFloat32) {
+      const pcm16 = this.floatTo16BitPCM(audioFloat32)
+      const bytes = pcm16.byteLength
 
-      this.utteranceActive = true
-      this.isStreamingToSocket = false
+      for (let start = 0; start < pcm16.length; start += CONFIG.PCM_CHUNK_SAMPLES) {
+        const slice = pcm16.subarray(start, Math.min(start + CONFIG.PCM_CHUNK_SAMPLES, pcm16.length))
+        ws.send(slice.buffer.slice(slice.byteOffset, slice.byteOffset + slice.byteLength))
+      }
+
+      return bytes
+    },
+
+    async processSpeechSegment(audioFloat32) {
+      if (!this.listeningArmed) {
+        this.log('[voice] dropped speech segment because session is not armed')
+        return
+      }
+
+      if (this.isAutoListenSuppressed()) {
+        this.log('[voice] dropped speech segment because auto-listen is suppressed')
+        return
+      }
+
+      if (this.ws) {
+        this.log('[voice] dropped speech segment because previous turn is still active')
+        return
+      }
+
       this.finalReceivedForCurrentTurn = false
-      this.endOfTurnSentForCurrentTurn = false
-      this.utteranceStartedAt = this.nowMs()
-      this.accumulatedAudioMs = 0
-      this.streamedChunkCount = 0
-      this.speechStartedAt = this.nowMs()
-      this.silenceStartedAt = 0
-
-      els.partial.textContent = ''
       this.currentUserMessage = null
       this.currentAssistantMessage = null
+      els.partial.textContent = ''
 
       this.createNewTurn()
-
       this.setState('connecting_turn')
-      this.log('speech detected -> opening turn socket')
+      this.log('[voice] speech segment received from MicVAD -> opening turn socket')
+
+      const speechSeconds = audioFloat32.length / CONFIG.PCM_SAMPLE_RATE
+
+      this.renderVadInfo({
+        listeningArmed: this.listeningArmed,
+        assistantAudioPlaying: this.assistantAudioPlaying,
+        suppressRemainingMs: Math.max(0, this.suppressAutoListenUntil - this.nowMs()),
+        state: this.state,
+        lastSpeechBytes: audioFloat32.length * 4,
+        lastSpeechSeconds: speechSeconds,
+      })
 
       try {
         this.ws = new WebSocket(CONFIG.WS_URL)
-        this.log('[voice] websocket object created')
       } catch (error) {
         this.log(`[voice] websocket constructor failed: ${String(error)}`)
         console.error(error)
-        this.cleanupSocketOnly()
+        this.ws = null
         this.setState(this.listeningArmed ? 'armed_listening' : 'error')
         return
       }
 
       this.ws.onopen = () => {
         this.log('[voice] connected')
-        this.isStreamingToSocket = true
         this.setState('streaming_turn')
+
+        const sentBytes = this.sendPcmAsChunks(this.ws, audioFloat32)
+
+        if (this.currentTurn) {
+          this.currentTurn.speechBytes = sentBytes
+          this.currentTurn.speechSeconds = speechSeconds
+        }
+
+        this.log(`[voice] sent speech segment bytes=${sentBytes} seconds=${speechSeconds.toFixed(2)}`)
+
+        this.ws.send(JSON.stringify({
+          type: 'end_of_turn',
+          conversationId: this.conversationId,
+        }))
+
+        this.setState('waiting_reply')
+        this.log('[voice] end_of_turn sent')
       }
 
       this.ws.onmessage = (event) => {
@@ -623,19 +596,10 @@
           els.partial.textContent = ''
 
           const transcript = (data.full || data.text || '').trim()
-          const meaningful = this.isMeaningfulTranscript(transcript)
 
           if (this.currentTurn) {
             this.currentTurn.transcript = transcript
             this.currentTurn.sttFinalAt = this.nowMs()
-            this.currentTurn.isMeaningful = meaningful
-          }
-
-          if (!meaningful) {
-            this.log(`[voice] ignoring weak transcript: "${transcript}"`)
-            this.cleanupSocketOnly()
-            this.setState(this.listeningArmed ? 'armed_listening' : 'idle')
-            return
           }
 
           this.currentUserMessage = this.createMessage('user', transcript)
@@ -644,11 +608,6 @@
         }
 
         if (data.type === 'assistant_final') {
-          if (!this.currentTurn?.isMeaningful) {
-            this.log('[voice] ignoring assistant reply for non-meaningful turn')
-            return
-          }
-
           this.currentAssistantMessage = this.createMessage('assistant', data.text || '')
 
           if (this.currentTurn) {
@@ -661,11 +620,6 @@
         }
 
         if (data.type === 'assistant_audio') {
-          if (!this.currentTurn?.isMeaningful) {
-            this.log('[voice] ignoring assistant audio for non-meaningful turn')
-            return
-          }
-
           this.addAssistantAudio(this.currentAssistantMessage, data.audioBase64 || '')
 
           if (this.currentTurn) {
@@ -681,12 +635,10 @@
 
           if (this.currentTurn) {
             this.currentTurn.turnEndAt = this.nowMs()
-            if (this.currentTurn.isMeaningful) {
-              this.pushMetricsRow(this.currentTurn)
-            }
+            this.pushMetricsRow(this.currentTurn)
           }
 
-          this.cleanupSocketOnly()
+          this.cleanupTurnSocket()
           this.setState(this.listeningArmed ? 'armed_listening' : 'idle')
           return
         }
@@ -702,152 +654,68 @@
           }
 
           this.log(`[voice] server error: ${msg}`)
-          this.cleanupSocketOnly()
+          this.cleanupTurnSocket()
           this.setState(this.listeningArmed ? 'armed_listening' : 'error')
         }
       }
 
       this.ws.onclose = () => {
         this.log('[voice] closed')
-        if (this.listeningArmed && this.state === 'waiting_reply') {
-          this.setState('armed_listening')
-        }
       }
 
       this.ws.onerror = (e) => {
         this.log('[voice] error')
         console.error(e)
-        this.cleanupSocketOnly()
-        this.setState(this.listeningArmed ? 'armed_listening' : 'error')
       }
-
-      this.ws.addEventListener('open', () => this.log('[voice] open event listener fired'))
-      this.ws.addEventListener('close', (event) =>
-        this.log(`[voice] close event listener fired code=${event.code} reason=${event.reason || ''}`),
-      )
-      this.ws.addEventListener('error', () => this.log('[voice] error event listener fired'))
     },
 
-    finishUtterance() {
-      if (!this.utteranceActive) return
-      if (this.endOfTurnSentForCurrentTurn) return
-
-      this.utteranceActive = false
-      this.isStreamingToSocket = false
-      this.silenceStartedAt = 0
-
-      this.setState('waiting_reply')
-      this.log('silence detected -> sending end_of_turn')
-      this.log(`[voice] utterance stats audioMs=${Math.round(this.accumulatedAudioMs)} chunks=${this.streamedChunkCount}`)
-
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-        this.endOfTurnSentForCurrentTurn = true
-        this.log('cannot send end_of_turn, socket not open')
-        return
+    cleanupTurnSocket() {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.close()
       }
+      this.ws = null
+      this.currentSessionId = ''
+      els.sessionId.textContent = ''
 
-      if (this.finalReceivedForCurrentTurn) {
-        this.endOfTurnSentForCurrentTurn = true
-        this.log('skipping end_of_turn because stt_final already arrived')
-        return
-      }
-
-      this.endOfTurnSentForCurrentTurn = true
-      this.ws.send(JSON.stringify({ type: 'end_of_turn', conversationId: this.conversationId }))
-    },
-
-    updateVadInfo(rms) {
-      const suppressRemainingMs = Math.max(0, this.suppressAutoListenUntil - this.nowMs())
-
-      els.vadInfo.textContent =
-        `rms=${rms.toFixed(4)}\n` +
-        `utteranceActive=${this.utteranceActive}\n` +
-        `isStreamingToSocket=${this.isStreamingToSocket}\n` +
-        `assistantAudioPlaying=${this.assistantAudioPlaying}\n` +
-        `suppressRemainingMs=${Math.round(suppressRemainingMs)}\n` +
-        `accumulatedAudioMs=${Math.round(this.accumulatedAudioMs)}\n` +
-        `streamedChunkCount=${this.streamedChunkCount}\n` +
-        `finalReceived=${this.finalReceivedForCurrentTurn}\n` +
-        `endOfTurnSent=${this.endOfTurnSentForCurrentTurn}\n` +
-        `conversationId=${this.conversationId}`
-    },
-
-    shouldStartUtterance(rms) {
-      const now = this.nowMs()
-
-      return (
-        this.listeningArmed &&
-        !this.ws &&
-        !this.utteranceActive &&
-        !this.assistantAudioPlaying &&
-        now >= this.suppressAutoListenUntil &&
-        this.state !== 'waiting_reply' &&
-        this.state !== 'assistant_ready' &&
-        this.state !== 'speaking' &&
-        rms >= CONFIG.START_THRESHOLD
+      this.suppressAutoListenUntil = Math.max(
+        this.suppressAutoListenUntil,
+        this.nowMs() + CONFIG.ASSISTANT_PLAYBACK_GRACE_MS,
       )
     },
 
-    shouldFinishUtterance(now) {
-      const speechDurationMs = this.speechStartedAt ? now - this.speechStartedAt : 0
-      const silenceDurationMs = this.silenceStartedAt ? now - this.silenceStartedAt : 0
+    async createVad() {
+      this.log('[vad] creating MicVAD instance')
 
-      return (
-        speechDurationMs >= CONFIG.MIN_SPEECH_MS &&
-        this.accumulatedAudioMs >= CONFIG.MIN_AUDIO_BEFORE_SEND_MS &&
-        this.streamedChunkCount >= CONFIG.MIN_CHUNKS_BEFORE_FINISH &&
-        silenceDurationMs >= CONFIG.SILENCE_MS_TO_STOP
-      )
-    },
+      this.vadInstance = await vad.MicVAD.new({
+        onnxWASMBasePath: CONFIG.VAD_ONNX_WASM_BASE_PATH,
+        baseAssetPath: CONFIG.VAD_BASE_ASSET_PATH,
 
-    onAudioProcess(event) {
-      if (!this.listeningArmed) return
+        onSpeechStart: () => {
+          this.log('[vad] speech start detected')
+        },
 
-      const input = event.inputBuffer.getChannelData(0)
-      const rms = this.calcRms(input)
-      const now = this.nowMs()
+        onSpeechEnd: (audio) => {
+          this.log(`[vad] speech end detected samples=${audio.length}`)
+          void this.processSpeechSegment(audio)
+        },
 
-      this.updateVadInfo(rms)
+        onVADMisfire: () => {
+          this.log('[vad] misfire detected')
+        },
+      })
 
-      if (!this.utteranceActive) {
-        if (this.shouldStartUtterance(rms)) {
-          this.startUtterance()
-        }
-        return
-      }
-
-      const bufferDurationMs =
-        (input.length / event.inputBuffer.sampleRate) * 1000
-
-      if (this.isStreamingToSocket && this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const pcm16 = this.float32ToInt16(input)
-        this.ws.send(pcm16.buffer)
-        this.accumulatedAudioMs += bufferDurationMs
-        this.streamedChunkCount += 1
-      }
-
-      if (rms >= CONFIG.STOP_THRESHOLD) {
-        if (!this.speechStartedAt) {
-          this.speechStartedAt = now
-        }
-        this.silenceStartedAt = 0
-        return
-      }
-
-      if (!this.silenceStartedAt) {
-        this.silenceStartedAt = now
-      }
-
-      if (this.shouldFinishUtterance(now)) {
-        this.finishUtterance()
-      }
+      this.log('[vad] MicVAD ready')
     },
 
     async startSession() {
       if (this.listeningArmed) return
 
       try {
-        await this.openMic()
+        if (!this.vadInstance) {
+          await this.createVad()
+        }
+
+        await this.vadInstance.start()
         this.listeningArmed = true
         this.setState('armed_listening')
         this.log('session armed')
@@ -858,14 +726,18 @@
       }
     },
 
-    stopSession() {
+    async stopSession() {
       this.listeningArmed = false
-      this.cleanupSocketOnly()
-      this.closeMic()
-      this.setState('idle')
-      this.log('session stopped')
       this.assistantAudioPlaying = false
       this.suppressAutoListenUntil = 0
+
+      if (this.vadInstance) {
+        await this.vadInstance.pause()
+      }
+
+      this.cleanupTurnSocket()
+      this.setState('idle')
+      this.log('session stopped')
     },
   }
 
