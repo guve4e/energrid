@@ -66,10 +66,10 @@ export class VoiceSttService {
       this.logger.log(`[BATCH STT] ${text}`)
 
       return text
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Unknown batch STT error'
-      this.logger.error(`Batch STT failed: ${message}`)
+    } catch (err: any) {
+      this.logger.error(
+        `Batch STT failed: message=${err?.message || 'unknown'} code=${err?.code || '-'} cause=${err?.cause?.message || '-'}`
+      )
       return ''
     }
   }
