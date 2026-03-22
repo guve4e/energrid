@@ -7,6 +7,8 @@ import { VoiceSessionService } from './voice-session.service'
 import { VoiceConversationService } from './voice-conversation.service'
 import { VoiceSynthesisService } from './voice-synthesis.service'
 import { VoiceAssistantReplyStreamerService } from './voice-assistant-reply-streamer.service'
+import { VoiceSessionTraceService } from './voice-session-trace.service'
+import { VoiceSessionEmitterService } from './voice-session-emitter.service'
 
 @Module({
   providers: [
@@ -18,6 +20,8 @@ import { VoiceAssistantReplyStreamerService } from './voice-assistant-reply-stre
     VoiceConversationService,
     VoiceSynthesisService,
     VoiceAssistantReplyStreamerService,
+    VoiceSessionTraceService,
+    VoiceSessionEmitterService
   ],
 })
 export class VoiceModule {}

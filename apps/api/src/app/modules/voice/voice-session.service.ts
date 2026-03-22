@@ -2,38 +2,12 @@ import { Injectable, Logger } from '@nestjs/common'
 import { WebSocket } from 'ws'
 import { randomUUID } from 'crypto'
 
-import { appendVoiceTrace } from './utils/voice-trace.util'
 import { VoiceSttService } from './voice-stt.service'
-import { DebugEventsService } from './debug-events.service'
-import type {
-  StreamingSttEvent,
-  StreamingSttSession,
-} from '@energrid/stt-stream-core'
+import type { StreamingSttEvent } from '@energrid/stt-stream-core'
 import { VoiceAssistantReplyStreamerService } from './voice-assistant-reply-streamer.service'
-
-interface ActiveVoiceSession {
-  id: string
-  conversationId: string
-  client: WebSocket
-  sttSession: StreamingSttSession
-
-  chunkCount: number
-  audioChunks: Buffer[]
-  partialTranscript: string
-  finalTranscript: string
-  assistantReply: string
-
-  startedAt: number
-  lastChunkAt: number
-
-  turnEnded: boolean
-  clientTurnEnded: boolean
-  finalized: boolean
-  assistantStarted: boolean
-
-  pendingFinalTranscript: string
-  pendingFinalTimer: NodeJS.Timeout | null
-}
+import { VoiceSessionTraceService } from './voice-session-trace.service'
+import { VoiceSessionEmitterService } from './voice-session-emitter.service'
+import type { ActiveVoiceSession } from './voice-session.types'
 
 @Injectable()
 export class VoiceSessionService {
@@ -42,22 +16,22 @@ export class VoiceSessionService {
 
   constructor(
     private readonly sttService: VoiceSttService,
-    private readonly debugEvents: DebugEventsService,
     private readonly replyStreamer: VoiceAssistantReplyStreamerService,
+    private readonly trace: VoiceSessionTraceService,
+    private readonly emitter: VoiceSessionEmitterService,
   ) {}
 
   async openSession(client: WebSocket): Promise<void> {
     const session = await this.createSession(client)
     this.sessions.set(client, session)
 
-    this.logSessionStart(session)
-    this.emitSessionStart(session)
+    this.trace.logSessionStart(session)
+    this.emitter.emitSessionStart(session)
   }
 
   async pushAudio(client: WebSocket, buf: Buffer): Promise<void> {
     const session = this.getSession(client)
-    if (!session) return
-    if (session.turnEnded) return
+    if (!session || session.turnEnded) return
 
     this.storeIncomingAudioChunk(session, buf)
     await session.sttSession.pushAudio(buf)
@@ -66,27 +40,10 @@ export class VoiceSessionService {
   async endTurn(client: WebSocket): Promise<void> {
     const session = this.getSession(client)
     if (!session) return
+    if (this.isTurnAlreadyClosed(session)) return
 
-    if (session.turnEnded || session.finalized) {
-      this.logger.log(
-        `[TURN END IGNORED] ${session.id} conversation=${session.conversationId} already finalized`,
-      )
-      return
-    }
-
-    session.turnEnded = true
-    session.clientTurnEnded = true
-
-    this.logger.log(
-      `[TURN END] ${session.id} conversation=${session.conversationId}`,
-    )
-
-    try {
-      await session.sttSession.endInput()
-    } catch (e) {
-      this.logger.warn(`STT endInput error: ${String(e)}`)
-    }
-
+    this.markTurnEnded(session)
+    await this.endSttInput(session)
     this.schedulePendingTranscriptFinalization(session, 250)
   }
 
@@ -95,26 +52,13 @@ export class VoiceSessionService {
     if (!session) return
 
     this.clearPendingFinalTimer(session)
-
-    this.logger.log(
-      `[SESSION END] ${session.id} conversation=${session.conversationId} transcript="${session.finalTranscript}"`,
-    )
-
-    try {
-      await session.sttSession.close()
-    } catch (e) {
-      this.logger.warn(`STT close error: ${String(e)}`)
-    }
-
-    this.emitSessionEndDebug(session)
-    this.appendSessionEndTrace(session)
+    this.trace.logSessionEnd(session)
+    await this.closeSttSession(session)
+    this.trace.emitSessionEndDebug(session)
+    this.trace.appendSessionEndTrace(session)
 
     this.sessions.delete(client)
   }
-
-  // --------------------------------------------------------------------------------
-  // Session creation
-  // --------------------------------------------------------------------------------
 
   private async createSession(client: WebSocket): Promise<ActiveVoiceSession> {
     const id = randomUUID()
@@ -127,17 +71,7 @@ export class VoiceSessionService {
         try {
           await this.handleSttEvent(session, event)
         } catch (error) {
-          const message =
-            error instanceof Error ? error.message : 'Unhandled STT event error'
-
-          this.logger.error(
-            `[VOICE EVENT ERROR] ${session?.id ?? 'unknown'} ${message}`,
-            error instanceof Error ? error.stack : undefined,
-          )
-
-          if (session) {
-            this.emitError(session, message)
-          }
+          this.handleVoiceEventError(session, error)
         }
       },
     )
@@ -164,6 +98,11 @@ export class VoiceSessionService {
 
       pendingFinalTranscript: '',
       pendingFinalTimer: null,
+
+      sttFinalAt: null,
+      assistantFirstDeltaAt: null,
+      assistantFirstAudioAt: null,
+      assistantFinalAt: null,
     }
 
     return session
@@ -173,127 +112,56 @@ export class VoiceSessionService {
     return this.sessions.get(client)
   }
 
-  // --------------------------------------------------------------------------------
-  // Low-level emitters
-  // --------------------------------------------------------------------------------
-
-  private sendToClient(
+  private handleVoiceEventError(
     session: ActiveVoiceSession,
-    event: Record<string, unknown>,
+    error: unknown,
   ): void {
+    const message =
+      error instanceof Error ? error.message : 'Unhandled STT event error'
+
+    this.logger.error(
+      `[VOICE EVENT ERROR] ${session.id} ${message}`,
+      error instanceof Error ? error.stack : undefined,
+    )
+
+    this.emitter.emitError(session, message)
+  }
+
+  private isTurnAlreadyClosed(session: ActiveVoiceSession): boolean {
+    if (session.turnEnded || session.finalized) {
+      this.logger.log(
+        `[TURN END IGNORED] ${session.id} conversation=${session.conversationId} already finalized`,
+      )
+      return true
+    }
+
+    return false
+  }
+
+  private markTurnEnded(session: ActiveVoiceSession): void {
+    session.turnEnded = true
+    session.clientTurnEnded = true
+
+    this.logger.log(
+      `[TURN END] ${session.id} conversation=${session.conversationId}`,
+    )
+  }
+
+  private async endSttInput(session: ActiveVoiceSession): Promise<void> {
     try {
-      if (session.client.readyState === WebSocket.OPEN) {
-        session.client.send(JSON.stringify(event))
-      }
+      await session.sttSession.endInput()
     } catch (error) {
-      this.logger.warn(`Failed to send event to client: ${String(error)}`)
+      this.logger.warn(`STT endInput error: ${String(error)}`)
     }
   }
 
-  private emitToBoth(
-    session: ActiveVoiceSession,
-    clientEvent: Record<string, unknown>,
-    debugEvent?: Record<string, unknown>,
-  ): void {
-    this.sendToClient(session, clientEvent)
-    this.debugEvents.emit(debugEvent ?? clientEvent)
+  private async closeSttSession(session: ActiveVoiceSession): Promise<void> {
+    try {
+      await session.sttSession.close()
+    } catch (error) {
+      this.logger.warn(`STT close error: ${String(error)}`)
+    }
   }
-
-  private emitSessionStart(session: ActiveVoiceSession): void {
-    this.emitToBoth(session, {
-      type: 'session_start',
-      sessionId: session.id,
-      conversationId: session.conversationId,
-    })
-  }
-
-  private emitSttPartial(session: ActiveVoiceSession, text: string): void {
-    this.emitToBoth(session, {
-      type: 'stt_partial',
-      sessionId: session.id,
-      text,
-      full: session.partialTranscript,
-    })
-  }
-
-  private emitSttFinal(session: ActiveVoiceSession): void {
-    this.emitToBoth(session, {
-      type: 'stt_final',
-      sessionId: session.id,
-      text: session.finalTranscript,
-      full: session.finalTranscript,
-    })
-  }
-
-  private emitAssistantFinal(session: ActiveVoiceSession): void {
-    this.emitToBoth(session, {
-      type: 'assistant_final',
-      sessionId: session.id,
-      text: session.assistantReply,
-    })
-  }
-
-  private emitTurnEnd(session: ActiveVoiceSession): void {
-    this.emitToBoth(session, {
-      type: 'turn_end',
-      sessionId: session.id,
-    })
-  }
-
-  private emitError(session: ActiveVoiceSession, message: string): void {
-    this.emitToBoth(session, {
-      type: 'error',
-      sessionId: session.id,
-      message,
-    })
-  }
-
-  // --------------------------------------------------------------------------------
-  // Session logging / trace
-  // --------------------------------------------------------------------------------
-
-  private logSessionStart(session: ActiveVoiceSession): void {
-    this.logger.log(
-      `[SESSION START] ${session.id} conversation=${session.conversationId}`,
-    )
-
-    appendVoiceTrace({
-      type: 'session_start',
-      sessionId: session.id,
-      conversationId: session.conversationId,
-    })
-  }
-
-  private emitSessionEndDebug(session: ActiveVoiceSession): void {
-    this.debugEvents.emit({
-      type: 'session_end',
-      sessionId: session.id,
-      conversationId: session.conversationId,
-      totalChunks: session.chunkCount,
-      finalTranscript: session.finalTranscript.trim(),
-      assistantReply: session.assistantReply,
-      durationMs: Date.now() - session.startedAt,
-    })
-  }
-
-  private appendSessionEndTrace(session: ActiveVoiceSession): void {
-    appendVoiceTrace({
-      type: 'session_end',
-      sessionId: session.id,
-      conversationId: session.conversationId,
-      finalTranscript: session.finalTranscript,
-      assistantReply: session.assistantReply,
-      chunkCount: session.chunkCount,
-      bufferedAudioBytes: this.getBufferedAudio(session).length,
-      clientTurnEnded: session.clientTurnEnded,
-      durationMs: Date.now() - session.startedAt,
-      closedAt: Date.now(),
-    })
-  }
-
-  // --------------------------------------------------------------------------------
-  // Incoming audio
-  // --------------------------------------------------------------------------------
 
   private storeIncomingAudioChunk(
     session: ActiveVoiceSession,
@@ -309,17 +177,8 @@ export class VoiceSessionService {
       )
     }
 
-    this.debugEvents.emit({
-      type: 'chunk',
-      sessionId: session.id,
-      chunkCount: session.chunkCount,
-      bytes: buf.length,
-    })
+    this.emitter.emitChunkDebug(session, buf.length)
   }
-
-  // --------------------------------------------------------------------------------
-  // Transcript helpers
-  // --------------------------------------------------------------------------------
 
   private isMeaningfulTranscript(text: string): boolean {
     const t = text.trim()
@@ -375,14 +234,25 @@ export class VoiceSessionService {
     }
   }
 
+  private shouldSchedulePendingFinalization(
+    session: ActiveVoiceSession,
+  ): boolean {
+    if (!this.isMeaningfulTranscript(session.pendingFinalTranscript)) {
+      return false
+    }
+
+    if (session.assistantStarted) {
+      return false
+    }
+
+    return true
+  }
+
   private schedulePendingTranscriptFinalization(
     session: ActiveVoiceSession,
     delayMs: number,
   ): void {
-    if (
-      !this.isMeaningfulTranscript(session.pendingFinalTranscript) ||
-      session.assistantStarted
-    ) {
+    if (!this.shouldSchedulePendingFinalization(session)) {
       return
     }
 
@@ -403,14 +273,11 @@ export class VoiceSessionService {
     }
 
     if (!sttServiceWithBatch.transcribeBufferedAudio) {
-      appendVoiceTrace({
-        type: 'batch_transcription_unavailable',
-        sessionId: session.id,
-        conversationId: session.conversationId,
+      this.trace.appendBatchUnavailableTrace(
+        session,
         realtimeTranscript,
-        bufferedAudioBytes: bufferedAudio.length,
-      })
-
+        bufferedAudio,
+      )
       return realtimeTranscript
     }
 
@@ -423,15 +290,13 @@ export class VoiceSessionService {
         batchTranscript,
       )
 
-      appendVoiceTrace({
-        type: 'batch_transcription_result',
-        sessionId: session.id,
-        conversationId: session.conversationId,
+      this.trace.appendBatchResultTrace(
+        session,
         realtimeTranscript,
         batchTranscript,
         chosenTranscript,
-        bufferedAudioBytes: bufferedAudio.length,
-      })
+        bufferedAudio,
+      )
 
       return chosenTranscript.trim()
     } catch (error) {
@@ -442,39 +307,36 @@ export class VoiceSessionService {
         `[BATCH TRANSCRIPTION FAILED] ${session.id} ${message}`,
       )
 
-      appendVoiceTrace({
-        type: 'batch_transcription_error',
-        sessionId: session.id,
-        conversationId: session.conversationId,
+      this.trace.appendBatchErrorTrace(
+        session,
         realtimeTranscript,
-        bufferedAudioBytes: bufferedAudio.length,
+        bufferedAudio,
         message,
-      })
+      )
 
       return realtimeTranscript
     }
   }
 
-  // --------------------------------------------------------------------------------
-  // STT event handling
-  // --------------------------------------------------------------------------------
-
   private async handleSttEvent(
     session: ActiveVoiceSession,
     event: StreamingSttEvent,
   ): Promise<void> {
-    if (event.type === 'stt_partial') {
-      await this.handleSttPartial(session, event.text)
-      return
-    }
+    switch (event.type) {
+      case 'stt_partial':
+        await this.handleSttPartial(session, event.text)
+        return
 
-    if (event.type === 'stt_final') {
-      await this.handleSttFinalCandidate(session, event.text || '')
-      return
-    }
+      case 'stt_final':
+        await this.handleSttFinalCandidate(session, event.text || '')
+        return
 
-    if (event.type === 'stt_error') {
-      await this.handleSttError(session, event.message)
+      case 'stt_error':
+        await this.handleSttError(session, event.message)
+        return
+
+      default:
+        return
     }
   }
 
@@ -485,9 +347,8 @@ export class VoiceSessionService {
     if (session.assistantStarted) return
 
     session.partialTranscript += text
-
     this.logger.log(`[STT PARTIAL] ${session.id} ${text}`)
-    this.emitSttPartial(session, text)
+    this.emitter.emitSttPartial(session, text)
   }
 
   private async handleSttFinalCandidate(
@@ -495,12 +356,7 @@ export class VoiceSessionService {
     rawText: string,
   ): Promise<void> {
     if (session.assistantStarted) {
-      appendVoiceTrace({
-        type: 'stt_final_ignored_after_assistant_started',
-        sessionId: session.id,
-        conversationId: session.conversationId,
-        transcript: rawText.trim(),
-      })
+      this.trace.appendIgnoredFinalTrace(session, rawText.trim())
       return
     }
 
@@ -511,16 +367,7 @@ export class VoiceSessionService {
     )
 
     session.pendingFinalTranscript = bestTranscript
-
-    appendVoiceTrace({
-      type: 'stt_final_candidate',
-      sessionId: session.id,
-      conversationId: session.conversationId,
-      transcript,
-      chosenTranscript: bestTranscript,
-      clientTurnEnded: session.clientTurnEnded,
-    })
-
+    this.trace.appendSttFinalCandidateTrace(session, transcript, bestTranscript)
     this.schedulePendingTranscriptFinalization(session, 700)
   }
 
@@ -547,34 +394,14 @@ export class VoiceSessionService {
         `[STT ERROR IGNORED] ${session.id} reason=${reason} ${message}`,
       )
 
-      appendVoiceTrace({
-        type: 'stt_error_ignored',
-        sessionId: session.id,
-        conversationId: session.conversationId,
-        message,
-        reason,
-        pendingFinalTranscript: session.pendingFinalTranscript,
-        clientTurnEnded: session.clientTurnEnded,
-      })
-
+      this.trace.appendIgnoredSttErrorTrace(session, message, reason)
       return
     }
 
     this.logger.error(`[STT ERROR] ${session.id} ${message}`)
-
-    appendVoiceTrace({
-      type: 'stt_error',
-      sessionId: session.id,
-      conversationId: session.conversationId,
-      message,
-    })
-
-    this.emitError(session, message)
+    this.trace.appendSttErrorTrace(session, message)
+    this.emitter.emitError(session, message)
   }
-
-  // --------------------------------------------------------------------------------
-  // Assistant generation orchestration
-  // --------------------------------------------------------------------------------
 
   private async finalizePendingTranscript(
     session: ActiveVoiceSession,
@@ -596,7 +423,7 @@ export class VoiceSessionService {
 
     try {
       await this.generateAssistantReply(session)
-      this.emitTurnEnd(session)
+      this.emitter.emitTurnEnd(session)
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Assistant generation failed'
@@ -606,15 +433,8 @@ export class VoiceSessionService {
         error instanceof Error ? error.stack : undefined,
       )
 
-      appendVoiceTrace({
-        type: 'assistant_error',
-        sessionId: session.id,
-        conversationId: session.conversationId,
-        transcript: session.finalTranscript,
-        message,
-      })
-
-      this.emitError(session, message)
+      this.trace.appendAssistantErrorTrace(session, message)
+      this.emitter.emitError(session, message)
     }
   }
 
@@ -630,30 +450,20 @@ export class VoiceSessionService {
       realtimeTranscript,
     )
 
-    appendVoiceTrace({
-      type: 'finalize_pending_transcript',
-      sessionId: session.id,
-      conversationId: session.conversationId,
+    this.trace.appendFinalizePendingTrace(
+      session,
       realtimeTranscript,
       transcript,
-      bufferedAudioBytes: bufferedAudio.length,
-      clientTurnEnded: session.clientTurnEnded,
-    })
+      bufferedAudio,
+    )
 
     if (!this.isMeaningfulTranscript(transcript)) {
       this.logger.warn(
         `[STT FINAL DROPPED AFTER SETTLE] ${session.id} ${JSON.stringify(transcript)}`,
       )
 
-      appendVoiceTrace({
-        type: 'stt_final_dropped_after_settle',
-        sessionId: session.id,
-        conversationId: session.conversationId,
-        transcript,
-        clientTurnEnded: session.clientTurnEnded,
-      })
-
-      this.emitTurnEnd(session)
+      this.trace.appendDroppedFinalTrace(session, transcript)
+      this.emitter.emitTurnEnd(session)
       return null
     }
 
@@ -667,29 +477,15 @@ export class VoiceSessionService {
     session.assistantStarted = true
     session.finalized = true
     session.finalTranscript = transcript
+    session.sttFinalAt = Date.now()
 
     this.logger.log(`[STT FINAL] ${session.id} ${session.finalTranscript}`)
-
-    appendVoiceTrace({
-      type: 'stt_final',
-      sessionId: session.id,
-      conversationId: session.conversationId,
-      transcript: session.finalTranscript,
-      chunkCount: session.chunkCount,
-      startedAt: session.startedAt,
-      sttFinalAt: Date.now(),
-    })
+    this.trace.appendSttFinalTrace(session)
   }
 
   private emitFinalTranscript(session: ActiveVoiceSession): void {
-    this.emitSttFinal(session)
-
-    appendVoiceTrace({
-      type: 'conversation_input',
-      sessionId: session.id,
-      conversationId: session.conversationId,
-      transcript: session.finalTranscript,
-    })
+    this.emitter.emitSttFinal(session)
+    this.trace.appendConversationInputTrace(session)
   }
 
   private async generateAssistantReply(
@@ -703,33 +499,19 @@ export class VoiceSessionService {
       },
       {
         onTextDelta: (delta, fullText) => {
-          this.sendToClient(session, {
-            type: 'assistant_text_delta',
-            sessionId: session.id,
-            delta,
-            full: fullText,
-          })
+          this.markAssistantFirstDelta(session)
+          this.emitter.emitAssistantTextDelta(session, delta, fullText)
+          this.trace.appendAssistantTextDeltaTrace(session, delta, fullText)
         },
 
         onAudioChunk: ({ chunkIndex, isLastChunk, text, format, audioBuffer }) => {
-          this.sendToClient(session, {
-            type: 'assistant_audio_chunk',
-            sessionId: session.id,
-            format,
+          this.markAssistantFirstAudio(session)
+          this.emitter.emitAssistantAudioChunk(session, {
             chunkIndex,
             isLastChunk,
             text,
-            audioBase64: audioBuffer.toString('base64'),
-          })
-
-          this.debugEvents.emit({
-            type: 'assistant_audio_chunk',
-            sessionId: session.id,
             format,
-            bytes: audioBuffer.length,
-            chunkIndex,
-            isLastChunk,
-            text,
+            audioBuffer,
           })
         },
 
@@ -740,18 +522,23 @@ export class VoiceSessionService {
     )
 
     session.assistantReply = replyText
+    session.assistantFinalAt = Date.now()
 
     this.logger.log(`[ASSISTANT] ${session.id} ${replyText}`)
+    this.trace.appendAssistantFinalTrace(session)
+    this.trace.logTurnMetrics(session)
+    this.emitter.emitAssistantFinal(session)
+  }
 
-    appendVoiceTrace({
-      type: 'assistant_final',
-      sessionId: session.id,
-      conversationId: session.conversationId,
-      transcript: session.finalTranscript,
-      assistantReply: replyText,
-      assistantFinalAt: Date.now(),
-    })
+  private markAssistantFirstDelta(session: ActiveVoiceSession): void {
+    if (!session.assistantFirstDeltaAt) {
+      session.assistantFirstDeltaAt = Date.now()
+    }
+  }
 
-    this.emitAssistantFinal(session)
+  private markAssistantFirstAudio(session: ActiveVoiceSession): void {
+    if (!session.assistantFirstAudioAt) {
+      session.assistantFirstAudioAt = Date.now()
+    }
   }
 }

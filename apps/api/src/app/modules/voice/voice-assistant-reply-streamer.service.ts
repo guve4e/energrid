@@ -134,8 +134,8 @@ export class VoiceAssistantReplyStreamerService {
       }
 
       state.speakableBuffer = remainder
-      const isLastChunk = forceFinal && !state.speakableBuffer.trim()
 
+      const isLastChunk = forceFinal && !this.hasPendingSpeakableText(state)
       await this.emitAudioChunk(
         input,
         state,
@@ -163,6 +163,10 @@ export class VoiceAssistantReplyStreamerService {
       finalChunk,
       true,
     )
+  }
+
+  private hasPendingSpeakableText(state: ReplyStreamState): boolean {
+    return state.speakableBuffer.trim().length > 0
   }
 
   private async emitAudioChunk(
