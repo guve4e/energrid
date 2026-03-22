@@ -37,13 +37,13 @@ window.createVoiceUi = function createVoiceUi() {
   }
 
   function renderVadInfo({
-    listeningArmed,
-    assistantAudioPlaying,
-    suppressRemainingMs,
-    state,
-    lastSpeechBytes,
-    lastSpeechSeconds,
-  }) {
+                           listeningArmed,
+                           assistantAudioPlaying,
+                           suppressRemainingMs,
+                           state,
+                           lastSpeechBytes,
+                           lastSpeechSeconds,
+                         }) {
     els.vadInfo.textContent =
       `listeningArmed=${Boolean(listeningArmed)}\n` +
       `assistantAudioPlaying=${Boolean(assistantAudioPlaying)}\n` +
@@ -84,7 +84,17 @@ window.createVoiceUi = function createVoiceUi() {
     return 'bad'
   }
 
-  function pushMetricsRow(turn) {
+  function computeTurnMetrics(turn) {
+    const captureToOpenMs =
+      turn.wsOpenAt && turn.speechCapturedAt
+        ? turn.wsOpenAt - turn.speechCapturedAt
+        : null
+
+    const uploadMs =
+      turn.audioSendEndAt && turn.audioSendStartAt
+        ? turn.audioSendEndAt - turn.audioSendStartAt
+        : null
+
     const sttMs =
       turn.sttFinalAt && turn.speechCapturedAt
         ? turn.sttFinalAt - turn.speechCapturedAt
@@ -110,23 +120,39 @@ window.createVoiceUi = function createVoiceUi() {
         ? turn.turnEndAt - turn.speechCapturedAt
         : null
 
+    return {
+      captureToOpenMs,
+      uploadMs,
+      sttMs,
+      firstTextMs,
+      firstAudioMs,
+      completeMs,
+      totalMs,
+    }
+  }
+
+  function pushMetricsRow(turn) {
+    const metrics = computeTurnMetrics(turn)
+
     const row = document.createElement('tr')
     row.innerHTML = `
       <td>${turn.index}</td>
-      <td class="${latencyClass(sttMs)}">${formatMs(sttMs)}</td>
-      <td class="${latencyClass(firstTextMs)}">${formatMs(firstTextMs)}</td>
-      <td class="${latencyClass(firstAudioMs)}">${formatMs(firstAudioMs)}</td>
-      <td class="${latencyClass(completeMs)}">${formatMs(completeMs)}</td>
-      <td class="${latencyClass(totalMs)}">${formatMs(totalMs)}</td>
+      <td class="${latencyClass(metrics.sttMs)}">${formatMs(metrics.sttMs)}</td>
+      <td class="${latencyClass(metrics.firstTextMs)}">${formatMs(metrics.firstTextMs)}</td>
+      <td class="${latencyClass(metrics.firstAudioMs)}">${formatMs(metrics.firstAudioMs)}</td>
+      <td class="${latencyClass(metrics.completeMs)}">${formatMs(metrics.completeMs)}</td>
+      <td class="${latencyClass(metrics.totalMs)}">${formatMs(metrics.totalMs)}</td>
       <td>${(turn.transcript || '').slice(0, 80)}</td>
     `
 
     row.title =
-      `stt=${formatMs(sttMs)} | ` +
-      `first_text=${formatMs(firstTextMs)} | ` +
-      `first_audio=${formatMs(firstAudioMs)} | ` +
-      `complete=${formatMs(completeMs)} | ` +
-      `total=${formatMs(totalMs)}`
+      `capture_to_open=${formatMs(metrics.captureToOpenMs)} | ` +
+      `upload=${formatMs(metrics.uploadMs)} | ` +
+      `stt=${formatMs(metrics.sttMs)} | ` +
+      `first_text=${formatMs(metrics.firstTextMs)} | ` +
+      `first_audio=${formatMs(metrics.firstAudioMs)} | ` +
+      `complete=${formatMs(metrics.completeMs)} | ` +
+      `total=${formatMs(metrics.totalMs)}`
 
     els.metricsBody.prepend(row)
   }
@@ -140,7 +166,12 @@ window.createVoiceUi = function createVoiceUi() {
     setStatus(state.listeningArmed ? 'armed_listening' : 'idle')
   }
 
-  function bindButtons({ onStart, onStop, onNewConversation, onClearLog }) {
+  function bindButtons({
+                         onStart,
+                         onStop,
+                         onNewConversation,
+                         onClearLog,
+                       }) {
     els.startBtn.addEventListener('click', onStart)
     els.stopBtn.addEventListener('click', onStop)
     els.newConversationBtn.addEventListener('click', onNewConversation)
@@ -159,5 +190,6 @@ window.createVoiceUi = function createVoiceUi() {
     pushMetricsRow,
     resetConversation,
     bindButtons,
+    computeTurnMetrics,
   }
 }

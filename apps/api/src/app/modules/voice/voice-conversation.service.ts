@@ -38,72 +38,15 @@ export class VoiceConversationService {
     input: VoiceConversationInput,
     callbacks?: VoiceConversationStreamCallbacks,
   ): Promise<VoiceConversationResult> {
-    appendVoiceTrace({
-      type: 'conversation_service_input',
-      sessionId: input.sessionId,
-      conversationId: input.conversationId,
-      transcript: input.transcript,
-    })
+    this.traceConversationInput(input)
 
-    const turns = this.history.get(input.conversationId) ?? []
-
-    turns.push({
-      role: 'user',
-      text: input.transcript,
-    })
-
-    const trimmedTurns = turns.slice(-this.maxTurnsPerConversation)
-    this.history.set(input.conversationId, trimmedTurns)
-
-    if (this.verbose) {
-      this.logger.log(
-        `[CONVERSATION] session=${input.sessionId} conversation=${input.conversationId} user="${input.transcript}"`,
-      )
-    }
+    const trimmedTurns = this.appendUserTurn(input.conversationId, input.transcript)
 
     if (!process.env.OPENAI_API_KEY) {
-      const fallback = `Чух: ${input.transcript}`
-      this.appendAssistantTurn(input.conversationId, fallback)
-
-      appendVoiceTrace({
-        type: 'conversation_service_output',
-        sessionId: input.sessionId,
-        conversationId: input.conversationId,
-        transcript: input.transcript,
-        replyText: fallback,
-        mode: 'fallback_no_api_key',
-      })
-
-      await callbacks?.onCompletedText?.(fallback)
-
-      return { replyText: fallback }
+      return this.handleMissingApiKey(input, callbacks)
     }
 
-    const inputMessages = [
-      {
-        role: 'system' as const,
-        content: [
-          {
-            type: 'input_text' as const,
-            text:
-              'You are a Bulgarian voice assistant. ' +
-              'Always answer in natural Bulgarian. ' +
-              'Be concise, helpful, and conversational. ' +
-              'Do not use markdown, bullets, or labels. ' +
-              'Keep continuity with the recent conversation context.',
-          },
-        ],
-      },
-      ...trimmedTurns.map((turn) => ({
-        role: turn.role,
-        content: [
-          {
-            type: 'input_text' as const,
-            text: turn.text,
-          },
-        ],
-      })),
-    ]
+    const inputMessages = this.buildInputMessages(trimmedTurns)
 
     appendVoiceTrace({
       type: 'conversation_service_request',
@@ -128,16 +71,9 @@ export class VoiceConversationService {
         if (!delta) continue
 
         replyText += delta
-
-        appendVoiceTrace({
-          type: 'conversation_service_delta',
-          sessionId: input.sessionId,
-          conversationId: input.conversationId,
-          delta,
-          accumulatedLength: replyText.length,
-        })
-
+        this.traceConversationDelta(input, delta, replyText.length)
         await callbacks?.onTextDelta?.(delta)
+        continue
       }
 
       if (event.type === 'response.completed') {
@@ -148,7 +84,119 @@ export class VoiceConversationService {
     replyText = replyText.trim() || 'Съжалявам, не успях да отговоря.'
 
     this.appendAssistantTurn(input.conversationId, replyText)
+    this.traceConversationOutput(input, replyText)
 
+    await callbacks?.onCompletedText?.(replyText)
+
+    return { replyText }
+  }
+
+  private appendUserTurn(
+    conversationId: string,
+    transcript: string,
+  ): ChatTurn[] {
+    const turns = this.history.get(conversationId) ?? []
+
+    turns.push({
+      role: 'user',
+      text: transcript,
+    })
+
+    const trimmedTurns = turns.slice(-this.maxTurnsPerConversation)
+    this.history.set(conversationId, trimmedTurns)
+
+    return trimmedTurns
+  }
+
+  private appendAssistantTurn(conversationId: string, text: string): void {
+    const turns = this.history.get(conversationId) ?? []
+    turns.push({ role: 'assistant', text })
+    this.history.set(conversationId, turns.slice(-this.maxTurnsPerConversation))
+  }
+
+  private buildInputMessages(turns: ChatTurn[]) {
+    return [
+      {
+        role: 'system' as const,
+        content: [
+          {
+            type: 'input_text' as const,
+            text:
+              'You are a Bulgarian voice assistant. ' +
+              'Always answer in natural Bulgarian. ' +
+              'Be concise, helpful, and conversational. ' +
+              'Do not use markdown, bullets, or labels. ' +
+              'Keep continuity with the recent conversation context.',
+          },
+        ],
+      },
+      ...turns.map((turn) => ({
+        role: turn.role,
+        content: [
+          {
+            type: 'input_text' as const,
+            text: turn.text,
+          },
+        ],
+      })),
+    ]
+  }
+
+  private async handleMissingApiKey(
+    input: VoiceConversationInput,
+    callbacks?: VoiceConversationStreamCallbacks,
+  ): Promise<VoiceConversationResult> {
+    const fallback = `Чух: ${input.transcript}`
+
+    this.appendAssistantTurn(input.conversationId, fallback)
+
+    appendVoiceTrace({
+      type: 'conversation_service_output',
+      sessionId: input.sessionId,
+      conversationId: input.conversationId,
+      transcript: input.transcript,
+      replyText: fallback,
+      mode: 'fallback_no_api_key',
+    })
+
+    await callbacks?.onCompletedText?.(fallback)
+
+    return { replyText: fallback }
+  }
+
+  private traceConversationInput(input: VoiceConversationInput): void {
+    appendVoiceTrace({
+      type: 'conversation_service_input',
+      sessionId: input.sessionId,
+      conversationId: input.conversationId,
+      transcript: input.transcript,
+    })
+
+    if (this.verbose) {
+      this.logger.log(
+        `[CONVERSATION] session=${input.sessionId} conversation=${input.conversationId} user="${input.transcript}"`,
+      )
+    }
+  }
+
+  private traceConversationDelta(
+    input: VoiceConversationInput,
+    delta: string,
+    accumulatedLength: number,
+  ): void {
+    appendVoiceTrace({
+      type: 'conversation_service_delta',
+      sessionId: input.sessionId,
+      conversationId: input.conversationId,
+      delta,
+      accumulatedLength,
+    })
+  }
+
+  private traceConversationOutput(
+    input: VoiceConversationInput,
+    replyText: string,
+  ): void {
     appendVoiceTrace({
       type: 'conversation_service_output',
       sessionId: input.sessionId,
@@ -162,17 +210,5 @@ export class VoiceConversationService {
         `[CONVERSATION REPLY] session=${input.sessionId} conversation=${input.conversationId} assistant="${replyText}"`,
       )
     }
-
-    await callbacks?.onCompletedText?.(replyText)
-
-    return {
-      replyText,
-    }
-  }
-
-  private appendAssistantTurn(conversationId: string, text: string) {
-    const turns = this.history.get(conversationId) ?? []
-    turns.push({ role: 'assistant', text })
-    this.history.set(conversationId, turns.slice(-this.maxTurnsPerConversation))
   }
 }

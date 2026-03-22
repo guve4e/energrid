@@ -14,66 +14,6 @@ export class VoiceSttService {
     apiKey: process.env.OPENAI_API_KEY,
   })
 
-  private pcm16ToWav(
-    pcm16: Buffer,
-    sampleRate = 16000,
-    channels = 1,
-  ): Buffer {
-    const bitsPerSample = 16
-    const byteRate = sampleRate * channels * (bitsPerSample / 8)
-    const blockAlign = channels * (bitsPerSample / 8)
-    const dataSize = pcm16.length
-    const buffer = Buffer.alloc(44 + dataSize)
-
-    buffer.write('RIFF', 0)
-    buffer.writeUInt32LE(36 + dataSize, 4)
-    buffer.write('WAVE', 8)
-
-    buffer.write('fmt ', 12)
-    buffer.writeUInt32LE(16, 16)
-    buffer.writeUInt16LE(1, 20) // PCM
-    buffer.writeUInt16LE(channels, 22)
-    buffer.writeUInt32LE(sampleRate, 24)
-    buffer.writeUInt32LE(byteRate, 28)
-    buffer.writeUInt16LE(blockAlign, 32)
-    buffer.writeUInt16LE(bitsPerSample, 34)
-
-    buffer.write('data', 36)
-    buffer.writeUInt32LE(dataSize, 40)
-    pcm16.copy(buffer, 44)
-
-    return buffer
-  }
-
-  async transcribeBufferedAudio(audio: Buffer): Promise<string> {
-    if (!audio.length) return ''
-
-    try {
-      const wav = this.pcm16ToWav(audio, 16000, 1)
-
-      const file = await toFile(wav, 'turn.wav', {
-        type: 'audio/wav',
-      })
-
-      const result = await this.openai.audio.transcriptions.create({
-        file,
-        model: process.env.BATCH_STT_MODEL || 'gpt-4o-transcribe',
-        language: 'bg',
-      })
-
-      const text = (result.text || '').trim()
-
-      this.logger.log(`[BATCH STT] ${text}`)
-
-      return text
-    } catch (err: any) {
-      this.logger.error(
-        `Batch STT failed: message=${err?.message || 'unknown'} code=${err?.code || '-'} cause=${err?.cause?.message || '-'}`
-      )
-      return ''
-    }
-  }
-
   async createSession(
     onEvent: (event: StreamingSttEvent) => Promise<void>,
   ): Promise<StreamingSttSession> {
@@ -83,16 +23,14 @@ export class VoiceSttService {
     let ended = false
     let closed = false
 
-    let eventHandler: ((event: StreamingSttEvent) => void) | null = null
-
     const emit = async (event: StreamingSttEvent): Promise<void> => {
       if (closed) return
       await onEvent(event)
     }
 
     const session: StreamingSttSession = {
-      onEvent: (cb) => {
-        eventHandler = cb
+      onEvent: () => {
+        // no-op in this local buffered implementation
       },
 
       pushAudio: async (buf: Buffer): Promise<void> => {
@@ -141,5 +79,65 @@ export class VoiceSttService {
 
     this.logger.log('VoiceSttService session created')
     return session
+  }
+
+  async transcribeBufferedAudio(audio: Buffer): Promise<string> {
+    if (!audio.length) return ''
+
+    try {
+      const wav = this.pcm16ToWav(audio, 16000, 1)
+
+      const file = await toFile(wav, 'turn.wav', {
+        type: 'audio/wav',
+      })
+
+      const result = await this.openai.audio.transcriptions.create({
+        file,
+        model: process.env.BATCH_STT_MODEL || 'gpt-4o-transcribe',
+        language: 'bg',
+      })
+
+      const text = (result.text || '').trim()
+
+      this.logger.log(`[BATCH STT] ${text}`)
+
+      return text
+    } catch (err: any) {
+      this.logger.error(
+        `Batch STT failed: message=${err?.message || 'unknown'} code=${err?.code || '-'} cause=${err?.cause?.message || '-'}`,
+      )
+      return ''
+    }
+  }
+
+  private pcm16ToWav(
+    pcm16: Buffer,
+    sampleRate = 16000,
+    channels = 1,
+  ): Buffer {
+    const bitsPerSample = 16
+    const byteRate = sampleRate * channels * (bitsPerSample / 8)
+    const blockAlign = channels * (bitsPerSample / 8)
+    const dataSize = pcm16.length
+    const buffer = Buffer.alloc(44 + dataSize)
+
+    buffer.write('RIFF', 0)
+    buffer.writeUInt32LE(36 + dataSize, 4)
+    buffer.write('WAVE', 8)
+
+    buffer.write('fmt ', 12)
+    buffer.writeUInt32LE(16, 16)
+    buffer.writeUInt16LE(1, 20)
+    buffer.writeUInt16LE(channels, 22)
+    buffer.writeUInt32LE(sampleRate, 24)
+    buffer.writeUInt32LE(byteRate, 28)
+    buffer.writeUInt16LE(blockAlign, 32)
+    buffer.writeUInt16LE(bitsPerSample, 34)
+
+    buffer.write('data', 36)
+    buffer.writeUInt32LE(dataSize, 40)
+    pcm16.copy(buffer, 44)
+
+    return buffer
   }
 }

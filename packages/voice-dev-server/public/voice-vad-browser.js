@@ -1,14 +1,16 @@
 window.createVoiceVadBrowser = function createVoiceVadBrowser({
-  config,
-  log,
-  onSpeechStart,
-  onSpeechEnd,
-  onMisfire,
-}) {
+                                                                config,
+                                                                log,
+                                                                onSpeechStart,
+                                                                onSpeechEnd,
+                                                                onMisfire,
+                                                              }) {
   let vadInstance = null
 
   async function ensureCreated() {
-    if (vadInstance) return vadInstance
+    if (vadInstance) {
+      return vadInstance
+    }
 
     log('[vad] creating MicVAD instance')
 
@@ -46,9 +48,22 @@ window.createVoiceVadBrowser = function createVoiceVadBrowser({
     await vadInstance.pause()
   }
 
+  async function destroy() {
+    if (!vadInstance) return
+
+    try {
+      await vadInstance.pause()
+    } catch (_) {
+      // ignore
+    }
+
+    vadInstance = null
+  }
+
   return {
     ensureCreated,
     start,
     pause,
+    destroy,
   }
 }

@@ -1,24 +1,38 @@
 window.createVoiceWsClient = function createVoiceWsClient({ wsUrl, log }) {
   let ws = null
 
-  function connect({
-    onOpen,
-    onMessage,
-    onClose,
-    onError,
-  }) {
+  function connect({ onOpen, onMessage, onClose, onError }) {
+    if (ws) {
+      throw new Error('WebSocket already exists')
+    }
+
+    log?.(`[ws] connecting to ${wsUrl}`)
+
     ws = new WebSocket(wsUrl)
 
-    ws.onopen = () => onOpen?.()
+    ws.onopen = () => {
+      log?.('[ws] open')
+      onOpen?.()
+    }
+
     ws.onmessage = (event) => {
-      const data = JSON.parse(event.data)
-      onMessage?.(data)
+      try {
+        const data = JSON.parse(event.data)
+        onMessage?.(data)
+      } catch (error) {
+        log?.(`[ws] failed to parse message: ${String(error)}`)
+      }
     }
-    ws.onclose = () => {
-      onClose?.()
+
+    ws.onclose = (event) => {
+      log?.(`[ws] close code=${event.code} reason=${event.reason || ''}`)
+      const prev = ws
       ws = null
+      onClose?.(event, prev)
     }
+
     ws.onerror = (event) => {
+      log?.('[ws] error')
       onError?.(event)
     }
 
@@ -26,20 +40,27 @@ window.createVoiceWsClient = function createVoiceWsClient({ wsUrl, log }) {
   }
 
   function sendBinary(buffer) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    if (!isOpen()) return
     ws.send(buffer)
   }
 
   function sendJson(payload) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    if (!isOpen()) return
     ws.send(JSON.stringify(payload))
   }
 
   function close() {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.close()
-    }
+    if (!ws) return
+
+    const socket = ws
     ws = null
+
+    if (
+      socket.readyState === WebSocket.OPEN ||
+      socket.readyState === WebSocket.CONNECTING
+    ) {
+      socket.close()
+    }
   }
 
   function isOpen() {
