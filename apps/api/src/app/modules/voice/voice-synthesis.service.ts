@@ -17,6 +17,10 @@ export class VoiceSynthesisService {
   async synthesize(text: string): Promise<SynthesizedVoiceAudio> {
     const normalizedText = this.normalizeText(text)
 
+    if (!normalizedText) {
+      throw new Error('Cannot synthesize empty text')
+    }
+
     this.logger.log(
       `Synthesizing assistant audio for text length=${normalizedText.length}`,
     )
@@ -29,11 +33,10 @@ export class VoiceSynthesisService {
     })
 
     const arrayBuffer = await response.arrayBuffer()
-    const audioBuffer = Buffer.from(arrayBuffer)
 
     return {
       format: 'wav',
-      audioBuffer,
+      audioBuffer: Buffer.from(arrayBuffer),
     }
   }
 
