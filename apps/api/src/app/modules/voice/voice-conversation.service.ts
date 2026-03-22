@@ -10,6 +10,11 @@ type ChatTurn =
   | { role: 'user'; text: string }
   | { role: 'assistant'; text: string }
 
+export interface VoiceConversationStreamCallbacks {
+  onTextDelta?: (delta: string) => Promise<void> | void
+  onCompletedText?: (fullText: string) => Promise<void> | void
+}
+
 @Injectable()
 export class VoiceConversationService {
   private readonly logger = new Logger(VoiceConversationService.name)
@@ -24,6 +29,14 @@ export class VoiceConversationService {
 
   async handleFinalTranscript(
     input: VoiceConversationInput,
+  ): Promise<VoiceConversationResult> {
+    const result = await this.handleFinalTranscriptStream(input)
+    return { replyText: result.replyText }
+  }
+
+  async handleFinalTranscriptStream(
+    input: VoiceConversationInput,
+    callbacks?: VoiceConversationStreamCallbacks,
   ): Promise<VoiceConversationResult> {
     appendVoiceTrace({
       type: 'conversation_service_input',
@@ -60,6 +73,8 @@ export class VoiceConversationService {
         replyText: fallback,
         mode: 'fallback_no_api_key',
       })
+
+      await callbacks?.onCompletedText?.(fallback)
 
       return { replyText: fallback }
     }
@@ -99,13 +114,38 @@ export class VoiceConversationService {
       history: trimmedTurns,
     })
 
-    const response = await this.openai.responses.create({
+    let replyText = ''
+
+    const stream = await this.openai.responses.create({
       model: 'gpt-4o-mini',
       input: inputMessages,
+      stream: true,
     })
 
-    const replyText =
-      response.output_text?.trim() || 'Съжалявам, не успях да отговоря.'
+    for await (const event of stream as AsyncIterable<any>) {
+      if (event.type === 'response.output_text.delta') {
+        const delta = event.delta || ''
+        if (!delta) continue
+
+        replyText += delta
+
+        appendVoiceTrace({
+          type: 'conversation_service_delta',
+          sessionId: input.sessionId,
+          conversationId: input.conversationId,
+          delta,
+          accumulatedLength: replyText.length,
+        })
+
+        await callbacks?.onTextDelta?.(delta)
+      }
+
+      if (event.type === 'response.completed') {
+        break
+      }
+    }
+
+    replyText = replyText.trim() || 'Съжалявам, не успях да отговоря.'
 
     this.appendAssistantTurn(input.conversationId, replyText)
 
@@ -122,6 +162,8 @@ export class VoiceConversationService {
         `[CONVERSATION REPLY] session=${input.sessionId} conversation=${input.conversationId} assistant="${replyText}"`,
       )
     }
+
+    await callbacks?.onCompletedText?.(replyText)
 
     return {
       replyText,

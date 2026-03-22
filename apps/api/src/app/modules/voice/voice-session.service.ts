@@ -481,11 +481,77 @@ export class VoiceSessionService {
     })
 
     try {
-      const result = await this.conversationService.handleFinalTranscript({
-        conversationId: session.conversationId,
-        sessionId: session.id,
-        transcript: session.finalTranscript,
-      })
+      let streamedReply = ''
+      let speakableBuffer = ''
+      let audioChunkIndex = 0
+
+      const flushStableChunks = async (forceFinal: boolean): Promise<void> => {
+        while (true) {
+          const { chunk, remainder } = this.extractSpeakableChunk(speakableBuffer)
+
+          if (!chunk) {
+            if (forceFinal) {
+              const finalChunk = speakableBuffer.trim()
+              if (finalChunk) {
+                speakableBuffer = ''
+                await this.sendAssistantAudioChunkFromText(
+                  session,
+                  finalChunk,
+                  audioChunkIndex++,
+                  true,
+                )
+              }
+            }
+            break
+          }
+
+          speakableBuffer = remainder
+          const isLastChunk = forceFinal && !speakableBuffer.trim()
+
+          await this.sendAssistantAudioChunkFromText(
+            session,
+            chunk,
+            audioChunkIndex++,
+            isLastChunk,
+          )
+        }
+      }
+
+      const result = await this.conversationService.handleFinalTranscriptStream(
+        {
+          conversationId: session.conversationId,
+          sessionId: session.id,
+          transcript: session.finalTranscript,
+        },
+        {
+          onTextDelta: async (delta: string) => {
+            streamedReply += delta
+            speakableBuffer += delta
+
+            this.sendToClient(session, {
+              type: 'assistant_text_delta',
+              sessionId: session.id,
+              delta,
+              full: streamedReply,
+            })
+
+            appendVoiceTrace({
+              type: 'assistant_text_delta',
+              sessionId: session.id,
+              conversationId: session.conversationId,
+              delta,
+              accumulatedLength: streamedReply.length,
+            })
+
+            await flushStableChunks(false)
+          },
+
+          onCompletedText: async (fullText: string) => {
+            streamedReply = fullText
+            await flushStableChunks(true)
+          },
+        },
+      )
 
       session.assistantReply = result.replyText
 
@@ -505,8 +571,6 @@ export class VoiceSessionService {
         sessionId: session.id,
         text: result.replyText,
       })
-
-      await this.sendAssistantAudioChunks(session, result.replyText)
 
       this.emitToBoth(session, {
         type: 'turn_end',
@@ -647,4 +711,74 @@ export class VoiceSessionService {
       })
     }
   }
+
+  private extractSpeakableChunk(buffer: string): {
+    chunk: string | null
+    remainder: string
+  } {
+    const trimmed = buffer.trimStart()
+    if (!trimmed) {
+      return { chunk: null, remainder: '' }
+    }
+
+    const sentenceMatch = trimmed.match(/^(.+?[.!?…]+)(\s+|$)/)
+    if (sentenceMatch) {
+      const chunk = sentenceMatch[1].trim()
+      const remainder = trimmed.slice(sentenceMatch[0].length).trimStart()
+      return { chunk, remainder }
+    }
+
+    if (trimmed.length >= 140) {
+      let splitAt = trimmed.lastIndexOf(',', 140)
+      if (splitAt < 60) splitAt = trimmed.lastIndexOf(' ', 140)
+      if (splitAt < 40) splitAt = 140
+
+      const chunk = trimmed.slice(0, splitAt).trim()
+      const remainder = trimmed.slice(splitAt).trimStart()
+      return { chunk, remainder }
+    }
+
+    return { chunk: null, remainder: trimmed }
+  }
+
+  private async sendAssistantAudioChunkFromText(
+    session: ActiveVoiceSession,
+    textChunk: string,
+    chunkIndex: number,
+    isLastChunk: boolean,
+  ): Promise<void> {
+    const synthesized = await this.synthesisService.synthesize(textChunk)
+
+    this.sendToClient(session, {
+      type: 'assistant_audio_chunk',
+      sessionId: session.id,
+      format: synthesized.format,
+      chunkIndex,
+      isLastChunk,
+      text: textChunk,
+      audioBase64: synthesized.audioBuffer.toString('base64'),
+    })
+
+    this.debugEvents.emit({
+      type: 'assistant_audio_chunk',
+      sessionId: session.id,
+      format: synthesized.format,
+      bytes: synthesized.audioBuffer.length,
+      chunkIndex,
+      isLastChunk,
+      text: textChunk,
+    })
+
+    appendVoiceTrace({
+      type: 'assistant_audio_chunk',
+      sessionId: session.id,
+      conversationId: session.conversationId,
+      bytes: synthesized.audioBuffer.length,
+      chunkIndex,
+      isLastChunk,
+      text: textChunk,
+      assistantAudioAt: Date.now(),
+    })
+  }
+
 }

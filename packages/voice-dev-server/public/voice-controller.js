@@ -235,12 +235,30 @@ window.createVoiceController = function createVoiceController({
             return
           }
 
+          if (data.type === 'assistant_text_delta') {
+            appendAssistantDelta(data.delta || '', data.full || '')
+
+            if (state.currentTurn && state.currentTurn.assistantFinalAt == null) {
+              // first visible assistant activity
+              state.currentTurn.assistantFinalAt = nowMs()
+            }
+
+            if (state.state !== 'speaking') {
+              setState('assistant_streaming')
+            }
+
+            return
+          }
+
           if (data.type === 'assistant_final') {
-            state.currentAssistantMessage = ui.createMessage('assistant', data.text || '')
+            const message = ensureAssistantMessage()
+            message.textEl.textContent = data.text || ''
 
             if (state.currentTurn) {
               state.currentTurn.reply = data.text || ''
-              state.currentTurn.assistantFinalAt = nowMs()
+              if (state.currentTurn.assistantFinalAt == null) {
+                state.currentTurn.assistantFinalAt = nowMs()
+              }
             }
 
             setState('assistant_ready')
@@ -248,8 +266,10 @@ window.createVoiceController = function createVoiceController({
           }
 
           if (data.type === 'assistant_audio_chunk') {
+            const message = ensureAssistantMessage()
+
             player.enqueue(
-              state.currentAssistantMessage,
+              message,
               data.audioBase64 || '',
               data.chunkIndex ?? 0,
               Boolean(data.isLastChunk),
@@ -362,6 +382,18 @@ window.createVoiceController = function createVoiceController({
     player.clear()
     ui.resetConversation(state)
     ui.log('new conversation created')
+  }
+
+  function ensureAssistantMessage() {
+    if (!state.currentAssistantMessage) {
+      state.currentAssistantMessage = ui.createMessage('assistant', '')
+    }
+    return state.currentAssistantMessage
+  }
+
+  function appendAssistantDelta(delta, fullText) {
+    const message = ensureAssistantMessage()
+    message.textEl.textContent = fullText || ((message.textEl.textContent || '') + delta)
   }
 
   function init() {
