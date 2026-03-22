@@ -73,15 +73,19 @@ window.createVoiceController = function createVoiceController({
       index: state.turnCounter,
       conversationId: state.conversationId,
       sessionId: '',
+
       speechCapturedAt: null,
       wsCreateAt: null,
       wsOpenAt: null,
       audioSendStartAt: null,
       audioSendEndAt: null,
+
       sttFinalAt: null,
+      assistantFirstDeltaAt: null,
+      assistantFirstAudioAt: null,
       assistantFinalAt: null,
-      assistantAudioAt: null,
       turnEndAt: null,
+
       transcript: '',
       reply: '',
       speechBytes: 0,
@@ -275,8 +279,8 @@ window.createVoiceController = function createVoiceController({
               Boolean(data.isLastChunk),
             )
 
-            if (state.currentTurn && state.currentTurn.assistantAudioAt == null) {
-              state.currentTurn.assistantAudioAt = nowMs()
+            if (state.currentTurn && state.currentTurn.assistantFirstAudioAt == null) {
+              state.currentTurn.assistantFirstAudioAt = nowMs()
             }
 
             setState('speaking')
@@ -288,7 +292,47 @@ window.createVoiceController = function createVoiceController({
 
             if (state.currentTurn) {
               state.currentTurn.turnEndAt = nowMs()
+
               ui.pushMetricsRow(state.currentTurn)
+
+              // 👇 ADD THIS BLOCK (DO NOT MOVE pushMetricsRow)
+              const turn = state.currentTurn
+
+              const sttMs =
+                turn.sttFinalAt && turn.speechCapturedAt
+                  ? turn.sttFinalAt - turn.speechCapturedAt
+                  : null
+
+              const firstTextMs =
+                turn.assistantFirstDeltaAt && turn.sttFinalAt
+                  ? turn.assistantFirstDeltaAt - turn.sttFinalAt
+                  : null
+
+              const firstAudioMs =
+                turn.assistantFirstAudioAt && turn.sttFinalAt
+                  ? turn.assistantFirstAudioAt - turn.sttFinalAt
+                  : null
+
+              const completeMs =
+                turn.assistantFinalAt && turn.sttFinalAt
+                  ? turn.assistantFinalAt - turn.sttFinalAt
+                  : null
+
+              const totalMs =
+                turn.turnEndAt && turn.speechCapturedAt
+                  ? turn.turnEndAt - turn.speechCapturedAt
+                  : null
+
+              ui.log(
+                `[metrics] turn=${turn.index} ` +
+                `stt=${formatMs(sttMs)} ` +
+                `first_text=${formatMs(firstTextMs)} ` +
+                `first_audio=${formatMs(firstAudioMs)} ` +
+                `complete=${formatMs(completeMs)} ` +
+                `total=${formatMs(totalMs)} ` +
+                `bytes=${turn.speechBytes} ` +
+                `seconds=${turn.speechSeconds.toFixed(2)}`
+              )
             }
 
             cleanupTurnSocket()

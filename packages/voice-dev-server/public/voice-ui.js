@@ -85,29 +85,24 @@ window.createVoiceUi = function createVoiceUi() {
   }
 
   function pushMetricsRow(turn) {
-    const captureToOpenMs =
-      turn.wsOpenAt && turn.speechCapturedAt
-        ? turn.wsOpenAt - turn.speechCapturedAt
-        : null
-
-    const uploadMs =
-      turn.audioSendEndAt && turn.audioSendStartAt
-        ? turn.audioSendEndAt - turn.audioSendStartAt
-        : null
-
     const sttMs =
-      turn.sttFinalAt && turn.audioSendEndAt
-        ? turn.sttFinalAt - turn.audioSendEndAt
+      turn.sttFinalAt && turn.speechCapturedAt
+        ? turn.sttFinalAt - turn.speechCapturedAt
         : null
 
-    const llmMs =
+    const firstTextMs =
+      turn.assistantFirstDeltaAt && turn.sttFinalAt
+        ? turn.assistantFirstDeltaAt - turn.sttFinalAt
+        : null
+
+    const firstAudioMs =
+      turn.assistantFirstAudioAt && turn.sttFinalAt
+        ? turn.assistantFirstAudioAt - turn.sttFinalAt
+        : null
+
+    const completeMs =
       turn.assistantFinalAt && turn.sttFinalAt
         ? turn.assistantFinalAt - turn.sttFinalAt
-        : null
-
-    const ttsMs =
-      turn.assistantAudioAt && turn.assistantFinalAt
-        ? turn.assistantAudioAt - turn.assistantFinalAt
         : null
 
     const totalMs =
@@ -119,17 +114,18 @@ window.createVoiceUi = function createVoiceUi() {
     row.innerHTML = `
       <td>${turn.index}</td>
       <td class="${latencyClass(sttMs)}">${formatMs(sttMs)}</td>
-      <td class="${latencyClass(llmMs)}">${formatMs(llmMs)}</td>
-      <td class="${latencyClass(ttsMs)}">${formatMs(ttsMs)}</td>
+      <td class="${latencyClass(firstTextMs)}">${formatMs(firstTextMs)}</td>
+      <td class="${latencyClass(firstAudioMs)}">${formatMs(firstAudioMs)}</td>
+      <td class="${latencyClass(completeMs)}">${formatMs(completeMs)}</td>
       <td class="${latencyClass(totalMs)}">${formatMs(totalMs)}</td>
       <td>${(turn.transcript || '').slice(0, 80)}</td>
     `
+
     row.title =
-      `capture→open=${formatMs(captureToOpenMs)} | ` +
-      `upload=${formatMs(uploadMs)} | ` +
       `stt=${formatMs(sttMs)} | ` +
-      `llm=${formatMs(llmMs)} | ` +
-      `tts=${formatMs(ttsMs)} | ` +
+      `first_text=${formatMs(firstTextMs)} | ` +
+      `first_audio=${formatMs(firstAudioMs)} | ` +
+      `complete=${formatMs(completeMs)} | ` +
       `total=${formatMs(totalMs)}`
 
     els.metricsBody.prepend(row)
