@@ -5,7 +5,10 @@
     "emitDeclarationOnly": false,
     "importHelpers": true,
     "isolatedModules": true,
-    "lib": ["es2022", "dom"],
+    "lib": [
+      "es2022",
+      "dom"
+    ],
     "module": "esnext",
     "moduleResolution": "node",
     "noEmitOnError": true,
@@ -18,9 +21,18 @@
     "target": "es2022",
     "baseUrl": ".",
     "paths": {
-      "@energrid/stt-stream-core": ["packages/stt-stream-core/src/index.ts"],
-      "@energrid/stt-stream-dev": ["packages/stt-stream-dev/src/index.ts"],
-      "@energrid/stt-stream-openai": ["packages/stt-stream-openai/src/index.ts"]
+      "@energrid/stt-stream-core": [
+        "packages/stt-stream-core/src/index.ts"
+      ],
+      "@energrid/stt-stream-dev": [
+        "packages/stt-stream-dev/src/index.ts"
+      ],
+      "@energrid/stt-stream-openai": [
+        "packages/stt-stream-openai/src/index.ts"
+      ],
+      "@energrid/domain-panel": [
+        "libs/domain-panel/src/index.ts"
+      ]
     }
   }
 }

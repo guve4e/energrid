@@ -17,42 +17,116 @@ export function analyzeCompiledPanel(
 
   if (!compileResult.compiled) return diagnostics;
 
-  const { snapshot } = compileResult.compiled;
-  const devices = snapshot.devices as Array<Record<string, unknown>>;
-  const circuits = snapshot.circuits as Array<Record<string, unknown>>;
+  const { snapshot, derived } = compileResult.compiled;
 
-  const breakerIds = new Set(
-    devices
-      .map((d) => (typeof d.uid === 'string' ? d.uid : null))
-      .filter(Boolean) as string[],
-  );
+  const devices = snapshot.devices;
+  const circuits = snapshot.circuits;
+  const mainBreakers = devices.filter((d) => d.isMain);
+
+  if (mainBreakers.length > 1) {
+    diagnostics.push(
+      makeDiagnostic(
+        'main.multiple',
+        'error',
+        'Main',
+        `Multiple main breakers detected (${mainBreakers.length}).`,
+        'snapshot.devices',
+      ),
+    );
+  }
 
   for (const c of circuits) {
-    const breakerUid =
-      typeof c.breakerUid === 'string' ? c.breakerUid : undefined;
-    const label = typeof c.label === 'string' ? c.label : 'Circuit';
+    const breakerUid = c.breakerUid ?? undefined;
 
     if (!breakerUid) {
       diagnostics.push(
         makeDiagnostic(
-          `circuit.unassigned.${label}`,
+          `circuit.unassigned.${c.id}`,
           'warning',
           'Circuit',
-          `"${label}" has no breaker assigned.`,
+          `"${c.label}" has no breaker assigned.`,
           'snapshot.circuits',
         ),
       );
       continue;
     }
 
-    if (!breakerIds.has(breakerUid)) {
+    if (!derived.devicesByUid[breakerUid]) {
       diagnostics.push(
         makeDiagnostic(
-          `circuit.missingBreaker.${label}`,
+          `circuit.missingBreaker.${c.id}`,
           'error',
           'Circuit',
-          `"${label}" references a missing breaker "${breakerUid}".`,
+          `"${c.label}" references a missing breaker "${breakerUid}".`,
           'snapshot.circuits',
+        ),
+      );
+      continue;
+    }
+
+    const state = derived.circuitStates[c.id];
+
+    if (!state.hasL) {
+      diagnostics.push(
+        makeDiagnostic(
+          `circuit.unfed.${c.id}`,
+          'error',
+          'Feed',
+          `"${c.label}" is on an unfed breaker.`,
+          'snapshot.circuits',
+        ),
+      );
+    }
+
+    if (!state.hasPE) {
+      diagnostics.push(
+        makeDiagnostic(
+          `circuit.nope.${c.id}`,
+          'warning',
+          'PE',
+          `"${c.label}" has no PE conductor declared.`,
+          'snapshot.circuits',
+        ),
+      );
+    }
+
+    if (!state.isComplete) {
+      diagnostics.push(
+        makeDiagnostic(
+          `circuit.incomplete.${c.id}`,
+          'info',
+          'Circuit',
+          `"${c.label}" is not fully complete.`,
+          'snapshot.circuits',
+        ),
+      );
+    }
+  }
+
+  for (const d of devices) {
+    const state = derived.breakerStates[d.uid];
+    if (!state) continue;
+
+    if (!d.isMain && !state.hasCircuit) {
+      diagnostics.push(
+        makeDiagnostic(
+          `breaker.nocircuit.${d.uid}`,
+          'info',
+          'Breaker',
+          `"${d.label ?? d.uid}" has no circuit.`,
+          'snapshot.devices',
+        ),
+      );
+    }
+
+    if (!d.isMain && !state.isFed) {
+      diagnostics.push(
+        makeDiagnostic(
+          `breaker.unfed.${d.uid}`,
+          'warning',
+          'Breaker',
+          `"${d.label ?? d.uid}" is not fed.`,
+          'snapshot.devices',
         ),
       );
     }
