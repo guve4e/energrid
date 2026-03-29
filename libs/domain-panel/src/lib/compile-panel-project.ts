@@ -217,20 +217,61 @@ function detectMainBreakerUid(devices: RawPlacedDevice[]) {
 function buildFedDeviceUids(
   devices: RawPlacedDevice[],
   combs: RawCombGroup[],
+  wires: RawWire[],
 ): string[] {
   const out = new Set<string>();
 
+  const devicesByUid = Object.fromEntries(devices.map((d) => [d.uid, d]));
+
+  function deviceHasSystemLive(uid: string): boolean {
+    const prefix = `${uid}:top:`;
+    return wires.some((w) => {
+      if (w.spec.kind !== 'L') return false;
+
+      const a = w.from.anchorId;
+      const b = w.to.anchorId;
+
+      const fromSystemToDevice =
+        a === 'system:feed:L' && b.startsWith(prefix);
+      const fromDeviceToSystem =
+        b === 'system:feed:L' && a.startsWith(prefix);
+
+      return fromSystemToDevice || fromDeviceToSystem;
+    });
+  }
+
+  // Seed fed set only from actual system live input.
   for (const d of devices) {
-    const start = d.slot;
-    const end = d.slot + d.widthModules - 1;
+    if (deviceHasSystemLive(d.uid)) {
+      out.add(d.uid);
+    }
+  }
 
-    const fed = combs.some(
-      (c) =>
-        c.railId === d.railId &&
-        rangesOverlap(start, end, c.startSlot, c.endSlot),
-    );
+  // Propagate feed through combs ONLY if comb has a fed sourceUid.
+  let changed = true;
+  while (changed) {
+    changed = false;
 
-    if (fed) out.add(d.uid);
+    for (const comb of combs) {
+      if (!comb.sourceUid) continue;
+      if (!out.has(comb.sourceUid)) continue;
+
+      for (const d of devices) {
+        if (d.uid === comb.sourceUid) continue;
+        if (d.railId !== comb.railId) continue;
+
+        const start = d.slot;
+        const end = d.slot + d.widthModules - 1;
+
+        const overlaps = rangesOverlap(start, end, comb.startSlot, comb.endSlot);
+        if (!overlaps) continue;
+
+        if (!out.has(d.uid)) {
+          out.add(d.uid);
+          changed = true;
+        }
+      }
+    }
   }
 
   return Array.from(out);
@@ -383,7 +424,7 @@ export function compilePanelProject(project: unknown): PanelCompileResult {
   const circuitsById = buildCircuitsById(circuits);
   const breakerCircuitMap = buildBreakerCircuitMap(circuits);
   const mainBreakerUid = detectMainBreakerUid(devices);
-  const fedDeviceUids = buildFedDeviceUids(devices, combs);
+  const fedDeviceUids = buildFedDeviceUids(devices, combs, wires);
   const circuitStates = buildCircuitStates(circuits, devicesByUid, fedDeviceUids);
   const breakerStates = buildBreakerStates(devices, fedDeviceUids, breakerCircuitMap);
   const circuitSuggestions = buildCircuitSuggestions(circuits);
@@ -420,8 +461,7 @@ export function compilePanelProject(project: unknown): PanelCompileResult {
       circuitStates,
       breakerStates,
       circuitSuggestions,
-      __debugCompilerVersion: 'panel-compiler-v2',
-    } as any,
+    },
   };
 
   return {

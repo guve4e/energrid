@@ -1,0 +1,7 @@
+{
+  "name": "domain-estimator",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "libs/domain-estimator/src",
+  "projectType": "library",
+  "targets": {}
+}

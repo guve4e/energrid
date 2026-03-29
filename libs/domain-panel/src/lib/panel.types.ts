@@ -10,6 +10,9 @@ export type PanelDiagnostic = {
   kind: string;
   message: string;
   path?: string;
+  circuitId?: string;
+  breakerUid?: string;
+  deviceUid?: string;
 };
 
 export type RawRail = {

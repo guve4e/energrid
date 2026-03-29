@@ -3,7 +3,13 @@
   "version": "0.0.0",
   "license": "MIT",
   "scripts": {
-    "api": "nx serve api"
+    "api": "nx serve api",
+    "core:migrate:create": "npm --prefix apps/core run migrate:create --",
+    "core:migrate:up": "npm --prefix apps/core run migrate:up",
+    "core:migrate:down": "npm --prefix apps/core run migrate:down",
+    "core:migrate:status": "npm --prefix apps/core run migrate:status",
+    "core:seed:pricing": "node apps/core/scripts/seed-pricing-catalog.js",
+    "core:test:estimator": "node -r ts-node/register apps/core/scripts/test-estimator.js"
   },
   "private": true,
   "devDependencies": {
@@ -66,6 +72,7 @@
     "axios": "^1.6.0",
     "dotenv": "^17.3.1",
     "openai": "^6.32.0",
+    "pg": "^8.20.0",
     "pinia": "^3.0.4",
     "reflect-metadata": "^0.1.13",
     "rxjs": "^7.8.0",
