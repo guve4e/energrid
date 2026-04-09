@@ -20,16 +20,29 @@ export interface EstimatePointInput {
   wallType?: EstimateWallType;
 }
 
+export type EstimateSimpleDeviceKind =
+  | 'socket_or_switch_concealed'
+  | 'socket_or_switch_surface'
+  | 'three_phase_socket'
+  | 'bathroom_fan'
+  | 'motion_sensor'
+  | 'internet_outlet'
+  | 'light_fixture_basic';
+
+export type EstimateApplianceConnectionKind =
+  | 'boiler_connection'
+  | 'stove_connection'
+  | 'ac_connection';
+
+export type EstimateDeviceKind =
+  | EstimateSimpleDeviceKind
+  | EstimateApplianceConnectionKind;
+
 export interface EstimateDeviceInput {
-  kind:
-    | 'socket_or_switch_concealed'
-    | 'socket_or_switch_surface'
-    | 'three_phase_socket'
-    | 'bathroom_fan'
-    | 'light_fixture_basic'
-    | 'motion_sensor'
-    | 'internet_outlet';
+  kind: EstimateDeviceKind;
   quantity: number;
+  routeLengthMeters?: number;
+  wallType?: EstimateWallType;
 }
 
 export interface EstimatePanelInput {

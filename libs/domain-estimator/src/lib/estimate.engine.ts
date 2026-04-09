@@ -1,10 +1,12 @@
 import type {
+  EstimateApplianceConnectionKind,
   EstimateDeviceInput,
   EstimateLineResult,
   EstimatePanelInput,
   EstimatePointInput,
   EstimateRequestInput,
   EstimateResult,
+  EstimateSimpleDeviceKind,
   PricingCatalogRow,
 } from './estimate.types';
 
@@ -59,6 +61,61 @@ function addLine(
   });
 }
 
+function isApplianceConnectionKind(
+  kind: EstimateDeviceInput['kind'],
+): kind is EstimateApplianceConnectionKind {
+  return (
+    kind === 'boiler_connection' ||
+    kind === 'stove_connection' ||
+    kind === 'ac_connection'
+  );
+}
+
+function handleSimpleDeviceInput(
+  lines: EstimateLineResult[],
+  catalogMap: Map<string, PricingCatalogRow>,
+  device: EstimateDeviceInput & { kind: EstimateSimpleDeviceKind },
+): void {
+  const quantity = safePositive(device.quantity, 'device.quantity');
+  if (quantity === 0) return;
+
+  const row = mustCatalogRow(catalogMap, device.kind);
+  addLine(lines, row, quantity);
+}
+
+function handleApplianceConnectionInput(
+  lines: EstimateLineResult[],
+  catalogMap: Map<string, PricingCatalogRow>,
+  device: EstimateDeviceInput & { kind: EstimateApplianceConnectionKind },
+): void {
+  const quantity = safePositive(device.quantity, 'device.quantity');
+  if (quantity === 0) return;
+
+  const baseRow = mustCatalogRow(catalogMap, device.kind);
+  addLine(lines, baseRow, quantity);
+
+  const routeLengthMeters = Math.max(
+    0,
+    safePositive(device.routeLengthMeters ?? 0, 'device.routeLengthMeters'),
+  );
+
+  if (routeLengthMeters > 3) {
+    const extraMetersPerDevice = routeLengthMeters - 3;
+    const extraRow = mustCatalogRow(catalogMap, 'power_line_extra_meter_after_3m');
+    addLine(lines, extraRow, quantity * extraMetersPerDevice);
+  }
+
+  const wallType = device.wallType ?? 'none';
+  if (wallType === 'brick' || wallType === 'concrete') {
+    const chaseCode =
+      wallType === 'brick'
+        ? 'chasing_brick_per_meter'
+        : 'chasing_concrete_per_meter';
+    const chaseRow = mustCatalogRow(catalogMap, chaseCode);
+    addLine(lines, chaseRow, quantity * routeLengthMeters);
+  }
+}
+
 function handlePointInput(
   lines: EstimateLineResult[],
   catalogMap: Map<string, PricingCatalogRow>,
@@ -111,11 +168,15 @@ function handleDeviceInput(
   catalogMap: Map<string, PricingCatalogRow>,
   device: EstimateDeviceInput,
 ): void {
-  const quantity = safePositive(device.quantity, 'device.quantity');
-  if (quantity === 0) return;
+  if (isApplianceConnectionKind(device.kind)) {
+    handleApplianceConnectionInput(lines, catalogMap, device as any);
+    return;
+  }
 
-  const row = mustCatalogRow(catalogMap, device.kind);
-  addLine(lines, row, quantity);
+  handleSimpleDeviceInput(lines, catalogMap, {
+    ...device,
+    kind: device.kind,
+  });
 }
 
 function handlePanelInput(
@@ -144,7 +205,14 @@ function deriveConfidence(input: EstimateRequestInput): 'low' | 'medium' | 'high
       (p) => p.routeLengthMeters > 3 || (p.wallType ?? 'none') !== 'none',
     ) ?? false;
 
-  if (hasComplexPoints) {
+  const hasComplexDevices =
+    input.devices?.some(
+      (d) =>
+        isApplianceConnectionKind(d.kind) &&
+        ((d.routeLengthMeters ?? 0) > 3 || (d.wallType ?? 'none') !== 'none'),
+    ) ?? false;
+
+  if (hasComplexPoints || hasComplexDevices) {
     return 'medium';
   }
 
@@ -162,7 +230,14 @@ function deriveAssumptions(input: EstimateRequestInput): string[] {
       (p) => p.routeLengthMeters > 3 || (p.wallType ?? 'none') !== 'none',
     ) ?? false;
 
-  if (hasComplexPoints) {
+  const hasComplexDevices =
+    input.devices?.some(
+      (d) =>
+        isApplianceConnectionKind(d.kind) &&
+        ((d.routeLengthMeters ?? 0) > 0 || (d.wallType ?? 'none') !== 'none'),
+    ) ?? false;
+
+  if (hasComplexPoints || hasComplexDevices) {
     assumptions.add('Дължините и условията на трасетата са приети по подадените данни.');
     assumptions.add('Къртенето е изчислено по ориентировъчен модел със споделени трасета.');
   }

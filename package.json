@@ -9,7 +9,9 @@
     "core:migrate:down": "npm --prefix apps/core run migrate:down",
     "core:migrate:status": "npm --prefix apps/core run migrate:status",
     "core:seed:pricing": "node apps/core/scripts/seed-pricing-catalog.js",
-    "core:test:estimator": "node -r ts-node/register apps/core/scripts/test-estimator.js"
+    "core:test:estimator": "node -r ts-node/register apps/core/scripts/test-estimator.js",
+    "core:test:persist": "TS_NODE_TRANSPILE_ONLY=1 TS_NODE_COMPILER_OPTIONS='{\"module\":\"commonjs\",\"moduleResolution\":\"node\"}' node apps/core/scripts/test-estimator-persist.js",
+    "core": "nx serve core"
   },
   "private": true,
   "devDependencies": {
@@ -33,6 +35,7 @@
     "@swc/helpers": "~0.5.18",
     "@types/jest": "^30.0.0",
     "@types/node": "20.19.9",
+    "@types/pg": "^8.20.0",
     "@types/wav": "^1.0.4",
     "@types/ws": "^8.18.1",
     "@typescript-eslint/parser": "^8.40.0",
