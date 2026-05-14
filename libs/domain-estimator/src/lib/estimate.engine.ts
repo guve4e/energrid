@@ -169,13 +169,15 @@ function handleDeviceInput(
   device: EstimateDeviceInput,
 ): void {
   if (isApplianceConnectionKind(device.kind)) {
-    handleApplianceConnectionInput(lines, catalogMap, device as any);
+    handleApplianceConnectionInput(lines, catalogMap, device as EstimateDeviceInput & {
+      kind: EstimateApplianceConnectionKind;
+    });
     return;
   }
 
   handleSimpleDeviceInput(lines, catalogMap, {
     ...device,
-    kind: device.kind,
+    kind: device.kind as EstimateSimpleDeviceKind,
   });
 }
 

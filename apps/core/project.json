@@ -5,36 +5,25 @@
   "projectType": "application",
   "targets": {
     "build": {
-      "executor": "@nx/webpack:webpack",
-      "outputs": ["{options.outputPath}"],
+      "executor": "nx:run-commands",
       "options": {
-        "target": "node",
-        "compiler": "tsc",
-        "outputPath": "dist/apps/core",
-        "main": "apps/core/src/main.ts",
-        "tsConfig": "apps/core/tsconfig.app.json",
-        "webpackConfig": "apps/core/webpack.config.js"
-      },
-      "configurations": {
-        "development": {},
-        "production": {}
-      }
-    },
-    "serve": {
-      "executor": "@nx/js:node",
-      "defaultConfiguration": "development",
-      "dependsOn": ["build"],
-      "options": {
-        "buildTarget": "core:build",
-        "runBuildTargetDependencies": false
+        "command": "webpack-cli build",
+        "args": ["--node-env=production"],
+        "cwd": "apps/core"
       },
       "configurations": {
         "development": {
-          "buildTarget": "core:build:development"
-        },
-        "production": {
-          "buildTarget": "core:build:production"
+          "args": ["--node-env=development"]
         }
+      }
+    },
+    "serve": {
+      "continuous": true,
+      "dependsOn": ["build"],
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "node dist/apps/core/main.js",
+        "cwd": "."
       }
     }
   }
