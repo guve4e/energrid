@@ -1,28 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 
-type OpenMeteoResponse = {
-  latitude: number;
-  longitude: number;
-  timezone: string;
-  current?: {
-    time: string;
-    temperature_2m?: number;
-    wind_speed_10m?: number;
-    wind_gusts_10m?: number;
-    weather_code?: number;
-  };
-  hourly?: {
-    time: string[];
-    temperature_2m?: number[];
-    precipitation_probability?: number[];
-    precipitation?: number[];
-    rain?: number[];
-    showers?: number[];
-    weather_code?: number[];
-    wind_speed_10m?: number[];
-    wind_gusts_10m?: number[];
-  };
-};
+type OpenMeteoResponse = any;
 
 @Injectable()
 export class WeatherProviderService {
@@ -45,15 +23,21 @@ export class WeatherProviderService {
       latitude: String(latitude),
       longitude: String(longitude),
       timezone: 'Europe/Sofia',
-      forecast_days: '3',
+      forecast_days: '12',
       current: [
         'temperature_2m',
+        'apparent_temperature',
+        'relative_humidity_2m',
+        'surface_pressure',
         'weather_code',
         'wind_speed_10m',
         'wind_gusts_10m',
       ].join(','),
       hourly: [
         'temperature_2m',
+        'apparent_temperature',
+        'relative_humidity_2m',
+        'surface_pressure',
         'precipitation_probability',
         'precipitation',
         'rain',
@@ -62,63 +46,84 @@ export class WeatherProviderService {
         'wind_speed_10m',
         'wind_gusts_10m',
       ].join(','),
+      daily: [
+        'temperature_2m_max',
+        'temperature_2m_min',
+        'precipitation_sum',
+        'precipitation_probability_max',
+        'weather_code',
+        'wind_speed_10m_max',
+        'wind_gusts_10m_max',
+      ].join(','),
     });
 
-    const url = `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
+    const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params.toString()}`);
 
-    const response = await fetch(url);
-
-    if (!response.ok) {
-      throw new Error(`Open-Meteo HTTP ${response.status}`);
-    }
+    if (!response.ok) throw new Error(`Open-Meteo HTTP ${response.status}`);
 
     const data = (await response.json()) as OpenMeteoResponse;
 
     return {
       location: 'Vidin',
-      coordinates: {
-        latitude,
-        longitude,
-      },
+      coordinates: { latitude, longitude },
       provider: 'open-meteo',
       fetchedAt: new Date().toISOString(),
       current: {
         time: data.current?.time,
         temperature: data.current?.temperature_2m ?? null,
+        feelsLike: data.current?.apparent_temperature ?? null,
+        humidity: data.current?.relative_humidity_2m ?? null,
+        pressure: data.current?.surface_pressure ?? null,
         windKmh: data.current?.wind_speed_10m ?? null,
         gustKmh: data.current?.wind_gusts_10m ?? null,
         weatherCode: data.current?.weather_code ?? null,
         condition: this.describeWeatherCode(data.current?.weather_code),
       },
       hourly: this.mapHourly(data),
+      daily: this.mapDaily(data),
       alerts: [],
     };
   }
 
   private mapHourly(data: OpenMeteoResponse) {
-    const hourly = data.hourly;
+    const h = data.hourly;
+    if (!h?.time?.length) return [];
 
-    if (!hourly?.time?.length) {
-      return [];
-    }
-
-    return hourly.time.slice(0, 24).map((time, index) => ({
+    return h.time.map((time: string, index: number) => ({
       time,
-      temperature: hourly.temperature_2m?.[index] ?? null,
-      rainChance: hourly.precipitation_probability?.[index] ?? null,
-      precipitationMm: hourly.precipitation?.[index] ?? null,
-      rainMm: hourly.rain?.[index] ?? null,
-      showersMm: hourly.showers?.[index] ?? null,
-      weatherCode: hourly.weather_code?.[index] ?? null,
-      condition: this.describeWeatherCode(hourly.weather_code?.[index]),
-      windKmh: hourly.wind_speed_10m?.[index] ?? null,
-      gustKmh: hourly.wind_gusts_10m?.[index] ?? null,
+      temperature: h.temperature_2m?.[index] ?? null,
+      feelsLike: h.apparent_temperature?.[index] ?? null,
+      humidity: h.relative_humidity_2m?.[index] ?? null,
+      pressure: h.surface_pressure?.[index] ?? null,
+      rainChance: h.precipitation_probability?.[index] ?? null,
+      precipitationMm: h.precipitation?.[index] ?? null,
+      rainMm: h.rain?.[index] ?? null,
+      showersMm: h.showers?.[index] ?? null,
+      weatherCode: h.weather_code?.[index] ?? null,
+      condition: this.describeWeatherCode(h.weather_code?.[index]),
+      windKmh: h.wind_speed_10m?.[index] ?? null,
+      gustKmh: h.wind_gusts_10m?.[index] ?? null,
+    }));
+  }
+
+  private mapDaily(data: OpenMeteoResponse) {
+    const d = data.daily;
+    if (!d?.time?.length) return [];
+
+    return d.time.map((date: string, index: number) => ({
+      date,
+      tempMax: d.temperature_2m_max?.[index] ?? null,
+      tempMin: d.temperature_2m_min?.[index] ?? null,
+      rainTotalMm: d.precipitation_sum?.[index] ?? null,
+      rainChanceMax: d.precipitation_probability_max?.[index] ?? null,
+      weatherCode: d.weather_code?.[index] ?? null,
+      condition: this.describeWeatherCode(d.weather_code?.[index]),
+      windMaxKmh: d.wind_speed_10m_max?.[index] ?? null,
+      gustMaxKmh: d.wind_gusts_10m_max?.[index] ?? null,
     }));
   }
 
   private describeWeatherCode(code?: number | null): string {
-    if (code == null) return 'Unknown';
-
     const map: Record<number, string> = {
       0: 'Clear sky',
       1: 'Mainly clear',
@@ -143,7 +148,7 @@ export class WeatherProviderService {
       99: 'Thunderstorm with heavy hail',
     };
 
-    return map[code] ?? `Weather code ${code}`;
+    return code == null ? 'Unknown' : map[code] ?? `Weather code ${code}`;
   }
 
   private getFallbackSnapshot() {
@@ -153,15 +158,16 @@ export class WeatherProviderService {
       fetchedAt: new Date().toISOString(),
       current: {
         temperature: 22,
+        feelsLike: 22,
+        humidity: 55,
+        pressure: 1014,
         windKmh: 48,
         gustKmh: 72,
         condition: 'Thunderstorms',
         weatherCode: 95,
       },
-      hourly: [
-        { time: '14:00', rainChance: 60, gustKmh: 70, condition: 'Thunderstorm' },
-        { time: '15:00', rainChance: 75, gustKmh: 82, condition: 'Thunderstorm' },
-      ],
+      hourly: [],
+      daily: [],
       alerts: [],
     };
   }

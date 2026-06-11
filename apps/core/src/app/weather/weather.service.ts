@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { WeatherProviderService } from './weather-provider.service';
 import { WeatherRiskEngine } from './weather-risk.engine';
 import { DanubeProviderService } from './danube-provider.service';
+import { WeatherIntelligenceService } from './weather-intelligence.service';
 
 @Injectable()
 export class WeatherService {
@@ -9,21 +10,21 @@ export class WeatherService {
     private readonly provider: WeatherProviderService,
     private readonly riskEngine: WeatherRiskEngine,
     private readonly danubeProvider: DanubeProviderService,
+    private readonly intelligenceService: WeatherIntelligenceService,
   ) {}
 
   async getDashboard() {
     const snapshot = await this.provider.getSnapshot();
     const river = await this.danubeProvider.getVidinRiverData();
     const riskReport = this.riskEngine.evaluate(snapshot);
+    const intelligence = this.intelligenceService.analyze(snapshot, river, riskReport);
 
     return {
       ...snapshot,
       river,
       riskReport,
-      summary:
-        riskReport.level === 'high'
-          ? 'Weather risks detected. Review wind and storm conditions.'
-          : 'No major risks detected.',
+      intelligence,
+      summary: intelligence.subtitle,
     };
   }
 }
