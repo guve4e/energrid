@@ -129,4 +129,114 @@ export class RiverHistoryService {
       historyTrend,
     };
   }
+  async getStationTrend(station: string, limit = 168) {
+    const result = await this.pool.query(
+      `
+      SELECT
+        station,
+        provider,
+        level_cm::float AS "levelCm",
+        discharge_m3s::float AS "dischargeM3s",
+        difference_24h_cm::float AS "difference24hCm",
+        trend,
+        water_temp_c::float AS "waterTempC",
+        elevation_m::float AS "elevationM",
+        fetched_at AS "fetchedAt"
+      FROM river_readings
+      WHERE station = $1
+        AND level_cm IS NOT NULL
+      ORDER BY fetched_at DESC
+      LIMIT $2
+      `,
+      [station, limit],
+    );
+
+    const points = result.rows.reverse();
+
+    if (points.length === 0) {
+      return {
+        station,
+        currentCm: null,
+        trend: 'unknown',
+        rateCmPerHour: null,
+        change24hCm: null,
+        confidence: 'low',
+        projection: null,
+        points: [],
+      };
+    }
+
+    const first = points[0];
+    const last = points[points.length - 1];
+
+    const hours =
+      (new Date(last.fetchedAt).getTime() - new Date(first.fetchedAt).getTime()) /
+      36e5;
+
+    const totalChange = Number(last.levelCm) - Number(first.levelCm);
+    const rateCmPerHour = hours > 0 ? totalChange / hours : 0;
+
+    const last24Cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    const last24 = points.filter(
+      (p) => new Date(p.fetchedAt).getTime() >= last24Cutoff,
+    );
+
+    const change24hCm =
+      last24.length >= 2
+        ? Number(last24[last24.length - 1].levelCm) - Number(last24[0].levelCm)
+        : null;
+
+    let trend: 'rising' | 'falling' | 'stable' | 'unknown' = 'stable';
+    const signal = change24hCm ?? totalChange;
+
+    if (signal >= 3) trend = 'rising';
+    else if (signal <= -3) trend = 'falling';
+    else if (points.length < 2) trend = 'unknown';
+
+    const currentCm = Number(last.levelCm);
+
+    const confidence =
+      points.length >= 24 ? 'high' : points.length >= 6 ? 'medium' : 'low';
+
+    const projected6h = currentCm + rateCmPerHour * 6;
+    const projected24h = currentCm + rateCmPerHour * 24;
+
+    const direction =
+      projected24h > currentCm + 2
+        ? 'rising'
+        : projected24h < currentCm - 2
+          ? 'falling'
+          : 'stable';
+
+    const uncertainty = confidence === 'high' ? 3 : confidence === 'medium' ? 6 : 10;
+
+    return {
+      station,
+      currentCm,
+      trend,
+      rateCmPerHour: Number(rateCmPerHour.toFixed(2)),
+      change24hCm,
+      confidence,
+      projection: {
+        next6h: {
+          expectedCm: Math.round(projected6h),
+          minCm: Math.round(projected6h - uncertainty),
+          maxCm: Math.round(projected6h + uncertainty),
+          direction,
+        },
+        next24h: {
+          expectedCm: Math.round(projected24h),
+          minCm: Math.round(projected24h - uncertainty),
+          maxCm: Math.round(projected24h + uncertainty),
+          direction,
+        },
+      },
+      points: points.map((p) => ({
+        fetchedAt: p.fetchedAt,
+        levelCm: Number(p.levelCm),
+        provider: p.provider,
+      })),
+    };
+  }
+
 }

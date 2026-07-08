@@ -18,4 +18,9 @@ export class RiverController {
   getHistory(@Param('station') station: string) {
     return this.history.getRecent(station, 48);
   }
+
+  @Get('trend/:station')
+  getTrend(@Param('station') station: string) {
+    return this.history.getStationTrend(station, 336);
+  }
 }
