@@ -15,6 +15,7 @@ import {
 import { RiverRegionalIntelligenceService } from './river-regional-intelligence.service';
 import { RiverHydrologicalIntelligenceService } from './river-hydrological-intelligence.service';
 
+import { RiverForecastPerformanceService } from './forecast-monitoring/river-forecast-performance.service';
 @Controller('river')
 export class RiverController {
   constructor(
@@ -23,6 +24,7 @@ export class RiverController {
     private readonly historicalContext: RiverHistoricalContextService,
     private readonly regionalIntelligence: RiverRegionalIntelligenceService,
     private readonly hydrologicalIntelligence: RiverHydrologicalIntelligenceService,
+    private readonly forecastPerformance: RiverForecastPerformanceService,
   ) {}
 
   @Post('collect')
@@ -80,5 +82,16 @@ export class RiverController {
   @Get('hydrological-context/vidin')
   getVidinHydrologicalContext() {
     return this.hydrologicalIntelligence.getVidinContext();
+  }
+  @Get('forecast-performance/:station')
+  getForecastPerformance(
+    @Param('station') station: string,
+    @Query('days') rawDays = '90',
+  ) {
+    const parsedDays = Number(rawDays);
+
+    const days = Number.isFinite(parsedDays) ? parsedDays : 90;
+
+    return this.forecastPerformance.getPerformance(station, days);
   }
 }

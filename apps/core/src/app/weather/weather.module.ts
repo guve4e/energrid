@@ -23,7 +23,10 @@ import { HistoricalAnalogueService } from './river/analogue/historical-analogue.
 import { ForecastBacktestEngine } from './river/backtest/forecast-backtest.engine';
 import { ConfidenceEngine } from './river/engines/confidence/confidence.engine';
 import { RiverForecastService } from './river/forecast/river-forecast.service';
-import {ForecastEngine} from "./river/engines/forecast.engine";
+import { RiverForecastRecorderService } from './river/forecast-monitoring/river-forecast-recorder.service';
+import { RiverForecastEvaluatorService } from './river/forecast-monitoring/river-forecast-evaluator.service';
+import { RiverForecastPerformanceService } from './river/forecast-monitoring/river-forecast-performance.service';
+import { ForecastEngine } from './river/engines/forecast.engine';
 
 @Module({
   controllers: [WeatherController, RiverController],
@@ -50,7 +53,10 @@ import {ForecastEngine} from "./river/engines/forecast.engine";
     ForecastEngine,
     ConfidenceEngine,
     ForecastBacktestEngine,
-    RiverForecastService
+    RiverForecastService,
+    RiverForecastRecorderService,
+    RiverForecastEvaluatorService,
+    RiverForecastPerformanceService,
   ],
 })
 export class WeatherModule {}
