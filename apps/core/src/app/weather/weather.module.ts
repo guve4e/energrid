@@ -17,6 +17,13 @@ import { RiverSchedulerService } from './river/river-scheduler.service';
 import { RiverHistoricalContextService } from './river/river-historical-context.service';
 import { RiverHydrologicalIntelligenceService } from './river/river-hydrological-intelligence.service';
 import { RiverRegionalIntelligenceService } from './river/river-regional-intelligence.service';
+import { TravelTimeEngine } from './river/engines/travel-time.engine';
+import { HistoricalAnalogueEngine } from './river/analogue/historical-analogue.engine';
+import { HistoricalAnalogueService } from './river/analogue/historical-analogue.service';
+import { ForecastBacktestEngine } from './river/backtest/forecast-backtest.engine';
+import { ConfidenceEngine } from './river/engines/confidence/confidence.engine';
+import { RiverForecastService } from './river/forecast/river-forecast.service';
+import {ForecastEngine} from "./river/engines/forecast.engine";
 
 @Module({
   controllers: [WeatherController, RiverController],
@@ -37,6 +44,13 @@ import { RiverRegionalIntelligenceService } from './river/river-regional-intelli
     RiverHistoricalContextService,
     RiverHydrologicalIntelligenceService,
     RiverRegionalIntelligenceService,
+    TravelTimeEngine,
+    HistoricalAnalogueEngine,
+    HistoricalAnalogueService,
+    ForecastEngine,
+    ConfidenceEngine,
+    ForecastBacktestEngine,
+    RiverForecastService
   ],
 })
 export class WeatherModule {}

@@ -26,6 +26,14 @@ export class DanubeProviderService {
       normalizedStations: dashboard.normalizedStations,
       providers: dashboard.providers,
       history: dashboard.history,
+      forecast: dashboard.forecast,
+      analogues: dashboard.analogues,
+      confidence: dashboard.confidence,
+
+      regionalPropagationForecast:
+        dashboard.regionalPropagationForecast,
+
+      propagation: dashboard.propagation,
     };
   }
 }

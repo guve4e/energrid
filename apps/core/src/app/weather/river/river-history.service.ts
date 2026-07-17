@@ -2,10 +2,14 @@ import { Inject, Injectable } from '@nestjs/common';
 import { Pool } from 'pg';
 import { PG_POOL } from '../../db.module';
 import { RiverStationReading } from './river.types';
+import { ForecastEngine } from './engines/forecast.engine';
 
 @Injectable()
 export class RiverHistoryService {
-  constructor(@Inject(PG_POOL) private readonly pool: Pool) {}
+  constructor(
+    @Inject(PG_POOL) private readonly pool: Pool,
+    private readonly forecastEngine: ForecastEngine,
+  ) {}
 
   async saveReadings(readings: RiverStationReading[]) {
     for (const reading of readings) {
@@ -129,6 +133,86 @@ export class RiverHistoryService {
       historyTrend,
     };
   }
+
+
+
+  async getStationHistory(
+    station: string,
+    limit = 48,
+  ) {
+    const result = await this.pool.query(
+      `
+      SELECT
+        level_cm::float AS "levelCm",
+        discharge_m3s::float AS "dischargeM3s",
+        difference_24h_cm::float AS "difference24hCm",
+        trend,
+        fetched_at AS "fetchedAt"
+      FROM river_readings
+      WHERE station = $1
+      ORDER BY fetched_at DESC
+      LIMIT $2
+      `,
+      [station, limit],
+    );
+
+    return result.rows.reverse();
+  }
+
+
+  async getReadingClosestTo(
+    station: string,
+    timestamp: Date,
+  ) {
+    const result = await this.pool.query(
+      `
+      SELECT
+        station,
+        provider,
+        level_cm::float AS "levelCm",
+        discharge_m3s::float AS "dischargeM3s",
+        difference_24h_cm::float AS "difference24hCm",
+        trend,
+        water_temp_c::float AS "waterTempC",
+        elevation_m::float AS "elevationM",
+        fetched_at AS "fetchedAt"
+      FROM river_readings
+      WHERE station = $1
+      ORDER BY ABS(
+        EXTRACT(
+          EPOCH FROM (
+            fetched_at - $2::timestamptz
+          )
+        )
+      )
+      LIMIT 1
+      `,
+      [station, timestamp],
+    );
+
+    return result.rows[0] ?? null;
+  }
+
+  async getLatestStationReading(station: string) {
+    const result = await this.pool.query(
+      `
+      SELECT
+        station,
+        level_cm::float AS "levelCm",
+        discharge_m3s::float AS "dischargeM3s",
+        difference_24h_cm::float AS "difference24hCm",
+        trend
+      FROM river_readings
+      WHERE station = $1
+      ORDER BY fetched_at DESC
+      LIMIT 1
+      `,
+      [station],
+    );
+
+    return result.rows[0] ?? null;
+  }
+
   async getStationTrend(station: string, limit = 168) {
     const result = await this.pool.query(
       `
@@ -195,28 +279,35 @@ export class RiverHistoryService {
 
     const currentCm = Number(last.levelCm);
 
-    const confidence =
-      points.length >= 24 ? 'high' : points.length >= 6 ? 'medium' : 'low';
+    const upstream =
+      await this.getLatestStationReading(
+        'Novo Selo',
+      );
 
-    const projected6h = currentCm + rateCmPerHour * 6;
-    const projected24h = currentCm + rateCmPerHour * 24;
+    const forecast =
+      this.forecastEngine.predict({
+        currentCm,
+        hours,
+        totalChange,
+        points: points.length,
+        change24hCm,
 
-    const direction =
-      projected24h > currentCm + 2
-        ? 'rising'
-        : projected24h < currentCm - 2
-          ? 'falling'
-          : 'stable';
+        upstreamTrend:
+          upstream?.trend,
 
-    const uncertainty = confidence === 'high' ? 3 : confidence === 'medium' ? 6 : 10;
+        upstreamDischarge:
+          upstream?.dischargeM3s,
+      });
 
     return {
       station,
       currentCm,
-      trend,
-      rateCmPerHour: Number(rateCmPerHour.toFixed(2)),
+      trend: forecast.trend,
+      rateCmPerHour: forecast.rateCmPerHour,
       change24hCm,
-      confidence,
+      confidence: forecast.confidence,
+      projection: forecast.projection,
+      /*
       projection: {
         next6h: {
           expectedCm: Math.round(projected6h),
@@ -230,7 +321,7 @@ export class RiverHistoryService {
           maxCm: Math.round(projected24h + uncertainty),
           direction,
         },
-      },
+      */
       points: points.map((p) => ({
         fetchedAt: p.fetchedAt,
         levelCm: Number(p.levelCm),

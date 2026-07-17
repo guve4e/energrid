@@ -11,7 +11,9 @@
     "core:seed:pricing": "node apps/core/scripts/seed-pricing-catalog.js",
     "core:test:estimator": "node -r ts-node/register apps/core/scripts/test-estimator.js",
     "core:test:persist": "TS_NODE_TRANSPILE_ONLY=1 TS_NODE_COMPILER_OPTIONS='{\"module\":\"commonjs\",\"moduleResolution\":\"node\"}' node apps/core/scripts/test-estimator-persist.js",
-    "core": "nx serve core"
+    "core": "nx serve core",
+    "core:backtest:river": "DATABASE_URL=$(node apps/core/scripts/db-url.js) TS_NODE_TRANSPILE_ONLY=1 TS_NODE_COMPILER_OPTIONS='{\"module\":\"commonjs\",\"moduleResolution\":\"node\"}' node -r ts-node/register apps/core/scripts/backtest-river-analogues.ts",
+    "core:backtest:propagation": "DATABASE_URL=$(node apps/core/scripts/db-url.js) TS_NODE_TRANSPILE_ONLY=1 TS_NODE_COMPILER_OPTIONS='{\"module\":\"commonjs\",\"moduleResolution\":\"node\"}' node -r ts-node/register apps/core/scripts/backtest-river-propagation.ts"
   },
   "private": true,
   "devDependencies": {

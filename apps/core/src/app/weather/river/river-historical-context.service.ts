@@ -289,6 +289,51 @@ export class RiverHistoricalContextService {
     };
   }
 
+  async findAnalogues(
+    stationCode: string,
+    metric: RiverHistoricalMetric,
+    currentValue: number,
+    observedAt = new Date(),
+    limit = 20,
+  ) {
+    const result = await this.pool.query(
+      `
+      SELECT
+        r.observed_date,
+        r.value::float AS value,
+        ABS(r.value::float - $3) AS distance
+      FROM river_historical_readings r
+      JOIN river_stations s
+        ON s.id = r.station_id
+      JOIN river_historical_datasets d
+        ON d.id = r.dataset_id
+      WHERE
+        s.code = $1
+        AND d.metric = $2
+        AND EXTRACT(month FROM r.observed_date)
+            = EXTRACT(month FROM $4::date)
+      ORDER BY
+        distance ASC,
+        r.observed_date DESC
+      LIMIT $5
+      `,
+      [
+        stationCode,
+        metric,
+        currentValue,
+        observedAt,
+        limit,
+      ],
+    );
+
+    return result.rows.map((row) => ({
+      date: row.observed_date,
+      value: Number(row.value),
+      distance: Number(row.distance),
+    }));
+  }
+
+
   private classify(
     percentile: number,
     currentValue: number,
