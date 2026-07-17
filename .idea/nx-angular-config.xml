@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="NxAngularConfigService" workspaceLocation="file://$PROJECT_DIR$/nx.json">
+    <projects>
+      <project name="api" file="file://$PROJECT_DIR$/apps/api/project.json" />
+      <project name="api-e2e" file="file://$PROJECT_DIR$/apps/api-e2e/project.json" />
+      <project name="core" file="file://$PROJECT_DIR$/apps/core/project.json" />
+      <project name="domain-automation" file="file://$PROJECT_DIR$/libs/domain-automation/project.json" />
+      <project name="domain-devices" file="file://$PROJECT_DIR$/libs/domain-devices/project.json" />
+      <project name="domain-estimator" file="file://$PROJECT_DIR$/libs/domain-estimator/project.json" />
+      <project name="domain-telemetry" file="file://$PROJECT_DIR$/libs/domain-telemetry/project.json" />
+      <project name="domain-voice" file="file://$PROJECT_DIR$/libs/domain-voice/project.json" />
+      <project name="shared-types" file="file://$PROJECT_DIR$/libs/shared-types/project.json" />
+      <project name="shared-utils" file="file://$PROJECT_DIR$/libs/shared-utils/project.json" />
+    </projects>
+  </component>
+</project>
