@@ -8,8 +8,12 @@ import {
 } from '@nestjs/common';
 import { RiverCollectorService } from './river-collector.service';
 import { RiverHistoryService } from './river-history.service';
-import { RiverHistoricalContextService } from './river-historical-context.service';
+import {
+  RiverHistoricalContextService,
+  RiverHistoricalMetric,
+} from './river-historical-context.service';
 import { RiverRegionalIntelligenceService } from './river-regional-intelligence.service';
+import { RiverHydrologicalIntelligenceService } from './river-hydrological-intelligence.service';
 
 @Controller('river')
 export class RiverController {
@@ -18,6 +22,7 @@ export class RiverController {
     private readonly history: RiverHistoryService,
     private readonly historicalContext: RiverHistoricalContextService,
     private readonly regionalIntelligence: RiverRegionalIntelligenceService,
+    private readonly hydrologicalIntelligence: RiverHydrologicalIntelligenceService,
   ) {}
 
   @Post('collect')
@@ -38,6 +43,7 @@ export class RiverController {
   getHistoricalContext(
     @Param('stationCode') stationCode: string,
     @Query('value') rawValue: string,
+    @Query('metric') rawMetric = 'water_level',
   ) {
     const value = Number(rawValue);
 
@@ -47,10 +53,32 @@ export class RiverController {
       );
     }
 
-    return this.historicalContext.getWaterLevelContext(stationCode, value);
+    const supportedMetrics: RiverHistoricalMetric[] = [
+      'water_level',
+      'water_discharge',
+      'water_temperature',
+    ];
+
+    if (!supportedMetrics.includes(rawMetric as RiverHistoricalMetric)) {
+      throw new BadRequestException(
+        'Query parameter "metric" must be one of: ' +
+          supportedMetrics.join(', '),
+      );
+    }
+
+    return this.historicalContext.getContext(
+      stationCode,
+      rawMetric as RiverHistoricalMetric,
+      value,
+    );
   }
   @Get('regional-context/vidin')
   getVidinRegionalContext() {
     return this.regionalIntelligence.getVidinContext();
+  }
+
+  @Get('hydrological-context/vidin')
+  getVidinHydrologicalContext() {
+    return this.hydrologicalIntelligence.getVidinContext();
   }
 }

@@ -1,0 +1,19 @@
+{
+  "sourceFile": "01_Apr_2026_09_38_24_Лом_2024_инфо_БГ.pdf",
+  "station": "Lom",
+  "stationCode": "lom",
+  "year": 2024,
+  "rowsExtracted": 366,
+  "uniqueDates": 366,
+  "duplicates": 0,
+  "missingDays": 0,
+  "coverageFrom": "2024-01-01",
+  "coverageTo": "2024-12-31",
+  "minimumLevelCm": 77.0,
+  "maximumLevelCm": 643.0,
+  "outputs": {
+    "water_level": "data/river-history/normalized/annual/lom-water-level-2024.csv",
+    "water_discharge": "data/river-history/normalized/annual/lom-water-discharge-2024.csv",
+    "water_temperature": "data/river-history/normalized/annual/lom-water-temperature-2024.csv"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "sourceFile": "novo-selo-2020.pdf",
+  "station": "Novo Selo",
+  "stationCode": "novo-selo",
+  "year": 2020,
+  "rowsExtracted": 366,
+  "uniqueDates": 366,
+  "duplicates": 0,
+  "missingDays": 0,
+  "coverageFrom": "2020-01-01",
+  "coverageTo": "2020-12-31",
+  "minimumLevelCm": 46.0,
+  "maximumLevelCm": 566.0,
+  "outputs": {
+    "water_level": "data/river-history/normalized/annual/novo-selo-water-level-2020.csv",
+    "water_discharge": "data/river-history/normalized/annual/novo-selo-water-discharge-2020.csv",
+    "water_temperature": "data/river-history/normalized/annual/novo-selo-water-temperature-2020.csv"
+  }
+}

@@ -18,7 +18,6 @@ YEAR_MIN = 1900
 YEAR_MAX = 2100
 YEAR_PATTERN = re.compile(r"^\d{4}$")
 INTEGER_PATTERN = re.compile(r"^-?\d+$")
-NUMBER_PATTERN = re.compile(r"^-?\d+(?:[.,]\d+)?$")
 
 
 @dataclass(frozen=True)
@@ -39,7 +38,7 @@ class Observation:
     station_code: str
     observed_date: date
     metric: str
-    value: float
+    value: int
     unit: str
     provider: str
     resolution: str
@@ -61,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--metric", default="water_level")
     parser.add_argument("--unit", default="cm")
     parser.add_argument("--provider", default="appd-bg")
-    parser.add_argument("--aggregation", default="daily_mean")
+    parser.add_argument("--aggregation", default="daily_observation")
     parser.add_argument("--quality", default="official")
     parser.add_argument(
         "--year-start",
@@ -83,15 +82,6 @@ def parse_int(value: str) -> int | None:
         return None
 
     return int(value)
-
-
-def parse_number(value: str) -> float | None:
-    normalized = value.strip().replace(",", ".")
-
-    if not NUMBER_PATTERN.fullmatch(normalized):
-        return None
-
-    return float(normalized)
 
 
 def load_pages(xml_path: Path) -> list[list[TextNode]]:
@@ -194,93 +184,6 @@ def nearest_year(
     return year
 
 
-def numeric_tokens(text: str) -> list[float]:
-    values: list[float] = []
-
-    for token in text.split():
-        parsed = parse_number(token)
-
-        if parsed is None:
-            return []
-
-        values.append(parsed)
-
-    return values
-
-
-def map_node_values_to_years(
-    node: TextNode,
-    year_columns: dict[int, float],
-    edge_tolerance: float = 18,
-) -> list[tuple[int, float]]:
-    """
-    Map one or more numeric values in a PDF text node to year columns.
-
-    Poppler sometimes merges adjacent cells into a single node, for example:
-    "6857 5846 7835".
-
-    We first identify all year-column centres covered by the node's bounding
-    box. When the number of covered columns equals the number of values, that
-    mapping is exact.
-
-    A proportional-centre fallback is used only when Poppler's node width does
-    not align perfectly with the year-column centres.
-    """
-    values = numeric_tokens(node.text)
-
-    if not values:
-        return []
-
-    if len(values) == 1:
-        year = nearest_year(node.center_x, year_columns)
-
-        if year is None:
-            return []
-
-        return [(year, values[0])]
-
-    node_right = node.left + node.width
-
-    covered_years = sorted(
-        (
-            (year, column_x)
-            for year, column_x in year_columns.items()
-            if node.left - edge_tolerance
-            <= column_x
-            <= node_right + edge_tolerance
-        ),
-        key=lambda item: item[1],
-    )
-
-    if len(covered_years) == len(values):
-        return [
-            (year, value)
-            for (year, _), value in zip(covered_years, values)
-        ]
-
-    # Fallback: estimate the centre of each token inside the merged node,
-    # then map each estimated centre to its nearest year column.
-    slot_width = node.width / len(values)
-    mapped: list[tuple[int, float]] = []
-    used_years: set[int] = set()
-
-    for index, value in enumerate(values):
-        estimated_center = node.left + slot_width * (index + 0.5)
-        year = nearest_year(
-            estimated_center,
-            year_columns,
-            max_distance=max(24, slot_width),
-        )
-
-        if year is None or year in used_years:
-            return []
-
-        used_years.add(year)
-        mapped.append((year, value))
-
-    return mapped
-
-
 def extract_observations(
     pages: list[list[TextNode]],
     args: argparse.Namespace,
@@ -343,35 +246,38 @@ def extract_observations(
                 if node.left < 190:
                     continue
 
-                mapped_values = map_node_values_to_years(
-                    node,
-                    year_columns,
-                )
+                value = parse_int(node.text)
 
-                for year, value in mapped_values:
-                    try:
-                        observed_date = date(year, month, day)
-                    except ValueError:
-                        # Expected for dates such as 29 February in
-                        # non-leap years.
-                        continue
+                if value is None:
+                    continue
 
-                    observations.append(
-                        Observation(
-                            station=args.station,
-                            station_code=args.station_code,
-                            observed_date=observed_date,
-                            metric=args.metric,
-                            value=value,
-                            unit=args.unit,
-                            provider=args.provider,
-                            resolution="daily",
-                            aggregation=args.aggregation,
-                            quality=args.quality,
-                            source_file=args.source_file,
-                        )
+                year = nearest_year(node.center_x, year_columns)
+
+                if year is None:
+                    continue
+
+                try:
+                    observed_date = date(year, month, day)
+                except ValueError:
+                    # Expected for dates such as 29 February in non-leap years.
+                    continue
+
+                observations.append(
+                    Observation(
+                        station=args.station,
+                        station_code=args.station_code,
+                        observed_date=observed_date,
+                        metric=args.metric,
+                        value=value,
+                        unit=args.unit,
+                        provider=args.provider,
+                        resolution="daily",
+                        aggregation=args.aggregation,
+                        quality=args.quality,
+                        source_file=args.source_file,
                     )
-                    values_found += 1
+                )
+                values_found += 1
 
             if values_found == 0:
                 rejected_rows.append(

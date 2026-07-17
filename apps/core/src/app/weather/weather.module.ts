@@ -15,6 +15,7 @@ import { RiverController } from './river/river.controller';
 import { RiverStationNormalizerService } from './river/river-station-normalizer.service';
 import { RiverSchedulerService } from './river/river-scheduler.service';
 import { RiverHistoricalContextService } from './river/river-historical-context.service';
+import { RiverHydrologicalIntelligenceService } from './river/river-hydrological-intelligence.service';
 import { RiverRegionalIntelligenceService } from './river/river-regional-intelligence.service';
 
 @Module({
@@ -34,6 +35,7 @@ import { RiverRegionalIntelligenceService } from './river/river-regional-intelli
     RiverStationNormalizerService,
     RiverSchedulerService,
     RiverHistoricalContextService,
+    RiverHydrologicalIntelligenceService,
     RiverRegionalIntelligenceService,
   ],
 })

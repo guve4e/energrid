@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { AppdDanubeProviderService } from './appd-danube-provider.service';
 import {
-  RiverHistoricalContext,
   RiverHistoricalContextService,
+  RiverWaterLevelHistoricalContext,
 } from './river-historical-context.service';
 import { RiverStationReading } from './river.types';
 
@@ -25,7 +25,7 @@ interface RegionalStationContext {
   difference24hCm: number | null;
   trend: string;
   historicalArchiveAvailable: boolean;
-  historical: RiverHistoricalContext | null;
+  historical: RiverWaterLevelHistoricalContext | null;
 }
 
 export interface VidinRegionalContext {
@@ -125,7 +125,7 @@ export class RiverRegionalIntelligenceService {
     stationCode: string,
     reading: RiverStationReading | null,
     observedAt: Date,
-  ): Promise<RiverHistoricalContext | null> {
+  ): Promise<RiverWaterLevelHistoricalContext | null> {
     if (reading?.levelCm == null) {
       return null;
     }
@@ -141,7 +141,7 @@ export class RiverRegionalIntelligenceService {
     role: 'upstream' | 'downstream',
     station: string,
     reading: RiverStationReading | null,
-    historical: RiverHistoricalContext | null,
+    historical: RiverWaterLevelHistoricalContext | null,
   ): RegionalStationContext {
     return {
       role,
@@ -155,8 +155,8 @@ export class RiverRegionalIntelligenceService {
   }
 
   private assessRegion(
-    upstream: RiverHistoricalContext | null,
-    downstream: RiverHistoricalContext | null,
+    upstream: RiverWaterLevelHistoricalContext | null,
+    downstream: RiverWaterLevelHistoricalContext | null,
   ): VidinRegionalContext['regional'] {
     if (!upstream && !downstream) {
       return {
@@ -275,7 +275,13 @@ export class RiverRegionalIntelligenceService {
       },
       agreement,
       headline: this.headlineFromAssessment(assessment),
-      explanation: this.explanationFromAssessment(assessment, minimum, maximum),
+      explanation: this.explanationFromAssessment(
+        assessment,
+        minimum,
+        maximum,
+        upstream,
+        downstream,
+      ),
       reasons: [
         this.stationReason('Novo Selo', upstream),
         this.stationReason('Lom', downstream),
@@ -318,6 +324,8 @@ export class RiverRegionalIntelligenceService {
     assessment: RegionalAssessment,
     minimumPercentile: number,
     maximumPercentile: number,
+    upstream: RiverWaterLevelHistoricalContext,
+    downstream: RiverWaterLevelHistoricalContext,
   ): string {
     const range =
       `${this.round(minimumPercentile)}–` +
@@ -325,7 +333,14 @@ export class RiverRegionalIntelligenceService {
 
     switch (assessment) {
       case 'record-low':
-        return `Both regional reference stations are below every observation for this month in the available official archives (${range}). Novo Selo covers 1936–2019 and Lom covers 1941–2019.`;
+        return (
+          `Both regional reference stations are below every observation ` +
+          `for this month in the available official archives (${range}). ` +
+          `Novo Selo covers ${upstream.coverage.from.slice(0, 4)}–` +
+          `${upstream.coverage.to.slice(0, 4)} and Lom covers ` +
+          `${downstream.coverage.from.slice(0, 4)}–` +
+          `${downstream.coverage.to.slice(0, 4)}.`
+        );
       case 'exceptionally-low':
         return `Both regional reference stations are within the lowest 1% of observations for this month (${range}).`;
       case 'below-normal':
@@ -341,7 +356,7 @@ export class RiverRegionalIntelligenceService {
 
   private stationReason(
     station: string,
-    context: RiverHistoricalContext,
+    context: RiverWaterLevelHistoricalContext,
   ): string {
     const differenceFromMedian =
       context.currentValueCm - context.seasonal.medianCm;
