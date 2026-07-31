@@ -58,6 +58,8 @@ Useful knobs:
 - `LOCAL_WHISPER_TIMEOUT_MS` defaults to `30000`
 - `LOCAL_WHISPER_PYTHON` defaults to `python3`
 - `LOCAL_WHISPER_SCRIPT` can point to a custom transcription script
+- `LOCAL_WHISPER_WORKER` defaults to enabled; set `false` for one-shot Python
+- `LOCAL_WHISPER_WORKER_SCRIPT` can point to a custom long-running worker
 - `LOCAL_WHISPER_FALLBACK_TO_OPENAI=true` falls back to OpenAI when the local
   model returns no text
 
@@ -81,6 +83,16 @@ Run the small fixture benchmark:
 ```sh
 pnpm voice:stt:bench
 ```
+
+Run the persistent-worker benchmark:
+
+```sh
+pnpm voice:stt:worker
+```
+
+The worker benchmark starts Python once, loads the model once, then sends each
+fixture to the same process. This is the mode the API uses by default for
+`VOICE_STT_PROVIDER=local-whisper`.
 
 On this Mac with `small`, `cpu`, and `int8`, the first run took about `80s`
 because the model had to download/load cold. Warm runs then transcribed the

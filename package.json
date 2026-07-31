@@ -22,6 +22,7 @@
     "voice:smoke:suite": "node device-scripts/run-voice-smoke-suite.js",
     "voice:stt:check": "node device-scripts/benchmark-local-whisper.js samples/voice/close-command.wav",
     "voice:stt:bench": "node device-scripts/benchmark-local-whisper.js samples/voice/close-command.wav samples/voice/fixtures/close-command-quiet.wav samples/voice/fixtures/close-command-noisy.wav samples/voice/fixtures/close-command-leading-trailing-silence.wav",
+    "voice:stt:worker": "node device-scripts/benchmark-local-whisper-worker.js samples/voice/close-command.wav samples/voice/fixtures/close-command-quiet.wav samples/voice/fixtures/close-command-noisy.wav samples/voice/fixtures/close-command-leading-trailing-silence.wav",
     "voice:fixtures": "node device-scripts/generate-voice-fixtures.js samples/voice/close-command.wav"
   },
   "private": true,

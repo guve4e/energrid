@@ -75,6 +75,7 @@ export class VoiceProtocolController {
         sttProvider: 'openai',
         openaiBatchModel: 'gpt-4o-transcribe',
         localWhisperFallbackToOpenAI: false,
+        localWhisperWorker: true,
         localWhisperModel: 'small',
         localWhisperLanguage: 'bg',
       },
@@ -86,6 +87,7 @@ export class VoiceProtocolController {
       openaiBatchModel: process.env.BATCH_STT_MODEL || 'gpt-4o-transcribe',
       localWhisperFallbackToOpenAI:
         process.env.LOCAL_WHISPER_FALLBACK_TO_OPENAI === 'true',
+      localWhisperWorker: process.env.LOCAL_WHISPER_WORKER !== 'false',
       localWhisperModel:
         process.env.LOCAL_WHISPER_MODEL_PATH ||
         process.env.LOCAL_WHISPER_MODEL ||
