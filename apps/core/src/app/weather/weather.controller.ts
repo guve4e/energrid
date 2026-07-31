@@ -1,17 +1,22 @@
 import { Controller, Get, Header } from '@nestjs/common';
+import { ApiOperation, ApiProduces, ApiTags } from '@nestjs/swagger';
 import { WeatherService } from './weather.service';
 
+@ApiTags('weather')
 @Controller('weather')
 export class WeatherController {
   constructor(private readonly weatherService: WeatherService) {}
 
   @Get('dashboard')
+  @ApiOperation({ summary: 'Get the weather dashboard data' })
   async getDashboard() {
     return this.weatherService.getDashboard();
   }
 
   @Get('monitor')
   @Header('Content-Type', 'text/html')
+  @ApiOperation({ summary: 'Render the weather monitor HTML page' })
+  @ApiProduces('text/html')
   getMonitorPage() {
     return `<!doctype html>
 <html lang="en">

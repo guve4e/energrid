@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Logger, Post } from '@nestjs/common';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { EstimatorService } from './estimator.service';
 import { EstimatorPersistenceService } from './estimator-persistence.service';
 import { PreviewEstimateDto } from './dto/preview-estimate.dto';
@@ -7,6 +8,7 @@ import { AssistantStepDto } from './dto/assistant-step.dto';
 import { EstimatorV2Service } from '../estimator-v2';
 import { CatalogV2Service } from '../estimator-v2/catalog-v2.service';
 
+@ApiTags('estimator')
 @Controller('estimator')
 export class EstimatorController {
   private readonly logger = new Logger(EstimatorController.name);
@@ -19,6 +21,7 @@ export class EstimatorController {
   ) {}
 
   @Get('catalog')
+  @ApiOperation({ summary: 'List active estimator catalog items' })
   async catalog() {
     const items = await this.catalogV2Service.listActive();
 
@@ -38,11 +41,13 @@ export class EstimatorController {
   }
 
   @Post('preview')
+  @ApiOperation({ summary: 'Preview an estimate without persisting it' })
   async preview(@Body() body: PreviewEstimateDto) {
     return this.estimatorService.preview(body);
   }
 
   @Post('assistant-step')
+  @ApiOperation({ summary: 'Advance the assistant estimate draft by one user message' })
   async assistantStep(@Body() body: AssistantStepDto) {
     const useEstimatorV2 = process.env.ESTIMATOR_V2_ENABLED === 'true';
 
@@ -64,6 +69,7 @@ export class EstimatorController {
   }
 
   @Post('persist')
+  @ApiOperation({ summary: 'Persist a confirmed estimate' })
   async persist(@Body() body: PersistEstimateDto) {
     return this.estimatorPersistenceService.persistEstimate(body);
   }

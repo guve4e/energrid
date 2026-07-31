@@ -1,10 +1,17 @@
 import { Injectable, Logger } from '@nestjs/common'
+import { execFile } from 'child_process'
+import { promises as fs } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { promisify } from 'util'
 import OpenAI from 'openai'
 import { toFile } from 'openai/uploads'
 import type {
   StreamingSttEvent,
   StreamingSttSession,
 } from '@energrid/stt-stream-core'
+
+const execFileAsync = promisify(execFile)
 
 @Injectable()
 export class VoiceSttService {
@@ -84,6 +91,45 @@ export class VoiceSttService {
   async transcribeBufferedAudio(audio: Buffer): Promise<string> {
     if (!audio.length) return ''
 
+    const startedAt = Date.now()
+    const provider = this.getProvider()
+
+    if (provider === 'local-whisper') {
+      const text = await this.transcribeWithLocalWhisper(audio)
+      this.logger.log(
+        `[STT PROVIDER] provider=local-whisper bytes=${audio.length} durationMs=${Date.now() - startedAt} textChars=${text.length}`,
+      )
+
+      if (text || !this.shouldFallbackToOpenAI()) {
+        return text
+      }
+
+      this.logger.warn('Local Whisper returned no text; falling back to OpenAI STT')
+    }
+
+    const text = await this.transcribeWithOpenAI(audio)
+    this.logger.log(
+      `[STT PROVIDER] provider=${provider === 'local-whisper' ? 'openai_fallback' : 'openai'} bytes=${audio.length} durationMs=${Date.now() - startedAt} textChars=${text.length}`,
+    )
+
+    return text
+  }
+
+  private getProvider(): 'openai' | 'local-whisper' {
+    const provider = process.env.VOICE_STT_PROVIDER || process.env.STT_PROVIDER
+
+    if (provider === 'local-whisper' || provider === 'faster-whisper') {
+      return 'local-whisper'
+    }
+
+    return 'openai'
+  }
+
+  private shouldFallbackToOpenAI(): boolean {
+    return process.env.LOCAL_WHISPER_FALLBACK_TO_OPENAI === 'true'
+  }
+
+  private async transcribeWithOpenAI(audio: Buffer): Promise<string> {
     try {
       const wav = this.pcm16ToWav(audio, 16000, 1)
 
@@ -107,6 +153,50 @@ export class VoiceSttService {
         `Batch STT failed: message=${err?.message || 'unknown'} code=${err?.code || '-'} cause=${err?.cause?.message || '-'}`,
       )
       return ''
+    }
+  }
+
+  private async transcribeWithLocalWhisper(audio: Buffer): Promise<string> {
+    const wav = this.pcm16ToWav(audio, 16000, 1)
+    const wavPath = join(
+      tmpdir(),
+      `energrid-voice-${Date.now()}-${Math.random().toString(16).slice(2)}.wav`,
+    )
+
+    try {
+      await fs.writeFile(wavPath, wav)
+
+      const scriptPath =
+        process.env.LOCAL_WHISPER_SCRIPT ||
+        join(__dirname, 'assets', 'local-whisper-transcribe.py')
+
+      const python = process.env.LOCAL_WHISPER_PYTHON || 'python3'
+      const timeoutMs = Number(process.env.LOCAL_WHISPER_TIMEOUT_MS || 30000)
+
+      const { stdout, stderr } = await execFileAsync(
+        python,
+        [scriptPath, wavPath],
+        {
+          env: process.env,
+          timeout: timeoutMs,
+          maxBuffer: 1024 * 1024,
+        },
+      )
+
+      if (stderr.trim()) {
+        this.logger.debug(`[LOCAL WHISPER STDERR] ${stderr.trim()}`)
+      }
+
+      const text = stdout.trim()
+      this.logger.log(`[LOCAL WHISPER STT] ${text}`)
+
+      return text
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'unknown'
+      this.logger.error(`Local Whisper STT failed: ${message}`)
+      return ''
+    } finally {
+      await fs.unlink(wavPath).catch(() => undefined)
     }
   }
 

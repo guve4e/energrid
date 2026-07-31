@@ -13,6 +13,12 @@ type ChatTurn =
 export interface VoiceConversationStreamCallbacks {
   onTextDelta?: (delta: string) => Promise<void> | void
   onCompletedText?: (fullText: string) => Promise<void> | void
+  onMetrics?: (metrics: {
+    requestStartedAt?: number
+    streamCreatedAt?: number
+    firstDeltaAt?: number
+    completedAt?: number
+  }) => Promise<void> | void
 }
 
 @Injectable()
@@ -58,11 +64,19 @@ export class VoiceConversationService {
     })
 
     let replyText = ''
+    const requestStartedAt = Date.now()
 
     const stream = await this.openai.responses.create({
       model: 'gpt-4o-mini',
       input: inputMessages,
       stream: true,
+    })
+    const streamCreatedAt = Date.now()
+    let firstDeltaAt: number | undefined
+
+    await callbacks?.onMetrics?.({
+      requestStartedAt,
+      streamCreatedAt,
     })
 
     for await (const event of stream as AsyncIterable<any>) {
@@ -70,8 +84,12 @@ export class VoiceConversationService {
         const delta = event.delta || ''
         if (!delta) continue
 
+        firstDeltaAt ??= Date.now()
         replyText += delta
         this.traceConversationDelta(input, delta, replyText.length)
+        await callbacks?.onMetrics?.({
+          firstDeltaAt,
+        })
         await callbacks?.onTextDelta?.(delta)
         continue
       }
@@ -86,6 +104,12 @@ export class VoiceConversationService {
     this.appendAssistantTurn(input.conversationId, replyText)
     this.traceConversationOutput(input, replyText)
 
+    await callbacks?.onMetrics?.({
+      requestStartedAt,
+      streamCreatedAt,
+      firstDeltaAt,
+      completedAt: Date.now(),
+    })
     await callbacks?.onCompletedText?.(replyText)
 
     return { replyText }

@@ -1,6 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common'
 import { WebSocket } from 'ws'
 import { randomUUID } from 'crypto'
+import {
+  classifyHomeIntent,
+  HomeContext,
+  planHomeIntent,
+} from '@energrid/domain-automation'
 
 import { VoiceSttService } from './voice-stt.service'
 import type { StreamingSttEvent } from '@energrid/stt-stream-core'
@@ -13,6 +18,12 @@ import type { ActiveVoiceSession } from './voice-session.types'
 export class VoiceSessionService {
   private readonly logger = new Logger(VoiceSessionService.name)
   private readonly sessions = new Map<WebSocket, ActiveVoiceSession>()
+  private readonly speechGateRmsDb = Number(
+    process.env.VOICE_SPEECH_GATE_RMS_DB || -55,
+  )
+  private readonly speechGatePeakDb = Number(
+    process.env.VOICE_SPEECH_GATE_PEAK_DB || -45,
+  )
 
   constructor(
     private readonly sttService: VoiceSttService,
@@ -89,7 +100,10 @@ export class VoiceSessionService {
       assistantReply: '',
 
       startedAt: Date.now(),
+      firstChunkAt: null,
       lastChunkAt: Date.now(),
+      turnEndedAt: null,
+      sttInputEndedAt: null,
 
       turnEnded: false,
       clientTurnEnded: false,
@@ -99,10 +113,22 @@ export class VoiceSessionService {
       pendingFinalTranscript: '',
       pendingFinalTimer: null,
 
+      sttFinalCandidateAt: null,
       sttFinalAt: null,
       assistantFirstDeltaAt: null,
       assistantFirstAudioAt: null,
       assistantFinalAt: null,
+      turnEndEmittedAt: null,
+      timings: {},
+      counters: {},
+      audioAnalysis: {
+        rmsDb: null,
+        peakDb: null,
+        rms: 0,
+        peak: 0,
+        sampleCount: 0,
+        speechGatePassed: null,
+      },
     }
 
     return session
@@ -141,6 +167,7 @@ export class VoiceSessionService {
   private markTurnEnded(session: ActiveVoiceSession): void {
     session.turnEnded = true
     session.clientTurnEnded = true
+    session.turnEndedAt = Date.now()
 
     this.logger.log(
       `[TURN END] ${session.id} conversation=${session.conversationId}`,
@@ -149,6 +176,22 @@ export class VoiceSessionService {
 
   private async endSttInput(session: ActiveVoiceSession): Promise<void> {
     try {
+      const audio = this.getBufferedAudio(session)
+      const analysis = this.analyzePcm16Audio(audio)
+      session.audioAnalysis = analysis
+
+      this.trace.appendAudioAnalysisTrace(session)
+
+      if (!analysis.speechGatePassed) {
+        this.logger.warn(
+          `[SPEECH GATE DROPPED] ${session.id} rmsDb=${analysis.rmsDb ?? '-'} peakDb=${analysis.peakDb ?? '-'} samples=${analysis.sampleCount}`,
+        )
+        this.trace.appendSpeechGateDroppedTrace(session)
+        this.emitter.emitTurnEnd(session)
+        return
+      }
+
+      session.sttInputEndedAt = Date.now()
       await session.sttSession.endInput()
     } catch (error) {
       this.logger.warn(`STT endInput error: ${String(error)}`)
@@ -169,6 +212,7 @@ export class VoiceSessionService {
   ): void {
     session.chunkCount++
     session.audioChunks.push(Buffer.from(buf))
+    session.firstChunkAt ??= Date.now()
     session.lastChunkAt = Date.now()
 
     if (session.chunkCount === 1 || session.chunkCount % 10 === 0) {
@@ -227,6 +271,50 @@ export class VoiceSessionService {
     return Buffer.concat(session.audioChunks)
   }
 
+  private analyzePcm16Audio(audio: Buffer): ActiveVoiceSession['audioAnalysis'] {
+    const sampleCount = Math.floor(audio.length / 2)
+
+    if (!sampleCount) {
+      return {
+        rmsDb: null,
+        peakDb: null,
+        rms: 0,
+        peak: 0,
+        sampleCount: 0,
+        speechGatePassed: false,
+      }
+    }
+
+    let sumSquares = 0
+    let peak = 0
+
+    for (let offset = 0; offset + 1 < audio.length; offset += 2) {
+      const normalized = audio.readInt16LE(offset) / 32768
+      const abs = Math.abs(normalized)
+      sumSquares += normalized * normalized
+      if (abs > peak) peak = abs
+    }
+
+    const rms = Math.sqrt(sumSquares / sampleCount)
+    const rmsDb = this.toDb(rms)
+    const peakDb = this.toDb(peak)
+
+    return {
+      rmsDb,
+      peakDb,
+      rms,
+      peak,
+      sampleCount,
+      speechGatePassed:
+        rmsDb >= this.speechGateRmsDb || peakDb >= this.speechGatePeakDb,
+    }
+  }
+
+  private toDb(value: number): number {
+    if (value <= 0) return -120
+    return Math.round(20 * Math.log10(value) * 10) / 10
+  }
+
   private clearPendingFinalTimer(session: ActiveVoiceSession): void {
     if (session.pendingFinalTimer) {
       clearTimeout(session.pendingFinalTimer)
@@ -261,61 +349,6 @@ export class VoiceSessionService {
     session.pendingFinalTimer = setTimeout(() => {
       void this.finalizePendingTranscript(session)
     }, delayMs)
-  }
-
-  private async resolveFinalTranscript(
-    session: ActiveVoiceSession,
-    bufferedAudio: Buffer,
-    realtimeTranscript: string,
-  ): Promise<string> {
-    const sttServiceWithBatch = this.sttService as VoiceSttService & {
-      transcribeBufferedAudio?: (audio: Buffer) => Promise<string>
-    }
-
-    if (!sttServiceWithBatch.transcribeBufferedAudio) {
-      this.trace.appendBatchUnavailableTrace(
-        session,
-        realtimeTranscript,
-        bufferedAudio,
-      )
-      return realtimeTranscript
-    }
-
-    try {
-      const batchTranscriptRaw =
-        await sttServiceWithBatch.transcribeBufferedAudio(bufferedAudio)
-      const batchTranscript = (batchTranscriptRaw || '').trim()
-      const chosenTranscript = this.chooseBetterTranscript(
-        realtimeTranscript,
-        batchTranscript,
-      )
-
-      this.trace.appendBatchResultTrace(
-        session,
-        realtimeTranscript,
-        batchTranscript,
-        chosenTranscript,
-        bufferedAudio,
-      )
-
-      return chosenTranscript.trim()
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Batch transcription failed'
-
-      this.logger.warn(
-        `[BATCH TRANSCRIPTION FAILED] ${session.id} ${message}`,
-      )
-
-      this.trace.appendBatchErrorTrace(
-        session,
-        realtimeTranscript,
-        bufferedAudio,
-        message,
-      )
-
-      return realtimeTranscript
-    }
   }
 
   private async handleSttEvent(
@@ -367,7 +400,14 @@ export class VoiceSessionService {
     )
 
     session.pendingFinalTranscript = bestTranscript
+    session.sttFinalCandidateAt = Date.now()
     this.trace.appendSttFinalCandidateTrace(session, transcript, bestTranscript)
+
+    if (session.clientTurnEnded) {
+      await this.finalizePendingTranscript(session)
+      return
+    }
+
     this.schedulePendingTranscriptFinalization(session, 700)
   }
 
@@ -441,18 +481,12 @@ export class VoiceSessionService {
   private async resolveAndValidateFinalTranscript(
     session: ActiveVoiceSession,
   ): Promise<string | null> {
-    const realtimeTranscript = session.pendingFinalTranscript.trim()
+    const transcript = session.pendingFinalTranscript.trim()
     const bufferedAudio = this.getBufferedAudio(session)
-
-    const transcript = await this.resolveFinalTranscript(
-      session,
-      bufferedAudio,
-      realtimeTranscript,
-    )
 
     this.trace.appendFinalizePendingTrace(
       session,
-      realtimeTranscript,
+      transcript,
       transcript,
       bufferedAudio,
     )
@@ -491,6 +525,9 @@ export class VoiceSessionService {
   private async generateAssistantReply(
     session: ActiveVoiceSession,
   ): Promise<void> {
+    const automationHandled = await this.tryGenerateAutomationReply(session)
+    if (automationHandled) return
+
     const replyText = await this.replyStreamer.streamReply(
       {
         sessionId: session.id,
@@ -518,6 +555,10 @@ export class VoiceSessionService {
         onCompleted: (finalReplyText) => {
           session.assistantReply = finalReplyText
         },
+
+        onMetrics: (metrics) => {
+          Object.assign(session.timings, metrics)
+        },
       },
     )
 
@@ -528,6 +569,93 @@ export class VoiceSessionService {
     this.trace.appendAssistantFinalTrace(session)
     this.trace.logTurnMetrics(session)
     this.emitter.emitAssistantFinal(session)
+  }
+
+  private async tryGenerateAutomationReply(
+    session: ActiveVoiceSession,
+  ): Promise<boolean> {
+    const classification = classifyHomeIntent(session.finalTranscript)
+
+    if (classification.intent === 'unknown') {
+      return false
+    }
+
+    session.counters.commandFastPath = 1
+    session.timings.llmRequestStartedAt = Date.now()
+    session.timings.llmFirstDeltaAt = session.timings.llmRequestStartedAt
+    session.timings.llmCompletedAt = session.timings.llmRequestStartedAt
+
+    const plan = planHomeIntent({
+      intent: classification.intent,
+      context: this.getFakeHomeContext(),
+    })
+
+    this.emitter.emitHomeActionPlan(session, classification, plan)
+
+    const replyText = await this.replyStreamer.streamStaticReply(
+      {
+        sessionId: session.id,
+        conversationId: session.conversationId,
+        transcript: session.finalTranscript,
+        replyText: plan.spokenReply,
+      },
+      {
+        onTextDelta: (delta, fullText) => {
+          this.markAssistantFirstDelta(session)
+          this.emitter.emitAssistantTextDelta(session, delta, fullText)
+          this.trace.appendAssistantTextDeltaTrace(session, delta, fullText)
+        },
+
+        onAudioChunk: ({ chunkIndex, isLastChunk, text, format, audioBuffer }) => {
+          this.markAssistantFirstAudio(session)
+          this.emitter.emitAssistantAudioChunk(session, {
+            chunkIndex,
+            isLastChunk,
+            text,
+            format,
+            audioBuffer,
+          })
+        },
+
+        onCompleted: (finalReplyText) => {
+          session.assistantReply = finalReplyText
+        },
+
+        onMetrics: (metrics) => {
+          Object.assign(session.timings, metrics)
+        },
+      },
+    )
+
+    session.assistantReply = replyText
+    session.assistantFinalAt = Date.now()
+
+    this.logger.log(
+      `[HOME ACTION PLAN] ${session.id} intent=${classification.intent} actions=${plan.actions.length}`,
+    )
+    this.trace.appendAssistantFinalTrace(session)
+    this.trace.logTurnMetrics(session)
+    this.emitter.emitAssistantFinal(session)
+
+    return true
+  }
+
+  private getFakeHomeContext(): HomeContext {
+    return {
+      outsideDark: process.env.HOME_FAKE_OUTSIDE_DARK !== 'false',
+      insideTempC: Number(process.env.HOME_FAKE_INSIDE_TEMP_C || 19),
+      targetTempC: Number(process.env.HOME_FAKE_TARGET_TEMP_C || 21),
+      comfortTempC: Number(process.env.HOME_FAKE_COMFORT_TEMP_C || 22),
+      homeMode: 'away',
+      availableDevices: [
+        'entry_light',
+        'hallway_light',
+        'kitchen_light',
+        'thermostat',
+      ],
+      occupiedRooms: [],
+      alarmArmed: process.env.HOME_FAKE_ALARM_ARMED === 'true',
+    }
   }
 
   private markAssistantFirstDelta(session: ActiveVoiceSession): void {

@@ -51,6 +51,7 @@ export class VoiceSessionTraceService {
       clientTurnEnded: session.clientTurnEnded,
       durationMs: Date.now() - session.startedAt,
       closedAt: Date.now(),
+      metrics: this.buildTurnMetrics(session),
     })
   }
 
@@ -178,6 +179,33 @@ export class VoiceSessionTraceService {
     })
   }
 
+  appendAudioAnalysisTrace(session: ActiveVoiceSession): void {
+    appendVoiceTrace({
+      type: 'audio_analysis',
+      sessionId: session.id,
+      conversationId: session.conversationId,
+      audioAnalysis: session.audioAnalysis,
+      bufferedAudioBytes: this.getBufferedAudio(session).length,
+    })
+  }
+
+  appendSpeechGateDroppedTrace(session: ActiveVoiceSession): void {
+    appendVoiceTrace({
+      type: 'speech_gate_dropped',
+      sessionId: session.id,
+      conversationId: session.conversationId,
+      audioAnalysis: session.audioAnalysis,
+      bufferedAudioBytes: this.getBufferedAudio(session).length,
+    })
+
+    this.debugEvents.emit({
+      type: 'speech_gate_dropped',
+      sessionId: session.id,
+      conversationId: session.conversationId,
+      audioAnalysis: session.audioAnalysis,
+    })
+  }
+
   appendIgnoredFinalTrace(
     session: ActiveVoiceSession,
     transcript: string,
@@ -202,6 +230,7 @@ export class VoiceSessionTraceService {
       transcript,
       chosenTranscript,
       clientTurnEnded: session.clientTurnEnded,
+      sttFinalCandidateAt: session.sttFinalCandidateAt,
     })
   }
 
@@ -247,36 +276,120 @@ export class VoiceSessionTraceService {
   }
 
   logTurnMetrics(session: ActiveVoiceSession): void {
-    const sttMs =
-      session.sttFinalAt != null ? session.sttFinalAt - session.startedAt : null
-
-    const firstTextMs =
-      session.assistantFirstDeltaAt != null && session.sttFinalAt != null
-        ? session.assistantFirstDeltaAt - session.sttFinalAt
-        : null
-
-    const firstAudioMs =
-      session.assistantFirstAudioAt != null && session.sttFinalAt != null
-        ? session.assistantFirstAudioAt - session.sttFinalAt
-        : null
-
-    const completeMs =
-      session.assistantFinalAt != null && session.sttFinalAt != null
-        ? session.assistantFinalAt - session.sttFinalAt
-        : null
-
-    const totalMs = Date.now() - session.startedAt
+    const metrics = this.buildTurnMetrics(session)
 
     this.logger.log(
       `[TURN METRICS] ${session.id} ` +
-      `stt=${sttMs ?? '-'}ms ` +
-      `first_text=${firstTextMs ?? '-'}ms ` +
-      `first_audio=${firstAudioMs ?? '-'}ms ` +
-      `complete=${completeMs ?? '-'}ms ` +
-      `total=${totalMs}ms ` +
+      `upload=${metrics.uploadMs ?? '-'}ms ` +
+      `stt=${metrics.sttMs ?? '-'}ms ` +
+      `first_text=${metrics.firstTextMs ?? '-'}ms ` +
+      `first_audio=${metrics.firstAudioMs ?? '-'}ms ` +
+      `assistant=${metrics.assistantCompleteMs ?? '-'}ms ` +
+      `total=${metrics.totalMs ?? '-'}ms ` +
       `chunks=${session.chunkCount} ` +
       `bufferedAudioBytes=${this.getBufferedAudio(session).length}`,
     )
+
+    appendVoiceTrace({
+      type: 'voice_metrics',
+      sessionId: session.id,
+      conversationId: session.conversationId,
+      metrics,
+    })
+
+    this.debugEvents.emit({
+      type: 'voice_metrics',
+      sessionId: session.id,
+      conversationId: session.conversationId,
+      metrics,
+    })
+  }
+
+  buildTurnMetrics(session: ActiveVoiceSession) {
+    const now = Date.now()
+    const bufferedAudioBytes = this.getBufferedAudio(session).length
+
+    return {
+      startedAt: session.startedAt,
+      firstChunkAt: session.firstChunkAt,
+      lastChunkAt: session.lastChunkAt,
+      turnEndedAt: session.turnEndedAt,
+      sttInputEndedAt: session.sttInputEndedAt,
+      sttFinalCandidateAt: session.sttFinalCandidateAt,
+      sttFinalAt: session.sttFinalAt,
+      assistantFirstDeltaAt: session.assistantFirstDeltaAt,
+      assistantFirstAudioAt: session.assistantFirstAudioAt,
+      assistantFinalAt: session.assistantFinalAt,
+      turnEndEmittedAt: session.turnEndEmittedAt,
+
+      uploadMs:
+        session.firstChunkAt != null && session.turnEndedAt != null
+          ? session.turnEndedAt - session.firstChunkAt
+          : null,
+      endInputToSttCandidateMs:
+        session.sttInputEndedAt != null && session.sttFinalCandidateAt != null
+          ? session.sttFinalCandidateAt - session.sttInputEndedAt
+          : null,
+      sttMs:
+        session.sttFinalAt != null ? session.sttFinalAt - session.startedAt : null,
+      firstTextMs:
+        session.assistantFirstDeltaAt != null && session.sttFinalAt != null
+          ? session.assistantFirstDeltaAt - session.sttFinalAt
+          : null,
+      firstAudioMs:
+        session.assistantFirstAudioAt != null && session.sttFinalAt != null
+          ? session.assistantFirstAudioAt - session.sttFinalAt
+          : null,
+      assistantCompleteMs:
+        session.assistantFinalAt != null && session.sttFinalAt != null
+          ? session.assistantFinalAt - session.sttFinalAt
+          : null,
+      totalMs:
+        session.turnEndEmittedAt != null
+          ? session.turnEndEmittedAt - session.startedAt
+          : now - session.startedAt,
+
+      chunkCount: session.chunkCount,
+      bufferedAudioBytes,
+      bufferedAudioMs: Math.round(bufferedAudioBytes / 2 / 16000 * 1000),
+      audioAnalysis: session.audioAnalysis,
+      speechGatePassed: session.audioAnalysis.speechGatePassed,
+      transcriptChars: session.finalTranscript.length,
+      assistantReplyChars: session.assistantReply.length,
+      llmRequestToStreamMs:
+        session.timings.llmRequestStartedAt != null &&
+        session.timings.llmStreamCreatedAt != null
+          ? session.timings.llmStreamCreatedAt -
+            session.timings.llmRequestStartedAt
+          : null,
+      llmFirstDeltaMs:
+        session.timings.llmRequestStartedAt != null &&
+        session.timings.llmFirstDeltaAt != null
+          ? session.timings.llmFirstDeltaAt -
+            session.timings.llmRequestStartedAt
+          : null,
+      llmTotalMs:
+        session.timings.llmRequestStartedAt != null &&
+        session.timings.llmCompletedAt != null
+          ? session.timings.llmCompletedAt -
+            session.timings.llmRequestStartedAt
+          : null,
+      firstTtsWaitFromSttMs:
+        session.sttFinalAt != null && session.timings.firstTtsRequestAt != null
+          ? session.timings.firstTtsRequestAt - session.sttFinalAt
+          : null,
+      firstTtsDurationMs:
+        session.timings.ttsChunk0DurationMs ?? null,
+      ttsTotalMs:
+        session.timings.firstTtsRequestAt != null &&
+        session.timings.lastTtsCompletedAt != null
+          ? session.timings.lastTtsCompletedAt -
+            session.timings.firstTtsRequestAt
+          : null,
+      ttsChunkCount: session.timings.ttsChunkCount ?? 0,
+      commandFastPath: session.counters.commandFastPath === 1,
+      timings: session.timings,
+    }
   }
 
   private getBufferedAudio(session: ActiveVoiceSession): Buffer {

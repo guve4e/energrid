@@ -14,7 +14,10 @@ export interface ActiveVoiceSession {
   assistantReply: string
 
   startedAt: number
+  firstChunkAt: number | null
   lastChunkAt: number
+  turnEndedAt: number | null
+  sttInputEndedAt: number | null
 
   turnEnded: boolean
   clientTurnEnded: boolean
@@ -24,8 +27,20 @@ export interface ActiveVoiceSession {
   pendingFinalTranscript: string
   pendingFinalTimer: NodeJS.Timeout | null
 
+  sttFinalCandidateAt: number | null
   sttFinalAt: number | null
   assistantFirstDeltaAt: number | null
   assistantFirstAudioAt: number | null
   assistantFinalAt: number | null
+  turnEndEmittedAt: number | null
+  timings: Record<string, number>
+  counters: Record<string, number>
+  audioAnalysis: {
+    rmsDb: number | null
+    peakDb: number | null
+    rms: number
+    peak: number
+    sampleCount: number
+    speechGatePassed: boolean | null
+  }
 }

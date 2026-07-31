@@ -4,7 +4,10 @@ const TRACE_FILE = '/tmp/voice-turn-trace.jsonl'
 
 export function appendVoiceTrace(event: Record<string, unknown>): void {
   try {
-    console.log('[voice-trace] writing', TRACE_FILE)
+    if (process.env.VOICE_TRACE_VERBOSE === 'true') {
+      console.log('[voice-trace] writing', TRACE_FILE)
+    }
+
     fs.appendFileSync(
       TRACE_FILE,
       JSON.stringify({

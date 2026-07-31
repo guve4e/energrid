@@ -6,6 +6,7 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
+import { ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { RiverCollectorService } from './river-collector.service';
 import { RiverHistoryService } from './river-history.service';
 import {
@@ -16,6 +17,7 @@ import { RiverRegionalIntelligenceService } from './river-regional-intelligence.
 import { RiverHydrologicalIntelligenceService } from './river-hydrological-intelligence.service';
 
 import { RiverForecastPerformanceService } from './forecast-monitoring/river-forecast-performance.service';
+@ApiTags('river')
 @Controller('river')
 export class RiverController {
   constructor(
@@ -28,20 +30,33 @@ export class RiverController {
   ) {}
 
   @Post('collect')
+  @ApiOperation({ summary: 'Collect river readings now' })
   collectNow() {
     return this.collector.collectNow();
   }
 
   @Get('history/:station')
+  @ApiOperation({ summary: 'Get recent river history for a station' })
+  @ApiParam({ name: 'station', example: 'vidin' })
   getHistory(@Param('station') station: string) {
     return this.history.getRecent(station, 48);
   }
 
   @Get('trend/:station')
+  @ApiOperation({ summary: 'Get river trend for a station' })
+  @ApiParam({ name: 'station', example: 'vidin' })
   getTrend(@Param('station') station: string) {
     return this.history.getStationTrend(station, 336);
   }
   @Get('historical-context/:stationCode')
+  @ApiOperation({ summary: 'Compare a river value with historical context' })
+  @ApiParam({ name: 'stationCode', example: 'vidin' })
+  @ApiQuery({ name: 'value', example: 320 })
+  @ApiQuery({
+    name: 'metric',
+    required: false,
+    enum: ['water_level', 'water_discharge', 'water_temperature'],
+  })
   getHistoricalContext(
     @Param('stationCode') stationCode: string,
     @Query('value') rawValue: string,
@@ -75,15 +90,20 @@ export class RiverController {
     );
   }
   @Get('regional-context/vidin')
+  @ApiOperation({ summary: 'Get Vidin regional river context' })
   getVidinRegionalContext() {
     return this.regionalIntelligence.getVidinContext();
   }
 
   @Get('hydrological-context/vidin')
+  @ApiOperation({ summary: 'Get Vidin hydrological river context' })
   getVidinHydrologicalContext() {
     return this.hydrologicalIntelligence.getVidinContext();
   }
   @Get('forecast-performance/:station')
+  @ApiOperation({ summary: 'Get forecast performance for a station' })
+  @ApiParam({ name: 'station', example: 'vidin' })
+  @ApiQuery({ name: 'days', required: false, example: 90 })
   getForecastPerformance(
     @Param('station') station: string,
     @Query('days') rawDays = '90',

@@ -4,6 +4,8 @@
   "license": "MIT",
   "scripts": {
     "api": "nx serve api",
+    "api:voice:openai": "VOICE_STT_PROVIDER=openai nx serve api",
+    "api:voice:local": "VOICE_STT_PROVIDER=local-whisper LOCAL_WHISPER_PYTHON=.venv/bin/python nx serve api",
     "core:migrate:create": "npm --prefix apps/core run migrate:create --",
     "core:migrate:up": "npm --prefix apps/core run migrate:up",
     "core:migrate:down": "npm --prefix apps/core run migrate:down",
@@ -13,7 +15,14 @@
     "core:test:persist": "TS_NODE_TRANSPILE_ONLY=1 TS_NODE_COMPILER_OPTIONS='{\"module\":\"commonjs\",\"moduleResolution\":\"node\"}' node apps/core/scripts/test-estimator-persist.js",
     "core": "nx serve core",
     "core:backtest:river": "DATABASE_URL=$(node apps/core/scripts/db-url.js) TS_NODE_TRANSPILE_ONLY=1 TS_NODE_COMPILER_OPTIONS='{\"module\":\"commonjs\",\"moduleResolution\":\"node\"}' node -r ts-node/register apps/core/scripts/backtest-river-analogues.ts",
-    "core:backtest:propagation": "DATABASE_URL=$(node apps/core/scripts/db-url.js) TS_NODE_TRANSPILE_ONLY=1 TS_NODE_COMPILER_OPTIONS='{\"module\":\"commonjs\",\"moduleResolution\":\"node\"}' node -r ts-node/register apps/core/scripts/backtest-river-propagation.ts"
+    "core:backtest:propagation": "DATABASE_URL=$(node apps/core/scripts/db-url.js) TS_NODE_TRANSPILE_ONLY=1 TS_NODE_COMPILER_OPTIONS='{\"module\":\"commonjs\",\"moduleResolution\":\"node\"}' node -r ts-node/register apps/core/scripts/backtest-river-propagation.ts",
+    "voice:replay": "node device-scripts/replay-wav-to-voice.js",
+    "voice:smoke": "node device-scripts/replay-wav-to-voice.js samples/voice/close-command.wav --expect-transcript ламп --expect-reply Включвам --expect-home-intent turn_on_lights --require-audio --require-metrics --require-fast-path",
+    "voice:smoke:silence": "node device-scripts/replay-wav-to-voice.js samples/voice/fixtures/silence-5s.wav --require-metrics --forbid-transcript --forbid-audio",
+    "voice:smoke:suite": "node device-scripts/run-voice-smoke-suite.js",
+    "voice:stt:check": "node device-scripts/benchmark-local-whisper.js samples/voice/close-command.wav",
+    "voice:stt:bench": "node device-scripts/benchmark-local-whisper.js samples/voice/close-command.wav samples/voice/fixtures/close-command-quiet.wav samples/voice/fixtures/close-command-noisy.wav samples/voice/fixtures/close-command-leading-trailing-silence.wav",
+    "voice:fixtures": "node device-scripts/generate-voice-fixtures.js samples/voice/close-command.wav"
   },
   "private": true,
   "devDependencies": {
@@ -73,6 +82,7 @@
     "@nestjs/platform-express": "^11.0.0",
     "@nestjs/platform-socket.io": "^11.1.17",
     "@nestjs/platform-ws": "^11.1.17",
+    "@nestjs/swagger": "^11.4.6",
     "@nestjs/websockets": "^11.1.17",
     "axios": "^1.6.0",
     "dotenv": "^17.3.1",
@@ -82,6 +92,7 @@
     "reflect-metadata": "^0.1.13",
     "rxjs": "^7.8.0",
     "socket.io": "^4.8.3",
+    "swagger-ui-express": "^5.0.1",
     "vue": "^3.5.13",
     "vue-router": "^4.5.0",
     "wav": "^1.0.2",

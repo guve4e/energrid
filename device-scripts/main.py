@@ -15,7 +15,7 @@ import sounddevice as sd
 import websocket
 from openwakeword.model import Model
 
-WS_URL = "ws://localhost:3101/voice"
+WS_URL = os.getenv("VOICE_WS_URL", "ws://localhost:3000/voice")
 BASE_DIR = pathlib.Path("./pi-agent-runtime")
 
 RATE = 16000
@@ -134,14 +134,15 @@ class VoiceAgent:
                     self.session_reply = message.get("text", "") or ""
                     log(f"assistant_final: {self.session_reply}")
 
-                elif msg_type == "assistant_audio":
+                elif msg_type in ("assistant_audio", "assistant_audio_chunk"):
                     audio_b64 = message.get("audioBase64", "") or ""
                     if audio_b64:
                         audio_bytes = base64.b64decode(audio_b64)
+                        chunk_index = message.get("chunkIndex", 0)
 
                         assistant_wav_path = (
                             SESSIONS_DIR
-                            / f"{self.session_started_iso}_{self.session_id}_assistant.wav"
+                            / f"{self.session_started_iso}_{self.session_id}_assistant_{chunk_index}.wav"
                         )
 
                         with open(assistant_wav_path, "wb") as f:

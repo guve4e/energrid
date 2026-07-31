@@ -27,6 +27,7 @@ export interface StreamAssistantReplyCallbacks {
   onTextDelta: (delta: string, fullText: string) => void
   onAudioChunk: (chunk: StreamAssistantReplyAudioChunk) => void
   onCompleted: (replyText: string) => void
+  onMetrics?: (metrics: Record<string, number>) => void
 }
 
 interface ReplyStreamState {
@@ -39,9 +40,9 @@ interface ReplyStreamState {
 export class VoiceAssistantReplyStreamerService {
   private readonly logger = new Logger(VoiceAssistantReplyStreamerService.name)
 
-  private readonly earlyFlushTargetLength = 100
-  private readonly minPreferredSplitIndex = 45
-  private readonly minFallbackSplitIndex = 35
+  private readonly earlyFlushTargetLength = 70
+  private readonly minPreferredSplitIndex = 28
+  private readonly minFallbackSplitIndex = 24
 
   constructor(
     private readonly conversationService: VoiceConversationService,
@@ -65,6 +66,9 @@ export class VoiceAssistantReplyStreamerService {
       onCompletedText: async (fullText: string) => {
         await this.handleCompletedText(input, state, fullText, callbacks)
       },
+      onMetrics: async (metrics) => {
+        callbacks.onMetrics?.(this.normalizeConversationMetrics(metrics))
+      },
     }
 
     const result = await this.conversationService.handleFinalTranscriptStream(
@@ -79,6 +83,24 @@ export class VoiceAssistantReplyStreamerService {
     callbacks.onCompleted(result.replyText)
 
     return result.replyText
+  }
+
+  async streamStaticReply(
+    input: StreamAssistantReplyInput & { replyText: string },
+    callbacks: StreamAssistantReplyCallbacks,
+  ): Promise<string> {
+    const state: ReplyStreamState = {
+      replyText: '',
+      speakableBuffer: '',
+      audioChunkIndex: 0,
+    }
+
+    await this.handleTextDelta(input, state, input.replyText, callbacks)
+    await this.handleCompletedText(input, state, input.replyText, callbacks)
+
+    callbacks.onCompleted(input.replyText)
+
+    return input.replyText
   }
 
   private async handleTextDelta(
@@ -182,12 +204,17 @@ export class VoiceAssistantReplyStreamerService {
     const chunkIndex = state.audioChunkIndex++
     const synthStartedAt = Date.now()
 
+    if (chunkIndex === 0) {
+      callbacks.onMetrics?.({ firstTtsRequestAt: synthStartedAt })
+    }
+
     this.logger.log(
       `[ASSISTANT AUDIO CHUNK] session=${input.sessionId} index=${chunkIndex} chars=${normalizedText.length} last=${isLastChunk}`,
     )
 
     const synthesized = await this.synthesisService.synthesize(normalizedText)
     const synthDurationMs = Date.now() - synthStartedAt
+    const synthCompletedAt = Date.now()
 
     appendVoiceTrace({
       type: 'assistant_audio_chunk',
@@ -199,6 +226,12 @@ export class VoiceAssistantReplyStreamerService {
       text: normalizedText,
       synthDurationMs,
       assistantAudioAt: Date.now(),
+    })
+
+    callbacks.onMetrics?.({
+      lastTtsCompletedAt: synthCompletedAt,
+      [`ttsChunk${chunkIndex}DurationMs`]: synthDurationMs,
+      ttsChunkCount: state.audioChunkIndex,
     })
 
     callbacks.onAudioChunk({
@@ -295,5 +328,31 @@ export class VoiceAssistantReplyStreamerService {
 
   private findSplitAtWhitespace(text: string): number {
     return text.lastIndexOf(' ', this.earlyFlushTargetLength)
+  }
+
+  private normalizeConversationMetrics(
+    metrics: {
+      requestStartedAt?: number
+      streamCreatedAt?: number
+      firstDeltaAt?: number
+      completedAt?: number
+    },
+  ): Record<string, number> {
+    const out: Record<string, number> = {}
+
+    if (metrics.requestStartedAt != null) {
+      out.llmRequestStartedAt = metrics.requestStartedAt
+    }
+    if (metrics.streamCreatedAt != null) {
+      out.llmStreamCreatedAt = metrics.streamCreatedAt
+    }
+    if (metrics.firstDeltaAt != null) {
+      out.llmFirstDeltaAt = metrics.firstDeltaAt
+    }
+    if (metrics.completedAt != null) {
+      out.llmCompletedAt = metrics.completedAt
+    }
+
+    return out
   }
 }

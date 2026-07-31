@@ -35,6 +35,9 @@
       ],
       "@energrid/domain-estimator": [
         "libs/domain-estimator/src/index.ts"
+      ],
+      "@energrid/domain-automation": [
+        "libs/domain-automation/src/index.ts"
       ]
     }
   }

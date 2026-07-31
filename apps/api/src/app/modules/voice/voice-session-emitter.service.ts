@@ -3,6 +3,7 @@ import { WebSocket } from 'ws'
 
 import { DebugEventsService } from './debug-events.service'
 import type { ActiveVoiceSession } from './voice-session.types'
+import type { ClassifyHomeIntentResult, HomeIntentPlan } from '@energrid/domain-automation'
 
 export interface AssistantAudioChunkEvent {
   chunkIndex: number
@@ -112,10 +113,62 @@ export class VoiceSessionEmitterService {
     })
   }
 
+  emitHomeActionPlan(
+    session: ActiveVoiceSession,
+    classification: ClassifyHomeIntentResult,
+    plan: HomeIntentPlan,
+  ): void {
+    this.emitToBoth(session, {
+      type: 'home_action_plan',
+      sessionId: session.id,
+      classification,
+      plan,
+    })
+  }
+
   emitTurnEnd(session: ActiveVoiceSession): void {
+    session.turnEndEmittedAt = Date.now()
+
+    const metrics = {
+      totalMs: session.turnEndEmittedAt - session.startedAt,
+      sttMs:
+        session.sttFinalAt != null ? session.sttFinalAt - session.startedAt : null,
+      firstTextMs:
+        session.assistantFirstDeltaAt != null && session.sttFinalAt != null
+          ? session.assistantFirstDeltaAt - session.sttFinalAt
+          : null,
+      firstAudioMs:
+        session.assistantFirstAudioAt != null && session.sttFinalAt != null
+          ? session.assistantFirstAudioAt - session.sttFinalAt
+          : null,
+      assistantCompleteMs:
+        session.assistantFinalAt != null && session.sttFinalAt != null
+          ? session.assistantFinalAt - session.sttFinalAt
+          : null,
+      speechGatePassed: session.audioAnalysis.speechGatePassed,
+      audioRmsDb: session.audioAnalysis.rmsDb,
+      audioPeakDb: session.audioAnalysis.peakDb,
+      llmFirstDeltaMs:
+        session.timings.llmRequestStartedAt != null &&
+        session.timings.llmFirstDeltaAt != null
+          ? session.timings.llmFirstDeltaAt -
+            session.timings.llmRequestStartedAt
+          : null,
+      firstTtsDurationMs: session.timings.ttsChunk0DurationMs ?? null,
+      ttsTotalMs:
+        session.timings.firstTtsRequestAt != null &&
+        session.timings.lastTtsCompletedAt != null
+          ? session.timings.lastTtsCompletedAt -
+            session.timings.firstTtsRequestAt
+          : null,
+      commandFastPath: session.counters.commandFastPath === 1,
+      chunkCount: session.chunkCount,
+    }
+
     this.emitToBoth(session, {
       type: 'turn_end',
       sessionId: session.id,
+      metrics,
     })
   }
 
