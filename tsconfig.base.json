@@ -38,6 +38,9 @@
       ],
       "@energrid/domain-automation": [
         "libs/domain-automation/src/index.ts"
+      ],
+      "@energrid/automation-core": [
+        "libs/automation-core/src/index.ts"
       ]
     }
   }

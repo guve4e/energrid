@@ -1,0 +1,29 @@
+{
+  "name": "portal",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/portal/src",
+  "projectType": "application",
+  "targets": {
+    "serve": {
+      "continuous": true,
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vite --config apps/portal/vite.config.ts --host 0.0.0.0"
+      }
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "outputs": ["{workspaceRoot}/dist/apps/portal"],
+      "options": {
+        "command": "vite build --config apps/portal/vite.config.ts"
+      }
+    },
+    "preview": {
+      "continuous": true,
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vite preview --config apps/portal/vite.config.ts --host 0.0.0.0"
+      }
+    }
+  }
+}

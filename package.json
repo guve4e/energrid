@@ -4,6 +4,8 @@
   "license": "MIT",
   "scripts": {
     "api": "nx serve api",
+    "portal": "nx serve portal",
+    "portal:build": "nx build portal",
     "api:voice:openai": "VOICE_STT_PROVIDER=openai nx serve api",
     "api:voice:local": "VOICE_STT_PROVIDER=local-whisper LOCAL_WHISPER_PYTHON=.venv/bin/python nx serve api",
     "core:migrate:create": "npm --prefix apps/core run migrate:create --",
