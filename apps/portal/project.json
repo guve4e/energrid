@@ -9,6 +9,14 @@
       "executor": "nx:run-commands",
       "options": {
         "command": "vite --config apps/portal/vite.config.ts --host 0.0.0.0"
+      },
+      "configurations": {
+        "local": {
+          "command": "PORTAL_API_PROXY_TARGET=http://localhost:3000 VITE_BACKEND_LABEL=local-live vite --config apps/portal/vite.config.ts --host 0.0.0.0"
+        },
+        "pi": {
+          "command": "PORTAL_API_PROXY_TARGET=http://192.168.1.60:3000 VITE_BACKEND_LABEL=pi5-live vite --config apps/portal/vite.config.ts --host 0.0.0.0"
+        }
       }
     },
     "build": {

@@ -4,8 +4,17 @@
     {
       "type": "node",
       "request": "launch",
+      "name": "Run portal frontend",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["nx", "serve", "portal", "--configuration=local"],
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen"
+    },
+    {
+      "type": "node",
+      "request": "launch",
       "name": "Debug api with Nx",
-      "runtimeExecutable": "pnpm exec",
+      "runtimeExecutable": "pnpm",
       "runtimeArgs": ["nx", "serve", "api"],
       "env": {
         "NODE_OPTIONS": "--inspect=9229"
@@ -18,6 +27,12 @@
         "${workspaceFolder}/api/dist/**/*.(m|c|)js",
         "!**/node_modules/**"
       ]
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Run API + portal",
+      "configurations": ["Debug api with Nx", "Run portal frontend"]
     }
   ]
 }
