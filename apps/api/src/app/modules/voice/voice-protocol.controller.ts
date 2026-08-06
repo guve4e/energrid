@@ -1,9 +1,12 @@
-import { Controller, Get } from '@nestjs/common'
+import { Controller, Get, Query } from '@nestjs/common'
 import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger'
+import { VoiceRunStoreService } from './voice-run-store.service'
 
 @ApiTags('voice')
 @Controller('voice')
 export class VoiceProtocolController {
+  constructor(private readonly runStore: VoiceRunStoreService) {}
+
   @Get('protocol')
   @ApiOperation({ summary: 'Describe the voice WebSocket protocol' })
   @ApiOkResponse({
@@ -93,6 +96,38 @@ export class VoiceProtocolController {
         process.env.LOCAL_WHISPER_MODEL ||
         'small',
       localWhisperLanguage: process.env.LOCAL_WHISPER_LANGUAGE || 'bg',
+    }
+  }
+
+  @Get('runs')
+  @ApiOperation({ summary: 'List recent persisted voice assistant runs' })
+  @ApiOkResponse({
+    schema: {
+      example: {
+        storage: {
+          enabled: true,
+          file: '/var/www/energrid/data/voice-runs.jsonl',
+        },
+        runs: [
+          {
+            id: 'session-id:1785600000000',
+            type: 'voice_turn',
+            transcript: 'Включи лампите в банята.',
+            intent: 'turn_on_lights',
+            metrics: { totalMs: 3200, sttMs: 900 },
+          },
+        ],
+      },
+    },
+  })
+  getRuns(@Query('limit') limit?: string) {
+    const parsedLimit = Number(limit)
+
+    return {
+      storage: this.runStore.getInfo(),
+      runs: this.runStore.listRecent(
+        Number.isFinite(parsedLimit) ? parsedLimit : 50,
+      ),
     }
   }
 }

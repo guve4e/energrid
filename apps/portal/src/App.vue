@@ -76,6 +76,14 @@ type PortalState = {
       observedAt: string | null;
       source: string;
       status: string;
+      command?: {
+        id: string;
+        action: 'turn_on' | 'turn_off' | string;
+        status: 'pending' | 'acked' | 'no_ack' | 'failed';
+        requestedAt: string;
+        expectedValues: Record<string, number | boolean | string | null>;
+        message?: string;
+      };
     };
     discovery?: {
       source: string;
@@ -144,6 +152,23 @@ type PortalState = {
       }>;
     };
   };
+  logs?: Array<{
+    id: string;
+    observedAt: string;
+    level: 'debug' | 'info' | 'warn' | 'error';
+    source:
+      | 'device-control'
+      | 'mqtt-ingest'
+      | 'device-registry'
+      | 'portal'
+      | 'voice';
+    event: string;
+    message: string;
+    deviceId?: string;
+    topic?: string;
+    status?: string;
+    details?: Record<string, string | number | boolean | null>;
+  }>;
   systems?: Array<{
     id: string;
     tenantId: string;
@@ -210,6 +235,7 @@ type PortalSystem = NonNullable<PortalState['systems']>[number];
 type MqttDebugMessage = NonNullable<
   PortalState['bus']
 >['mqtt']['recentMessages'][number];
+type OperationalLogEntry = NonNullable<PortalState['logs']>[number];
 type MqttTreeNode = {
   key: string;
   topic: string;
@@ -334,6 +360,9 @@ const deviceSearch = ref('');
 const deviceCapabilityFilter = ref('all');
 const deviceZoneFilter = ref('all');
 const deviceStatusFilter = ref('all');
+const logLevelFilter = ref('all');
+const logSourceFilter = ref('all');
+const logSearch = ref('');
 const clientTrace = ref({
   connectStartAt: 0,
   connectedAt: 0,
@@ -534,6 +563,66 @@ const userInitials = computed(() => {
 });
 
 const displayLogs = computed(() => eventLog.value.slice(-40));
+const operationalLogs = computed(() => state.value?.logs || []);
+const clientLogEntries = computed<OperationalLogEntry[]>(() =>
+  eventLog.value
+    .slice(-80)
+    .reverse()
+    .map((line, index) => ({
+      id: `client:${index}:${line}`,
+      observedAt: new Date().toISOString(),
+      level: line.includes('failed') || line.includes('error') ? 'warn' : 'debug',
+      source: 'portal',
+      event: 'client.log',
+      message: line,
+    })),
+);
+const allLogEntries = computed(() =>
+  [...operationalLogs.value, ...clientLogEntries.value].sort(
+    (left, right) =>
+      Date.parse(right.observedAt) - Date.parse(left.observedAt),
+  ),
+);
+const visibleLogEntries = computed(() => {
+  const search = logSearch.value.trim().toLowerCase();
+  return allLogEntries.value.filter((entry) => {
+    if (logLevelFilter.value !== 'all' && entry.level !== logLevelFilter.value)
+      return false;
+    if (
+      logSourceFilter.value !== 'all' &&
+      entry.source !== logSourceFilter.value
+    )
+      return false;
+    if (!search) return true;
+    return `${entry.level} ${entry.source} ${entry.event} ${entry.message} ${entry.deviceId || ''} ${entry.topic || ''}`
+      .toLowerCase()
+      .includes(search);
+  });
+});
+const logSummary = computed(() => {
+  const entries = allLogEntries.value;
+  return [
+    { label: 'Events', value: `${entries.length}`, detail: 'recent buffer' },
+    {
+      label: 'Warnings',
+      value: `${entries.filter((entry) => entry.level === 'warn').length}`,
+      detail: 'needs attention',
+    },
+    {
+      label: 'Errors',
+      value: `${entries.filter((entry) => entry.level === 'error').length}`,
+      detail: 'failed actions',
+    },
+    {
+      label: 'No ack',
+      value: `${entries.filter((entry) => entry.event === 'command.no_ack').length}`,
+      detail: 'device command misses',
+    },
+  ];
+});
+const logSources = computed(() =>
+  [...new Set(allLogEntries.value.map((entry) => entry.source))].sort(),
+);
 const serverLabel = computed(
   () => import.meta.env.VITE_BACKEND_LABEL || apiBase || 'same-origin',
 );
@@ -1220,6 +1309,15 @@ function closeDeviceSheet() {
 }
 
 function deviceValuePreview(device: PortalDevice) {
+  const command = device.state.command;
+  if (command?.status === 'pending') {
+    return `Pending ${expectedOnLabel(command.expectedValues)}`;
+  }
+  if (command?.status === 'no_ack') {
+    return `No ack · expected ${expectedOnLabel(command.expectedValues)}`;
+  }
+  if (command?.status === 'failed') return 'Command failed';
+
   const values = device.state.values;
   const parts: string[] = [];
 
@@ -1244,6 +1342,23 @@ function deviceValuePreview(device: PortalDevice) {
   return device.state.status;
 }
 
+function deviceStateDetail(device: PortalDevice) {
+  const command = device.state.command;
+  if (command?.status === 'pending') return 'waiting for device ack';
+  if (command?.status === 'acked') return 'confirmed by telemetry';
+  if (command?.status === 'no_ack') return 'published, no telemetry ack';
+  if (command?.status === 'failed') return 'publish failed';
+  return device.adapter.configured ? 'configured' : 'needs setup';
+}
+
+function expectedOnLabel(
+  values: Record<string, number | boolean | string | null>,
+) {
+  const on = values.on ?? values.output ?? values.switch ?? values.powered;
+  if (typeof on === 'boolean') return on ? 'On' : 'Off';
+  return 'state';
+}
+
 function formatNumber(value: number) {
   return Number.isInteger(value) ? `${value}` : value.toFixed(1);
 }
@@ -1261,12 +1376,29 @@ function canToggleDevice(device: PortalDevice) {
 }
 
 function canSendToggle(device: PortalDevice) {
-  return canToggleDevice(device) && device.adapter.configured;
+  return (
+    canToggleDevice(device) &&
+    device.adapter.configured &&
+    device.state.command?.status !== 'pending'
+  );
 }
 
 function deviceIsOn(device: PortalDevice) {
   const values = device.state.values;
   return Boolean(values.on ?? values.output ?? values.switch ?? values.powered);
+}
+
+function deviceControlIsOn(device: PortalDevice) {
+  if (device.state.command?.status === 'pending') {
+    const expected = device.state.command.expectedValues;
+    const on = expected.on ?? expected.output ?? expected.switch ?? expected.powered;
+    if (typeof on === 'boolean') return on;
+  }
+  return deviceIsOn(device);
+}
+
+function deviceCommandIsPending(device: PortalDevice) {
+  return device.state.command?.status === 'pending';
 }
 
 function deviceToggleLabel(device: PortalDevice) {
@@ -1312,6 +1444,9 @@ async function sendDeviceAction(
       `[device] ${action} ${result.status}; affected=${result.affectedDeviceIds?.join(',') || device.id}`,
     );
     await loadState();
+    if (result?.command?.status === 'pending') {
+      await waitForDeviceCommand(device.id, result.command.id);
+    }
   } catch (error) {
     appendLog(
       `[device] ${action} failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -1321,6 +1456,22 @@ async function sendDeviceAction(
     delete next[device.id];
     deviceActionBusy.value = next;
   }
+}
+
+async function waitForDeviceCommand(deviceId: string, commandId: string) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    await sleep(800);
+    await loadState();
+    const device = deviceCards.value.find((candidate) => candidate.id === deviceId);
+    const command = device?.state.command;
+    if (!command || command.id !== commandId || command.status !== 'pending') {
+      return;
+    }
+  }
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function deviceProxyUrl(device: NetworkDevice) {
@@ -1607,6 +1758,23 @@ function appendLog(message: string) {
   eventLog.value.push(`${time} ${message}`);
   if (eventLog.value.length > 200)
     eventLog.value.splice(0, eventLog.value.length - 200);
+}
+
+function formatLogTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString();
+}
+
+function logMeta(entry: OperationalLogEntry) {
+  return [entry.deviceId, entry.topic, entry.status].filter(Boolean).join(' · ');
+}
+
+function logDetails(entry: OperationalLogEntry) {
+  if (!entry.details || Object.keys(entry.details).length === 0) return '';
+  return Object.entries(entry.details)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(' · ');
 }
 
 function connectVoice() {
@@ -2551,23 +2719,26 @@ onBeforeUnmount(() => {
                       <span :class="['dot', deviceStatusClass(device)]"></span>
                       <strong>{{ deviceValuePreview(device) }}</strong>
                     </span>
-                    <span>{{
-                      device.adapter.configured ? 'configured' : 'needs setup'
-                    }}</span>
+                    <span>{{ deviceStateDetail(device) }}</span>
                   </td>
                   <td data-label="Control">
                     <div
                       v-if="canToggleDevice(device)"
                       class="device-switch-control"
-                      :class="{ busy: deviceActionBusy[device.id] }"
+                      :class="{
+                        busy:
+                          deviceActionBusy[device.id] ||
+                          deviceCommandIsPending(device),
+                        noAck: device.state.command?.status === 'no_ack',
+                      }"
                       role="group"
                       :aria-label="`Control ${device.displayName}`"
                     >
                       <button
                         type="button"
                         :class="{
-                          active: !deviceIsOn(device),
-                          off: !deviceIsOn(device),
+                          active: !deviceControlIsOn(device),
+                          off: !deviceControlIsOn(device),
                         }"
                         :disabled="
                           !canSendToggle(device) || deviceActionBusy[device.id]
@@ -2584,8 +2755,8 @@ onBeforeUnmount(() => {
                       <button
                         type="button"
                         :class="{
-                          active: deviceIsOn(device),
-                          on: deviceIsOn(device),
+                          active: deviceControlIsOn(device),
+                          on: deviceControlIsOn(device),
                         }"
                         :disabled="
                           !canSendToggle(device) || deviceActionBusy[device.id]
@@ -2684,15 +2855,20 @@ onBeforeUnmount(() => {
                 <dd>
                   <div
                     class="device-switch-control detail-switch-control"
-                    :class="{ busy: deviceActionBusy[selectedDevice.id] }"
+                    :class="{
+                      busy:
+                        deviceActionBusy[selectedDevice.id] ||
+                        deviceCommandIsPending(selectedDevice),
+                      noAck: selectedDevice.state.command?.status === 'no_ack',
+                    }"
                     role="group"
                     :aria-label="`Control ${selectedDevice.displayName}`"
                   >
                     <button
                       type="button"
                       :class="{
-                        active: !deviceIsOn(selectedDevice),
-                        off: !deviceIsOn(selectedDevice),
+                        active: !deviceControlIsOn(selectedDevice),
+                        off: !deviceControlIsOn(selectedDevice),
                       }"
                       :disabled="
                         !canSendToggle(selectedDevice) ||
@@ -2705,8 +2881,8 @@ onBeforeUnmount(() => {
                     <button
                       type="button"
                       :class="{
-                        active: deviceIsOn(selectedDevice),
-                        on: deviceIsOn(selectedDevice),
+                        active: deviceControlIsOn(selectedDevice),
+                        on: deviceControlIsOn(selectedDevice),
                       }"
                       :disabled="
                         !canSendToggle(selectedDevice) ||
@@ -3387,6 +3563,108 @@ onBeforeUnmount(() => {
           <div v-else class="discovery-empty">
             <strong>MQTT debug state unavailable</strong>
             <span>Load the bus state after the API is online.</span>
+          </div>
+        </section>
+
+        <section
+          v-else-if="activePage === 'logs'"
+          class="panel workspace-panel"
+        >
+          <div class="page-heading split-heading">
+            <div>
+              <p class="eyebrow">Operations</p>
+              <h2>Logs</h2>
+              <span
+                >Follow device commands, MQTT adapter decisions, acknowledgements,
+                and portal-side diagnostics in one timeline.</span
+              >
+            </div>
+            <button class="primary" type="button" @click="loadState">
+              Refresh logs
+            </button>
+          </div>
+
+          <div class="network-stat-grid compact-stats log-summary">
+            <div v-for="item in logSummary" :key="item.label">
+              <span>{{ item.label }}</span>
+              <strong>{{ item.value }}</strong>
+              <small>{{ item.detail }}</small>
+            </div>
+          </div>
+
+          <div class="device-inventory-toolbar log-toolbar">
+            <label class="inventory-search">
+              <span class="search-icon">⌕</span>
+              <input
+                v-model="logSearch"
+                placeholder="Search logs, topics, devices"
+              />
+            </label>
+            <select v-model="logLevelFilter">
+              <option value="all">All levels</option>
+              <option value="error">Errors</option>
+              <option value="warn">Warnings</option>
+              <option value="info">Info</option>
+              <option value="debug">Debug</option>
+            </select>
+            <select v-model="logSourceFilter">
+              <option value="all">All sources</option>
+              <option
+                v-for="source in logSources"
+                :key="source"
+                :value="source"
+              >
+                {{ source }}
+              </option>
+            </select>
+            <span>{{ visibleLogEntries.length }} shown</span>
+          </div>
+
+          <div v-if="visibleLogEntries.length === 0" class="discovery-empty">
+            <strong>No logs match this view</strong>
+            <span
+              >Run a device command, refresh the bus, or clear the filters.</span
+            >
+          </div>
+          <div v-else class="network-table-wrap">
+            <table class="network-table log-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Level</th>
+                  <th>Source</th>
+                  <th>Event</th>
+                  <th>Message</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="entry in visibleLogEntries" :key="entry.id">
+                  <td data-label="Time">
+                    <strong>{{ formatLogTime(entry.observedAt) }}</strong>
+                    <span>{{ entry.observedAt }}</span>
+                  </td>
+                  <td data-label="Level">
+                    <span :class="['trust-pill', `log-${entry.level}`]">
+                      {{ entry.level }}
+                    </span>
+                  </td>
+                  <td data-label="Source">
+                    <strong>{{ entry.source }}</strong>
+                    <span>{{ logMeta(entry) || 'site runtime' }}</span>
+                  </td>
+                  <td data-label="Event">
+                    <strong>{{ entry.event }}</strong>
+                    <span>{{ entry.status || 'recorded' }}</span>
+                  </td>
+                  <td data-label="Message">
+                    <strong>{{ entry.message }}</strong>
+                    <span v-if="logDetails(entry)">{{
+                      logDetails(entry)
+                    }}</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </section>
 

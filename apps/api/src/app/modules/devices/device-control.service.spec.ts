@@ -55,9 +55,13 @@ describe('DeviceControlService', () => {
 
     expect(result).toEqual(
       expect.objectContaining({
-        status: 'success',
+        status: 'pending',
         adapter: 'mqtt',
         affectedDeviceIds: ['kitchen.island.light'],
+        command: expect.objectContaining({
+          status: 'pending',
+          expectedValues: { on: true },
+        }),
       }),
     )
     expect(execFileMock).toHaveBeenCalledWith(

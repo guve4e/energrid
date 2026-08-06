@@ -1,4 +1,5 @@
 import { DeviceRegistryService } from '../devices/device-registry.service'
+import { OperationalLogService } from '../devices/operational-log.service'
 import { PortalStateService } from './portal-state.service'
 
 describe('PortalStateService', () => {
@@ -27,9 +28,10 @@ describe('PortalStateService', () => {
         prefix: 'energrid/tenant-demo/site-home',
         subscriptions: ['energrid/tenant-demo/site-home/#'],
         legacyTemperatureTopics: [],
+        legacyDeviceTopics: [],
         recentMessages: [],
       }),
-    } as never)
+    } as never, new OperationalLogService())
   }
 
   it('returns a demo portal state with kitchen temperature and voice config', () => {
@@ -49,6 +51,7 @@ describe('PortalStateService', () => {
     expect(temp?.source).toBe('valentin-sensor')
     expect(state.voice.provider).toBe('openai')
     expect(state.bus.mqtt.status).toBe('disabled')
+    expect(state.logs).toEqual([])
     expect(state.networkZones).toEqual([])
     expect(state.networkDevices).toEqual([])
   })

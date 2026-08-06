@@ -4,6 +4,7 @@ import { WebSocket } from 'ws'
 import { DebugEventsService } from './debug-events.service'
 import type { ActiveVoiceSession } from './voice-session.types'
 import type { ClassifyHomeIntentResult, HomeIntentPlan } from '@energrid/domain-automation'
+import type { HomeActionExecutionResult } from './home-automation.service'
 
 export interface AssistantAudioChunkEvent {
   chunkIndex: number
@@ -123,6 +124,17 @@ export class VoiceSessionEmitterService {
       sessionId: session.id,
       classification,
       plan,
+    })
+  }
+
+  emitHomeActionExecution(
+    session: ActiveVoiceSession,
+    results: HomeActionExecutionResult[],
+  ): void {
+    this.emitToBoth(session, {
+      type: 'home_action_execution',
+      sessionId: session.id,
+      results,
     })
   }
 

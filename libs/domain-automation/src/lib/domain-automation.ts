@@ -23,6 +23,7 @@ export interface HomeContext {
   availableDevices: string[]
   occupiedRooms: string[]
   alarmArmed: boolean
+  requestedText?: string
 }
 
 export interface PlannedHomeAction {
@@ -100,9 +101,15 @@ const intentPatterns: Array<{
     confidence: 0.9,
     phrases: [
       'включи лампите',
+      'включи лампата',
       'пусни лампите',
+      'пусни лампата',
       'светни лампите',
+      'светни лампата',
       'включи осветлението',
+      'vkluchi lampite',
+      'vklu4i lampite',
+      'pusni lampite',
       'turn on the lights',
       'lights on',
     ],
@@ -112,9 +119,15 @@ const intentPatterns: Array<{
     confidence: 0.9,
     phrases: [
       'изключи лампите',
+      'изключи лампата',
       'спри лампите',
+      'спри лампата',
       'угаси лампите',
+      'угаси лампата',
       'изключи осветлението',
+      'izkluchi lampite',
+      'izklu4i lampite',
+      'ugasi lampite',
       'turn off the lights',
       'lights off',
     ],
@@ -150,6 +163,12 @@ const intentPatterns: Array<{
       'какво е състоянието',
       'как е вкъщи',
       'статус на къщата',
+      'каква е температурата',
+      'каква е температурата в кухнята',
+      'колко градуса е',
+      'колко градуса е в кухнята',
+      'temperature in the kitchen',
+      'kitchen temperature',
       'home status',
       'house status',
     ],
@@ -332,7 +351,13 @@ function planGoodNight(context: HomeContext): HomeIntentPlan {
 
 function planTurnOnLights(context: HomeContext): HomeIntentPlan {
   const actions: PlannedHomeAction[] = []
-  addLightIfAvailable(actions, context, 'kitchen_light', 'кухня')
+  const target = chooseRequestedLight(context)
+
+  if (target) {
+    addLightIfAvailable(actions, context, target.deviceId, target.room)
+  } else {
+    addLightIfAvailable(actions, context, 'kitchen_light', 'кухня')
+  }
 
   return {
     intent: 'turn_on_lights',
@@ -346,11 +371,15 @@ function planTurnOnLights(context: HomeContext): HomeIntentPlan {
 }
 
 function planTurnOffLights(context: HomeContext): HomeIntentPlan {
-  const actions = context.availableDevices
-    .filter((deviceId) => deviceId.endsWith('_light'))
-    .map<PlannedHomeAction>((deviceId) => ({
+  const target = chooseRequestedLight(context)
+  const targetDeviceIds = target
+    ? [target.deviceId]
+    : context.availableDevices.filter((deviceId) => deviceId.endsWith('_light'))
+
+  const actions = targetDeviceIds.map<PlannedHomeAction>((deviceId) => ({
       type: 'light.turn_off',
       deviceId,
+      room: target?.deviceId === deviceId ? target.room : undefined,
       risk: 'safe',
       reason: 'User requested lights off.',
     }))
@@ -413,6 +442,115 @@ function addLightIfAvailable(
     risk: 'safe',
     reason: 'Lighting is safe and useful for this intent.',
   })
+}
+
+function chooseRequestedLight(
+  context: HomeContext,
+): { deviceId: string; room: string } | null {
+  const room = requestedRoomFromText(context.requestedText || '')
+  if (!room) return null
+
+  for (const candidate of lightCandidatesForRoom(room.key)) {
+    if (context.availableDevices.includes(candidate)) {
+      return { deviceId: candidate, room: room.bg }
+    }
+  }
+
+  const matchingDevice = context.availableDevices.find(
+    (deviceId) =>
+      deviceId.includes(room.key) &&
+      (deviceId.includes('light') || deviceId.includes('lamp')),
+  )
+
+  return matchingDevice ? { deviceId: matchingDevice, room: room.bg } : null
+}
+
+function requestedRoomFromText(
+  text: string,
+): { key: string; bg: string } | null {
+  const normalized = normalizeIntentText(text)
+  if (!normalized) return null
+
+  if (
+    matchesAny(normalized, [
+      'баня',
+      'банята',
+      'bathroom',
+      'bath',
+      'banq',
+      'banqta',
+      'bania',
+      'banyata',
+    ])
+  ) {
+    return { key: 'bath', bg: 'баня' }
+  }
+
+  if (
+    matchesAny(normalized, [
+      'кухня',
+      'кухнята',
+      'kitchen',
+      'kuhnq',
+      'kuhnqta',
+      'kuhnia',
+      'kuhnyata',
+    ])
+  ) {
+    return { key: 'kitchen', bg: 'кухня' }
+  }
+
+  if (
+    matchesAny(normalized, [
+      'коридор',
+      'коридора',
+      'антре',
+      'hall',
+      'hallway',
+      'koridor',
+      'antre',
+    ])
+  ) {
+    return { key: 'hallway', bg: 'коридор' }
+  }
+
+  if (matchesAny(normalized, ['вход', 'входа', 'entry', 'entrance', 'vhod'])) {
+    return { key: 'entry', bg: 'вход' }
+  }
+
+  return null
+}
+
+function matchesAny(text: string, phrases: string[]): boolean {
+  return phrases.some((phrase) => text.includes(normalizeIntentText(phrase)))
+}
+
+function lightCandidatesForRoom(room: string): string[] {
+  switch (room) {
+    case 'bath':
+      return [
+        'bath_light',
+        'bathroom_light',
+        'bath.lights',
+        'bath.light',
+        'bath_light_led',
+        'bath.light.led',
+      ]
+    case 'kitchen':
+      return [
+        'kitchen_light',
+        'kitchen.lights',
+        'kitchen.light',
+        'kitchen_light_led',
+        'kitchen.light.led',
+      ]
+    case 'hallway':
+      return ['hallway_light', 'hall_light', 'hallway.lights', 'hall.lights']
+    case 'entry':
+      return ['entry_light', 'entrance_light', 'entry.lights', 'entrance.lights']
+    default:
+      return [`${room}_light`, `${room}.lights`]
+  }
 }
 
 function shouldRaiseTemperature(context: HomeContext): boolean {

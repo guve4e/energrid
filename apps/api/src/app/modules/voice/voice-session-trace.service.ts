@@ -2,12 +2,16 @@ import { Injectable, Logger } from '@nestjs/common'
 import { DebugEventsService } from './debug-events.service'
 import { appendVoiceTrace } from './utils/voice-trace.util'
 import type { ActiveVoiceSession } from './voice-session.types'
+import { VoiceRunStoreService } from './voice-run-store.service'
 
 @Injectable()
 export class VoiceSessionTraceService {
   private readonly logger = new Logger(VoiceSessionTraceService.name)
 
-  constructor(private readonly debugEvents: DebugEventsService) {}
+  constructor(
+    private readonly debugEvents: DebugEventsService,
+    private readonly runStore: VoiceRunStoreService,
+  ) {}
 
   logSessionStart(session: ActiveVoiceSession): void {
     this.logger.log(
@@ -52,6 +56,20 @@ export class VoiceSessionTraceService {
       durationMs: Date.now() - session.startedAt,
       closedAt: Date.now(),
       metrics: this.buildTurnMetrics(session),
+    })
+  }
+
+  recordCompletedTurn(session: ActiveVoiceSession): void {
+    const record = this.runStore.recordTurn(session, this.buildTurnMetrics(session))
+    if (!record) return
+
+    this.debugEvents.emit({
+      type: 'voice_run_recorded',
+      sessionId: session.id,
+      conversationId: session.conversationId,
+      runId: record.id,
+      intent: record.intent,
+      file: this.runStore.getInfo().file,
     })
   }
 

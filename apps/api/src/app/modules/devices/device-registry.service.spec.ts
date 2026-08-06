@@ -129,6 +129,40 @@ describe('DeviceRegistryService', () => {
     expect(snapshot.summary.discovered).toBe(1);
   });
 
+  it('tracks a pending command until matching telemetry acknowledges it', () => {
+    const service = new DeviceRegistryService();
+
+    const pending = service.markDeviceCommandPending('kitchen_light', {
+      action: 'turn_on',
+      expectedValues: { on: true },
+      ttlMs: 5000,
+    });
+
+    expect(pending).toEqual(
+      expect.objectContaining({
+        status: 'pending',
+        expectedValues: { on: true },
+      }),
+    );
+    expect(
+      service
+        .getSnapshot()
+        .devices.find((device) => device.id === 'kitchen_light')?.state.command,
+    ).toEqual(expect.objectContaining({ status: 'pending' }));
+
+    service.ingestDeviceTelemetry({
+      deviceId: 'kitchen_light',
+      values: { on: true },
+      observedAt: '2026-08-05T12:00:00.000Z',
+    });
+
+    expect(
+      service
+        .getSnapshot()
+        .devices.find((device) => device.id === 'kitchen_light')?.state.command,
+    ).toEqual(expect.objectContaining({ status: 'acked' }));
+  });
+
   it('imports approved site devices from the legacy Shelly registry shape', () => {
     process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({
       devices: [

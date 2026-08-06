@@ -8,6 +8,7 @@ import type {
   RegisteredDeviceState,
   SiteSystem,
 } from './device-registry.types'
+import { OperationalLogService } from './operational-log.service'
 
 export interface ShellyRpcDeviceConfig {
   key: string
@@ -90,6 +91,15 @@ export class DeviceRegistryService {
   private readonly liveApprovedDeviceConfigs = new Map<string, ApprovedDeviceConfig>()
   private readonly liveDiscoveredDeviceConfigs = new Map<string, DiscoveredDeviceConfig>()
   private readonly liveStateByDeviceId = new Map<string, RegisteredDeviceState>()
+  private readonly commandByDeviceId = new Map<
+    string,
+    NonNullable<RegisteredDeviceState['command']> & {
+      expiresAt: number
+      displayUntil: number
+    }
+  >()
+
+  constructor(private readonly operationalLog?: OperationalLogService) {}
 
   getSnapshot(): DeviceRegistrySnapshot {
     const allDevices = this.getDevices()
@@ -614,6 +624,7 @@ export class DeviceRegistryService {
       source: raw.state?.source || raw.origin || raw.protocol || 'mqtt-telemetry',
       status: normalizeOnlineStatus(raw.state?.status || raw.status || 'online'),
     })
+    this.ackMatchingCommand(id, values)
 
     if (!this.liveApprovedDeviceConfigs.has(id)) {
       this.liveDiscoveredDeviceConfigs.set(id, {
@@ -658,22 +669,182 @@ export class DeviceRegistryService {
     })
   }
 
+  markDeviceCommandPending(
+    deviceId: string,
+    command: {
+      action: NonNullable<RegisteredDeviceState['command']>['action']
+      expectedValues: Record<string, number | boolean | string | null>
+      message?: string
+      ttlMs?: number
+    },
+  ): NonNullable<RegisteredDeviceState['command']> {
+    const now = Date.now()
+    const requestedAt = new Date(now).toISOString()
+    const pending = {
+      id: `${deviceId}:${command.action}:${now}`,
+      action: command.action,
+      status: 'pending' as const,
+      requestedAt,
+      expectedValues: command.expectedValues,
+      message: command.message,
+      expiresAt: now + (command.ttlMs || numberFromEnv('HOME_DEVICE_ACK_TIMEOUT_MS', 5000)),
+      displayUntil: now + numberFromEnv('HOME_DEVICE_ACK_TIMEOUT_MS', 5000) + 30000,
+    }
+    this.commandByDeviceId.set(deviceId, pending)
+    this.operationalLog?.record({
+      level: 'info',
+      source: 'device-control',
+      event: 'command.pending',
+      message: `${deviceId} ${command.action} published; waiting for acknowledgement.`,
+      deviceId,
+      status: 'pending',
+      details: {
+        action: command.action,
+        expected: JSON.stringify(command.expectedValues),
+      },
+    })
+    return commandForState(pending)
+  }
+
+  markDeviceCommandFailed(
+    deviceId: string,
+    command: {
+      action: NonNullable<RegisteredDeviceState['command']>['action']
+      expectedValues: Record<string, number | boolean | string | null>
+      message?: string
+    },
+  ): NonNullable<RegisteredDeviceState['command']> {
+    const now = Date.now()
+    const failed = {
+      id: `${deviceId}:${command.action}:${now}`,
+      action: command.action,
+      status: 'failed' as const,
+      requestedAt: new Date(now).toISOString(),
+      expectedValues: command.expectedValues,
+      message: command.message,
+      expiresAt: now,
+      displayUntil: now + 30000,
+    }
+    this.commandByDeviceId.set(deviceId, failed)
+    this.operationalLog?.record({
+      level: 'error',
+      source: 'device-control',
+      event: 'command.failed',
+      message: `${deviceId} ${command.action} failed: ${command.message || 'unknown error'}`,
+      deviceId,
+      status: 'failed',
+      details: {
+        action: command.action,
+        expected: JSON.stringify(command.expectedValues),
+      },
+    })
+    return commandForState(failed)
+  }
+
   private withLiveState(device: RegisteredDevice): RegisteredDevice {
+    this.refreshDeviceCommand(device.id)
     const liveState = this.liveStateByDeviceId.get(device.id)
-    if (!liveState) return device
+    const command = this.commandByDeviceId.get(device.id)
+    if (!liveState && !command) return device
 
     return {
       ...device,
       state: {
         ...device.state,
-        ...liveState,
+        ...(liveState || {}),
         values: {
           ...device.state.values,
-          ...liveState.values,
+          ...(liveState?.values || {}),
         },
+        ...(command ? { command: commandForState(command) } : {}),
       },
     }
   }
+
+  private ackMatchingCommand(
+    deviceId: string,
+    values: Record<string, number | boolean | string | null>,
+  ): void {
+    this.refreshDeviceCommand(deviceId)
+    const command = this.commandByDeviceId.get(deviceId)
+    if (!command || command.status !== 'pending') return
+    if (!valuesMatch(command.expectedValues, values)) return
+
+    const now = Date.now()
+    this.commandByDeviceId.set(deviceId, {
+      ...command,
+      status: 'acked',
+      message: 'Device reported the requested state.',
+      displayUntil: now + 5000,
+    })
+    this.operationalLog?.record({
+      level: 'info',
+      source: 'device-registry',
+      event: 'command.acked',
+      message: `${deviceId} reported the requested state.`,
+      deviceId,
+      status: 'acked',
+      details: {
+        action: command.action,
+        expected: JSON.stringify(command.expectedValues),
+      },
+    })
+  }
+
+  private refreshDeviceCommand(deviceId: string): void {
+    const command = this.commandByDeviceId.get(deviceId)
+    if (!command) return
+
+    const now = Date.now()
+    if (command.status === 'pending' && now > command.expiresAt) {
+      this.commandByDeviceId.set(deviceId, {
+        ...command,
+        status: 'no_ack',
+        message: 'Command was published, but no matching telemetry arrived.',
+        displayUntil: now + 30000,
+      })
+      this.operationalLog?.record({
+        level: 'warn',
+        source: 'device-registry',
+        event: 'command.no_ack',
+        message: `${deviceId} did not report the requested state after command publish.`,
+        deviceId,
+        status: 'no_ack',
+        details: {
+          action: command.action,
+          expected: JSON.stringify(command.expectedValues),
+        },
+      })
+      return
+    }
+
+    if (command.status !== 'pending' && now > command.displayUntil) {
+      this.commandByDeviceId.delete(deviceId)
+    }
+  }
+}
+
+function commandForState(
+  command: NonNullable<RegisteredDeviceState['command']> & {
+    expiresAt?: number
+    displayUntil?: number
+  },
+): NonNullable<RegisteredDeviceState['command']> {
+  return {
+    id: command.id,
+    action: command.action,
+    status: command.status,
+    requestedAt: command.requestedAt,
+    expectedValues: command.expectedValues,
+    message: command.message,
+  }
+}
+
+function valuesMatch(
+  expected: Record<string, number | boolean | string | null>,
+  actual: Record<string, number | boolean | string | null>,
+): boolean {
+  return Object.entries(expected).every(([key, value]) => actual[key] === value)
 }
 
 function unknownState(source: string, configured = true): RegisteredDeviceState {

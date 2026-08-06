@@ -3,7 +3,6 @@ import { WebSocket } from 'ws'
 import { randomUUID } from 'crypto'
 import {
   classifyHomeIntent,
-  HomeContext,
   planHomeIntent,
 } from '@energrid/domain-automation'
 
@@ -13,6 +12,7 @@ import { VoiceAssistantReplyStreamerService } from './voice-assistant-reply-stre
 import { VoiceSessionTraceService } from './voice-session-trace.service'
 import { VoiceSessionEmitterService } from './voice-session-emitter.service'
 import type { ActiveVoiceSession } from './voice-session.types'
+import { HomeAutomationService } from './home-automation.service'
 
 @Injectable()
 export class VoiceSessionService {
@@ -30,6 +30,7 @@ export class VoiceSessionService {
     private readonly replyStreamer: VoiceAssistantReplyStreamerService,
     private readonly trace: VoiceSessionTraceService,
     private readonly emitter: VoiceSessionEmitterService,
+    private readonly homeAutomation: HomeAutomationService,
   ) {}
 
   async openSession(client: WebSocket): Promise<void> {
@@ -98,6 +99,10 @@ export class VoiceSessionService {
       partialTranscript: '',
       finalTranscript: '',
       assistantReply: '',
+      homeIntentClassification: null,
+      homeIntentPlan: null,
+      homeActionExecutionResults: [],
+      errorMessages: [],
 
       startedAt: Date.now(),
       firstChunkAt: null,
@@ -144,6 +149,7 @@ export class VoiceSessionService {
   ): void {
     const message =
       error instanceof Error ? error.message : 'Unhandled STT event error'
+    session.errorMessages.push(message)
 
     this.logger.error(
       `[VOICE EVENT ERROR] ${session.id} ${message}`,
@@ -188,6 +194,7 @@ export class VoiceSessionService {
         )
         this.trace.appendSpeechGateDroppedTrace(session)
         this.emitter.emitTurnEnd(session)
+        this.trace.recordCompletedTurn(session)
         return
       }
 
@@ -464,9 +471,11 @@ export class VoiceSessionService {
     try {
       await this.generateAssistantReply(session)
       this.emitter.emitTurnEnd(session)
+      this.trace.recordCompletedTurn(session)
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Assistant generation failed'
+      session.errorMessages.push(message)
 
       this.logger.error(
         `[ASSISTANT ERROR] ${session.id} ${message}`,
@@ -498,6 +507,7 @@ export class VoiceSessionService {
 
       this.trace.appendDroppedFinalTrace(session, transcript)
       this.emitter.emitTurnEnd(session)
+      this.trace.recordCompletedTurn(session)
       return null
     }
 
@@ -575,6 +585,7 @@ export class VoiceSessionService {
     session: ActiveVoiceSession,
   ): Promise<boolean> {
     const classification = classifyHomeIntent(session.finalTranscript)
+    session.homeIntentClassification = classification
 
     if (classification.intent === 'unknown') {
       return false
@@ -585,19 +596,38 @@ export class VoiceSessionService {
     session.timings.llmFirstDeltaAt = session.timings.llmRequestStartedAt
     session.timings.llmCompletedAt = session.timings.llmRequestStartedAt
 
+    const homeContext = await this.homeAutomation.getHomeContext()
     const plan = planHomeIntent({
       intent: classification.intent,
-      context: this.getFakeHomeContext(),
+      context: {
+        ...homeContext,
+        requestedText: session.finalTranscript,
+      },
     })
+    session.homeIntentPlan = plan
 
     this.emitter.emitHomeActionPlan(session, classification, plan)
+
+    const executionResults = plan.requiresConfirmation
+      ? []
+      : await this.homeAutomation.executePlan(plan)
+    session.homeActionExecutionResults = executionResults
+
+    if (executionResults.length > 0) {
+      this.emitter.emitHomeActionExecution(session, executionResults)
+    }
+
+    const replyTextWithExecution = this.withExecutionSummary(
+      plan.spokenReply,
+      executionResults,
+    )
 
     const replyText = await this.replyStreamer.streamStaticReply(
       {
         sessionId: session.id,
         conversationId: session.conversationId,
         transcript: session.finalTranscript,
-        replyText: plan.spokenReply,
+        replyText: replyTextWithExecution,
       },
       {
         onTextDelta: (delta, fullText) => {
@@ -640,22 +670,26 @@ export class VoiceSessionService {
     return true
   }
 
-  private getFakeHomeContext(): HomeContext {
-    return {
-      outsideDark: process.env.HOME_FAKE_OUTSIDE_DARK !== 'false',
-      insideTempC: Number(process.env.HOME_FAKE_INSIDE_TEMP_C || 19),
-      targetTempC: Number(process.env.HOME_FAKE_TARGET_TEMP_C || 21),
-      comfortTempC: Number(process.env.HOME_FAKE_COMFORT_TEMP_C || 22),
-      homeMode: 'away',
-      availableDevices: [
-        'entry_light',
-        'hallway_light',
-        'kitchen_light',
-        'thermostat',
-      ],
-      occupiedRooms: [],
-      alarmArmed: process.env.HOME_FAKE_ALARM_ARMED === 'true',
+  private withExecutionSummary(
+    spokenReply: string,
+    executionResults: Awaited<ReturnType<HomeAutomationService['executePlan']>>,
+  ): string {
+    if (executionResults.length === 0) return spokenReply
+
+    const failed = executionResults.filter((result) => result.status === 'failed')
+    if (failed.length > 0) {
+      return `${spokenReply} Но имаше проблем при изпълнението: ${failed[0].message}`
     }
+
+    const executed = executionResults.filter((result) => result.status === 'success')
+    if (executed.length > 0) return spokenReply
+
+    const skipped = executionResults.find((result) => result.status === 'skipped')
+    if (skipped) {
+      return `${spokenReply} Засега това е симулация: ${skipped.message}`
+    }
+
+    return spokenReply
   }
 
   private markAssistantFirstDelta(session: ActiveVoiceSession): void {

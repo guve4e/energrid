@@ -1,5 +1,10 @@
 import { WebSocket } from 'ws'
 import type { StreamingSttSession } from '@energrid/stt-stream-core'
+import type {
+  ClassifyHomeIntentResult,
+  HomeIntentPlan,
+} from '@energrid/domain-automation'
+import type { HomeActionExecutionResult } from './home-automation.service'
 
 export interface ActiveVoiceSession {
   id: string
@@ -12,6 +17,10 @@ export interface ActiveVoiceSession {
   partialTranscript: string
   finalTranscript: string
   assistantReply: string
+  homeIntentClassification: ClassifyHomeIntentResult | null
+  homeIntentPlan: HomeIntentPlan | null
+  homeActionExecutionResults: HomeActionExecutionResult[]
+  errorMessages: string[]
 
   startedAt: number
   firstChunkAt: number | null

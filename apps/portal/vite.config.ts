@@ -17,9 +17,17 @@ export default defineConfig({
   },
   server: {
     port: 4300,
+    hmr: {
+      protocol: 'ws',
+      host: 'localhost',
+      clientPort: 4300,
+    },
     proxy: {
       '/auth': apiProxyTarget,
-      '/portal': apiProxyTarget,
+      '/portal': {
+        target: apiProxyTarget,
+        ws: true,
+      },
       '/voice': {
         target: voiceProxyTarget,
         ws: true,

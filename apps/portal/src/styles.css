@@ -1070,6 +1070,20 @@ pre {
   color: #2863e6;
 }
 
+.device-switch-control.busy {
+  border-color: rgba(40, 99, 230, 0.34);
+  background: #f4f7ff;
+}
+
+.device-switch-control.noAck {
+  border-color: rgba(217, 119, 6, 0.38);
+  background: #fff8eb;
+}
+
+.device-switch-control.noAck button.active {
+  color: #b54708;
+}
+
 .detail-switch-control {
   min-width: 160px;
 }
@@ -1826,6 +1840,62 @@ pre {
   overflow-wrap: anywhere;
 }
 
+.log-toolbar {
+  margin: 14px 0;
+}
+
+.log-summary {
+  margin-top: 10px;
+}
+
+.log-table {
+  min-width: 1080px;
+}
+
+.log-table td:nth-child(1) {
+  width: 14%;
+}
+
+.log-table td:nth-child(2) {
+  width: 9%;
+}
+
+.log-table td:nth-child(3) {
+  width: 18%;
+}
+
+.log-table td:nth-child(4) {
+  width: 18%;
+}
+
+.log-table td:nth-child(5) {
+  width: 41%;
+}
+
+.log-table td span {
+  overflow-wrap: anywhere;
+}
+
+.trust-pill.log-debug {
+  border-color: #d8e0ec;
+  color: #667085;
+}
+
+.trust-pill.log-info {
+  border-color: rgba(40, 99, 230, 0.22);
+  color: #194bcb;
+}
+
+.trust-pill.log-warn {
+  border-color: rgba(217, 119, 6, 0.34);
+  color: #b54708;
+}
+
+.trust-pill.log-error {
+  border-color: rgba(220, 38, 38, 0.32);
+  color: #b42318;
+}
+
 .bus-actions {
   display: flex;
   align-items: center;
@@ -2253,6 +2323,20 @@ pre {
   color: #a9c4ff;
 }
 
+.theme-dark .device-switch-control.busy {
+  border-color: rgba(96, 165, 250, 0.42);
+  background: #101827;
+}
+
+.theme-dark .device-switch-control.noAck {
+  border-color: rgba(251, 191, 36, 0.36);
+  background: #1f1a0c;
+}
+
+.theme-dark .device-switch-control.noAck button.active {
+  color: #fbbf24;
+}
+
 .theme-dark .device-inventory-toolbar select {
   border-color: #243143;
   background: #050917;
@@ -2471,6 +2555,26 @@ pre {
 
 .theme-dark .bus-table code {
   color: #cbd5e1;
+}
+
+.theme-dark .trust-pill.log-debug {
+  border-color: #243143;
+  color: #94a3b8;
+}
+
+.theme-dark .trust-pill.log-info {
+  border-color: rgba(96, 165, 250, 0.38);
+  color: #a9c4ff;
+}
+
+.theme-dark .trust-pill.log-warn {
+  border-color: rgba(251, 191, 36, 0.36);
+  color: #fbbf24;
+}
+
+.theme-dark .trust-pill.log-error {
+  border-color: rgba(248, 113, 113, 0.38);
+  color: #fca5a5;
 }
 
 .theme-dark .system-card {
@@ -2926,6 +3030,10 @@ pre {
   }
 
   .bus-table {
+    min-width: 0;
+  }
+
+  .log-table {
     min-width: 0;
   }
 

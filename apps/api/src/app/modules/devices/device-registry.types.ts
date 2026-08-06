@@ -87,6 +87,14 @@ export interface RegisteredDeviceState {
   observedAt: string | null
   source: string
   status: DeviceOnlineStatus
+  command?: {
+    id: string
+    action: DeviceCapabilityAction
+    status: 'pending' | 'acked' | 'no_ack' | 'failed'
+    requestedAt: string
+    expectedValues: Record<string, number | boolean | string | null>
+    message?: string
+  }
 }
 
 export interface DeviceDiscoveryInfo {

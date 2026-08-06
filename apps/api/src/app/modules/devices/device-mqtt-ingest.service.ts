@@ -13,6 +13,7 @@ import {
 import { promisify } from 'node:util';
 import { Subject } from 'rxjs';
 import { DeviceRegistryService } from './device-registry.service';
+import { OperationalLogService } from './operational-log.service';
 import type { DeviceCapabilityKind } from './device-registry.types';
 
 const execFileAsync = promisify(execFile);
@@ -55,7 +56,10 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
   private recentMessages: MqttDebugMessage[] = [];
   private readonly debugMessages = new Subject<MqttDebugMessage>();
 
-  constructor(private readonly registry: DeviceRegistryService) {}
+  constructor(
+    private readonly registry: DeviceRegistryService,
+    private readonly operationalLog?: OperationalLogService,
+  ) {}
 
   onModuleInit(): void {
     if (!mqttIngestEnabled()) return;
@@ -86,6 +90,16 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(
       `[DEVICE MQTT INGEST] subscribing topics=${debugTopics.length} legacyTemperatureTopics=${legacyTemperatureTopics.length} legacyDeviceTopics=${legacyDeviceTopics.length}`,
     );
+    this.operationalLog?.record({
+      level: 'info',
+      source: 'mqtt-ingest',
+      event: 'mqtt.subscribe',
+      message: `MQTT ingest subscribed to ${debugTopics.length} topic pattern(s).`,
+      details: {
+        broker: `${args[1]}:${args[3]}`,
+        subscriptions: debugTopics.length,
+      },
+    });
     this.process = spawn(
       process.env.HOME_MQTT_SUB_COMMAND || 'mosquitto_sub',
       args,
@@ -94,17 +108,37 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
     this.process.stdout.on('data', (chunk) => this.handleStdout(chunk));
     this.process.stderr.on('data', (chunk) => {
       this.logger.warn(`[DEVICE MQTT INGEST] ${String(chunk).trim()}`);
+      this.operationalLog?.record({
+        level: 'warn',
+        source: 'mqtt-ingest',
+        event: 'mqtt.stderr',
+        message: String(chunk).trim(),
+      });
     });
     this.process.on('exit', (code, signal) => {
       this.logger.warn(
         `[DEVICE MQTT INGEST] stopped code=${code ?? '-'} signal=${signal ?? '-'}`,
       );
+      this.operationalLog?.record({
+        level: 'warn',
+        source: 'mqtt-ingest',
+        event: 'mqtt.stopped',
+        message: `MQTT ingest stopped code=${code ?? '-'} signal=${signal ?? '-'}.`,
+        status: 'stopped',
+      });
       this.process = null;
     });
     this.process.on('error', (error) => {
       this.logger.warn(
         `[DEVICE MQTT INGEST] failed to start: ${error.message}`,
       );
+      this.operationalLog?.record({
+        level: 'error',
+        source: 'mqtt-ingest',
+        event: 'mqtt.start_failed',
+        message: error.message,
+        status: 'failed',
+      });
       this.process = null;
     });
   }
@@ -179,6 +213,16 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
       true,
       'published by portal',
     );
+    this.operationalLog?.record({
+      level: 'info',
+      source: 'portal',
+      event: 'mqtt.debug_publish',
+      message: `Portal published ${payloadBytes} byte(s) to ${topicText}.`,
+      topic: topicText,
+      details: {
+        payloadBytes,
+      },
+    });
 
     return {
       topic: topicText,
@@ -218,6 +262,18 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
         'ignored non-json',
       );
       this.logger.warn(`[DEVICE MQTT INGEST] ignored non-json topic=${topic}`);
+      if (!topic.startsWith('$SYS/')) {
+        this.operationalLog?.record({
+          level: 'warn',
+          source: 'mqtt-ingest',
+          event: 'mqtt.ignored_non_json',
+          message: `Ignored non-JSON MQTT payload on ${topic}.`,
+          topic,
+          details: {
+            payloadBytes: Buffer.byteLength(payloadText, 'utf8'),
+          },
+        });
+      }
       return;
     }
 
@@ -231,6 +287,13 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
         'registry devices',
       );
       this.logger.log(`[DEVICE MQTT INGEST] registry topic=${topic}`);
+      this.operationalLog?.record({
+        level: 'info',
+        source: 'mqtt-ingest',
+        event: 'mqtt.registry',
+        message: `Device registry update received on ${topic}.`,
+        topic,
+      });
       return;
     }
 
@@ -269,12 +332,26 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
         true,
         'device telemetry',
       );
+      this.operationalLog?.record({
+        level: 'debug',
+        source: 'mqtt-ingest',
+        event: 'mqtt.telemetry',
+        message: `Device telemetry handled from ${topic}.`,
+        topic,
+      });
       return;
     }
 
     if (topic.endsWith('/status')) {
       this.registry.ingestDeviceStatus(payload);
       this.recordDebugMessage(topic, payloadText, true, true, 'device status');
+      this.operationalLog?.record({
+        level: 'debug',
+        source: 'mqtt-ingest',
+        event: 'mqtt.status',
+        message: `Device status handled from ${topic}.`,
+        topic,
+      });
       return;
     }
 
@@ -300,6 +377,13 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(
         `[DEVICE MQTT INGEST] ignored legacy temperature without numeric value topic=${config.topic}`,
       );
+      this.operationalLog?.record({
+        level: 'warn',
+        source: 'mqtt-ingest',
+        event: 'mqtt.ignored_legacy_temperature',
+        message: `Ignored legacy temperature payload without numeric value on ${config.topic}.`,
+        topic: config.topic,
+      });
       return;
     }
 
@@ -383,12 +467,28 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(
         `[DEVICE MQTT INGEST] ignored legacy device without readings topic=${topic}`,
       );
+      this.operationalLog?.record({
+        level: 'debug',
+        source: 'mqtt-ingest',
+        event: 'mqtt.ignored_legacy_empty',
+        message: `Ignored legacy device payload without readings on ${topic}.`,
+        topic,
+        deviceId,
+      });
       return true;
     }
     if (capabilities.length === 0) {
       this.logger.warn(
         `[DEVICE MQTT INGEST] ignored legacy device without known readings topic=${topic}`,
       );
+      this.operationalLog?.record({
+        level: 'warn',
+        source: 'mqtt-ingest',
+        event: 'mqtt.ignored_legacy_unknown',
+        message: `Ignored legacy device payload without known readings on ${topic}.`,
+        topic,
+        deviceId,
+      });
       return true;
     }
 

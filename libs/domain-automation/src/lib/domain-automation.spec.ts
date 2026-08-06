@@ -101,6 +101,25 @@ describe('planHomeIntent', () => {
     )
   })
 
+  it('targets requested bathroom lights from Bulgarian transliteration', () => {
+    const plan = planHomeIntent({
+      intent: 'turn_on_lights',
+      context: {
+        ...baseContext,
+        requestedText: 'Vklu4i lampite v banqta',
+        availableDevices: [...baseContext.availableDevices, 'bath_light'],
+      },
+    })
+
+    expect(plan.actions).toEqual([
+      expect.objectContaining({
+        type: 'light.turn_on',
+        deviceId: 'bath_light',
+        room: 'баня',
+      }),
+    ])
+  })
+
   it('moves the thermostat one degree warmer for comfort_warmer', () => {
     const plan = planHomeIntent({
       intent: 'comfort_warmer',
@@ -139,10 +158,13 @@ describe('classifyHomeIntent', () => {
     ['Излизам от вкъщи.', 'leaving_home'],
     ['Лека нощ.', 'good_night'],
     ['Включи лампите в кухнята.', 'turn_on_lights'],
+    ['Vklu4i lampite v banqta.', 'turn_on_lights'],
     ['Угаси лампите.', 'turn_off_lights'],
     ['Студено ми е.', 'comfort_warmer'],
     ['Направи по-хладно.', 'comfort_cooler'],
     ['Как е вкъщи?', 'status_check'],
+    ['Каква е температурата в кухнята?', 'status_check'],
+    ['What is the kitchen temperature?', 'status_check'],
   ] as const)('classifies "%s" as %s', (text, expectedIntent) => {
     expect(classifyHomeIntent(text)).toEqual(
       expect.objectContaining({

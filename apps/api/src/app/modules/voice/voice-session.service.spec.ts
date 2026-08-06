@@ -27,9 +27,30 @@ describe('VoiceSessionService home automation fast path', () => {
     }
     const emitter = {
       emitHomeActionPlan: jest.fn(),
+      emitHomeActionExecution: jest.fn(),
       emitAssistantTextDelta: jest.fn(),
       emitAssistantAudioChunk: jest.fn(),
       emitAssistantFinal: jest.fn(),
+    }
+    const homeAutomation = {
+      getHomeContext: jest.fn(async () => ({
+        outsideDark: true,
+        insideTempC: 22.4,
+        targetTempC: 21,
+        comfortTempC: 22,
+        homeMode: 'home',
+        availableDevices: ['kitchen_light', 'kitchen_temperature'],
+        occupiedRooms: [],
+        alarmArmed: false,
+      })),
+      executePlan: jest.fn(async (plan) =>
+        plan.actions.map((action) => ({
+          action,
+          status: 'success',
+          adapter: 'http',
+          message: 'ok',
+        })),
+      ),
     }
 
     const service = new VoiceSessionService(
@@ -37,6 +58,7 @@ describe('VoiceSessionService home automation fast path', () => {
       replyStreamer as any,
       trace as any,
       emitter as any,
+      homeAutomation as any,
     ) as any
 
     const session = {
@@ -75,6 +97,15 @@ describe('VoiceSessionService home automation fast path', () => {
     )
     expect(emitter.emitAssistantAudioChunk).toHaveBeenCalled()
     expect(emitter.emitAssistantFinal).toHaveBeenCalledWith(session)
+    expect(emitter.emitHomeActionExecution).toHaveBeenCalledWith(
+      session,
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: 'success',
+          adapter: 'http',
+        }),
+      ]),
+    )
     expect(session.counters.commandFastPath).toBe(1)
     expect(session.assistantReply).toBe('Включвам лампите.')
   })

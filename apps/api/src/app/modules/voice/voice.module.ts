@@ -9,10 +9,14 @@ import { VoiceSynthesisService } from './voice-synthesis.service'
 import { VoiceAssistantReplyStreamerService } from './voice-assistant-reply-streamer.service'
 import { VoiceSessionTraceService } from './voice-session-trace.service'
 import { VoiceSessionEmitterService } from './voice-session-emitter.service'
+import { VoiceRunStoreService } from './voice-run-store.service'
 import { VoiceProtocolController } from './voice-protocol.controller'
 import { VoiceClientController } from './voice-client.controller'
+import { HomeAutomationService } from './home-automation.service'
+import { DevicesModule } from '../devices/devices.module'
 
 @Module({
+  imports: [DevicesModule],
   controllers: [VoiceProtocolController, VoiceClientController],
   providers: [
     VoiceGateway,
@@ -24,7 +28,9 @@ import { VoiceClientController } from './voice-client.controller'
     VoiceSynthesisService,
     VoiceAssistantReplyStreamerService,
     VoiceSessionTraceService,
-    VoiceSessionEmitterService
+    VoiceSessionEmitterService,
+    VoiceRunStoreService,
+    HomeAutomationService,
   ],
 })
 export class VoiceModule {}

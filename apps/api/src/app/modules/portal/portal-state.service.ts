@@ -5,6 +5,10 @@ import {
   type MqttDebugState,
 } from '../devices/device-mqtt-ingest.service';
 import { DeviceRegistryService } from '../devices/device-registry.service';
+import {
+  OperationalLogService,
+  type OperationalLogEntry,
+} from '../devices/operational-log.service';
 import type {
   DeviceRegistrySnapshot,
   NetworkDiscoveredDevice,
@@ -50,6 +54,7 @@ export interface PortalState {
   bus: {
     mqtt: MqttDebugState;
   };
+  logs: OperationalLogEntry[];
 }
 
 @Injectable()
@@ -58,6 +63,7 @@ export class PortalStateService {
     private readonly deviceRegistry: DeviceRegistryService,
     private readonly lanDiscovery: DeviceLanDiscoveryService,
     private readonly mqttIngest: DeviceMqttIngestService,
+    private readonly operationalLog: OperationalLogService,
   ) {}
 
   getState(): PortalState {
@@ -115,6 +121,7 @@ export class PortalStateService {
       bus: {
         mqtt: this.mqttIngest.getDebugState(),
       },
+      logs: this.operationalLog.recent(),
     };
   }
 }

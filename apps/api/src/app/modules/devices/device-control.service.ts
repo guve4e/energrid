@@ -17,10 +17,11 @@ const execFileAsync = promisify(execFile)
 export interface DeviceActionResult {
   deviceId: string
   action: DeviceCapabilityAction
-  status: 'success' | 'failed'
+  status: 'success' | 'pending' | 'failed'
   adapter: 'mqtt' | 'http' | 'simulated' | 'none'
   message: string
   affectedDeviceIds: string[]
+  command?: RegisteredDevice['state']['command']
 }
 
 @Injectable()
@@ -139,17 +140,20 @@ export class DeviceControlService {
       switchMembers.map((member) => this.executeBinarySwitch(member, on, action)),
     )
     const failed = results.filter((result) => result.status === 'failed')
+    const pending = results.filter((result) => result.status === 'pending')
     const affected = results.flatMap((result) => result.affectedDeviceIds)
 
     return {
       deviceId: device.id,
       action,
-      status: failed.length > 0 ? 'failed' : 'success',
+      status: failed.length > 0 ? 'failed' : pending.length > 0 ? 'pending' : 'success',
       adapter: results.some((result) => result.adapter === 'mqtt') ? 'mqtt' : 'none',
       message:
         failed.length > 0
           ? `${failed.length} member switch command(s) failed.`
-          : `${affected.length} member switch command(s) sent.`,
+          : pending.length > 0
+            ? `${affected.length} member switch command(s) sent; waiting for acknowledgement.`
+            : `${affected.length} member switch command(s) confirmed.`,
       affectedDeviceIds: affected,
     }
   }
@@ -189,11 +193,10 @@ export class DeviceControlService {
 
     try {
       await this.publishMqtt(topic, payload)
-      this.registry.ingestDeviceTelemetry({
-        deviceId: device.id,
-        values: { on },
-        observedAt: new Date().toISOString(),
-        origin: 'device-control',
+      const command = this.registry.markDeviceCommandPending(device.id, {
+        action,
+        expectedValues: { on },
+        message: `Published Shelly ${action}; waiting for telemetry.`,
       })
       this.logger.log(
         `[DEVICE ACTION SHELLY RPC] ${device.id} ${action} topic=${topic} dst=${dst} switch=${switchId}`,
@@ -202,13 +205,19 @@ export class DeviceControlService {
       return {
         deviceId: device.id,
         action,
-        status: 'success',
+        status: 'pending',
         adapter: 'mqtt',
-        message: `Published Shelly ${action} to ${dst} switch ${switchId}.`,
+        message: `Published Shelly ${action} to ${dst} switch ${switchId}; waiting for acknowledgement.`,
         affectedDeviceIds: [device.id],
+        command,
       }
     } catch (error) {
       const message = errorMessage(error)
+      const command = this.registry.markDeviceCommandFailed(device.id, {
+        action,
+        expectedValues: { on },
+        message,
+      })
       this.logger.warn(
         `[DEVICE ACTION SHELLY RPC FAILED] ${device.id} ${action} ${message}`,
       )
@@ -220,6 +229,7 @@ export class DeviceControlService {
         adapter: 'mqtt',
         message,
         affectedDeviceIds: [],
+        command,
       }
     }
   }
@@ -250,29 +260,36 @@ export class DeviceControlService {
 
     try {
       await this.publishMqtt(topic, payload)
-      this.registry.ingestDeviceTelemetry({
-        deviceId: device.id,
-        values: { on },
-        observedAt: new Date().toISOString(),
-        origin: 'device-control',
+      const command = this.registry.markDeviceCommandPending(device.id, {
+        action,
+        expectedValues: { on },
+        message: `Published ${action}; waiting for telemetry.`,
       })
 
       return {
         deviceId: device.id,
         action,
-        status: 'success',
+        status: 'pending',
         adapter: 'mqtt',
-        message: `Published ${action} to ${topic}.`,
+        message: `Published ${action} to ${topic}; waiting for acknowledgement.`,
         affectedDeviceIds: [device.id],
+        command,
       }
     } catch (error) {
+      const message = errorMessage(error)
+      const command = this.registry.markDeviceCommandFailed(device.id, {
+        action,
+        expectedValues: { on },
+        message,
+      })
       return {
         deviceId: device.id,
         action,
         status: 'failed',
         adapter: 'mqtt',
-        message: errorMessage(error),
+        message,
         affectedDeviceIds: [],
+        command,
       }
     }
   }
