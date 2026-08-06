@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common'
+import { Injectable } from '@nestjs/common';
 import type {
   DeviceCapabilityKind,
   DeviceProtocol,
@@ -7,107 +7,126 @@ import type {
   RegisteredDevice,
   RegisteredDeviceState,
   SiteSystem,
-} from './device-registry.types'
-import { OperationalLogService } from './operational-log.service'
+} from './device-registry.types';
+import { OperationalLogService } from './operational-log.service';
 
 export interface ShellyRpcDeviceConfig {
-  key: string
-  dst: string
-  switchId: number
+  key: string;
+  dst: string;
+  switchId: number;
 }
 
 interface DiscoveredDeviceConfig {
-  id?: string
-  displayName?: string
-  suggestedName?: string
-  tenantId?: string
-  siteId?: string
-  siteName?: string
-  gatewayId?: string
-  zoneId?: string
-  zoneName?: string
-  suggestedRoom?: string
-  protocol?: DeviceProtocol
-  transport?: DeviceTransport
-  driver?: string
-  target?: string
-  bridge?: string
-  capabilities?: DeviceCapabilityKind[]
-  source?: 'mqtt' | 'mdns' | 'http' | 'zigbee' | 'matter' | 'modbus' | 'manual' | 'simulated'
-  confidence?: number
-  reason?: string
+  id?: string;
+  displayName?: string;
+  suggestedName?: string;
+  tenantId?: string;
+  siteId?: string;
+  siteName?: string;
+  gatewayId?: string;
+  zoneId?: string;
+  zoneName?: string;
+  suggestedRoom?: string;
+  protocol?: DeviceProtocol;
+  transport?: DeviceTransport;
+  driver?: string;
+  target?: string;
+  bridge?: string;
+  capabilities?: DeviceCapabilityKind[];
+  source?:
+    | 'mqtt'
+    | 'mdns'
+    | 'http'
+    | 'zigbee'
+    | 'matter'
+    | 'modbus'
+    | 'manual'
+    | 'simulated';
+  confidence?: number;
+  reason?: string;
 }
 
 interface ApprovedDeviceConfig {
-  id?: string
-  deviceId?: string
-  key?: string
-  displayName?: string
-  name?: string
-  tenantId?: string
-  siteId?: string
-  siteName?: string
-  gatewayId?: string
-  type?: string
-  kind?: 'logical' | 'physical'
-  zoneId?: string
-  zoneName?: string
-  location?: string
-  origin?: string
-  physicalId?: string
-  dst?: string
-  channel?: number
-  channelName?: string
-  component?: string
-  hardwareId?: string
-  switchId?: number
-  model?: string
-  protocol?: DeviceProtocol
-  transport?: DeviceTransport
-  driver?: string
-  target?: string
-  bridge?: string
-  configured?: boolean
-  status?: string
-  capabilities?: DeviceCapabilityKind[]
-  groups?: string[]
-  aliases?: string[]
-  metadata?: Record<string, string | number | boolean>
-  values?: Record<string, number | boolean | string | null>
+  id?: string;
+  deviceId?: string;
+  key?: string;
+  displayName?: string;
+  name?: string;
+  tenantId?: string;
+  siteId?: string;
+  siteName?: string;
+  gatewayId?: string;
+  type?: string;
+  kind?: 'logical' | 'physical';
+  zoneId?: string;
+  zoneName?: string;
+  location?: string;
+  origin?: string;
+  physicalId?: string;
+  dst?: string;
+  channel?: number;
+  channelName?: string;
+  component?: string;
+  hardwareId?: string;
+  switchId?: number;
+  model?: string;
+  protocol?: DeviceProtocol;
+  transport?: DeviceTransport;
+  driver?: string;
+  target?: string;
+  bridge?: string;
+  configured?: boolean;
+  status?: string;
+  capabilities?: DeviceCapabilityKind[];
+  groups?: string[];
+  aliases?: string[];
+  metadata?: Record<string, string | number | boolean>;
+  values?: Record<string, number | boolean | string | null>;
   state?: {
-    values?: Record<string, number | boolean | string | null>
-    observedAt?: string | null
-    source?: string
-    status?: string
-  }
+    values?: Record<string, number | boolean | string | null>;
+    observedAt?: string | null;
+    source?: string;
+    status?: string;
+  };
   config?: {
-    readings?: Record<string, { enabled?: boolean; unit?: string }>
-  }
-  lastSeen?: string
+    readings?: Record<string, { enabled?: boolean; unit?: string }>;
+  };
+  lastSeen?: string;
 }
 
 @Injectable()
 export class DeviceRegistryService {
-  private readonly liveApprovedDeviceConfigs = new Map<string, ApprovedDeviceConfig>()
-  private readonly liveDiscoveredDeviceConfigs = new Map<string, DiscoveredDeviceConfig>()
-  private readonly liveStateByDeviceId = new Map<string, RegisteredDeviceState>()
+  private readonly liveApprovedDeviceConfigs = new Map<
+    string,
+    ApprovedDeviceConfig
+  >();
+  private readonly liveDiscoveredDeviceConfigs = new Map<
+    string,
+    DiscoveredDeviceConfig
+  >();
+  private readonly liveStateByDeviceId = new Map<
+    string,
+    RegisteredDeviceState
+  >();
   private readonly commandByDeviceId = new Map<
     string,
     NonNullable<RegisteredDeviceState['command']> & {
-      expiresAt: number
-      displayUntil: number
+      expiresAt: number;
+      displayUntil: number;
     }
-  >()
+  >();
 
   constructor(private readonly operationalLog?: OperationalLogService) {}
 
   getSnapshot(): DeviceRegistrySnapshot {
-    const allDevices = this.getDevices()
-    const allSystems = this.getSystems(allDevices)
-    const currentSiteId = configuredSite().siteId
-    const devices = allDevices.filter((device) => device.siteId === currentSiteId)
-    const systems = this.getSystems(devices)
-    const zones = this.getZones(devices, systems)
+    const allDevices = this.getDevices();
+    const allSystems = this.getSystems(allDevices);
+    const currentSiteId = configuredSite().siteId;
+    const devices = allDevices.filter(
+      (device) => device.siteId === currentSiteId,
+    );
+    const systems = this.getSystems(devices);
+    const zones = this.getZones(devices, systems);
 
     return {
       tenant: {
@@ -125,41 +144,50 @@ export class DeviceRegistryService {
       zones,
       summary: {
         total: devices.length,
-        approved: devices.filter((device) => device.trustStatus === 'approved').length,
-        discovered: devices.filter((device) => device.trustStatus === 'discovered').length,
+        approved: devices.filter((device) => device.trustStatus === 'approved')
+          .length,
+        discovered: devices.filter(
+          (device) => device.trustStatus === 'discovered',
+        ).length,
         controllable: devices.filter((device) =>
           device.capabilities.some((capability) =>
             capability.actions.some((action) => action !== 'read'),
           ),
         ).length,
         sensors: devices.filter((device) =>
-          device.capabilities.some((capability) => capability.actions.includes('read')),
+          device.capabilities.some((capability) =>
+            capability.actions.includes('read'),
+          ),
         ).length,
         systems: systems.length,
-        learningEnabled: systems.filter((system) => system.learning.enabled).length,
+        learningEnabled: systems.filter((system) => system.learning.enabled)
+          .length,
       },
-    }
+    };
   }
 
   getDevices(): RegisteredDevice[] {
-    const now = new Date().toISOString()
-    const identity = configuredSite()
-    const shellyDevices = this.getKitchenLightShellyDevices()
-    const importedDevices = this.getApprovedDevicesFromConfig()
-    const importedLogicalGroups = logicalGroupsFromImportedDevices(importedDevices)
-    const hasShellyGroup = shellyDevices.length > 0
-    const hasGenericLightMqtt = !!process.env.HOME_KITCHEN_LIGHT_MQTT_TOPIC
+    const now = new Date().toISOString();
+    const identity = configuredSite();
+    const shellyDevices = this.getKitchenLightShellyDevices();
+    const importedDevices = this.getApprovedDevicesFromConfig();
+    const importedLogicalGroups =
+      logicalGroupsFromImportedDevices(importedDevices);
+    const hasShellyGroup = shellyDevices.length > 0;
+    const hasGenericLightMqtt = !!process.env.HOME_KITCHEN_LIGHT_MQTT_TOPIC;
     const hasLightHttp =
       !!process.env.HOME_KITCHEN_LIGHT_ON_URL ||
-      !!process.env.HOME_KITCHEN_LIGHT_OFF_URL
+      !!process.env.HOME_KITCHEN_LIGHT_OFF_URL;
     const hasImportedKitchenLights = importedLogicalGroups.some(
       (device) => device.id === 'kitchen_light',
-    )
+    );
     const hasImportedKitchenTemperature = importedDevices.some(
       (device) =>
         device.zoneId === 'kitchen' &&
-        device.capabilities.some((capability) => capability.kind === 'temperature'),
-    )
+        device.capabilities.some(
+          (capability) => capability.kind === 'temperature',
+        ),
+    );
 
     const kitchenLightGroup: RegisteredDevice = {
       id: 'kitchen_light',
@@ -183,8 +211,17 @@ export class DeviceRegistryService {
             : hasLightHttp
               ? 'http-relay'
               : 'simulated',
-        protocol: hasShellyGroup || hasGenericLightMqtt ? 'mqtt' : hasLightHttp ? 'http' : 'simulated',
-        transport: hasLightHttp ? 'http' : hasShellyGroup || hasGenericLightMqtt ? 'mqtt' : 'local',
+        protocol:
+          hasShellyGroup || hasGenericLightMqtt
+            ? 'mqtt'
+            : hasLightHttp
+              ? 'http'
+              : 'simulated',
+        transport: hasLightHttp
+          ? 'http'
+          : hasShellyGroup || hasGenericLightMqtt
+            ? 'mqtt'
+            : 'local',
         driver: hasShellyGroup
           ? 'shelly-rpc'
           : hasGenericLightMqtt
@@ -202,14 +239,17 @@ export class DeviceRegistryService {
         commandTopic: mqttTopicFor(identity, 'kitchen_light', 'command'),
         stateTopic: mqttTopicFor(identity, 'kitchen_light', 'state'),
       },
-      state: unknownState('configured by adapter', hasShellyGroup || hasGenericLightMqtt || hasLightHttp),
+      state: unknownState(
+        'configured by adapter',
+        hasShellyGroup || hasGenericLightMqtt || hasLightHttp,
+      ),
       responseProfile: responseProfile({
         latencyMs: 600,
         notes: 'Logical light group fans out to physical adapters.',
       }),
       policy: safePolicy(),
       memberDeviceIds: shellyDevices.map((device) => device.key),
-    }
+    };
 
     const physicalLights = shellyDevices.map<RegisteredDevice>((device) => ({
       id: device.key,
@@ -240,18 +280,19 @@ export class DeviceRegistryService {
       state: unknownState('shelly-rpc'),
       responseProfile: responseProfile({
         latencyMs: 500,
-        notes: 'Shelly local RPC should be fast even when vendor cloud is unavailable.',
+        notes:
+          'Shelly local RPC should be fast even when vendor cloud is unavailable.',
       }),
       policy: safePolicy(),
       metadata: {
         dst: device.dst,
         switchId: device.switchId,
       },
-    }))
+    }));
 
-    const kitchenTemp = this.getKitchenTemperatureFromEnv()
-    const tempHasMqtt = !!process.env.HOME_KITCHEN_TEMP_MQTT_TOPIC
-    const tempHasHttp = !!process.env.HOME_KITCHEN_TEMP_URL
+    const kitchenTemp = this.getKitchenTemperatureFromEnv();
+    const tempHasMqtt = !!process.env.HOME_KITCHEN_TEMP_MQTT_TOPIC;
+    const tempHasHttp = !!process.env.HOME_KITCHEN_TEMP_URL;
 
     const temperatureDevice: RegisteredDevice = {
       id: 'kitchen_temperature',
@@ -269,15 +310,29 @@ export class DeviceRegistryService {
         },
       ],
       adapter: {
-        id: tempHasMqtt ? 'mqtt-sensor' : tempHasHttp ? 'http-sensor' : 'simulated',
+        id: tempHasMqtt
+          ? 'mqtt-sensor'
+          : tempHasHttp
+            ? 'http-sensor'
+            : 'simulated',
         protocol: tempHasMqtt ? 'mqtt' : tempHasHttp ? 'http' : 'simulated',
         transport: tempHasHttp ? 'http' : tempHasMqtt ? 'mqtt' : 'local',
-        driver: tempHasMqtt ? 'mqtt-json-sensor' : tempHasHttp ? 'http-json-sensor' : 'simulated-sensor',
+        driver: tempHasMqtt
+          ? 'mqtt-json-sensor'
+          : tempHasHttp
+            ? 'http-json-sensor'
+            : 'simulated-sensor',
         configured: tempHasMqtt || tempHasHttp || kitchenTemp != null,
-        target: process.env.HOME_KITCHEN_TEMP_MQTT_TOPIC || process.env.HOME_KITCHEN_TEMP_URL,
+        target:
+          process.env.HOME_KITCHEN_TEMP_MQTT_TOPIC ||
+          process.env.HOME_KITCHEN_TEMP_URL,
         eventTopicPrefix: mqttPrefixFor(identity),
         stateTopic: mqttTopicFor(identity, 'kitchen_temperature', 'state'),
-        telemetryTopic: mqttTopicFor(identity, 'kitchen_temperature', 'telemetry'),
+        telemetryTopic: mqttTopicFor(
+          identity,
+          'kitchen_temperature',
+          'telemetry',
+        ),
         statusTopic: mqttTopicFor(identity, 'kitchen_temperature', 'status'),
       },
       state: {
@@ -294,13 +349,17 @@ export class DeviceRegistryService {
       },
       responseProfile: responseProfile({
         latencyMs: 1000,
-        notes: 'Read-only temperature signal used by the assistant and future climate systems.',
+        notes:
+          'Read-only temperature signal used by the assistant and future climate systems.',
       }),
       policy: readOnlyPolicy(),
-    }
+    };
 
     const devices = dedupeDevices([
-      ...((hasShellyGroup || hasGenericLightMqtt || hasLightHttp || !hasImportedKitchenLights)
+      ...(hasShellyGroup ||
+      hasGenericLightMqtt ||
+      hasLightHttp ||
+      !hasImportedKitchenLights
         ? [kitchenLightGroup]
         : []),
       ...physicalLights,
@@ -308,22 +367,25 @@ export class DeviceRegistryService {
       ...importedLogicalGroups,
       ...importedDevices,
       ...this.getDiscoveredDevices(),
-    ])
+    ]);
 
-    return devices.map((device) => this.withLiveState(device))
+    return devices.map((device) => this.withLiveState(device));
   }
 
   getAvailableDeviceIds(): string[] {
     return this.getDevices()
       .filter((device) => device.trustStatus === 'approved')
-      .filter((device) => device.adapter.configured || device.adapter.protocol === 'simulated')
-      .map((device) => device.id)
+      .filter(
+        (device) =>
+          device.adapter.configured || device.adapter.protocol === 'simulated',
+      )
+      .map((device) => device.id);
   }
 
   getKitchenLightShellyDevices(): ShellyRpcDeviceConfig[] {
     return parseShellyRpcDevices(
       process.env.HOME_KITCHEN_LIGHT_SHELLY_RPC_DEVICES,
-    )
+    );
   }
 
   private getKitchenTemperatureFromEnv(): number | null {
@@ -331,13 +393,13 @@ export class DeviceRegistryService {
       process.env.PORTAL_KITCHEN_TEMP_C ||
         process.env.HOME_FAKE_INSIDE_TEMP_C ||
         22.4,
-    )
+    );
 
-    return Number.isFinite(configured) ? configured : null
+    return Number.isFinite(configured) ? configured : null;
   }
 
   private getSystems(devices: RegisteredDevice[]): SiteSystem[] {
-    const now = new Date().toISOString()
+    const now = new Date().toISOString();
     const systems: SiteSystem[] = [
       {
         id: 'kitchen_lighting',
@@ -351,7 +413,8 @@ export class DeviceRegistryService {
           {
             kind: 'light',
             actions: ['turn_on', 'turn_off'],
-            description: 'Group lighting controlled locally through approved adapters.',
+            description:
+              'Group lighting controlled locally through approved adapters.',
           },
         ],
         responseProfile: responseProfile({
@@ -361,8 +424,14 @@ export class DeviceRegistryService {
         policy: safePolicy(),
         learning: {
           enabled: true,
-          objective: 'Learn occupancy and daylight patterns before proposing scenes.',
-          signals: ['voice commands', 'time of day', 'outside darkness', 'manual overrides'],
+          objective:
+            'Learn occupancy and daylight patterns before proposing scenes.',
+          signals: [
+            'voice commands',
+            'time of day',
+            'outside darkness',
+            'manual overrides',
+          ],
           currentConfidence: 0.25,
         },
         state: unknownState('registry'),
@@ -380,14 +449,19 @@ export class DeviceRegistryService {
             kind: 'slow_radiant_zone',
             actions: ['read', 'set_target_temperature'],
             unit: 'C',
-            description: 'Slow thermal mass heating with delayed room response.',
+            description:
+              'Slow thermal mass heating with delayed room response.',
           },
         ],
         responseProfile: responseProfile({
-          thermalLagMinutes: numberFromEnv('HOME_FLOOR_HEATING_LAG_MINUTES', 210),
+          thermalLagMinutes: numberFromEnv(
+            'HOME_FLOOR_HEATING_LAG_MINUTES',
+            210,
+          ),
           minCycleMinutes: 30,
           confidence: 0.2,
-          notes: 'Learns slab delay, spacing behavior, forecast error, and comfort outcome.',
+          notes:
+            'Learns slab delay, spacing behavior, forecast error, and comfort outcome.',
         }),
         policy: climatePolicy(16, 28),
         learning: {
@@ -406,7 +480,10 @@ export class DeviceRegistryService {
         state: {
           values: {
             mode: 'learning',
-            thermalLagMinutes: numberFromEnv('HOME_FLOOR_HEATING_LAG_MINUTES', 210),
+            thermalLagMinutes: numberFromEnv(
+              'HOME_FLOOR_HEATING_LAG_MINUTES',
+              210,
+            ),
           },
           observedAt: now,
           source: 'planned-system',
@@ -438,8 +515,13 @@ export class DeviceRegistryService {
         policy: climatePolicy(16, 30),
         learning: {
           enabled: true,
-          objective: 'Use fast air only when radiant heating cannot meet comfort in time.',
-          signals: ['room temperature', 'fan speed', 'comfort correction commands'],
+          objective:
+            'Use fast air only when radiant heating cannot meet comfort in time.',
+          signals: [
+            'room temperature',
+            'fan speed',
+            'comfort correction commands',
+          ],
           currentConfidence: 0.2,
         },
         state: unknownState('planned-system'),
@@ -467,13 +549,19 @@ export class DeviceRegistryService {
         responseProfile: responseProfile({
           latencyMs: 3500,
           confidence: 0.1,
-          notes: 'Vision inventory must report confidence and avoid pretending certainty.',
+          notes:
+            'Vision inventory must report confidence and avoid pretending certainty.',
         }),
         policy: readOnlyPolicy(),
         learning: {
           enabled: true,
-          objective: 'Learn household inventory patterns and reduce repeated manual checks.',
-          signals: ['camera snapshots', 'vision confidence', 'user corrections'],
+          objective:
+            'Learn household inventory patterns and reduce repeated manual checks.',
+          signals: [
+            'camera snapshots',
+            'vision confidence',
+            'user corrections',
+          ],
           currentConfidence: 0.1,
         },
         state: unknownState('planned-system'),
@@ -487,7 +575,9 @@ export class DeviceRegistryService {
         zoneName: 'Whole home',
         deviceIds: devices
           .filter((device) =>
-            device.capabilities.some((capability) => capability.kind === 'temperature'),
+            device.capabilities.some(
+              (capability) => capability.kind === 'temperature',
+            ),
           )
           .map((device) => device.id),
         capabilities: [
@@ -499,32 +589,43 @@ export class DeviceRegistryService {
           {
             kind: 'tariff',
             actions: ['read'],
-            description: 'Optional electricity tariff signal for preheating decisions.',
+            description:
+              'Optional electricity tariff signal for preheating decisions.',
           },
         ],
         responseProfile: responseProfile({
           confidence: 0.15,
-          notes: 'Gets better only after enough forecast vs actual history exists.',
+          notes:
+            'Gets better only after enough forecast vs actual history exists.',
         }),
         policy: readOnlyPolicy(),
         learning: {
           enabled: true,
-          objective: 'Improve preheat and comfort decisions from forecast error and building inertia.',
-          signals: ['weather forecast', 'actual outside temperature', 'inside temperature', 'energy use'],
+          objective:
+            'Improve preheat and comfort decisions from forecast error and building inertia.',
+          signals: [
+            'weather forecast',
+            'actual outside temperature',
+            'inside temperature',
+            'energy use',
+          ],
           currentConfidence: 0.15,
         },
         state: unknownState('planned-system'),
       },
-    ]
+    ];
 
-    return systems
+    return systems;
   }
 
   private getZones(
     devices: RegisteredDevice[],
     systems: SiteSystem[],
   ): DeviceRegistrySnapshot['zones'] {
-    const byZone = new Map<string, { id: string; name: string; deviceIds: string[]; systemIds: string[] }>()
+    const byZone = new Map<
+      string,
+      { id: string; name: string; deviceIds: string[]; systemIds: string[] }
+    >();
 
     for (const device of devices) {
       const zone = byZone.get(device.zoneId) || {
@@ -532,31 +633,31 @@ export class DeviceRegistryService {
         name: device.zoneName,
         deviceIds: [],
         systemIds: [],
-      }
-      zone.deviceIds.push(device.id)
-      byZone.set(device.zoneId, zone)
+      };
+      zone.deviceIds.push(device.id);
+      byZone.set(device.zoneId, zone);
     }
 
     for (const system of systems) {
-      const zoneId = system.zoneId || 'site'
+      const zoneId = system.zoneId || 'site';
       const zone = byZone.get(zoneId) || {
         id: zoneId,
         name: system.zoneName || 'Site',
         deviceIds: [],
         systemIds: [],
-      }
-      zone.systemIds.push(system.id)
-      byZone.set(zoneId, zone)
+      };
+      zone.systemIds.push(system.id);
+      byZone.set(zoneId, zone);
     }
 
-    return [...byZone.values()]
+    return [...byZone.values()];
   }
 
   private getDiscoveredDevices(): RegisteredDevice[] {
     return [
       ...parseDiscoveredDevices(process.env.HOME_DISCOVERED_DEVICES_JSON),
       ...parseDiscoveredDevices([...this.liveDiscoveredDeviceConfigs.values()]),
-    ]
+    ];
   }
 
   private getApprovedDevicesFromConfig(): RegisteredDevice[] {
@@ -567,28 +668,28 @@ export class DeviceRegistryService {
           process.env.DEVICE_REGISTRY_JSON,
       ),
       ...parseApprovedDevices([...this.liveApprovedDeviceConfigs.values()]),
-    ]
+    ];
   }
 
   ingestRegistryPayload(payload: unknown): void {
-    if (!payload || typeof payload !== 'object') return
+    if (!payload || typeof payload !== 'object') return;
 
     const raw = payload as {
-      tenantId?: string
-      siteId?: string
-      siteName?: string
-      gatewayId?: string
-      devices?: unknown[]
-      observedAt?: string
-    }
-    if (!Array.isArray(raw.devices)) return
+      tenantId?: string;
+      siteId?: string;
+      siteName?: string;
+      gatewayId?: string;
+      devices?: unknown[];
+      observedAt?: string;
+    };
+    if (!Array.isArray(raw.devices)) return;
 
     for (const item of raw.devices) {
-      if (!item || typeof item !== 'object') continue
+      if (!item || typeof item !== 'object') continue;
 
-      const device = item as ApprovedDeviceConfig
-      const id = safeId(device.id || device.deviceId || device.key)
-      if (!id) continue
+      const device = item as ApprovedDeviceConfig;
+      const id = safeId(device.id || device.deviceId || device.key);
+      if (!id) continue;
 
       this.liveApprovedDeviceConfigs.set(id, {
         ...device,
@@ -598,38 +699,86 @@ export class DeviceRegistryService {
         gatewayId: device.gatewayId || raw.gatewayId,
         state: {
           values: device.state?.values || device.values || {},
-          observedAt: device.state?.observedAt ?? device.lastSeen ?? raw.observedAt ?? null,
-          source: device.state?.source || device.origin || device.protocol || 'mqtt-registry',
+          observedAt:
+            device.state?.observedAt ??
+            device.lastSeen ??
+            raw.observedAt ??
+            null,
+          source:
+            device.state?.source ||
+            device.origin ||
+            device.protocol ||
+            'mqtt-registry',
           status: device.state?.status || device.status || 'online',
         },
-      })
-      this.liveDiscoveredDeviceConfigs.delete(id)
+      });
+      this.liveDiscoveredDeviceConfigs.delete(id);
     }
   }
 
+  findApprovedDeviceIdByPhysicalChannel(
+    physicalId: string,
+    channel = 0,
+  ): string | null {
+    const normalizedPhysicalId = physicalId.trim().toLowerCase();
+    if (!normalizedPhysicalId) return null;
+
+    const matchingDevice = this.getDevices().find((device) => {
+      if (device.trustStatus !== 'approved') return false;
+      if (device.kind !== 'physical') return false;
+
+      const identifiers = [
+        device.adapter.target,
+        metadataString(device.metadata, 'physicalId'),
+        metadataString(device.metadata, 'hardwareId'),
+        metadataString(device.metadata, 'dst'),
+      ]
+        .filter((value): value is string => !!value)
+        .map((value) => value.trim().toLowerCase());
+
+      if (!identifiers.includes(normalizedPhysicalId)) return false;
+
+      const configuredChannel =
+        metadataNumber(device.metadata, 'switchId') ??
+        metadataNumber(device.metadata, 'channel') ??
+        0;
+
+      return configuredChannel === channel;
+    });
+
+    return matchingDevice?.id || null;
+  }
+
   ingestDeviceTelemetry(payload: unknown): void {
-    if (!payload || typeof payload !== 'object') return
+    if (!payload || typeof payload !== 'object') return;
 
     const raw = payload as ApprovedDeviceConfig & {
-      deviceId?: string
-      observedAt?: string
-    }
-    const id = safeId(raw.id || raw.deviceId || raw.key)
-    if (!id) return
+      deviceId?: string;
+      observedAt?: string;
+    };
+    const id = safeId(raw.id || raw.deviceId || raw.key);
+    if (!id) return;
 
-    const values = raw.state?.values || raw.values || {}
+    const values = raw.state?.values || raw.values || {};
+    const observedAt =
+      raw.observedAt || raw.state?.observedAt || new Date().toISOString();
+
     this.liveStateByDeviceId.set(id, {
       values,
-      observedAt: raw.observedAt || raw.state?.observedAt || new Date().toISOString(),
-      source: raw.state?.source || raw.origin || raw.protocol || 'mqtt-telemetry',
-      status: normalizeOnlineStatus(raw.state?.status || raw.status || 'online'),
-    })
-    this.ackMatchingCommand(id, values)
+      observedAt,
+      source:
+        raw.state?.source || raw.origin || raw.protocol || 'mqtt-telemetry',
+      status: normalizeOnlineStatus(
+        raw.state?.status || raw.status || 'online',
+      ),
+    });
+    this.ackMatchingCommand(id, values, observedAt);
 
     if (!this.liveApprovedDeviceConfigs.has(id)) {
       this.liveDiscoveredDeviceConfigs.set(id, {
         id,
-        displayName: raw.displayName || raw.name || displayNameFromDeviceKey(id),
+        displayName:
+          raw.displayName || raw.name || displayNameFromDeviceKey(id),
         tenantId: raw.tenantId,
         siteId: raw.siteId,
         siteName: raw.siteName,
@@ -642,44 +791,48 @@ export class DeviceRegistryService {
         driver: raw.driver,
         target: raw.target || raw.physicalId,
         bridge: raw.bridge,
-        capabilities: inferCapabilities(raw).map((capability) => capability.kind),
+        capabilities: inferCapabilities(raw).map(
+          (capability) => capability.kind,
+        ),
         confidence: 0.65,
-        reason: 'Telemetry arrived on the Energrid site bus before this device was approved.',
-      })
+        reason:
+          'Telemetry arrived on the Energrid site bus before this device was approved.',
+      });
     }
   }
 
   ingestDeviceStatus(payload: unknown): void {
-    if (!payload || typeof payload !== 'object') return
+    if (!payload || typeof payload !== 'object') return;
 
     const raw = payload as {
-      deviceId?: string
-      status?: string
-      observedAt?: string
-    }
-    const id = safeId(raw.deviceId)
-    if (!id) return
+      deviceId?: string;
+      status?: string;
+      observedAt?: string;
+    };
+    const id = safeId(raw.deviceId);
+    if (!id) return;
 
-    const current = this.liveStateByDeviceId.get(id)
+    const current = this.liveStateByDeviceId.get(id);
     this.liveStateByDeviceId.set(id, {
       values: current?.values || {},
-      observedAt: raw.observedAt || current?.observedAt || new Date().toISOString(),
+      observedAt:
+        raw.observedAt || current?.observedAt || new Date().toISOString(),
       source: current?.source || 'mqtt-status',
       status: normalizeOnlineStatus(raw.status),
-    })
+    });
   }
 
   markDeviceCommandPending(
     deviceId: string,
     command: {
-      action: NonNullable<RegisteredDeviceState['command']>['action']
-      expectedValues: Record<string, number | boolean | string | null>
-      message?: string
-      ttlMs?: number
+      action: NonNullable<RegisteredDeviceState['command']>['action'];
+      expectedValues: Record<string, number | boolean | string | null>;
+      message?: string;
+      ttlMs?: number;
     },
   ): NonNullable<RegisteredDeviceState['command']> {
-    const now = Date.now()
-    const requestedAt = new Date(now).toISOString()
+    const now = Date.now();
+    const requestedAt = new Date(now).toISOString();
     const pending = {
       id: `${deviceId}:${command.action}:${now}`,
       action: command.action,
@@ -687,10 +840,13 @@ export class DeviceRegistryService {
       requestedAt,
       expectedValues: command.expectedValues,
       message: command.message,
-      expiresAt: now + (command.ttlMs || numberFromEnv('HOME_DEVICE_ACK_TIMEOUT_MS', 5000)),
-      displayUntil: now + numberFromEnv('HOME_DEVICE_ACK_TIMEOUT_MS', 5000) + 30000,
-    }
-    this.commandByDeviceId.set(deviceId, pending)
+      expiresAt:
+        now +
+        (command.ttlMs || numberFromEnv('HOME_DEVICE_ACK_TIMEOUT_MS', 5000)),
+      displayUntil:
+        now + numberFromEnv('HOME_DEVICE_ACK_TIMEOUT_MS', 5000) + 30000,
+    };
+    this.commandByDeviceId.set(deviceId, pending);
     this.operationalLog?.record({
       level: 'info',
       source: 'device-control',
@@ -702,19 +858,19 @@ export class DeviceRegistryService {
         action: command.action,
         expected: JSON.stringify(command.expectedValues),
       },
-    })
-    return commandForState(pending)
+    });
+    return commandForState(pending);
   }
 
   markDeviceCommandFailed(
     deviceId: string,
     command: {
-      action: NonNullable<RegisteredDeviceState['command']>['action']
-      expectedValues: Record<string, number | boolean | string | null>
-      message?: string
+      action: NonNullable<RegisteredDeviceState['command']>['action'];
+      expectedValues: Record<string, number | boolean | string | null>;
+      message?: string;
     },
   ): NonNullable<RegisteredDeviceState['command']> {
-    const now = Date.now()
+    const now = Date.now();
     const failed = {
       id: `${deviceId}:${command.action}:${now}`,
       action: command.action,
@@ -724,8 +880,8 @@ export class DeviceRegistryService {
       message: command.message,
       expiresAt: now,
       displayUntil: now + 30000,
-    }
-    this.commandByDeviceId.set(deviceId, failed)
+    };
+    this.commandByDeviceId.set(deviceId, failed);
     this.operationalLog?.record({
       level: 'error',
       source: 'device-control',
@@ -737,15 +893,15 @@ export class DeviceRegistryService {
         action: command.action,
         expected: JSON.stringify(command.expectedValues),
       },
-    })
-    return commandForState(failed)
+    });
+    return commandForState(failed);
   }
 
   private withLiveState(device: RegisteredDevice): RegisteredDevice {
-    this.refreshDeviceCommand(device.id)
-    const liveState = this.liveStateByDeviceId.get(device.id)
-    const command = this.commandByDeviceId.get(device.id)
-    if (!liveState && !command) return device
+    this.refreshDeviceCommand(device.id);
+    const liveState = this.liveStateByDeviceId.get(device.id);
+    const command = this.commandByDeviceId.get(device.id);
+    if (!liveState && !command) return device;
 
     return {
       ...device,
@@ -758,25 +914,37 @@ export class DeviceRegistryService {
         },
         ...(command ? { command: commandForState(command) } : {}),
       },
-    }
+    };
   }
 
   private ackMatchingCommand(
     deviceId: string,
     values: Record<string, number | boolean | string | null>,
+    observedAt: string,
   ): void {
-    this.refreshDeviceCommand(deviceId)
-    const command = this.commandByDeviceId.get(deviceId)
-    if (!command || command.status !== 'pending') return
-    if (!valuesMatch(command.expectedValues, values)) return
+    this.refreshDeviceCommand(deviceId);
+    const command = this.commandByDeviceId.get(deviceId);
+    if (!command || command.status !== 'pending') return;
+    if (!valuesMatch(command.expectedValues, values)) return;
 
-    const now = Date.now()
+    const telemetryTime = Date.parse(observedAt);
+    const requestedTime = Date.parse(command.requestedAt);
+
+    if (
+      Number.isFinite(telemetryTime) &&
+      Number.isFinite(requestedTime) &&
+      telemetryTime < requestedTime
+    ) {
+      return;
+    }
+
+    const now = Date.now();
     this.commandByDeviceId.set(deviceId, {
       ...command,
       status: 'acked',
       message: 'Device reported the requested state.',
       displayUntil: now + 5000,
-    })
+    });
     this.operationalLog?.record({
       level: 'info',
       source: 'device-registry',
@@ -788,21 +956,21 @@ export class DeviceRegistryService {
         action: command.action,
         expected: JSON.stringify(command.expectedValues),
       },
-    })
+    });
   }
 
   private refreshDeviceCommand(deviceId: string): void {
-    const command = this.commandByDeviceId.get(deviceId)
-    if (!command) return
+    const command = this.commandByDeviceId.get(deviceId);
+    if (!command) return;
 
-    const now = Date.now()
+    const now = Date.now();
     if (command.status === 'pending' && now > command.expiresAt) {
       this.commandByDeviceId.set(deviceId, {
         ...command,
         status: 'no_ack',
         message: 'Command was published, but no matching telemetry arrived.',
         displayUntil: now + 30000,
-      })
+      });
       this.operationalLog?.record({
         level: 'warn',
         source: 'device-registry',
@@ -814,20 +982,44 @@ export class DeviceRegistryService {
           action: command.action,
           expected: JSON.stringify(command.expectedValues),
         },
-      })
-      return
+      });
+      return;
     }
 
     if (command.status !== 'pending' && now > command.displayUntil) {
-      this.commandByDeviceId.delete(deviceId)
+      this.commandByDeviceId.delete(deviceId);
     }
   }
 }
 
+function metadataString(
+  metadata: RegisteredDevice['metadata'] | undefined,
+  key: string,
+): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function metadataNumber(
+  metadata: RegisteredDevice['metadata'] | undefined,
+  key: string,
+): number | undefined {
+  const value = metadata?.[key];
+
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+
+  return undefined;
+}
+
 function commandForState(
   command: NonNullable<RegisteredDeviceState['command']> & {
-    expiresAt?: number
-    displayUntil?: number
+    expiresAt?: number;
+    displayUntil?: number;
   },
 ): NonNullable<RegisteredDeviceState['command']> {
   return {
@@ -837,49 +1029,59 @@ function commandForState(
     requestedAt: command.requestedAt,
     expectedValues: command.expectedValues,
     message: command.message,
-  }
+  };
 }
 
 function valuesMatch(
   expected: Record<string, number | boolean | string | null>,
   actual: Record<string, number | boolean | string | null>,
 ): boolean {
-  return Object.entries(expected).every(([key, value]) => actual[key] === value)
+  return Object.entries(expected).every(
+    ([key, value]) => actual[key] === value,
+  );
 }
 
-function unknownState(source: string, configured = true): RegisteredDeviceState {
+function unknownState(
+  source: string,
+  configured = true,
+): RegisteredDeviceState {
   return {
     values: {},
     observedAt: null,
     source,
     status: configured ? 'unknown' : 'offline',
-  }
+  };
 }
 
 function displayNameFromDeviceKey(key: string): string {
   return key
     .split('.')
     .map((part) => part[0]?.toUpperCase() + part.slice(1))
-    .join(' ')
+    .join(' ');
 }
 
 function dedupeDevices(devices: RegisteredDevice[]): RegisteredDevice[] {
-  const byId = new Map<string, RegisteredDevice>()
+  const byId = new Map<string, RegisteredDevice>();
 
   for (const device of devices) {
-    byId.set(device.id, device)
+    byId.set(device.id, device);
   }
 
-  return [...byId.values()]
+  return [...byId.values()];
 }
 
 function configuredSite() {
   return {
     tenantId: process.env.PORTAL_TENANT_ID || 'tenant-demo',
-    siteId: process.env.PORTAL_SITE_ID || process.env.HOME_SITE_ID || 'site-home',
-    siteName: process.env.PORTAL_SITE_NAME || process.env.HOME_SITE_NAME || 'Home',
-    gatewayId: process.env.HOME_GATEWAY_ID || process.env.PORTAL_GATEWAY_ID || 'site-gateway',
-  }
+    siteId:
+      process.env.PORTAL_SITE_ID || process.env.HOME_SITE_ID || 'site-home',
+    siteName:
+      process.env.PORTAL_SITE_NAME || process.env.HOME_SITE_NAME || 'Home',
+    gatewayId:
+      process.env.HOME_GATEWAY_ID ||
+      process.env.PORTAL_GATEWAY_ID ||
+      'site-gateway',
+  };
 }
 
 function mqttTopicFor(
@@ -892,22 +1094,28 @@ function mqttTopicFor(
     'devices',
     safeTopicPart(deviceId),
     channel,
-  ].join('/')
+  ].join('/');
 }
 
-function mqttPrefixFor(identity: Pick<RegisteredDevice, 'tenantId' | 'siteId'>): string {
-  return ['energrid', safeTopicPart(identity.tenantId), safeTopicPart(identity.siteId)].join('/')
+function mqttPrefixFor(
+  identity: Pick<RegisteredDevice, 'tenantId' | 'siteId'>,
+): string {
+  return [
+    'energrid',
+    safeTopicPart(identity.tenantId),
+    safeTopicPart(identity.siteId),
+  ].join('/');
 }
 
 function safeTopicPart(value: string): string {
-  return safeId(value).replace(/\./g, '_')
+  return safeId(value).replace(/\./g, '_');
 }
 
 function summarizeSites(
   devices: RegisteredDevice[],
   systems: SiteSystem[],
 ): DeviceRegistrySnapshot['sites'] {
-  const bySite = new Map<string, DeviceRegistrySnapshot['sites'][number]>()
+  const bySite = new Map<string, DeviceRegistrySnapshot['sites'][number]>();
 
   for (const device of devices) {
     const site = bySite.get(device.siteId) || {
@@ -916,12 +1124,12 @@ function summarizeSites(
       gatewayIds: [],
       deviceCount: 0,
       systemCount: 0,
-    }
-    site.deviceCount += 1
+    };
+    site.deviceCount += 1;
     if (device.gatewayId && !site.gatewayIds.includes(device.gatewayId)) {
-      site.gatewayIds.push(device.gatewayId)
+      site.gatewayIds.push(device.gatewayId);
     }
-    bySite.set(device.siteId, site)
+    bySite.set(device.siteId, site);
   }
 
   for (const system of systems) {
@@ -931,83 +1139,95 @@ function summarizeSites(
       gatewayIds: system.gatewayId ? [system.gatewayId] : [],
       deviceCount: 0,
       systemCount: 0,
-    }
-    site.systemCount += 1
+    };
+    site.systemCount += 1;
     if (system.gatewayId && !site.gatewayIds.includes(system.gatewayId)) {
-      site.gatewayIds.push(system.gatewayId)
+      site.gatewayIds.push(system.gatewayId);
     }
-    bySite.set(system.siteId, site)
+    bySite.set(system.siteId, site);
   }
 
-  return [...bySite.values()]
+  return [...bySite.values()];
 }
 
-function summarizeGateways(devices: RegisteredDevice[]): DeviceRegistrySnapshot['gateways'] {
-  const gateways = new Map<string, DeviceRegistrySnapshot['gateways'][number]>()
+function summarizeGateways(
+  devices: RegisteredDevice[],
+): DeviceRegistrySnapshot['gateways'] {
+  const gateways = new Map<
+    string,
+    DeviceRegistrySnapshot['gateways'][number]
+  >();
 
   for (const device of devices) {
-    if (!device.gatewayId) continue
+    if (!device.gatewayId) continue;
     const gateway = gateways.get(device.gatewayId) || {
       id: device.gatewayId,
       siteId: device.siteId,
-      transport: device.adapter.transport || transportForProtocol(device.adapter.protocol),
+      transport:
+        device.adapter.transport ||
+        transportForProtocol(device.adapter.protocol),
       broker: process.env.HOME_MQTT_HOST,
       topicPrefix: mqttPrefixFor(device),
       status: 'unknown',
-    }
-    if (device.state.status === 'online') gateway.status = 'online'
-    gateways.set(device.gatewayId, gateway)
+    };
+    if (device.state.status === 'online') gateway.status = 'online';
+    gateways.set(device.gatewayId, gateway);
   }
 
-  return [...gateways.values()]
+  return [...gateways.values()];
 }
 
-function parseApprovedDevices(value: string | unknown[] | undefined): RegisteredDevice[] {
-  if (!value) return []
+function parseApprovedDevices(
+  value: string | unknown[] | undefined,
+): RegisteredDevice[] {
+  if (!value) return [];
 
-  let parsed: unknown
+  let parsed: unknown;
   if (typeof value === 'string') {
     try {
-      parsed = JSON.parse(value)
+      parsed = JSON.parse(value);
     } catch {
-      return []
+      return [];
     }
   } else {
-    parsed = value
+    parsed = value;
   }
 
   const items = Array.isArray(parsed)
     ? parsed
-    : parsed && typeof parsed === 'object' && Array.isArray((parsed as { devices?: unknown[] }).devices)
+    : parsed &&
+        typeof parsed === 'object' &&
+        Array.isArray((parsed as { devices?: unknown[] }).devices)
       ? (parsed as { devices: unknown[] }).devices
-      : []
+      : [];
 
   return items
     .map((item) => normalizeApprovedDevice(item))
-    .filter((device): device is RegisteredDevice => !!device)
+    .filter((device): device is RegisteredDevice => !!device);
 }
 
 function normalizeApprovedDevice(item: unknown): RegisteredDevice | null {
-  if (!item || typeof item !== 'object') return null
+  if (!item || typeof item !== 'object') return null;
 
-  const raw = item as ApprovedDeviceConfig
-  const id = safeId(raw.id || raw.deviceId || raw.key)
-  if (!id) return null
+  const raw = item as ApprovedDeviceConfig;
+  const id = safeId(raw.id || raw.deviceId || raw.key);
+  if (!id) return null;
 
-  const defaultIdentity = configuredSite()
+  const defaultIdentity = configuredSite();
   const identity = {
     tenantId: safeId(raw.tenantId) || defaultIdentity.tenantId,
     siteId: safeId(raw.siteId) || defaultIdentity.siteId,
     siteName: raw.siteName || defaultIdentity.siteName,
     gatewayId: safeId(raw.gatewayId) || defaultIdentity.gatewayId,
-  }
-  const zoneName = raw.zoneName || raw.location || inferZoneName(id, raw.groups)
-  const capabilities = inferCapabilities(raw)
-  const protocol = inferProtocol(raw)
-  const transport = inferTransport(raw, protocol)
-  const target = raw.target || raw.physicalId || raw.dst || id
-  const configured = raw.configured ?? protocol !== 'simulated'
-  const values = raw.state?.values || raw.values || {}
+  };
+  const zoneName =
+    raw.zoneName || raw.location || inferZoneName(id, raw.groups);
+  const capabilities = inferCapabilities(raw);
+  const protocol = inferProtocol(raw);
+  const transport = inferTransport(raw, protocol);
+  const target = raw.target || raw.physicalId || raw.dst || id;
+  const configured = raw.configured ?? protocol !== 'simulated';
+  const values = raw.state?.values || raw.values || {};
 
   return {
     id,
@@ -1059,37 +1279,39 @@ function normalizeApprovedDevice(item: unknown): RegisteredDevice | null {
       groups: raw.groups?.join(','),
       aliases: raw.aliases?.slice(0, 8).join(', '),
     }),
-  }
+  };
 }
 
-function logicalGroupsFromImportedDevices(devices: RegisteredDevice[]): RegisteredDevice[] {
-  const byGroup = new Map<string, RegisteredDevice[]>()
+function logicalGroupsFromImportedDevices(
+  devices: RegisteredDevice[],
+): RegisteredDevice[] {
+  const byGroup = new Map<string, RegisteredDevice[]>();
 
   for (const device of devices) {
     const groups = String(device.metadata?.groups || '')
       .split(',')
       .map((group) => group.trim())
-      .filter(Boolean)
+      .filter(Boolean);
 
     for (const group of groups) {
-      const current = byGroup.get(group) || []
-      current.push(device)
-      byGroup.set(group, current)
+      const current = byGroup.get(group) || [];
+      current.push(device);
+      byGroup.set(group, current);
     }
   }
 
   return [...byGroup.entries()]
     .filter(([, members]) => members.length > 0)
     .map(([group, members]) => {
-      const isLightGroup = group.includes('light')
-      const zoneName = inferZoneName(group)
-      const first = members[0]
+      const isLightGroup = group.includes('light');
+      const zoneName = inferZoneName(group);
+      const first = members[0];
       const identity = {
         tenantId: first.tenantId,
         siteId: first.siteId,
         siteName: first.siteName,
         gatewayId: first.gatewayId,
-      }
+      };
 
       return {
         id: logicalGroupId(group),
@@ -1113,7 +1335,11 @@ function logicalGroupsFromImportedDevices(devices: RegisteredDevice[]): Register
           configured: true,
           target: group,
           eventTopicPrefix: mqttPrefixFor(identity),
-          commandTopic: mqttTopicFor(identity, logicalGroupId(group), 'command'),
+          commandTopic: mqttTopicFor(
+            identity,
+            logicalGroupId(group),
+            'command',
+          ),
           stateTopic: mqttTopicFor(identity, logicalGroupId(group), 'state'),
         },
         state: unknownState('registry-group'),
@@ -1123,48 +1349,63 @@ function logicalGroupsFromImportedDevices(devices: RegisteredDevice[]): Register
         }),
         policy: safePolicy(),
         memberDeviceIds: members.map((device) => device.id),
-      } satisfies RegisteredDevice
-    })
+      } satisfies RegisteredDevice;
+    });
 }
 
 function logicalGroupId(group: string): string {
-  const normalized = group.trim().toLowerCase()
+  const normalized = group.trim().toLowerCase();
 
-  if (normalized === 'kitchen.lights') return 'kitchen_light'
-  if (normalized === 'bath.lights' || normalized === 'bathroom.lights') return 'bath_light'
-  if (normalized === 'hall.lights' || normalized === 'hallway.lights') return 'hallway_light'
-  if (normalized === 'entry.lights' || normalized === 'entrance.lights') return 'entry_light'
+  if (normalized === 'kitchen.lights') return 'kitchen_light';
+  if (normalized === 'bath.lights' || normalized === 'bathroom.lights')
+    return 'bath_light';
+  if (normalized === 'hall.lights' || normalized === 'hallway.lights')
+    return 'hallway_light';
+  if (normalized === 'entry.lights' || normalized === 'entrance.lights')
+    return 'entry_light';
 
-  return safeId(normalized).replace(/\./g, '_')
+  return safeId(normalized).replace(/\./g, '_');
 }
 
-function inferCapabilities(raw: ApprovedDeviceConfig): RegisteredDevice['capabilities'] {
-  const explicit = (raw.capabilities || []).filter(isCapabilityKind)
+function inferCapabilities(
+  raw: ApprovedDeviceConfig,
+): RegisteredDevice['capabilities'] {
+  const explicit = (raw.capabilities || []).filter(isCapabilityKind);
   const readings = Object.entries(raw.config?.readings || {})
     .filter(([, config]) => config?.enabled !== false)
     .map(([kind]) => kind)
-    .filter(isCapabilityKind)
+    .filter(isCapabilityKind);
 
-  const inferred = new Set<DeviceCapabilityKind>([...explicit, ...readings])
-  const text = `${raw.type || ''} ${raw.deviceId || ''} ${raw.key || ''} ${(raw.groups || []).join(' ')}`.toLowerCase()
+  const inferred = new Set<DeviceCapabilityKind>([...explicit, ...readings]);
+  const text =
+    `${raw.type || ''} ${raw.deviceId || ''} ${raw.key || ''} ${(raw.groups || []).join(' ')}`.toLowerCase();
 
-  if (text.includes('temp')) inferred.add('temperature')
-  if (text.includes('humid')) inferred.add('humidity')
-  if (text.includes('power') || text.includes('energy')) inferred.add('power')
-  if (text.includes('motion') || text.includes('presence')) inferred.add('motion')
-  if (text.includes('pump')) inferred.add('pump')
-  if (text.includes('boiler') || text.includes('oven') || text.includes('fridge')) inferred.add('power')
-  if (text.includes('light') || text.includes('lights')) inferred.add(raw.kind === 'logical' ? 'light' : 'switch')
-  if (inferred.size === 0) inferred.add('switch')
+  if (text.includes('temp')) inferred.add('temperature');
+  if (text.includes('humid')) inferred.add('humidity');
+  if (text.includes('power') || text.includes('energy')) inferred.add('power');
+  if (text.includes('motion') || text.includes('presence'))
+    inferred.add('motion');
+  if (text.includes('pump')) inferred.add('pump');
+  if (
+    text.includes('boiler') ||
+    text.includes('oven') ||
+    text.includes('fridge')
+  )
+    inferred.add('power');
+  if (text.includes('light') || text.includes('lights'))
+    inferred.add(raw.kind === 'logical' ? 'light' : 'switch');
+  if (inferred.size === 0) inferred.add('switch');
 
   return [...inferred].map((kind) => ({
     kind,
     actions: actionsForCapability(kind),
     unit: unitForCapability(kind),
-  }))
+  }));
 }
 
-function actionsForCapability(kind: DeviceCapabilityKind): RegisteredDevice['capabilities'][number]['actions'] {
+function actionsForCapability(
+  kind: DeviceCapabilityKind,
+): RegisteredDevice['capabilities'][number]['actions'] {
   if (
     kind === 'temperature' ||
     kind === 'humidity' ||
@@ -1174,120 +1415,143 @@ function actionsForCapability(kind: DeviceCapabilityKind): RegisteredDevice['cap
     kind === 'forecast' ||
     kind === 'tariff'
   ) {
-    return ['read']
+    return ['read'];
   }
-  if (kind === 'camera') return ['capture']
-  if (kind === 'inventory') return ['read', 'analyze']
-  if (kind === 'heat_source') return ['read', 'set_mode', 'set_flow_temperature']
-  if (kind === 'slow_radiant_zone' || kind === 'fast_air_zone') return ['read', 'set_target_temperature', 'set_mode']
-  if (kind === 'valve') return ['open', 'close']
-  return ['turn_on', 'turn_off']
+  if (kind === 'camera') return ['capture'];
+  if (kind === 'inventory') return ['read', 'analyze'];
+  if (kind === 'heat_source')
+    return ['read', 'set_mode', 'set_flow_temperature'];
+  if (kind === 'slow_radiant_zone' || kind === 'fast_air_zone')
+    return ['read', 'set_target_temperature', 'set_mode'];
+  if (kind === 'valve') return ['open', 'close'];
+  return ['turn_on', 'turn_off'];
 }
 
 function unitForCapability(kind: DeviceCapabilityKind): string | undefined {
-  if (kind === 'temperature') return 'C'
-  if (kind === 'humidity') return '%'
-  if (kind === 'power') return 'W'
-  return undefined
+  if (kind === 'temperature') return 'C';
+  if (kind === 'humidity') return '%';
+  if (kind === 'power') return 'W';
+  return undefined;
 }
 
 function inferProtocol(raw: ApprovedDeviceConfig): DeviceProtocol {
-  if (isProtocol(raw.protocol)) return raw.protocol
-  if (raw.origin === 'zigbee' || raw.driver?.includes('zigbee')) return 'zigbee'
-  if (raw.origin === 'matter' || raw.driver?.includes('matter')) return 'matter'
-  if (raw.origin === 'modbus' || raw.driver?.includes('modbus')) return 'modbus'
-  if (raw.origin === 'shelly' || raw.origin === 'native') return 'mqtt'
-  if (raw.target?.startsWith('http')) return 'http'
-  return 'mqtt'
+  if (isProtocol(raw.protocol)) return raw.protocol;
+  if (raw.origin === 'zigbee' || raw.driver?.includes('zigbee'))
+    return 'zigbee';
+  if (raw.origin === 'matter' || raw.driver?.includes('matter'))
+    return 'matter';
+  if (raw.origin === 'modbus' || raw.driver?.includes('modbus'))
+    return 'modbus';
+  if (raw.origin === 'shelly' || raw.origin === 'native') return 'mqtt';
+  if (raw.target?.startsWith('http')) return 'http';
+  return 'mqtt';
 }
 
-function inferTransport(raw: ApprovedDeviceConfig | DiscoveredDeviceConfig, protocol: DeviceProtocol): DeviceTransport {
-  if (isTransport(raw.transport)) return raw.transport
-  return transportForProtocol(protocol)
+function inferTransport(
+  raw: ApprovedDeviceConfig | DiscoveredDeviceConfig,
+  protocol: DeviceProtocol,
+): DeviceTransport {
+  if (isTransport(raw.transport)) return raw.transport;
+  return transportForProtocol(protocol);
 }
 
 function transportForProtocol(protocol: DeviceProtocol): DeviceTransport {
-  if (protocol === 'http') return 'http'
-  if (protocol === 'simulated' || protocol === 'none') return 'local'
-  return 'mqtt'
+  if (protocol === 'http') return 'http';
+  if (protocol === 'simulated' || protocol === 'none') return 'local';
+  return 'mqtt';
 }
 
-function inferDriver(raw: ApprovedDeviceConfig, protocol: DeviceProtocol): string {
-  if (raw.origin === 'shelly') return 'shelly-rpc'
-  if (protocol === 'zigbee') return 'zigbee2mqtt'
-  if (protocol === 'matter') return 'matter-bridge'
-  if (protocol === 'modbus') return 'modbus-gateway'
-  if (protocol === 'http') return 'http-device'
-  if (protocol === 'simulated') return 'simulated-device'
-  return 'mqtt-device'
+function inferDriver(
+  raw: ApprovedDeviceConfig,
+  protocol: DeviceProtocol,
+): string {
+  if (raw.origin === 'shelly') return 'shelly-rpc';
+  if (protocol === 'zigbee') return 'zigbee2mqtt';
+  if (protocol === 'matter') return 'matter-bridge';
+  if (protocol === 'modbus') return 'modbus-gateway';
+  if (protocol === 'http') return 'http-device';
+  if (protocol === 'simulated') return 'simulated-device';
+  return 'mqtt-device';
 }
 
 function latencyForProtocol(protocol: DeviceProtocol): number | undefined {
-  if (protocol === 'mqtt' || protocol === 'zigbee') return 700
-  if (protocol === 'matter') return 800
-  if (protocol === 'modbus') return 1000
-  if (protocol === 'http') return 1500
-  return undefined
+  if (protocol === 'mqtt' || protocol === 'zigbee') return 700;
+  if (protocol === 'matter') return 800;
+  if (protocol === 'modbus') return 1000;
+  if (protocol === 'http') return 1500;
+  return undefined;
 }
 
-function importedDeviceNotes(protocol: DeviceProtocol, transport: DeviceTransport): string {
-  if (protocol === transport) return 'Imported from the site device registry.'
-  return `Imported from the site device registry; native protocol is ${protocol}, reported through ${transport}.`
+function importedDeviceNotes(
+  protocol: DeviceProtocol,
+  transport: DeviceTransport,
+): string {
+  if (protocol === transport) return 'Imported from the site device registry.';
+  return `Imported from the site device registry; native protocol is ${protocol}, reported through ${transport}.`;
 }
 
 function inferZoneName(id: string, groups: string[] = []): string {
-  const text = `${id} ${groups.join(' ')}`.toLowerCase()
-  if (text.includes('kitchen')) return 'Kitchen'
-  if (text.includes('bath')) return 'Bathroom'
-  if (text.includes('garage')) return 'Garage'
-  if (text.includes('din') || text.includes('panel') || text.includes('mainline')) return 'Panel'
-  if (text.includes('shed') || text.includes('pump')) return 'Shed'
-  return 'Unassigned'
+  const text = `${id} ${groups.join(' ')}`.toLowerCase();
+  if (text.includes('kitchen')) return 'Kitchen';
+  if (text.includes('bath')) return 'Bathroom';
+  if (text.includes('garage')) return 'Garage';
+  if (
+    text.includes('din') ||
+    text.includes('panel') ||
+    text.includes('mainline')
+  )
+    return 'Panel';
+  if (text.includes('shed') || text.includes('pump')) return 'Shed';
+  return 'Unassigned';
 }
 
-function normalizeOnlineStatus(value: string | undefined): RegisteredDeviceState['status'] {
-  if (value === 'active' || value === 'online') return 'online'
-  if (value === 'inactive' || value === 'offline') return 'offline'
-  return 'unknown'
+function normalizeOnlineStatus(
+  value: string | undefined,
+): RegisteredDeviceState['status'] {
+  if (value === 'active' || value === 'online') return 'online';
+  if (value === 'inactive' || value === 'offline') return 'offline';
+  return 'unknown';
 }
 
 function cleanMetadata(
   input: Record<string, string | number | boolean | undefined>,
 ): Record<string, string | number | boolean> {
-  const output: Record<string, string | number | boolean> = {}
+  const output: Record<string, string | number | boolean> = {};
 
   for (const [key, value] of Object.entries(input)) {
     if (value !== undefined && value !== '') {
-      output[key] = value
+      output[key] = value;
     }
   }
 
-  return output
+  return output;
 }
 
-function parseShellyRpcDevices(value: string | undefined): ShellyRpcDeviceConfig[] {
-  if (!value) return []
+function parseShellyRpcDevices(
+  value: string | undefined,
+): ShellyRpcDeviceConfig[] {
+  if (!value) return [];
 
   return value
     .split(',')
     .map((item) => item.trim())
     .filter(Boolean)
     .map((item) => {
-      const parts = item.split(':').map((part) => part.trim())
+      const parts = item.split(':').map((part) => part.trim());
 
       if (parts.length === 2) {
         return {
           key: parts[0],
           dst: parts[0],
           switchId: Number(parts[1]),
-        }
+        };
       }
 
       return {
         key: parts[0],
         dst: parts[1],
         switchId: Number(parts[2]),
-      }
+      };
     })
     .filter((device) => {
       return (
@@ -1295,52 +1559,54 @@ function parseShellyRpcDevices(value: string | undefined): ShellyRpcDeviceConfig
         !!device.dst &&
         Number.isInteger(device.switchId) &&
         device.switchId >= 0
-      )
-    })
+      );
+    });
 }
 
-function parseDiscoveredDevices(value: string | unknown[] | undefined): RegisteredDevice[] {
-  if (!value) return []
+function parseDiscoveredDevices(
+  value: string | unknown[] | undefined,
+): RegisteredDevice[] {
+  if (!value) return [];
 
-  let parsed: unknown
+  let parsed: unknown;
   if (typeof value === 'string') {
     try {
-      parsed = JSON.parse(value)
+      parsed = JSON.parse(value);
     } catch {
-      return []
+      return [];
     }
   } else {
-    parsed = value
+    parsed = value;
   }
 
-  if (!Array.isArray(parsed)) return []
+  if (!Array.isArray(parsed)) return [];
 
   return parsed
     .map((item, index) => normalizeDiscoveredDevice(item, index))
-    .filter((device): device is RegisteredDevice => !!device)
+    .filter((device): device is RegisteredDevice => !!device);
 }
 
 function normalizeDiscoveredDevice(
   item: unknown,
   index: number,
 ): RegisteredDevice | null {
-  if (!item || typeof item !== 'object') return null
+  if (!item || typeof item !== 'object') return null;
 
-  const raw = item as DiscoveredDeviceConfig
-  const id = safeId(raw.id) || `discovered-${index + 1}`
-  const defaultIdentity = configuredSite()
+  const raw = item as DiscoveredDeviceConfig;
+  const id = safeId(raw.id) || `discovered-${index + 1}`;
+  const defaultIdentity = configuredSite();
   const identity = {
     tenantId: safeId(raw.tenantId) || defaultIdentity.tenantId,
     siteId: safeId(raw.siteId) || defaultIdentity.siteId,
     siteName: raw.siteName || defaultIdentity.siteName,
     gatewayId: safeId(raw.gatewayId) || defaultIdentity.gatewayId,
-  }
+  };
   const capabilities = (raw.capabilities || ['switch']).filter(
     isCapabilityKind,
-  )
-  const protocol = isProtocol(raw.protocol) ? raw.protocol : 'none'
-  const transport = inferTransport(raw, protocol)
-  const source = raw.source || protocolToDiscoverySource(protocol)
+  );
+  const protocol = isProtocol(raw.protocol) ? raw.protocol : 'none';
+  const transport = inferTransport(raw, protocol);
+  const source = raw.source || protocolToDiscoverySource(protocol);
 
   return {
     id,
@@ -1372,7 +1638,8 @@ function normalizeDiscoveredDevice(
     state: unknownState(source, false),
     responseProfile: responseProfile({
       confidence: clampConfidence(raw.confidence),
-      notes: 'Discovered devices must be approved before the assistant can execute actions.',
+      notes:
+        'Discovered devices must be approved before the assistant can execute actions.',
     }),
     policy: {
       ...safePolicy(),
@@ -1384,15 +1651,16 @@ function normalizeDiscoveredDevice(
       confidence: clampConfidence(raw.confidence),
       suggestedRoom: raw.suggestedRoom || raw.zoneName,
       suggestedName: raw.suggestedName || raw.displayName,
-      reason: raw.reason || 'Discovered on the local network but not approved yet.',
+      reason:
+        raw.reason || 'Discovered on the local network but not approved yet.',
     },
-  }
+  };
 }
 
 function safeId(value: string | undefined): string {
   return String(value || '')
     .trim()
-    .replace(/\s+/g, '_')
+    .replace(/\s+/g, '_');
 }
 
 function isCapabilityKind(value: string): value is DeviceCapabilityKind {
@@ -1412,35 +1680,45 @@ function isCapabilityKind(value: string): value is DeviceCapabilityKind {
     'inventory',
     'forecast',
     'tariff',
-  ].includes(value)
+  ].includes(value);
 }
 
 function isProtocol(value: string | undefined): value is DeviceProtocol {
-  return ['mqtt', 'http', 'zigbee', 'matter', 'modbus', 'simulated', 'none'].includes(String(value))
+  return [
+    'mqtt',
+    'http',
+    'zigbee',
+    'matter',
+    'modbus',
+    'simulated',
+    'none',
+  ].includes(String(value));
 }
 
 function isTransport(value: string | undefined): value is DeviceTransport {
-  return ['mqtt', 'http', 'local'].includes(String(value))
+  return ['mqtt', 'http', 'local'].includes(String(value));
 }
 
 function protocolToDiscoverySource(
   protocol: DeviceProtocol,
 ): 'mqtt' | 'http' | 'zigbee' | 'matter' | 'modbus' | 'manual' | 'simulated' {
-  if (protocol === 'mqtt') return 'mqtt'
-  if (protocol === 'http') return 'http'
-  if (protocol === 'zigbee') return 'zigbee'
-  if (protocol === 'matter') return 'matter'
-  if (protocol === 'modbus') return 'modbus'
-  if (protocol === 'simulated') return 'simulated'
-  return 'manual'
+  if (protocol === 'mqtt') return 'mqtt';
+  if (protocol === 'http') return 'http';
+  if (protocol === 'zigbee') return 'zigbee';
+  if (protocol === 'matter') return 'matter';
+  if (protocol === 'modbus') return 'modbus';
+  if (protocol === 'simulated') return 'simulated';
+  return 'manual';
 }
 
 function clampConfidence(value: number | undefined): number {
-  if (!Number.isFinite(value)) return 0.5
-  return Math.max(0, Math.min(1, Number(value)))
+  if (!Number.isFinite(value)) return 0.5;
+  return Math.max(0, Math.min(1, Number(value)));
 }
 
-function responseProfile(input: Partial<RegisteredDevice['responseProfile']> = {}): RegisteredDevice['responseProfile'] {
+function responseProfile(
+  input: Partial<RegisteredDevice['responseProfile']> = {},
+): RegisteredDevice['responseProfile'] {
   return {
     confidence: input.confidence ?? 0.5,
     learningEnabled: input.learningEnabled ?? true,
@@ -1448,14 +1726,14 @@ function responseProfile(input: Partial<RegisteredDevice['responseProfile']> = {
     thermalLagMinutes: input.thermalLagMinutes,
     minCycleMinutes: input.minCycleMinutes,
     notes: input.notes,
-  }
+  };
 }
 
 function safePolicy(): RegisteredDevice['policy'] {
   return {
     requiresApproval: false,
     confirmationRequiredFor: [],
-  }
+  };
 }
 
 function readOnlyPolicy(): RegisteredDevice['policy'] {
@@ -1463,7 +1741,7 @@ function readOnlyPolicy(): RegisteredDevice['policy'] {
     requiresApproval: false,
     confirmationRequiredFor: [],
     notes: 'Read-only context for the assistant.',
-  }
+  };
 }
 
 function climatePolicy(min: number, max: number): RegisteredDevice['policy'] {
@@ -1475,11 +1753,12 @@ function climatePolicy(min: number, max: number): RegisteredDevice['policy'] {
       max,
       unit: 'C',
     },
-    notes: 'Climate changes stay inside configured comfort and equipment limits.',
-  }
+    notes:
+      'Climate changes stay inside configured comfort and equipment limits.',
+  };
 }
 
 function numberFromEnv(name: string, fallback: number): number {
-  const value = Number(process.env[name])
-  return Number.isFinite(value) ? value : fallback
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) ? value : fallback;
 }

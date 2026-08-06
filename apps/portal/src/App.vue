@@ -248,6 +248,13 @@ type MqttTreeNode = {
   subscription: boolean;
 };
 
+type MqttPipelineStep = {
+  id: string;
+  label: string;
+  detail: string;
+  status: 'passed' | 'warning' | 'failed' | 'idle';
+};
+
 type VoiceMetrics = {
   totalMs?: number | null;
   sttMs?: number | null;
@@ -571,7 +578,8 @@ const clientLogEntries = computed<OperationalLogEntry[]>(() =>
     .map((line, index) => ({
       id: `client:${index}:${line}`,
       observedAt: new Date().toISOString(),
-      level: line.includes('failed') || line.includes('error') ? 'warn' : 'debug',
+      level:
+        line.includes('failed') || line.includes('error') ? 'warn' : 'debug',
       source: 'portal',
       event: 'client.log',
       message: line,
@@ -579,8 +587,7 @@ const clientLogEntries = computed<OperationalLogEntry[]>(() =>
 );
 const allLogEntries = computed(() =>
   [...operationalLogs.value, ...clientLogEntries.value].sort(
-    (left, right) =>
-      Date.parse(right.observedAt) - Date.parse(left.observedAt),
+    (left, right) => Date.parse(right.observedAt) - Date.parse(left.observedAt),
   ),
 );
 const visibleLogEntries = computed(() => {
@@ -1022,6 +1029,22 @@ const selectedMqttLastMessage = computed(
 const selectedMqttPrettyPayload = computed(() =>
   formatMqttPayload(selectedMqttLastMessage.value?.payloadPreview),
 );
+const selectedMqttPipeline = computed<MqttPipelineStep[]>(() =>
+  mqttPipelineFor(selectedMqttLastMessage.value),
+);
+const selectedMqttMessageMeta = computed(() => {
+  const message = selectedMqttLastMessage.value;
+  if (!message) return null;
+
+  return {
+    topic: message.topic,
+    observedAt: message.observedAt,
+    bytes: formatBytes(message.payloadBytes),
+    format: message.validJson ? 'JSON' : 'Raw payload',
+    outcome: message.handled ? 'Handled' : message.reason,
+  };
+});
+
 const mqttPublishTopicValue = computed(() => {
   const topic = mqttPublishTopic.value.trim();
   if (topic) return topic;
@@ -1268,6 +1291,112 @@ function selectMqttTopic(topic: string) {
   mqttPublishTopic.value = topic.endsWith('/#') ? '' : topic;
 }
 
+function mqttPipelineFor(message: MqttDebugMessage | null): MqttPipelineStep[] {
+  if (!message) {
+    return [
+      {
+        id: 'received',
+        label: 'MQTT received',
+        detail: 'Select a topic containing at least one message.',
+        status: 'idle',
+      },
+      {
+        id: 'parsed',
+        label: 'Payload parsed',
+        detail: 'Waiting for a selected MQTT message.',
+        status: 'idle',
+      },
+      {
+        id: 'handler',
+        label: 'Handler selected',
+        detail: 'Waiting for parser classification.',
+        status: 'idle',
+      },
+      {
+        id: 'registry',
+        label: 'Registry outcome',
+        detail: 'No adapter result is available yet.',
+        status: 'idle',
+      },
+      {
+        id: 'portal',
+        label: 'Portal visibility',
+        detail: 'No normalized result is available yet.',
+        status: 'idle',
+      },
+    ];
+  }
+
+  const reason = message.reason.toLowerCase();
+  const registryUpdated =
+    message.handled &&
+    [
+      'telemetry',
+      'status',
+      'registry',
+      'legacy framework device',
+      'legacy temperature',
+      'shelly',
+    ].some((token) => reason.includes(token));
+
+  const adapterOnly = message.handled && !registryUpdated;
+
+  return [
+    {
+      id: 'received',
+      label: 'MQTT received',
+      detail: `${formatBytes(message.payloadBytes)} received on ${message.topic}.`,
+      status: 'passed',
+    },
+    {
+      id: 'parsed',
+      label: 'Payload parsed',
+      detail: message.validJson
+        ? 'Payload decoded as valid JSON.'
+        : 'Payload could not be decoded as JSON.',
+      status: message.validJson ? 'passed' : 'failed',
+    },
+    {
+      id: 'handler',
+      label: 'Handler selected',
+      detail: message.handled
+        ? `Accepted as ${message.reason}.`
+        : message.validJson
+          ? `No known adapter accepted this JSON message: ${message.reason}.`
+          : 'No adapter processing was attempted for invalid JSON.',
+      status: message.handled
+        ? 'passed'
+        : message.validJson
+          ? 'warning'
+          : 'failed',
+    },
+    {
+      id: 'registry',
+      label: 'Registry outcome',
+      detail: registryUpdated
+        ? 'Normalized device information was passed into the device registry.'
+        : adapterOnly
+          ? 'Handled by an adapter, but no registry update is inferred.'
+          : 'No device registry update was produced.',
+      status: registryUpdated ? 'passed' : adapterOnly ? 'warning' : 'failed',
+    },
+    {
+      id: 'portal',
+      label: 'Portal visibility',
+      detail: registryUpdated
+        ? 'The normalized state can be exposed through the portal snapshot.'
+        : message.handled
+          ? 'The event is visible in diagnostics, but may not represent device state.'
+          : 'The event remains visible only as raw MQTT diagnostic traffic.',
+      status: registryUpdated
+        ? 'passed'
+        : message.handled
+          ? 'warning'
+          : 'failed',
+    },
+  ];
+}
+
 function adapterLabel(device: PortalDevice) {
   const protocol = device.adapter.protocol;
   const transport = device.adapter.transport;
@@ -1391,7 +1520,8 @@ function deviceIsOn(device: PortalDevice) {
 function deviceControlIsOn(device: PortalDevice) {
   if (device.state.command?.status === 'pending') {
     const expected = device.state.command.expectedValues;
-    const on = expected.on ?? expected.output ?? expected.switch ?? expected.powered;
+    const on =
+      expected.on ?? expected.output ?? expected.switch ?? expected.powered;
     if (typeof on === 'boolean') return on;
   }
   return deviceIsOn(device);
@@ -1462,7 +1592,9 @@ async function waitForDeviceCommand(deviceId: string, commandId: string) {
   for (let attempt = 0; attempt < 8; attempt += 1) {
     await sleep(800);
     await loadState();
-    const device = deviceCards.value.find((candidate) => candidate.id === deviceId);
+    const device = deviceCards.value.find(
+      (candidate) => candidate.id === deviceId,
+    );
     const command = device?.state.command;
     if (!command || command.id !== commandId || command.status !== 'pending') {
       return;
@@ -1767,7 +1899,9 @@ function formatLogTime(value: string) {
 }
 
 function logMeta(entry: OperationalLogEntry) {
-  return [entry.deviceId, entry.topic, entry.status].filter(Boolean).join(' · ');
+  return [entry.deviceId, entry.topic, entry.status]
+    .filter(Boolean)
+    .join(' · ');
 }
 
 function logDetails(entry: OperationalLogEntry) {
@@ -3265,8 +3399,8 @@ onBeforeUnmount(() => {
               <p class="eyebrow">Site Bus</p>
               <h2>MQTT debug</h2>
               <span
-                >Inspect Energrid topics, confirm adapter traffic, and publish
-                scoped test messages.</span
+                >Inspect broker traffic, trace adapter decisions, and confirm
+                how MQTT messages reach the Energrid device registry.</span
               >
             </div>
             <div class="bus-actions">
@@ -3462,6 +3596,93 @@ onBeforeUnmount(() => {
                     {{ mqttPublishError }}
                   </p>
                 </details>
+              </section>
+
+              <aside class="mqtt-pipeline-panel">
+                <div class="mqtt-pipeline-heading">
+                  <div>
+                    <span>Processing trace</span>
+                    <h3>Message pipeline</h3>
+                  </div>
+                  <span
+                    v-if="selectedMqttLastMessage"
+                    :class="[
+                      'trust-pill',
+                      selectedMqttLastMessage.handled
+                        ? 'approved'
+                        : selectedMqttLastMessage.validJson
+                          ? 'unknown'
+                          : 'discovered',
+                    ]"
+                  >
+                    {{
+                      selectedMqttLastMessage.handled
+                        ? 'accepted'
+                        : 'not handled'
+                    }}
+                  </span>
+                </div>
+
+                <div v-if="selectedMqttMessageMeta" class="mqtt-message-meta">
+                  <div>
+                    <span>Topic</span>
+                    <strong>{{ selectedMqttMessageMeta.topic }}</strong>
+                  </div>
+                  <div>
+                    <span>Observed</span>
+                    <strong>{{
+                      formatMqttTime(selectedMqttMessageMeta.observedAt)
+                    }}</strong>
+                  </div>
+                  <div>
+                    <span>Format</span>
+                    <strong>{{ selectedMqttMessageMeta.format }}</strong>
+                  </div>
+                  <div>
+                    <span>Size</span>
+                    <strong>{{ selectedMqttMessageMeta.bytes }}</strong>
+                  </div>
+                </div>
+
+                <div class="mqtt-pipeline">
+                  <article
+                    v-for="(step, index) in selectedMqttPipeline"
+                    :key="step.id"
+                    :class="['mqtt-pipeline-step', step.status]"
+                  >
+                    <div class="mqtt-pipeline-rail">
+                      <span class="mqtt-pipeline-marker">
+                        {{
+                          step.status === 'passed'
+                            ? '✓'
+                            : step.status === 'failed'
+                              ? '×'
+                              : step.status === 'warning'
+                                ? '!'
+                                : '·'
+                        }}
+                      </span>
+                      <span
+                        v-if="index < selectedMqttPipeline.length - 1"
+                        class="mqtt-pipeline-line"
+                      ></span>
+                    </div>
+                    <div>
+                      <strong>{{ step.label }}</strong>
+                      <span>{{ step.detail }}</span>
+                    </div>
+                  </article>
+                </div>
+
+                <div class="mqtt-pipeline-outcome">
+                  <span>Adapter decision</span>
+                  <strong>
+                    {{
+                      selectedMqttMessageMeta?.outcome ||
+                      'Select a topic to inspect its latest message'
+                    }}
+                  </strong>
+                </div>
 
                 <div class="network-stat-grid compact-stats">
                   <div v-for="item in mqttStats" :key="item.label">
@@ -3470,7 +3691,7 @@ onBeforeUnmount(() => {
                     <small>{{ item.detail }}</small>
                   </div>
                 </div>
-              </section>
+              </aside>
             </section>
 
             <section class="bus-stream">
@@ -3575,8 +3796,9 @@ onBeforeUnmount(() => {
               <p class="eyebrow">Operations</p>
               <h2>Logs</h2>
               <span
-                >Follow device commands, MQTT adapter decisions, acknowledgements,
-                and portal-side diagnostics in one timeline.</span
+                >Follow device commands, MQTT adapter decisions,
+                acknowledgements, and portal-side diagnostics in one
+                timeline.</span
               >
             </div>
             <button class="primary" type="button" @click="loadState">
@@ -3623,7 +3845,8 @@ onBeforeUnmount(() => {
           <div v-if="visibleLogEntries.length === 0" class="discovery-empty">
             <strong>No logs match this view</strong>
             <span
-              >Run a device command, refresh the bus, or clear the filters.</span
+              >Run a device command, refresh the bus, or clear the
+              filters.</span
             >
           </div>
           <div v-else class="network-table-wrap">

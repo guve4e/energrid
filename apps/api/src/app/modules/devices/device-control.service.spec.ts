@@ -1,37 +1,37 @@
-import { BadRequestException } from '@nestjs/common'
-import { execFile } from 'node:child_process'
-import { DeviceControlService } from './device-control.service'
-import { DeviceRegistryService } from './device-registry.service'
+import { BadRequestException } from '@nestjs/common';
+import { execFile } from 'node:child_process';
+import { DeviceControlService } from './device-control.service';
+import { DeviceRegistryService } from './device-registry.service';
 
 jest.mock('node:child_process', () => ({
   execFile: jest.fn((_command, _args, _options, callback) => {
-    callback(null, { stdout: '', stderr: '' })
+    callback(null, { stdout: '', stderr: '' });
   }),
-}))
+}));
 
 describe('DeviceControlService', () => {
-  const originalEnv = process.env
-  const execFileMock = jest.mocked(execFile)
+  const originalEnv = process.env;
+  const execFileMock = jest.mocked(execFile);
 
   beforeEach(() => {
-    execFileMock.mockClear()
+    execFileMock.mockClear();
     execFileMock.mockImplementation((_command, _args, _options, callback) => {
-      callback(null, { stdout: '', stderr: '' })
-      return {} as ReturnType<typeof execFile>
-    })
-    process.env = { ...originalEnv }
-    delete process.env.HOME_APPROVED_DEVICES_JSON
-    delete process.env.HOME_SHELLY_RPC_TOPIC
-    delete process.env.HOME_MQTT_HOST
-    delete process.env.HOME_MQTT_PORT
-  })
+      callback(null, { stdout: '', stderr: '' });
+      return {} as ReturnType<typeof execFile>;
+    });
+    process.env = { ...originalEnv };
+    delete process.env.HOME_APPROVED_DEVICES_JSON;
+    delete process.env.HOME_SHELLY_RPC_TOPIC;
+    delete process.env.HOME_MQTT_HOST;
+    delete process.env.HOME_MQTT_PORT;
+  });
 
   afterAll(() => {
-    process.env = originalEnv
-  })
+    process.env = originalEnv;
+  });
 
   it('publishes Shelly RPC for a switch-capable logical device', async () => {
-    process.env.HOME_MQTT_HOST = '192.168.1.6'
+    process.env.HOME_MQTT_HOST = '192.168.1.6';
     process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify([
       {
         deviceId: 'kitchen.island.light',
@@ -47,11 +47,11 @@ describe('DeviceControlService', () => {
         channel: 0,
         capabilities: ['switch'],
       },
-    ])
+    ]);
 
-    const service = new DeviceControlService(new DeviceRegistryService())
+    const service = new DeviceControlService(new DeviceRegistryService());
 
-    const result = await service.execute('kitchen.island.light', 'turn_on')
+    const result = await service.execute('kitchen.island.light', 'turn_on');
 
     expect(result).toEqual(
       expect.objectContaining({
@@ -63,7 +63,7 @@ describe('DeviceControlService', () => {
           expectedValues: { on: true },
         }),
       }),
-    )
+    );
     expect(execFileMock).toHaveBeenCalledWith(
       'mosquitto_pub',
       expect.arrayContaining([
@@ -76,17 +76,17 @@ describe('DeviceControlService', () => {
       ]),
       expect.any(Object),
       expect.any(Function),
-    )
-    const args = execFileMock.mock.calls[0]?.[1] as string[]
-    const payload = JSON.parse(args[args.indexOf('-m') + 1])
+    );
+    const args = execFileMock.mock.calls[0]?.[1] as string[];
+    const payload = JSON.parse(args[args.indexOf('-m') + 1]);
     expect(payload).toEqual(
       expect.objectContaining({
         dst: 'shellyplus1-78ee4ccf5cf0',
         method: 'Switch.Set',
         params: { id: 0, on: true },
       }),
-    )
-  })
+    );
+  });
 
   it('does not expose switching for a read-only meter channel', async () => {
     process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify([
@@ -108,13 +108,58 @@ describe('DeviceControlService', () => {
         capabilities: ['power'],
         values: { power: 376.2 },
       },
-    ])
+    ]);
 
-    const service = new DeviceControlService(new DeviceRegistryService())
+    const service = new DeviceControlService(new DeviceRegistryService());
 
     await expect(
       service.execute('panel.mainline.energy', 'turn_off'),
-    ).rejects.toBeInstanceOf(BadRequestException)
-    expect(execFileMock).not.toHaveBeenCalled()
-  })
-})
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(execFileMock).not.toHaveBeenCalled();
+  });
+  it('marks the Shelly command pending before MQTT publication begins', async () => {
+    process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify([
+      {
+        deviceId: 'kitchen.island.light',
+        name: 'Kitchen island light',
+        kind: 'physical',
+        origin: 'shelly',
+        protocol: 'mqtt',
+        transport: 'mqtt',
+        driver: 'shelly-rpc',
+        target: 'shellyplus1-78ee4ccf5cf0',
+        physicalId: 'shellyplus1-78ee4ccf5cf0',
+        channel: 0,
+        location: 'kitchen',
+        capabilities: ['switch'],
+      },
+    ]);
+
+    const registry = new DeviceRegistryService();
+    const service = new DeviceControlService(registry);
+
+    execFileMock.mockImplementation((_command, _args, _options, callback) => {
+      const device = registry
+        .getDevices()
+        .find((candidate) => candidate.id === 'kitchen.island.light');
+
+      expect(device?.state.command).toEqual(
+        expect.objectContaining({
+          status: 'pending',
+          expectedValues: { on: true },
+        }),
+      );
+
+      callback(null, { stdout: '', stderr: '' });
+      return {} as ReturnType<typeof execFile>;
+    });
+
+    await expect(
+      service.execute('kitchen.island.light', 'turn_on'),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        status: 'pending',
+      }),
+    );
+  });
+});

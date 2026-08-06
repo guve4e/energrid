@@ -153,7 +153,7 @@ describe('DeviceRegistryService', () => {
     service.ingestDeviceTelemetry({
       deviceId: 'kitchen_light',
       values: { on: true },
-      observedAt: '2026-08-05T12:00:00.000Z',
+      observedAt: new Date().toISOString(),
     });
 
     expect(

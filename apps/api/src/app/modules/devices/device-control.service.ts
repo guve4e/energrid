@@ -3,30 +3,30 @@ import {
   Injectable,
   Logger,
   NotFoundException,
-} from '@nestjs/common'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
-import { DeviceRegistryService } from './device-registry.service'
+} from '@nestjs/common';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { DeviceRegistryService } from './device-registry.service';
 import type {
   DeviceCapabilityAction,
   RegisteredDevice,
-} from './device-registry.types'
+} from './device-registry.types';
 
-const execFileAsync = promisify(execFile)
+const execFileAsync = promisify(execFile);
 
 export interface DeviceActionResult {
-  deviceId: string
-  action: DeviceCapabilityAction
-  status: 'success' | 'pending' | 'failed'
-  adapter: 'mqtt' | 'http' | 'simulated' | 'none'
-  message: string
-  affectedDeviceIds: string[]
-  command?: RegisteredDevice['state']['command']
+  deviceId: string;
+  action: DeviceCapabilityAction;
+  status: 'success' | 'pending' | 'failed';
+  adapter: 'mqtt' | 'http' | 'simulated' | 'none';
+  message: string;
+  affectedDeviceIds: string[];
+  command?: RegisteredDevice['state']['command'];
 }
 
 @Injectable()
 export class DeviceControlService {
-  private readonly logger = new Logger(DeviceControlService.name)
+  private readonly logger = new Logger(DeviceControlService.name);
 
   constructor(private readonly registry: DeviceRegistryService) {}
 
@@ -34,27 +34,28 @@ export class DeviceControlService {
     deviceId: string,
     action: DeviceCapabilityAction | string | undefined,
   ): Promise<DeviceActionResult> {
-    if (!action) throw new BadRequestException('Missing device action.')
+    if (!action) throw new BadRequestException('Missing device action.');
     if (!isDeviceAction(action)) {
-      throw new BadRequestException(`Unsupported device action ${action}.`)
+      throw new BadRequestException(`Unsupported device action ${action}.`);
     }
 
-    const device = this.findDevice(deviceId)
-    if (!device) throw new NotFoundException(`Device ${deviceId} was not found.`)
+    const device = this.findDevice(deviceId);
+    if (!device)
+      throw new NotFoundException(`Device ${deviceId} was not found.`);
 
     if (!deviceSupportsAction(device, action)) {
       throw new BadRequestException(
         `${device.displayName} does not expose ${action}.`,
-      )
+      );
     }
 
     if (action !== 'turn_on' && action !== 'turn_off') {
       throw new BadRequestException(
         `${action} is recognized but is not wired to a control adapter yet.`,
-      )
+      );
     }
 
-    return this.executeBinarySwitch(device, action === 'turn_on', action)
+    return this.executeBinarySwitch(device, action === 'turn_on', action);
   }
 
   private async executeBinarySwitch(
@@ -63,7 +64,7 @@ export class DeviceControlService {
     action: DeviceCapabilityAction,
   ): Promise<DeviceActionResult> {
     if (device.memberDeviceIds?.length) {
-      return this.executeMemberSwitches(device, on, action)
+      return this.executeMemberSwitches(device, on, action);
     }
 
     if (device.adapter.protocol === 'simulated') {
@@ -72,7 +73,7 @@ export class DeviceControlService {
         values: { on },
         observedAt: new Date().toISOString(),
         origin: 'simulated-control',
-      })
+      });
 
       return {
         deviceId: device.id,
@@ -81,7 +82,7 @@ export class DeviceControlService {
         adapter: 'simulated',
         message: `${device.displayName} set ${on ? 'on' : 'off'} in simulation.`,
         affectedDeviceIds: [device.id],
-      }
+      };
     }
 
     if (!device.adapter.configured) {
@@ -92,15 +93,15 @@ export class DeviceControlService {
         adapter: 'none',
         message: 'Device adapter is not configured.',
         affectedDeviceIds: [],
-      }
+      };
     }
 
     if (isShellyRpcDevice(device)) {
-      return this.executeShellyRpc(device, on, action)
+      return this.executeShellyRpc(device, on, action);
     }
 
     if (device.adapter.commandTopic || device.adapter.target) {
-      return this.executeGenericMqttSwitch(device, on, action)
+      return this.executeGenericMqttSwitch(device, on, action);
     }
 
     return {
@@ -110,7 +111,7 @@ export class DeviceControlService {
       adapter: 'none',
       message: `No control adapter for ${device.adapter.driver}.`,
       affectedDeviceIds: [],
-    }
+    };
   }
 
   private async executeMemberSwitches(
@@ -118,12 +119,13 @@ export class DeviceControlService {
     on: boolean,
     action: DeviceCapabilityAction,
   ): Promise<DeviceActionResult> {
-    const members = device.memberDeviceIds
-      ?.map((id) => this.findDevice(id))
-      .filter((member): member is RegisteredDevice => !!member) || []
+    const members =
+      device.memberDeviceIds
+        ?.map((id) => this.findDevice(id))
+        .filter((member): member is RegisteredDevice => !!member) || [];
     const switchMembers = members.filter((member) =>
       deviceSupportsAction(member, action),
-    )
+    );
 
     if (switchMembers.length === 0) {
       return {
@@ -133,21 +135,30 @@ export class DeviceControlService {
         adapter: 'none',
         message: 'Logical device has no controllable switch members.',
         affectedDeviceIds: [],
-      }
+      };
     }
 
     const results = await Promise.all(
-      switchMembers.map((member) => this.executeBinarySwitch(member, on, action)),
-    )
-    const failed = results.filter((result) => result.status === 'failed')
-    const pending = results.filter((result) => result.status === 'pending')
-    const affected = results.flatMap((result) => result.affectedDeviceIds)
+      switchMembers.map((member) =>
+        this.executeBinarySwitch(member, on, action),
+      ),
+    );
+    const failed = results.filter((result) => result.status === 'failed');
+    const pending = results.filter((result) => result.status === 'pending');
+    const affected = results.flatMap((result) => result.affectedDeviceIds);
 
     return {
       deviceId: device.id,
       action,
-      status: failed.length > 0 ? 'failed' : pending.length > 0 ? 'pending' : 'success',
-      adapter: results.some((result) => result.adapter === 'mqtt') ? 'mqtt' : 'none',
+      status:
+        failed.length > 0
+          ? 'failed'
+          : pending.length > 0
+            ? 'pending'
+            : 'success',
+      adapter: results.some((result) => result.adapter === 'mqtt')
+        ? 'mqtt'
+        : 'none',
       message:
         failed.length > 0
           ? `${failed.length} member switch command(s) failed.`
@@ -155,7 +166,7 @@ export class DeviceControlService {
             ? `${affected.length} member switch command(s) sent; waiting for acknowledgement.`
             : `${affected.length} member switch command(s) confirmed.`,
       affectedDeviceIds: affected,
-    }
+    };
   }
 
   private async executeShellyRpc(
@@ -163,14 +174,16 @@ export class DeviceControlService {
     on: boolean,
     action: DeviceCapabilityAction,
   ): Promise<DeviceActionResult> {
-    const topic = process.env.HOME_SHELLY_RPC_TOPIC || 'shelly/rpc'
+    const topic = process.env.HOME_SHELLY_RPC_TOPIC || 'shelly/rpc';
     const dst =
       stringMetadata(device, 'dst') ||
       stringMetadata(device, 'physicalId') ||
       stringMetadata(device, 'hardwareId') ||
-      device.adapter.target
+      device.adapter.target;
     const switchId =
-      numberMetadata(device, 'switchId') ?? numberMetadata(device, 'channel') ?? 0
+      numberMetadata(device, 'switchId') ??
+      numberMetadata(device, 'channel') ??
+      0;
 
     if (!dst) {
       return {
@@ -180,7 +193,7 @@ export class DeviceControlService {
         adapter: 'mqtt',
         message: 'Shelly RPC destination is missing.',
         affectedDeviceIds: [],
-      }
+      };
     }
 
     const payload = JSON.stringify({
@@ -189,18 +202,19 @@ export class DeviceControlService {
       dst,
       method: 'Switch.Set',
       params: { id: switchId, on },
-    })
+    });
+
+    const command = this.registry.markDeviceCommandPending(device.id, {
+      action,
+      expectedValues: { on },
+      message: `Publishing Shelly ${action}; waiting for telemetry.`,
+    });
 
     try {
-      await this.publishMqtt(topic, payload)
-      const command = this.registry.markDeviceCommandPending(device.id, {
-        action,
-        expectedValues: { on },
-        message: `Published Shelly ${action}; waiting for telemetry.`,
-      })
+      await this.publishMqtt(topic, payload);
       this.logger.log(
         `[DEVICE ACTION SHELLY RPC] ${device.id} ${action} topic=${topic} dst=${dst} switch=${switchId}`,
-      )
+      );
 
       return {
         deviceId: device.id,
@@ -210,17 +224,17 @@ export class DeviceControlService {
         message: `Published Shelly ${action} to ${dst} switch ${switchId}; waiting for acknowledgement.`,
         affectedDeviceIds: [device.id],
         command,
-      }
+      };
     } catch (error) {
-      const message = errorMessage(error)
+      const message = errorMessage(error);
       const command = this.registry.markDeviceCommandFailed(device.id, {
         action,
         expectedValues: { on },
         message,
-      })
+      });
       this.logger.warn(
         `[DEVICE ACTION SHELLY RPC FAILED] ${device.id} ${action} ${message}`,
-      )
+      );
 
       return {
         deviceId: device.id,
@@ -230,7 +244,7 @@ export class DeviceControlService {
         message,
         affectedDeviceIds: [],
         command,
-      }
+      };
     }
   }
 
@@ -239,7 +253,7 @@ export class DeviceControlService {
     on: boolean,
     action: DeviceCapabilityAction,
   ): Promise<DeviceActionResult> {
-    const topic = device.adapter.commandTopic || device.adapter.target
+    const topic = device.adapter.commandTopic || device.adapter.target;
     if (!topic) {
       return {
         deviceId: device.id,
@@ -248,7 +262,7 @@ export class DeviceControlService {
         adapter: 'mqtt',
         message: 'MQTT command topic is missing.',
         affectedDeviceIds: [],
-      }
+      };
     }
 
     const payload = JSON.stringify({
@@ -256,15 +270,16 @@ export class DeviceControlService {
       on,
       deviceId: device.id,
       observedAt: new Date().toISOString(),
-    })
+    });
+
+    const command = this.registry.markDeviceCommandPending(device.id, {
+      action,
+      expectedValues: { on },
+      message: `Publishing ${action}; waiting for telemetry.`,
+    });
 
     try {
-      await this.publishMqtt(topic, payload)
-      const command = this.registry.markDeviceCommandPending(device.id, {
-        action,
-        expectedValues: { on },
-        message: `Published ${action}; waiting for telemetry.`,
-      })
+      await this.publishMqtt(topic, payload);
 
       return {
         deviceId: device.id,
@@ -274,14 +289,14 @@ export class DeviceControlService {
         message: `Published ${action} to ${topic}; waiting for acknowledgement.`,
         affectedDeviceIds: [device.id],
         command,
-      }
+      };
     } catch (error) {
-      const message = errorMessage(error)
+      const message = errorMessage(error);
       const command = this.registry.markDeviceCommandFailed(device.id, {
         action,
         expectedValues: { on },
         message,
-      })
+      });
       return {
         deviceId: device.id,
         action,
@@ -290,14 +305,15 @@ export class DeviceControlService {
         message,
         affectedDeviceIds: [],
         command,
-      }
+      };
     }
   }
 
   private findDevice(deviceId: string): RegisteredDevice | null {
     return (
-      this.registry.getDevices().find((device) => device.id === deviceId) || null
-    )
+      this.registry.getDevices().find((device) => device.id === deviceId) ||
+      null
+    );
   }
 
   private async publishMqtt(topic: string, payload: string): Promise<void> {
@@ -310,13 +326,19 @@ export class DeviceControlService {
       topic,
       '-m',
       payload,
-    ]
-    if (process.env.HOME_MQTT_USERNAME) args.push('-u', process.env.HOME_MQTT_USERNAME)
-    if (process.env.HOME_MQTT_PASSWORD) args.push('-P', process.env.HOME_MQTT_PASSWORD)
+    ];
+    if (process.env.HOME_MQTT_USERNAME)
+      args.push('-u', process.env.HOME_MQTT_USERNAME);
+    if (process.env.HOME_MQTT_PASSWORD)
+      args.push('-P', process.env.HOME_MQTT_PASSWORD);
 
-    await execFileAsync(process.env.HOME_MQTT_PUB_BIN || 'mosquitto_pub', args, {
-      timeout: Number(process.env.HOME_DEVICE_WRITE_TIMEOUT_MS || 2500),
-    })
+    await execFileAsync(
+      process.env.HOME_MQTT_PUB_BIN || 'mosquitto_pub',
+      args,
+      {
+        timeout: Number(process.env.HOME_DEVICE_WRITE_TIMEOUT_MS || 2500),
+      },
+    );
   }
 }
 
@@ -326,7 +348,7 @@ function deviceSupportsAction(
 ): boolean {
   return device.capabilities.some((capability) =>
     capability.actions.includes(action),
-  )
+  );
 }
 
 function isShellyRpcDevice(device: RegisteredDevice): boolean {
@@ -335,22 +357,28 @@ function isShellyRpcDevice(device: RegisteredDevice): boolean {
     !!stringMetadata(device, 'dst') ||
     !!stringMetadata(device, 'physicalId') ||
     !!stringMetadata(device, 'hardwareId')
-  )
+  );
 }
 
-function stringMetadata(device: RegisteredDevice, key: string): string | undefined {
-  const value = device.metadata?.[key]
-  return typeof value === 'string' && value.trim() ? value : undefined
+function stringMetadata(
+  device: RegisteredDevice,
+  key: string,
+): string | undefined {
+  const value = device.metadata?.[key];
+  return typeof value === 'string' && value.trim() ? value : undefined;
 }
 
-function numberMetadata(device: RegisteredDevice, key: string): number | undefined {
-  const value = device.metadata?.[key]
-  if (typeof value === 'number' && Number.isFinite(value)) return value
+function numberMetadata(
+  device: RegisteredDevice,
+  key: string,
+): number | undefined {
+  const value = device.metadata?.[key];
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string' && value.trim()) {
-    const parsed = Number(value)
-    if (Number.isFinite(parsed)) return parsed
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
   }
-  return undefined
+  return undefined;
 }
 
 function isDeviceAction(value: string): value is DeviceCapabilityAction {
@@ -365,9 +393,9 @@ function isDeviceAction(value: string): value is DeviceCapabilityAction {
     'close',
     'capture',
     'analyze',
-  ].includes(value)
+  ].includes(value);
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+  return error instanceof Error ? error.message : String(error);
 }
