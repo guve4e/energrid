@@ -1,6 +1,6 @@
-import ExecutionFlowVisualization from './components/execution/ExecutionFlowVisualization.vue'
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue';
+import ExecutionTimelineModal from './components/execution/ExecutionTimelineModal.vue'
 
 type LoginResponse = {
   accessToken: string;
@@ -935,12 +935,16 @@ const selectedDeviceTraces = computed(() =>
     .slice(0, 5) || [],
 );
 
-const selectedExecutionTrace = computed(() =>
-  state.value?.executionTraces?.find(
-    (trace) => trace.id === selectedExecutionTraceId.value,
-  ) || null,
-);
+const selectedExecutionTrace = computed(() => {
+  const trace =
+    state.value?.executionTraces?.find(
+      (trace) => trace.id === selectedExecutionTraceId.value,
+    ) || null;
 
+  console.log('SELECTED TRACE', trace);
+
+  return trace;
+});
 
 const executionSearch = ref('');
 const executionOutcomeFilter = ref('all');
@@ -1504,15 +1508,18 @@ function selectDevice(device: PortalDevice) {
 }
 
 function closeDeviceSheet() {
+  console.log('CLOSE DEVICE SHEET');
   selectedDeviceId.value = null;
   selectedExecutionTraceId.value = null;
 }
 
 function openExecutionTrace(traceId: string) {
+  console.log('OPEN TRACE', traceId);
   selectedExecutionTraceId.value = traceId;
 }
 
 function closeExecutionTrace() {
+  console.log('CLOSE EXECUTION TRACE');
   selectedExecutionTraceId.value = null;
 }
 
@@ -3134,7 +3141,7 @@ onBeforeUnmount(() => {
                     v-for="trace in selectedDeviceTraces"
                     :key="trace.id"
                     class="execution-trace clickable"
-                    @click="openExecutionTrace(trace.id)"
+                    @click.stop="openExecutionTrace(trace.id)"
                   >
                     <strong>
                       {{ trace.action }}
@@ -3968,7 +3975,12 @@ onBeforeUnmount(() => {
                   </td>
 
                   <td>
-                    <span class="trust-pill approved">
+                    <span
+                      :class="[
+                        'trust-pill',
+                        `execution-${trace.outcome}`
+                      ]"
+                    >
                       {{ trace.outcome }}
                     </span>
                   </td>
@@ -4107,99 +4119,15 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
-
-          <div
-            v-if="selectedExecutionTrace"
-            class="trace-modal-backdrop"
-            @click="closeExecutionTrace"
-          ></div>
-
-          <aside
-            v-if="selectedExecutionTrace"
-            class="trace-modal"
-          >
-            <div class="device-sheet-head">
-              <div>
-                <span class="eyebrow">
-                  Execution timeline
-                </span>
-
-                <h3>
-                  {{ selectedExecutionTrace.action }}
-                  ·
-                  {{ selectedExecutionTrace.outcome }}
-                </h3>
-
-              </div>
-
-              <button
-                class="icon-button"
-                type="button"
-                @click="closeExecutionTrace"
-              >
-                ×
-              </button>
-            </div>
-
-                        <div class="execution-summary">
-
-              <div>
-                <small>ACTOR</small>
-                <strong>
-                  {{ selectedExecutionTrace.actor?.name || selectedExecutionTrace.actor?.type || 'Unknown' }}
-                </strong>
-              </div>
-
-              <div>
-                <small>DEVICE</small>
-                <strong>
-                  {{ selectedExecutionTrace.deviceId }}
-                </strong>
-              </div>
-
-              <div>
-                <small>DURATION</small>
-                <strong>
-                  {{
-                    selectedExecutionTrace.durationMs
-                      ? (selectedExecutionTrace.durationMs / 1000).toFixed(3)+'s'
-                      : 'running'
-                  }}
-                </strong>
-              </div>
-
-            </div>
-
-
-            <ExecutionFlowVisualization
-              :trace="selectedExecutionTrace"
-            />
-
-<ol class="execution-timeline">
-              <li
-                v-for="stage in selectedExecutionTrace.stages"
-                :key="stage.stage"
-                :class="[
-                  'execution-stage-item',
-                  `stage-${stage.status}`
-                ]"
-              >
-                <div>
-                  <strong>{{ stage.stage }}</strong>
-                  <span>{{ stage.status }}</span>
-                </div>
-
-                <p>{{ stage.message }}</p>
-
-                <small>{{ stage.observedAt }}</small>
-              </li>
-            </ol>
-
-          </aside>
-
-
         <p v-if="stateError" class="error">{{ stateError }}</p>
+
       </section>
+
+      <ExecutionTimelineModal
+        :trace="selectedExecutionTrace"
+        @close="closeExecutionTrace"
+      />
+
     </section>
   </main>
 </template>

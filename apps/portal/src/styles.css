@@ -3461,8 +3461,8 @@ pre {
   top:50%;
   left:50%;
   transform:translate(-50%,-50%);
-  width:min(720px,calc(100vw - 32px));
-  max-height:80vh;
+  width:min(820px,calc(100vw - 32px));
+  max-height:92vh;
   overflow:auto;
   border-radius:20px;
   padding:20px;
@@ -3514,7 +3514,7 @@ pre {
   top:auto;
   bottom:10px;
   transform:translateX(-50%);
-  max-height:85dvh;
+  max-height:92dvh;
 }
 
 .trace-summary {
@@ -4194,5 +4194,19 @@ pre {
     margin-left:auto;
   }
 
+}
+
+
+.trust-pill.execution-settled {
+  border-color: rgba(22,179,100,.35);
+  background:#f0fdf4;
+  color:#087443;
+}
+
+.trust-pill.execution-timed_out,
+.trust-pill.execution-failed {
+  border-color: rgba(220,38,38,.35);
+  background:#fef2f2;
+  color:#b42318;
 }
 
