@@ -10,6 +10,7 @@ import {
   type OperationalLogEntry,
 } from '../devices/operational-log.service';
 import type {
+  DeviceExecutionTrace,
   DeviceRegistrySnapshot,
   NetworkDiscoveredDevice,
   NetworkDiscoveryZone,
@@ -43,6 +44,7 @@ export interface PortalState {
     }>;
   }>;
   devices: RegisteredDevice[];
+  executionTraces: DeviceExecutionTrace[];
   networkZones: NetworkDiscoveryZone[];
   networkDevices: NetworkDiscoveredDevice[];
   systems: SiteSystem[];
@@ -107,6 +109,7 @@ export class PortalStateService {
           ),
       })),
       devices: registry.devices,
+      executionTraces: this.deviceRegistry.getExecutionTraces(),
       networkZones: this.lanDiscovery.getZones(),
       networkDevices: this.lanDiscovery.getLastScan(),
       systems: registry.systems,

@@ -1,3 +1,4 @@
+import ExecutionFlowVisualization from './components/execution/ExecutionFlowVisualization.vue'
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue';
 
@@ -10,7 +11,31 @@ type LoginResponse = {
   };
 };
 
+type PortalExecutionTrace = {
+  id: string;
+  commandId: string;
+  deviceId: string;
+  actor?: {
+    type: string;
+    name?: string;
+  };
+  action: string;
+  expectedValues: Record<string, unknown>;
+  requestedAt: string;
+  completedAt: string | null;
+  outcome: string;
+  durationMs: number | null;
+  stages: Array<{
+    stage: string;
+    status: string;
+    observedAt: string;
+    message: string;
+    evidence?: Record<string, unknown>;
+  }>;
+};
+
 type PortalState = {
+  executionTraces?: PortalExecutionTrace[];
   tenant: { id: string; name: string };
   site: { id: string; name: string; mode: string };
   sites?: Array<{
@@ -362,6 +387,7 @@ const notificationsOpen = ref(false);
 const mobileMenuOpen = ref(false);
 const activePage = ref('assistant');
 const selectedDeviceId = ref<string | null>(null);
+const selectedExecutionTraceId = ref<string | null>(null);
 const deviceActionBusy = ref<Record<string, boolean>>({});
 const deviceSearch = ref('');
 const deviceCapabilityFilter = ref('all');
@@ -400,6 +426,7 @@ const navItems = computed(() => [
   },
   { id: 'bus', label: 'Bus', active: activePage.value === 'bus' },
   { id: 'systems', label: 'Systems', active: activePage.value === 'systems' },
+  { id: 'executions', label: 'Executions', active: activePage.value === 'executions' },
   { id: 'logs', label: 'Logs', active: activePage.value === 'logs' },
 ]);
 
@@ -900,6 +927,48 @@ const selectedDevice = computed(() =>
       ) || null
     : null,
 );
+const selectedDeviceTraces = computed(() =>
+  state.value?.executionTraces
+    ?.filter(
+      (trace) => trace.deviceId === selectedDeviceId.value,
+    )
+    .slice(0, 5) || [],
+);
+
+const selectedExecutionTrace = computed(() =>
+  state.value?.executionTraces?.find(
+    (trace) => trace.id === selectedExecutionTraceId.value,
+  ) || null,
+);
+
+
+const executionSearch = ref('');
+const executionOutcomeFilter = ref('all');
+const executionActionFilter = ref('all');
+
+const visibleExecutions = computed(() => {
+  const traces = state.value?.executionTraces || [];
+
+  return traces.filter((trace) => {
+    const search = executionSearch.value.trim().toLowerCase();
+
+    const matchesSearch =
+      !search ||
+      trace.deviceId.toLowerCase().includes(search) ||
+      trace.action.toLowerCase().includes(search);
+
+    const matchesOutcome =
+      executionOutcomeFilter.value === 'all' ||
+      trace.outcome === executionOutcomeFilter.value;
+
+    const matchesAction =
+      executionActionFilter.value === 'all' ||
+      trace.action === executionActionFilter.value;
+
+    return matchesSearch && matchesOutcome && matchesAction;
+  });
+});
+
 const siteSystems = computed(() => state.value?.systems || []);
 const mqttBus = computed(() => state.value?.bus?.mqtt || null);
 const mqttMessages = computed(() => {
@@ -1101,6 +1170,7 @@ const deviceSummary = computed(() => {
 function setActivePage(pageId: string) {
   activePage.value = pageId;
   selectedDeviceId.value = null;
+  selectedExecutionTraceId.value = null;
   closeMobileMenu();
   if (pageId === 'assistant') void loadVoiceRuns();
   if (pageId === 'bus') {
@@ -1435,6 +1505,15 @@ function selectDevice(device: PortalDevice) {
 
 function closeDeviceSheet() {
   selectedDeviceId.value = null;
+  selectedExecutionTraceId.value = null;
+}
+
+function openExecutionTrace(traceId: string) {
+  selectedExecutionTraceId.value = traceId;
+}
+
+function closeExecutionTrace() {
+  selectedExecutionTraceId.value = null;
 }
 
 function deviceValuePreview(device: PortalDevice) {
@@ -3047,6 +3126,39 @@ onBeforeUnmount(() => {
                 <dt>Updated</dt>
                 <dd>{{ selectedDevice.state.observedAt || 'unknown' }}</dd>
               </div>
+
+              <div v-if="selectedDeviceTraces.length">
+                <dt>Execution history</dt>
+                <dd>
+                  <div
+                    v-for="trace in selectedDeviceTraces"
+                    :key="trace.id"
+                    class="execution-trace clickable"
+                    @click="openExecutionTrace(trace.id)"
+                  >
+                    <strong>
+                      {{ trace.action }}
+                      ·
+                      {{ trace.outcome }}
+                      <span v-if="trace.durationMs">
+                        ({{ trace.durationMs }}ms)
+                      </span>
+                    </strong>
+
+                    <ol>
+                      <li
+                        v-for="stage in trace.stages"
+                        :key="`${trace.id}-${stage.stage}`"
+                      >
+                        <b>{{ stage.stage }}</b>
+                        —
+                        {{ stage.message }}
+                      </li>
+                    </ol>
+                  </div>
+                </dd>
+              </div>
+
               <div v-if="selectedDevice.adapter.commandTopic">
                 <dt>Command topic</dt>
                 <dd>{{ selectedDevice.adapter.commandTopic }}</dd>
@@ -3057,6 +3169,7 @@ onBeforeUnmount(() => {
               </div>
             </dl>
           </aside>
+
         </section>
 
         <section
@@ -3788,6 +3901,97 @@ onBeforeUnmount(() => {
         </section>
 
         <section
+          v-else-if="activePage === 'executions'"
+          class="panel workspace-panel"
+        >
+          <div class="page-heading split-heading">
+            <div>
+              <p class="eyebrow">Operations</p>
+              <h2>Executions</h2>
+              <span>
+                Review device commands from request to telemetry,
+                verification, and settlement.
+              </span>
+            </div>
+
+            <button class="primary" type="button" @click="loadState">
+              Refresh executions
+            </button>
+          </div>
+
+          <div
+            v-if="!state?.executionTraces?.length"
+            class="discovery-empty"
+          >
+            <strong>No executions yet</strong>
+            <span>
+              Run a device command to generate execution history.
+            </span>
+          </div>
+
+          <div v-else class="network-table-wrap">
+
+            <table class="network-table execution-table">
+
+              <thead>
+                <tr>
+                  <th>Device</th>
+                  <th>Actor</th>
+                  <th>Action</th>
+                  <th>Outcome</th>
+                  <th>Duration</th>
+                  <th>Completed</th>
+                </tr>
+              </thead>
+
+              <tbody>
+
+                <tr
+                  v-for="trace in visibleExecutions"
+                  :key="trace.id"
+                  class="execution-row"
+                  @click="openExecutionTrace(trace.id)"
+                >
+
+                  <td>
+                    <strong>{{ trace.deviceId }}</strong>
+                  </td>
+
+                  <td>
+                    <strong>
+                      {{ trace.actor?.name || trace.actor?.type || 'unknown' }}
+                    </strong>
+                  </td>
+
+                  <td>
+                    {{ trace.action }}
+                  </td>
+
+                  <td>
+                    <span class="trust-pill approved">
+                      {{ trace.outcome }}
+                    </span>
+                  </td>
+
+                  <td>
+                    {{ trace.durationMs || 0 }}ms
+                  </td>
+
+                  <td>
+                    {{ trace.completedAt || trace.requestedAt }}
+                  </td>
+
+                </tr>
+
+              </tbody>
+
+            </table>
+
+          </div>
+
+        </section>
+
+<section
           v-else-if="activePage === 'logs'"
           class="panel workspace-panel"
         >
@@ -3902,6 +4106,97 @@ onBeforeUnmount(() => {
             >
           </div>
         </section>
+
+
+          <div
+            v-if="selectedExecutionTrace"
+            class="trace-modal-backdrop"
+            @click="closeExecutionTrace"
+          ></div>
+
+          <aside
+            v-if="selectedExecutionTrace"
+            class="trace-modal"
+          >
+            <div class="device-sheet-head">
+              <div>
+                <span class="eyebrow">
+                  Execution timeline
+                </span>
+
+                <h3>
+                  {{ selectedExecutionTrace.action }}
+                  ·
+                  {{ selectedExecutionTrace.outcome }}
+                </h3>
+
+              </div>
+
+              <button
+                class="icon-button"
+                type="button"
+                @click="closeExecutionTrace"
+              >
+                ×
+              </button>
+            </div>
+
+                        <div class="execution-summary">
+
+              <div>
+                <small>ACTOR</small>
+                <strong>
+                  {{ selectedExecutionTrace.actor?.name || selectedExecutionTrace.actor?.type || 'Unknown' }}
+                </strong>
+              </div>
+
+              <div>
+                <small>DEVICE</small>
+                <strong>
+                  {{ selectedExecutionTrace.deviceId }}
+                </strong>
+              </div>
+
+              <div>
+                <small>DURATION</small>
+                <strong>
+                  {{
+                    selectedExecutionTrace.durationMs
+                      ? (selectedExecutionTrace.durationMs / 1000).toFixed(3)+'s'
+                      : 'running'
+                  }}
+                </strong>
+              </div>
+
+            </div>
+
+
+            <ExecutionFlowVisualization
+              :trace="selectedExecutionTrace"
+            />
+
+<ol class="execution-timeline">
+              <li
+                v-for="stage in selectedExecutionTrace.stages"
+                :key="stage.stage"
+                :class="[
+                  'execution-stage-item',
+                  `stage-${stage.status}`
+                ]"
+              >
+                <div>
+                  <strong>{{ stage.stage }}</strong>
+                  <span>{{ stage.status }}</span>
+                </div>
+
+                <p>{{ stage.message }}</p>
+
+                <small>{{ stage.observedAt }}</small>
+              </li>
+            </ol>
+
+          </aside>
+
 
         <p v-if="stateError" class="error">{{ stateError }}</p>
       </section>

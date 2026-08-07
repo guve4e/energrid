@@ -22,7 +22,7 @@
     "core:backtest:river": "DATABASE_URL=$(node apps/core/scripts/db-url.js) TS_NODE_TRANSPILE_ONLY=1 TS_NODE_COMPILER_OPTIONS='{\"module\":\"commonjs\",\"moduleResolution\":\"node\"}' node -r ts-node/register apps/core/scripts/backtest-river-analogues.ts",
     "core:backtest:propagation": "DATABASE_URL=$(node apps/core/scripts/db-url.js) TS_NODE_TRANSPILE_ONLY=1 TS_NODE_COMPILER_OPTIONS='{\"module\":\"commonjs\",\"moduleResolution\":\"node\"}' node -r ts-node/register apps/core/scripts/backtest-river-propagation.ts",
     "voice:replay": "node device-scripts/replay-wav-to-voice.js",
-    "voice:smoke": "node device-scripts/replay-wav-to-voice.js samples/voice/close-command.wav --expect-transcript ламп --expect-reply Включвам --expect-home-intent turn_on_lights --require-audio --require-metrics --require-fast-path",
+    "voice:smoke": "node device-scripts/replay-wav-to-voice.js samples/voice/close-command.wav --expect-transcript \u043b\u0430\u043c\u043f --expect-reply \u0412\u043a\u043b\u044e\u0447\u0432\u0430\u043c --expect-home-intent turn_on_lights --require-audio --require-metrics --require-fast-path",
     "voice:smoke:silence": "node device-scripts/replay-wav-to-voice.js samples/voice/fixtures/silence-5s.wav --require-metrics --forbid-transcript --forbid-audio",
     "voice:smoke:suite": "node device-scripts/run-voice-smoke-suite.js",
     "voice:stt:check": "node device-scripts/benchmark-local-whisper.js samples/voice/close-command.wav",
@@ -33,7 +33,9 @@
     "site:gateway:init": "node device-scripts/bootstrap-site-gateway.js",
     "site:devices:fake": "python3 device-scripts/publish-fake-site-devices.py",
     "site:mqtt:fixtures": "python3 device-scripts/publish-mqtt-explorer-fixtures.py",
-    "site:device:http": "python3 device-scripts/serve-fake-http-device.py"
+    "site:device:http": "python3 device-scripts/serve-fake-http-device.py",
+    "device:lab": "node --env-file=.env device-scripts/device-lab/server.js",
+    "device:lab:test": "node --test device-scripts/device-lab/test/*.test.js"
   },
   "private": true,
   "devDependencies": {

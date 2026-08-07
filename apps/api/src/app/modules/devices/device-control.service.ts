@@ -212,6 +212,12 @@ export class DeviceControlService {
 
     try {
       await this.publishMqtt(topic, payload);
+
+      this.registry.markDeviceCommandPublished(device.id, command.id, {
+        topic,
+        adapter: 'shelly-rpc',
+      });
+
       this.logger.log(
         `[DEVICE ACTION SHELLY RPC] ${device.id} ${action} topic=${topic} dst=${dst} switch=${switchId}`,
       );
@@ -227,7 +233,14 @@ export class DeviceControlService {
       };
     } catch (error) {
       const message = errorMessage(error);
-      const command = this.registry.markDeviceCommandFailed(device.id, {
+
+      this.registry.markDeviceCommandTransportFailed(
+        device.id,
+        command.id,
+        message,
+      );
+
+      const failedCommand = this.registry.markDeviceCommandFailed(device.id, {
         action,
         expectedValues: { on },
         message,
@@ -243,7 +256,7 @@ export class DeviceControlService {
         adapter: 'mqtt',
         message,
         affectedDeviceIds: [],
-        command,
+        command: failedCommand,
       };
     }
   }
@@ -265,21 +278,28 @@ export class DeviceControlService {
       };
     }
 
-    const payload = JSON.stringify({
-      action,
-      on,
-      deviceId: device.id,
-      observedAt: new Date().toISOString(),
-    });
-
     const command = this.registry.markDeviceCommandPending(device.id, {
       action,
       expectedValues: { on },
       message: `Publishing ${action}; waiting for telemetry.`,
     });
 
+    const payload = JSON.stringify({
+      commandId: command.id,
+      action,
+      on,
+      deviceId: device.id,
+      expectedValues: { on },
+      requestedAt: command.requestedAt,
+    });
+
     try {
       await this.publishMqtt(topic, payload);
+
+      this.registry.markDeviceCommandPublished(device.id, command.id, {
+        topic,
+        adapter: device.adapter.driver,
+      });
 
       return {
         deviceId: device.id,
@@ -292,11 +312,19 @@ export class DeviceControlService {
       };
     } catch (error) {
       const message = errorMessage(error);
-      const command = this.registry.markDeviceCommandFailed(device.id, {
+
+      this.registry.markDeviceCommandTransportFailed(
+        device.id,
+        command.id,
+        message,
+      );
+
+      const failedCommand = this.registry.markDeviceCommandFailed(device.id, {
         action,
         expectedValues: { on },
         message,
       });
+
       return {
         deviceId: device.id,
         action,
@@ -304,7 +332,7 @@ export class DeviceControlService {
         adapter: 'mqtt',
         message,
         affectedDeviceIds: [],
-        command,
+        command: failedCommand,
       };
     }
   }

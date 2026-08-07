@@ -14,6 +14,7 @@ import { promisify } from 'node:util';
 import { Subject } from 'rxjs';
 import { DeviceRegistryService } from './device-registry.service';
 import { OperationalLogService } from './operational-log.service';
+import { DeviceMqttMessageRouter } from './mqtt/device-mqtt-message-router';
 import type { DeviceCapabilityKind } from './device-registry.types';
 
 const execFileAsync = promisify(execFile);
@@ -55,19 +56,26 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
   private buffer = '';
   private recentMessages: MqttDebugMessage[] = [];
   private readonly debugMessages = new Subject<MqttDebugMessage>();
+  private readonly messageRouter: DeviceMqttMessageRouter;
 
   constructor(
     private readonly registry: DeviceRegistryService,
     private readonly operationalLog?: OperationalLogService,
-  ) {}
+  ) {
+    this.messageRouter = new DeviceMqttMessageRouter(registry);
+  }
 
   onModuleInit(): void {
     if (!mqttIngestEnabled()) return;
 
     const prefix = mqttPrefix();
-    const legacyTemperatureTopics = legacyTemperatureTopicConfigs();
-    const legacyDeviceTopics = legacyDeviceTopicPatterns();
-    const debugTopics = mqttDebugTopics(prefix);
+    const legacyTemperatureTopics =
+      this.messageRouter.legacyTemperatureTopics();
+    const legacyDeviceTopics = this.messageRouter.legacyDeviceTopics();
+    const debugTopics = mqttDebugTopics(
+      prefix,
+      this.messageRouter.subscriptions(prefix),
+    );
     const args = [
       '-h',
       process.env.HOME_MQTT_HOST || '127.0.0.1',
@@ -151,11 +159,13 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
 
   getDebugState(): MqttDebugState {
     const prefix = mqttPrefix();
-    const legacyTemperatureTopics = legacyTemperatureTopicConfigs().map(
-      (config) => config.topic,
+    const legacyTemperatureTopics =
+      this.messageRouter.legacyTemperatureTopics();
+    const legacyDeviceTopics = this.messageRouter.legacyDeviceTopics();
+    const subscriptions = mqttDebugTopics(
+      prefix,
+      this.messageRouter.subscriptions(prefix),
     );
-    const legacyDeviceTopics = legacyDeviceTopicPatterns();
-    const subscriptions = mqttDebugTopics(prefix);
 
     return {
       enabled: mqttIngestEnabled(),
@@ -277,99 +287,14 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    if (topic.endsWith('/registry/devices')) {
-      this.registry.ingestRegistryPayload(payload);
-      this.recordDebugMessage(
-        topic,
-        payloadText,
-        true,
-        true,
-        'registry devices',
-      );
-      this.logger.log(`[DEVICE MQTT INGEST] registry topic=${topic}`);
-      this.operationalLog?.record({
-        level: 'info',
-        source: 'mqtt-ingest',
-        event: 'mqtt.registry',
-        message: `Device registry update received on ${topic}.`,
-        topic,
-      });
-      return;
-    }
+    const routed = this.messageRouter.route({
+      topic,
+      payload,
+      payloadText,
+    });
 
-    const legacyTemperatureTopic = legacyTemperatureTopicConfigs().find(
-      (config) => config.topic === topic,
-    );
-    if (legacyTemperatureTopic) {
-      this.ingestLegacyTemperature(legacyTemperatureTopic, payload);
-      this.recordDebugMessage(
-        topic,
-        payloadText,
-        true,
-        true,
-        'legacy temperature',
-      );
-      return;
-    }
-
-    if (this.ingestShellyTelemetry(topic, payload)) {
-      this.recordDebugMessage(
-        topic,
-        payloadText,
-        true,
-        true,
-        'shelly telemetry',
-      );
-      this.operationalLog?.record({
-        level: 'debug',
-        source: 'mqtt-ingest',
-        event: 'mqtt.shelly_telemetry',
-        message: `Shelly telemetry handled from ${topic}.`,
-        topic,
-      });
-      return;
-    }
-
-    if (this.ingestLegacyFrameworkDevice(topic, payload)) {
-      this.recordDebugMessage(
-        topic,
-        payloadText,
-        true,
-        true,
-        'legacy framework device',
-      );
-      return;
-    }
-
-    if (topic.endsWith('/telemetry') || topic.endsWith('/state')) {
-      this.registry.ingestDeviceTelemetry(payload);
-      this.recordDebugMessage(
-        topic,
-        payloadText,
-        true,
-        true,
-        'device telemetry',
-      );
-      this.operationalLog?.record({
-        level: 'debug',
-        source: 'mqtt-ingest',
-        event: 'mqtt.telemetry',
-        message: `Device telemetry handled from ${topic}.`,
-        topic,
-      });
-      return;
-    }
-
-    if (topic.endsWith('/status')) {
-      this.registry.ingestDeviceStatus(payload);
-      this.recordDebugMessage(topic, payloadText, true, true, 'device status');
-      this.operationalLog?.record({
-        level: 'debug',
-        source: 'mqtt-ingest',
-        event: 'mqtt.status',
-        message: `Device status handled from ${topic}.`,
-        topic,
-      });
+    if (routed) {
+      this.recordDebugMessage(topic, payloadText, true, true, routed.reason);
       return;
     }
 
@@ -636,15 +561,12 @@ function mqttDebugAllowAnyTopic(): boolean {
   );
 }
 
-function mqttDebugTopics(prefix: string): string[] {
+function mqttDebugTopics(
+  prefix: string,
+  adapterTopics: string[] = [],
+): string[] {
   const configured = process.env.HOME_MQTT_DEBUG_TOPICS;
-  const defaults = [
-    `${prefix}/#`,
-    ...legacyDeviceTopicPatterns(),
-    ...legacyTemperatureTopicConfigs().map((config) => config.topic),
-    'shelly/#',
-    '$SYS/#',
-  ];
+  const defaults = [`${prefix}/#`, ...adapterTopics, '$SYS/#'];
   const topics = configured
     ? configured
         .split(',')
