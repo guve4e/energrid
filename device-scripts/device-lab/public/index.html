@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+  />
+  <title>Energrid Device Lab</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="app-shell">
+    <header class="hero">
+      <div>
+        <span class="brand-mark">ENERGRID</span>
+        <h1>Device Lab</h1>
+        <p>
+          Autonomous protocol simulators for MQTT, HTTP, Zigbee2MQTT,
+          and Modbus adapter pipelines.
+        </p>
+      </div>
+
+      <div class="broker-card">
+        <span>Active bus</span>
+        <strong id="brokerHost">Connecting…</strong>
+        <code id="brokerPrefix">—</code>
+      </div>
+    </header>
+
+    <section class="summary-bar">
+      <div>
+        <span>Devices</span>
+        <strong id="summaryDevices">0</strong>
+      </div>
+      <div>
+        <span>Online</span>
+        <strong id="summaryOnline">0</strong>
+      </div>
+      <div>
+        <span>Autonomous</span>
+        <strong id="summaryRunning">0</strong>
+      </div>
+      <div>
+        <span>Errors</span>
+        <strong id="summaryErrors">0</strong>
+      </div>
+
+      <button class="refresh-button" type="button" onclick="refresh()">
+        Refresh now
+      </button>
+    </section>
+
+    <section id="devices" class="device-grid"></section>
+  </main>
+
+  <template id="loadingTemplate">
+    <article class="empty-card">
+      Loading Device Lab runtime…
+    </article>
+  </template>
+
+  <script src="/app.js"></script>
+</body>
+</html>

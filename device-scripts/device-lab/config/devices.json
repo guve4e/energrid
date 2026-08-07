@@ -1,0 +1,257 @@
+[
+  {
+    "id": "lab.mqtt.relay",
+    "name": "MQTT relay",
+    "protocol": "mqtt",
+    "transport": "mqtt",
+    "driver": "generic-mqtt-switch",
+    "zone": "Lab",
+    "capabilities": [
+      {
+        "kind": "switch",
+        "actions": [
+          "turn_on",
+          "turn_off",
+          "read"
+        ]
+      },
+      {
+        "kind": "power",
+        "actions": [
+          "read"
+        ],
+        "unit": "W"
+      }
+    ],
+    "initialValues": {
+      "on": false,
+      "power": 0
+    },
+    "telemetry": {
+      "enabled": true,
+      "intervalMs": 5000,
+      "initialDelayMs": 300,
+      "variation": {}
+    }
+  },
+  {
+    "id": "lab.http.temperature",
+    "name": "HTTP temperature sensor",
+    "protocol": "http",
+    "transport": "http",
+    "driver": "http-json-sensor",
+    "zone": "Lab",
+    "capabilities": [
+      {
+        "kind": "temperature",
+        "actions": [
+          "read"
+        ],
+        "unit": "C"
+      },
+      {
+        "kind": "humidity",
+        "actions": [
+          "read"
+        ],
+        "unit": "%"
+      }
+    ],
+    "initialValues": {
+      "temperature": 22.4,
+      "humidity": 48
+    },
+    "telemetry": {
+      "enabled": true,
+      "intervalMs": 3000,
+      "initialDelayMs": 500,
+      "variation": {
+        "temperature": 0.15,
+        "humidity": 0.5
+      }
+    }
+  },
+  {
+    "id": "lab.zigbee.motion",
+    "name": "Zigbee motion sensor",
+    "protocol": "zigbee",
+    "transport": "mqtt",
+    "driver": "zigbee2mqtt",
+    "bridge": "zigbee2mqtt-lab",
+    "zone": "Lab",
+    "capabilities": [
+      {
+        "kind": "motion",
+        "actions": [
+          "read"
+        ]
+      },
+      {
+        "kind": "temperature",
+        "actions": [
+          "read"
+        ],
+        "unit": "C"
+      },
+      {
+        "kind": "battery",
+        "actions": [
+          "read"
+        ],
+        "unit": "%"
+      }
+    ],
+    "initialValues": {
+      "motion": false,
+      "temperature": 21.8,
+      "battery": 94,
+      "linkquality": 120
+    },
+    "telemetry": {
+      "enabled": true,
+      "intervalMs": 4000,
+      "initialDelayMs": 700,
+      "variation": {
+        "temperature": 0.1,
+        "linkquality": 2
+      }
+    }
+  },
+  {
+    "id": "lab.modbus.power-meter",
+    "name": "Modbus power meter",
+    "protocol": "modbus",
+    "transport": "mqtt",
+    "driver": "modbus-tcp-adapter",
+    "zone": "Panel",
+    "capabilities": [
+      {
+        "kind": "power",
+        "actions": [
+          "read"
+        ],
+        "unit": "W"
+      },
+      {
+        "kind": "voltage",
+        "actions": [
+          "read"
+        ],
+        "unit": "V"
+      },
+      {
+        "kind": "current",
+        "actions": [
+          "read"
+        ],
+        "unit": "A"
+      },
+      {
+        "kind": "energy",
+        "actions": [
+          "read"
+        ],
+        "unit": "kWh"
+      }
+    ],
+    "initialValues": {
+      "power": 840,
+      "voltage": 231.2,
+      "current": 3.63,
+      "energy": 1284.7
+    },
+    "protocolConfig": {
+      "slaveId": 1,
+      "registerMap": {
+        "power": 0,
+        "voltage": 1,
+        "current": 2,
+        "energy": 3
+      }
+    },
+    "telemetry": {
+      "enabled": true,
+      "intervalMs": 2000,
+      "initialDelayMs": 900,
+      "variation": {
+        "power": 25,
+        "voltage": 0.4,
+        "current": 0.08
+      }
+    }
+  },
+  {
+    "id": "lab.mqtt.valve",
+    "name": "MQTT water valve",
+    "protocol": "mqtt",
+    "transport": "mqtt",
+    "driver": "generic-mqtt-valve",
+    "zone": "Utility",
+    "capabilities": [
+      {
+        "kind": "valve",
+        "actions": [
+          "open",
+          "close",
+          "read"
+        ]
+      },
+      {
+        "kind": "flow",
+        "actions": [
+          "read"
+        ],
+        "unit": "L/min"
+      }
+    ],
+    "initialValues": {
+      "open": false,
+      "flow": 0
+    },
+    "telemetry": {
+      "enabled": true,
+      "intervalMs": 5000,
+      "initialDelayMs": 1100,
+      "variation": {
+        "flow": 0.15
+      }
+    }
+  },
+  {
+    "id": "lab.http.dimmer",
+    "name": "HTTP dimmer",
+    "protocol": "http",
+    "transport": "http",
+    "driver": "http-dimmer",
+    "zone": "Lab",
+    "capabilities": [
+      {
+        "kind": "light",
+        "actions": [
+          "turn_on",
+          "turn_off",
+          "set_level",
+          "read"
+        ]
+      },
+      {
+        "kind": "power",
+        "actions": [
+          "read"
+        ],
+        "unit": "W"
+      }
+    ],
+    "initialValues": {
+      "on": false,
+      "level": 0,
+      "power": 0
+    },
+    "telemetry": {
+      "enabled": true,
+      "intervalMs": 5000,
+      "initialDelayMs": 1300,
+      "variation": {}
+    }
+  }
+]

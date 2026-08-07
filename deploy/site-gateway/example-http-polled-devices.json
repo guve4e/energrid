@@ -1,0 +1,31 @@
+{
+  "devices": [
+    {
+      "deviceId": "kitchen.temperature.http",
+      "name": "Kitchen temperature HTTP sensor",
+      "kind": "physical",
+      "origin": "http",
+      "protocol": "http",
+      "transport": "http",
+      "driver": "http-json-sensor",
+      "target": "http://127.0.0.1:8088/status",
+      "location": "kitchen",
+      "capabilities": ["temperature", "humidity", "power"],
+      "values": { "temperature": 22.4, "humidity": 48.0, "power": 420.0 }
+    },
+    {
+      "deviceId": "kitchen.light.wall.led",
+      "name": "Kitchen wall lights",
+      "kind": "switch",
+      "origin": "shelly",
+      "protocol": "mqtt",
+      "transport": "mqtt",
+      "location": "kitchen",
+      "physicalId": "shellyplus1-wall",
+      "channel": 0,
+      "groups": ["kitchen.lights"],
+      "aliases": ["kitchen wall", "wall lights", "лампа на стената в кухнята"],
+      "values": { "on": false }
+    }
+  ]
+}
