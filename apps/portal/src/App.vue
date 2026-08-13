@@ -155,6 +155,40 @@ type PortalState = {
     systems: number;
     learningEnabled: number;
   };
+
+  deviceDiagnostics?: Array<{
+    deviceId: string;
+    category: string;
+    severity: string;
+    recommendation?: string;
+    explanation: string;
+    evidence: {
+      network: unknown;
+      registry: unknown;
+      telemetry: unknown;
+    };
+    match?: {
+      confidence: number;
+      reason: string;
+    };
+  }>;
+
+  deviceDiagnostics?: Array<{
+    deviceId: string;
+    category: string;
+    severity: string;
+    recommendation?: string;
+    explanation: string;
+    evidence: {
+      network: unknown;
+      registry: unknown;
+      telemetry: unknown;
+    };
+    match?: {
+      confidence: number;
+      reason: string;
+    };
+  }>;
   bus?: {
     mqtt: {
       enabled: boolean;
@@ -823,6 +857,21 @@ const filteredApprovedDevices = computed(() => {
 const discoveredDevices = computed(() =>
   deviceCards.value.filter((device) => device.trustStatus === 'discovered'),
 );
+
+
+const deviceDiagnostics = computed(
+  () => state.value?.deviceDiagnostics || [],
+);
+
+const diagnosticSummary = computed(() => ({
+  total: deviceDiagnostics.value.length,
+  errors: deviceDiagnostics.value.filter(
+    (item) => item.severity === 'error',
+  ).length,
+  warnings: deviceDiagnostics.value.filter(
+    (item) => item.severity === 'warning',
+  ).length,
+}));
 const deviceSourceStats = computed(() => {
   const busBacked = deviceCards.value.filter((device) =>
     ['mqtt', 'zigbee', 'matter', 'modbus'].includes(
@@ -940,8 +989,6 @@ const selectedExecutionTrace = computed(() => {
     state.value?.executionTraces?.find(
       (trace) => trace.id === selectedExecutionTraceId.value,
     ) || null;
-
-  console.log('SELECTED TRACE', trace);
 
   return trace;
 });
@@ -1508,18 +1555,15 @@ function selectDevice(device: PortalDevice) {
 }
 
 function closeDeviceSheet() {
-  console.log('CLOSE DEVICE SHEET');
   selectedDeviceId.value = null;
   selectedExecutionTraceId.value = null;
 }
 
 function openExecutionTrace(traceId: string) {
-  console.log('OPEN TRACE', traceId);
   selectedExecutionTraceId.value = traceId;
 }
 
 function closeExecutionTrace() {
-  console.log('CLOSE EXECUTION TRACE');
   selectedExecutionTraceId.value = null;
 }
 

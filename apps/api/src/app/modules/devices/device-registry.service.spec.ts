@@ -707,4 +707,55 @@ describe('DeviceRegistryService', () => {
       'garage.motion.zigbee',
     );
   });
+
+  it('does not match a Shelly component with another component on the same physical channel', () => {
+    process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify([
+      {
+        deviceId: 'panel.mainline.energy',
+        name: 'Whole house mainline',
+        kind: 'physical',
+        origin: 'shelly',
+        protocol: 'mqtt',
+        transport: 'mqtt',
+        driver: 'shelly-pro-em',
+        target: 'shellyproem50-8c4f00dbd258',
+        physicalId: 'shellyproem50-8c4f00dbd258',
+        component: 'em1:0',
+        channel: 0,
+        capabilities: ['power'],
+      },
+      {
+        deviceId: 'panel.relay',
+        name: 'Panel relay',
+        kind: 'physical',
+        origin: 'shelly',
+        protocol: 'mqtt',
+        transport: 'mqtt',
+        driver: 'shelly-rpc',
+        target: 'shellyproem50-8c4f00dbd258',
+        physicalId: 'shellyproem50-8c4f00dbd258',
+        component: 'switch:0',
+        channel: 0,
+        capabilities: ['switch'],
+      },
+    ]);
+
+    const registry = new DeviceRegistryService();
+
+    expect(
+      registry.findApprovedDeviceIdByPhysicalChannel(
+        'shellyproem50-8c4f00dbd258',
+        'em1:0',
+        0,
+      ),
+    ).toBe('panel.mainline.energy');
+
+    expect(
+      registry.findApprovedDeviceIdByPhysicalChannel(
+        'shellyproem50-8c4f00dbd258',
+        'switch:0',
+        0,
+      ),
+    ).toBe('panel.relay');
+  });
 });

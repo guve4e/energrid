@@ -1,6 +1,8 @@
 import { firstValueFrom } from 'rxjs';
 import { DeviceMqttIngestService } from './device-mqtt-ingest.service';
-import { DeviceRegistryService } from './device-registry.service';
+import { DeviceRegistryService } from './device-registry.service'
+import { DeviceObservationService } from './device-observation.service';
+import { OperationalLogService } from './operational-log.service';
 
 describe('DeviceMqttIngestService', () => {
   const originalEnv = process.env;
@@ -25,7 +27,7 @@ describe('DeviceMqttIngestService', () => {
 
   it('maps legacy Arduino temperature topics into approved registry devices', () => {
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry);
+    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
 
     service['handleLine'](
       'sensors/arduino/temp {"temperature":23.5,"humidity":48.2,"timestamp":"2026-08-03T10:15:00.000Z"}',
@@ -64,7 +66,7 @@ describe('DeviceMqttIngestService', () => {
 
   it('keeps a recent MQTT debug trace for handled and ignored messages', () => {
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry);
+    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
 
     service['handleLine'](
       'energrid/valentin/boyana-home/devices/kitchen_temperature/telemetry {"deviceId":"kitchen_temperature","values":{"temperature":24.1}}',
@@ -94,7 +96,7 @@ describe('DeviceMqttIngestService', () => {
 
   it('subscribes to the legacy framework device branch by default', () => {
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry);
+    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
 
     expect(service.getDebugState().subscriptions).toEqual(
       expect.arrayContaining(['energrid/valentin/boyana-home/#', 'devices/#']),
@@ -104,7 +106,7 @@ describe('DeviceMqttIngestService', () => {
 
   it('maps legacy framework device status topics into approved read-only devices', () => {
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry);
+    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
 
     service['handleLine'](
       'devices/temp-kitchen/status {"deviceId":"temp-kitchen","name":"ESP8266 Temp Sensor","type":"sensor","firmwareVersion":"1.1.0","location":"garage","temperature":{"value":23.5},"humidity":{"value":48.1},"config":{"readings":{"temperature":{"enabled":true,"unit":"°C"},"humidity":{"enabled":true,"unit":"%"}}}}',
@@ -149,7 +151,7 @@ describe('DeviceMqttIngestService', () => {
 
   it('uses legacy online topics only as status updates for existing devices', () => {
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry);
+    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
 
     service['handleLine'](
       'devices/temp-garage/status {"deviceId":"temp-garage","name":"ESP8266 Temp Sensor","type":"sensor","temperature":31.5}',
@@ -167,7 +169,7 @@ describe('DeviceMqttIngestService', () => {
 
   it('emits live MQTT debug messages as they are recorded', async () => {
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry);
+    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
     const nextMessage = firstValueFrom(service.streamDebugMessages());
 
     service['handleLine'](
@@ -203,7 +205,7 @@ describe('DeviceMqttIngestService', () => {
     ]);
 
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry);
+    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
 
     service['handleLine'](
       'shellyplus1-78ee4ccf5cf0/events/rpc ' +
@@ -267,7 +269,7 @@ describe('DeviceMqttIngestService', () => {
     ]);
 
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry);
+    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
 
     registry.markDeviceCommandPending('kitchen.light.island.led', {
       action: 'turn_on',
@@ -321,7 +323,7 @@ describe('DeviceMqttIngestService', () => {
     ]);
 
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry);
+    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
 
     registry.markDeviceCommandPending('kitchen.light.island.led', {
       action: 'turn_on',
@@ -375,7 +377,7 @@ describe('DeviceMqttIngestService', () => {
     ]);
 
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry);
+    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
 
     registry.markDeviceCommandPending('kitchen.light.island.led', {
       action: 'turn_on',

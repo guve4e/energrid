@@ -9,16 +9,11 @@ import type {
   RegisteredDevice,
   RegisteredDeviceState,
   SiteSystem,
+  ShellyRpcDeviceConfig,
 } from './device-registry.types';
 import { OperationalLogService } from './operational-log.service';
 
-export interface ShellyRpcDeviceConfig {
-  key: string;
-  dst: string;
-  switchId: number;
-}
-
-interface DiscoveredDeviceConfig {
+export interface DiscoveredDeviceConfig {
   id?: string;
   displayName?: string;
   suggestedName?: string;
@@ -191,9 +186,6 @@ export class DeviceRegistryService {
       logicalGroupsFromImportedDevices(importedDevices);
     const hasShellyGroup = shellyDevices.length > 0;
     const hasGenericLightMqtt = !!process.env.HOME_KITCHEN_LIGHT_MQTT_TOPIC;
-    const hasLightHttp =
-      !!process.env.HOME_KITCHEN_LIGHT_ON_URL ||
-      !!process.env.HOME_KITCHEN_LIGHT_OFF_URL;
     const hasImportedKitchenLights = importedLogicalGroups.some(
       (device) => device.id === 'kitchen_light',
     );
@@ -224,40 +216,25 @@ export class DeviceRegistryService {
           ? 'shelly-rpc-group'
           : hasGenericLightMqtt
             ? 'generic-mqtt'
-            : hasLightHttp
-              ? 'http-relay'
-              : 'simulated',
-        protocol:
-          hasShellyGroup || hasGenericLightMqtt
-            ? 'mqtt'
-            : hasLightHttp
-              ? 'http'
-              : 'simulated',
-        transport: hasLightHttp
-          ? 'http'
-          : hasShellyGroup || hasGenericLightMqtt
-            ? 'mqtt'
-            : 'local',
+            : 'simulated',
+        protocol: hasShellyGroup || hasGenericLightMqtt ? 'mqtt' : 'simulated',
+        transport: hasShellyGroup || hasGenericLightMqtt ? 'mqtt' : 'local',
         driver: hasShellyGroup
           ? 'shelly-rpc'
           : hasGenericLightMqtt
             ? 'generic-mqtt-switch'
-            : hasLightHttp
-              ? 'http-switch'
-              : 'simulated-switch',
-        configured: hasShellyGroup || hasGenericLightMqtt || hasLightHttp,
+            : 'simulated-switch',
+        configured: hasShellyGroup || hasGenericLightMqtt,
         target: hasShellyGroup
           ? process.env.HOME_SHELLY_RPC_TOPIC || 'shelly/rpc'
-          : process.env.HOME_KITCHEN_LIGHT_MQTT_TOPIC ||
-            process.env.HOME_KITCHEN_LIGHT_ON_URL ||
-            undefined,
+          : process.env.HOME_KITCHEN_LIGHT_MQTT_TOPIC || undefined,
         eventTopicPrefix: mqttPrefixFor(identity),
         commandTopic: mqttTopicFor(identity, 'kitchen_light', 'command'),
         stateTopic: mqttTopicFor(identity, 'kitchen_light', 'state'),
       },
       state: unknownState(
         'configured by adapter',
-        hasShellyGroup || hasGenericLightMqtt || hasLightHttp,
+        hasShellyGroup || hasGenericLightMqtt,
       ),
       responseProfile: responseProfile({
         latencyMs: 600,
@@ -372,15 +349,12 @@ export class DeviceRegistryService {
     };
 
     const devices = dedupeDevices([
-      ...(hasShellyGroup ||
-      hasGenericLightMqtt ||
-      hasLightHttp ||
-      !hasImportedKitchenLights
+      ...importedLogicalGroups,
+      ...(hasShellyGroup || hasGenericLightMqtt || !hasImportedKitchenLights
         ? [kitchenLightGroup]
         : []),
       ...physicalLights,
       ...(hasImportedKitchenTemperature ? [] : [temperatureDevice]),
-      ...importedLogicalGroups,
       ...importedDevices,
       ...this.getDiscoveredDevices(),
     ]);
@@ -398,10 +372,82 @@ export class DeviceRegistryService {
       .map((device) => device.id);
   }
 
+  registerDiscoveredShellyDevice(
+    physicalId: string,
+    component: string,
+    channel: number | null,
+  ): void {
+    const id = `${physicalId}:${component}`;
+    const capability: DeviceCapabilityKind = component.startsWith('switch:')
+      ? 'switch'
+      : 'power';
+
+    if (this.liveDiscoveredDeviceConfigs.has(id)) {
+      return;
+    }
+
+    this.liveDiscoveredDeviceConfigs.set(id, {
+      id,
+      displayName: `${physicalId} ${component}`,
+      suggestedName: `${physicalId} ${component}`,
+      suggestedRoom: 'Unknown',
+      protocol: 'mqtt',
+      transport: 'mqtt',
+      driver: 'shelly-discovered',
+      target: physicalId,
+      capabilities: [capability],
+      source: 'mqtt',
+      confidence: 0.8,
+      reason: 'Discovered from Shelly MQTT telemetry',
+    });
+
+    this.operationalLog?.record({
+      level: 'info',
+      source: 'device-registry',
+      event: 'device.discovered',
+      deviceId: id,
+      message: `Discovered Shelly device ${physicalId} component ${component} channel ${channel ?? '-'}.`,
+    });
+  }
+
+  registerDiscoveredDevice(config: DiscoveredDeviceConfig): void {
+    const id = safeId(config.id);
+
+    if (!id) {
+      return;
+    }
+
+    if (this.liveApprovedDeviceConfigs.has(id)) {
+      return;
+    }
+
+    this.liveDiscoveredDeviceConfigs.set(id, {
+      ...config,
+      confidence: config.confidence ?? 0.5,
+      reason: config.reason || 'Discovered device awaiting approval.',
+    });
+  }
+
   getKitchenLightShellyDevices(): ShellyRpcDeviceConfig[] {
-    return parseShellyRpcDevices(
+    const configured = parseShellyRpcDevices(
       process.env.HOME_KITCHEN_LIGHT_SHELLY_RPC_DEVICES,
     );
+
+    if (configured.length > 0) {
+      return configured;
+    }
+
+    if (process.env.HOME_USE_DEMO_SHELLY !== 'true') {
+      return [];
+    }
+
+    return [
+      {
+        key: 'kitchen-shelly',
+        dst: 'shellyplus1-78ee4ccf4b54',
+        switchId: 0,
+      },
+    ];
   }
 
   private getKitchenTemperatureFromEnv(): number | null {
@@ -734,10 +780,13 @@ export class DeviceRegistryService {
 
   findApprovedDeviceIdByPhysicalChannel(
     physicalId: string,
-    channel = 0,
+    component: string | null | undefined,
+    channel: number | null = 0,
   ): string | null {
     const normalizedPhysicalId = physicalId.trim().toLowerCase();
     if (!normalizedPhysicalId) return null;
+
+    const normalizedComponent = component?.trim().toLowerCase() || null;
 
     const matchingDevice = this.getDevices().find((device) => {
       if (device.trustStatus !== 'approved') return false;
@@ -754,10 +803,25 @@ export class DeviceRegistryService {
 
       if (!identifiers.includes(normalizedPhysicalId)) return false;
 
+      const configuredComponent =
+        metadataString(device.metadata, 'component')?.trim().toLowerCase() ||
+        null;
+
       const configuredChannel =
         metadataNumber(device.metadata, 'switchId') ??
-        metadataNumber(device.metadata, 'channel') ??
-        0;
+        metadataNumber(device.metadata, 'channel');
+
+      if (
+        configuredComponent &&
+        normalizedComponent &&
+        configuredComponent !== normalizedComponent
+      ) {
+        return false;
+      }
+
+      if (configuredChannel == null) {
+        return channel == null || channel === 0;
+      }
 
       return configuredChannel === channel;
     });
@@ -876,24 +940,18 @@ export class DeviceRegistryService {
       : null;
 
     if (previousTrace?.outcome === 'running') {
-      replaceActiveTraceStage(
-        previousTrace,
-        'settling',
-        {
-          stage: 'settling',
-          status: 'warning',
-          observedAt: requestedAt,
-          message:
-            'Stability window interrupted by a newer command.',
-        },
-      );
+      replaceActiveTraceStage(previousTrace, 'settling', {
+        stage: 'settling',
+        status: 'warning',
+        observedAt: requestedAt,
+        message: 'Stability window interrupted by a newer command.',
+      });
 
       appendTraceStage(previousTrace, {
         stage: 'superseded',
         status: 'complete',
         observedAt: requestedAt,
-        message:
-          'A newer command replaced this execution before completion.',
+        message: 'A newer command replaced this execution before completion.',
         evidence: {
           supersededByAction: command.action,
         },
@@ -1512,10 +1570,28 @@ function dedupeDevices(devices: RegisteredDevice[]): RegisteredDevice[] {
   const byId = new Map<string, RegisteredDevice>();
 
   for (const device of devices) {
-    byId.set(device.id, device);
+    const existing = byId.get(device.id);
+
+    if (!existing || devicePriority(device) > devicePriority(existing)) {
+      byId.set(device.id, device);
+    }
   }
 
   return [...byId.values()];
+}
+
+function devicePriority(device: RegisteredDevice): number {
+  let score = 0;
+
+  if (device.trustStatus === 'approved') score += 100;
+  if (device.adapter.configured) score += 50;
+
+  if (device.kind === 'logical') score += 20;
+
+  if (device.adapter.id === 'mqtt-discovered') score -= 200;
+  if (device.adapter.driver === 'mqtt-unknown') score -= 200;
+
+  return score;
 }
 
 function configuredSite() {

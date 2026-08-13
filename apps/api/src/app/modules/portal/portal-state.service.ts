@@ -5,6 +5,10 @@ import {
   type MqttDebugState,
 } from '../devices/device-mqtt-ingest.service';
 import { DeviceRegistryService } from '../devices/device-registry.service';
+import { DeviceObservationService } from '../devices/device-observation.service';
+import { DeviceHealthService } from '../devices/device-health.service';
+import { DeviceInvestigationService } from '../devices/device-investigation.service';
+import type { DeviceHealthSnapshot } from '../devices/device-health.service';
 import {
   OperationalLogService,
   type OperationalLogEntry,
@@ -44,6 +48,9 @@ export interface PortalState {
     }>;
   }>;
   devices: RegisteredDevice[];
+  deviceMemory: ReturnType<DeviceObservationService['getAll']>;
+  deviceHealth: DeviceHealthSnapshot[];
+  deviceDiagnostics: ReturnType<DeviceInvestigationService['analyze']>;
   executionTraces: DeviceExecutionTrace[];
   networkZones: NetworkDiscoveryZone[];
   networkDevices: NetworkDiscoveredDevice[];
@@ -66,9 +73,19 @@ export class PortalStateService {
     private readonly lanDiscovery: DeviceLanDiscoveryService,
     private readonly mqttIngest: DeviceMqttIngestService,
     private readonly operationalLog: OperationalLogService,
+    private readonly observation: DeviceObservationService,
+    private readonly health: DeviceHealthService,
+    private readonly investigation: DeviceInvestigationService,
   ) {}
 
   getState(): PortalState {
+    this.investigation.analyze({
+      networkDevices: this.lanDiscovery.getLastScan(),
+      registeredDevices: this.deviceRegistry.getSnapshot().devices,
+      memory: this.observation.getAll(),
+      health: this.health.getAll(),
+    });
+
     const registry = this.deviceRegistry.getSnapshot();
 
     return {
@@ -109,6 +126,15 @@ export class PortalStateService {
           ),
       })),
       devices: registry.devices,
+      deviceMemory: this.observation.getAll(),
+      deviceHealth: this.health.getAll(),
+
+      deviceDiagnostics: this.investigation.analyze({
+        networkDevices: this.lanDiscovery.getLastScan(),
+        registeredDevices: registry.devices,
+        memory: this.observation.getAll(),
+        health: this.health.getAll(),
+      }),
       executionTraces: this.deviceRegistry.getExecutionTraces(),
       networkZones: this.lanDiscovery.getZones(),
       networkDevices: this.lanDiscovery.getLastScan(),

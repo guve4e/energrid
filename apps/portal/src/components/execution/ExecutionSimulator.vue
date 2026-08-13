@@ -1,54 +1,57 @@
 <template>
 <section class="execution-simulator">
 
-  <div class="replay-header">
-    <span class="eyebrow">Execution replay</span>
-    <h3>{{ trace.action }} lifecycle</h3>
+  <div class="simulator-header">
+
+    <div>
+      <span class="eyebrow">
+        Execution replay
+      </span>
+
+      <h3>
+        {{ trace.action }} lifecycle
+      </h3>
+    </div>
+
   </div>
 
 
   <div class="flow">
 
     <div
-      v-for="(stage,index) in visibleStages"
-      :key="stage.stage"
+      v-for="node in nodes"
+      :key="node.stage"
       class="flow-node"
       :class="[
-        stage.status,
-        stage.status === 'complete' ? 'success' : '',
-        stage.status === 'failed' ? 'error' : ''
+        node.status
       ]"
     >
 
       <div class="icon">
-        {{ icon(stage.stage) }}
+        {{ node.icon }}
       </div>
 
 
-      <div class="content">
-
+      <div>
         <strong>
-          {{ title(stage.stage) }}
+          {{ node.stage }}
         </strong>
 
         <small>
-          {{ stage.message }}
+          {{ node.message }}
         </small>
-
       </div>
 
 
-      <span class="result">
-        {{ stage.status === 'complete' ? '✓' : stage.status === 'failed' ? '!' : '' }}
+      <span>
+        {{ node.status === 'done' ? '✓' : '' }}
       </span>
 
-      <span class="time">
-        +{{ stageTime(stage.observedAt) }}
-      </span>
 
     </div>
 
   </div>
+
 
 </section>
 </template>
@@ -56,102 +59,80 @@
 
 <script setup lang="ts">
 
-import {ref,onMounted,onBeforeUnmount} from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 
 const props = defineProps<{
- trace:{
-  action:string;
-  stages:Array<{
-   stage:string;
-   status:string;
-   message:string;
-   observedAt:string;
-  }>
- }
+  trace:{
+    action:string;
+    stages:Array<{
+      stage:string;
+      message:string;
+      status:string;
+    }>
+  }
 }>()
 
 
-const visibleStages = ref<any[]>([])
-
-let timer:any=null
-
-
-onMounted(()=>{
-
- let index=0
-
- timer=setInterval(()=>{
-
-   visibleStages.value.push(
-     props.trace.stages[index]
-   )
-
-   index++
-
-   if(index >= props.trace.stages.length){
-     clearInterval(timer)
-   }
-
- },350)
-
-})
-
-
-onBeforeUnmount(()=>{
-
- if(timer)
-   clearInterval(timer)
-
-})
-
-
-function title(stage:string){
-
- const map:any={
-  requested:'Command request',
-  published:'Adapter',
-  reported:'Physical device',
-  verified:'Verification',
-  settling:'Settlement',
-  settled:'Stable state',
- timed_out:'Timeout'
- }
-
- return map[stage] || stage
-}
-
+const nodes = ref<any[]>([])
 
 
 function icon(stage:string){
 
- const map:any={
-  requested:'🤖',
-  published:'📡',
-  reported:'💡',
-  verified:'🔍',
-  settling:'⌛',
-  settled:'✅',
- timed_out:'❌'
- }
+  const map:Record<string,string> = {
+    requested:'🤖',
+    published:'📡',
+    reported:'📥',
+    verified:'🔍',
+    settling:'⏳',
+    settled:'✅',
+    timed_out:'❌',
+    failed:'❌'
+  }
 
- return map[stage] || '⚙️'
+  return map[stage] || '⚙️'
 }
 
 
+function buildNodes(){
 
-function stageTime(value:string){
-
- const start =
-  new Date(props.trace.stages[0].observedAt).getTime()
-
- const current =
-  new Date(value).getTime()
-
-
- return `${current-start}ms`
+  nodes.value =
+    props.trace.stages.map(stage=>({
+      ...stage,
+      icon:icon(stage.stage),
+      status:'idle'
+    }))
 
 }
+
+
+async function replay(){
+
+  for(const node of nodes.value){
+
+    node.status='active'
+
+    await delay(450)
+
+    node.status='done'
+
+  }
+
+}
+
+
+function delay(ms:number){
+ return new Promise(resolve=>setTimeout(resolve,ms))
+}
+
+
+onMounted(()=>{
+
+ buildNodes()
+
+ replay()
+
+})
 
 
 </script>
@@ -160,29 +141,11 @@ function stageTime(value:string){
 <style scoped>
 
 .execution-simulator{
-
 padding:24px;
 border:1px solid #dbe4f5;
 border-radius:18px;
 background:white;
-
-}
-
-
-.replay-header{
 margin-bottom:20px;
-}
-
-
-.eyebrow{
-color:#2563eb;
-font-size:12px;
-font-weight:700;
-}
-
-
-h3{
-margin:5px 0;
 }
 
 
@@ -194,21 +157,25 @@ gap:12px;
 
 
 .flow-node{
-
 display:flex;
 align-items:center;
 gap:14px;
-
 padding:14px;
-
 border-radius:14px;
+border:1px solid #e1e8f5;
+transition:.3s;
+}
 
-border:1px solid #cbd5e1;
 
-background:white;
+.flow-node.active{
+border-color:#2563eb;
+background:#eff6ff;
+}
 
-animation:appear .35s ease;
 
+.flow-node.done{
+border-color:#16a34a;
+background:#f0fdf4;
 }
 
 
@@ -217,43 +184,9 @@ font-size:24px;
 }
 
 
-.content{
-flex:1;
-}
-
-
-.content small{
-
+small{
 display:block;
-
-margin-top:4px;
-
 color:#64748b;
-
-}
-
-
-.time{
-
-font-size:12px;
-
-color:#94a3b8;
-
-}
-
-
-@keyframes appear{
-
-from{
- opacity:0;
- transform:translateY(8px);
-}
-
-to{
- opacity:1;
- transform:none;
-}
-
 }
 
 </style>

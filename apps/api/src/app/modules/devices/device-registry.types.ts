@@ -297,3 +297,10 @@ export interface DeviceExecutionTrace {
   durationMs: number | null;
   stages: DeviceExecutionTraceStage[];
 }
+
+
+export interface ShellyRpcDeviceConfig {
+  key: string;
+  dst: string;
+  switchId: number;
+}

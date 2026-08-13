@@ -218,10 +218,6 @@ export class DeviceControlService {
         adapter: 'shelly-rpc',
       });
 
-      this.logger.log(
-        `[DEVICE ACTION SHELLY RPC] ${device.id} ${action} topic=${topic} dst=${dst} switch=${switchId}`,
-      );
-
       return {
         deviceId: device.id,
         action,
@@ -245,9 +241,6 @@ export class DeviceControlService {
         expectedValues: { on },
         message,
       });
-      this.logger.warn(
-        `[DEVICE ACTION SHELLY RPC FAILED] ${device.id} ${action} ${message}`,
-      );
 
       return {
         deviceId: device.id,

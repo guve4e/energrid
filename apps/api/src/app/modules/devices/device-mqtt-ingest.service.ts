@@ -14,6 +14,7 @@ import { promisify } from 'node:util';
 import { Subject } from 'rxjs';
 import { DeviceRegistryService } from './device-registry.service';
 import { OperationalLogService } from './operational-log.service';
+import { DeviceObservationService } from './device-observation.service';
 import { DeviceMqttMessageRouter } from './mqtt/device-mqtt-message-router';
 import type { DeviceCapabilityKind } from './device-registry.types';
 
@@ -60,9 +61,10 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     private readonly registry: DeviceRegistryService,
-    private readonly operationalLog?: OperationalLogService,
+    private readonly operationalLog: OperationalLogService,
+    private readonly observation: DeviceObservationService,
   ) {
-    this.messageRouter = new DeviceMqttMessageRouter(registry);
+    this.messageRouter = new DeviceMqttMessageRouter(registry, observation);
   }
 
   onModuleInit(): void {
@@ -305,34 +307,6 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
       false,
       'json topic outside known handlers',
     );
-  }
-
-  private ingestShellyTelemetry(topic: string, payload: unknown): boolean {
-    const telemetry = parseShellySwitchTelemetry(topic, payload);
-    if (!telemetry) return false;
-
-    const deviceId = this.registry.findApprovedDeviceIdByPhysicalChannel(
-      telemetry.physicalId,
-      telemetry.channel,
-    );
-
-    if (!deviceId) {
-      this.logger.warn(
-        `[DEVICE MQTT INGEST] no approved device mapping for Shelly ${telemetry.physicalId} channel=${telemetry.channel}`,
-      );
-      return false;
-    }
-
-    this.registry.ingestDeviceTelemetry({
-      deviceId,
-      values: telemetry.values,
-      observedAt: telemetry.observedAt,
-      origin: 'shelly-mqtt',
-      protocol: 'mqtt',
-      status: 'online',
-    });
-
-    return true;
   }
 
   private ingestLegacyTemperature(
@@ -650,143 +624,6 @@ function legacyTemperatureTopicConfigs(): LegacyTemperatureTopicConfig[] {
       };
     })
     .filter((config) => !!config.topic);
-}
-
-interface ShellySwitchTelemetry {
-  physicalId: string;
-  channel: number;
-  values: Record<string, number | boolean | string | null>;
-  observedAt: string;
-}
-
-function parseShellySwitchTelemetry(
-  topic: string,
-  payload: unknown,
-): ShellySwitchTelemetry | null {
-  if (!payload || typeof payload !== 'object') return null;
-
-  const raw = payload as Record<string, unknown>;
-  const topicParts = topic.split('/').filter(Boolean);
-
-  const physicalId =
-    stringValue(raw.src) || shellyPhysicalIdFromTopic(topicParts);
-
-  if (!physicalId) return null;
-
-  const params =
-    raw.params && typeof raw.params === 'object'
-      ? (raw.params as Record<string, unknown>)
-      : null;
-
-  const nestedSwitch = params
-    ? Object.entries(params).find(
-        ([key, value]) =>
-          /^switch:\d+$/.test(key) && !!value && typeof value === 'object',
-      )
-    : undefined;
-
-  const topicComponent = topicParts.find((part) => /^switch:\d+$/.test(part));
-
-  let componentName: string | null = null;
-  let component: Record<string, unknown> | null = null;
-
-  if (nestedSwitch) {
-    componentName = nestedSwitch[0];
-    component = nestedSwitch[1] as Record<string, unknown>;
-  } else if (topicComponent) {
-    componentName = topicComponent;
-    component =
-      raw.params && typeof raw.params === 'object'
-        ? (raw.params as Record<string, unknown>)
-        : raw;
-  }
-
-  if (!componentName || !component) return null;
-
-  const channel = Number(componentName.split(':')[1]);
-  if (!Number.isInteger(channel) || channel < 0) return null;
-
-  const output = shellyBooleanValue(component.output);
-  if (output == null) return null;
-
-  const values: Record<string, number | boolean | string | null> = {
-    on: output,
-  };
-
-  const power = shellyFiniteNumber(component.apower);
-  const current = shellyFiniteNumber(component.current);
-  const voltage = shellyFiniteNumber(component.voltage);
-
-  if (power != null) values.power = power;
-  if (current != null) values.current = current;
-  if (voltage != null) values.voltage = voltage;
-
-  return {
-    physicalId,
-    channel,
-    values,
-    observedAt: shellyObservedAt(raw, params),
-  };
-}
-
-function shellyPhysicalIdFromTopic(parts: string[]): string | null {
-  const eventsIndex = parts.indexOf('events');
-  if (eventsIndex > 0) return parts[eventsIndex - 1];
-
-  const statusIndex = parts.indexOf('status');
-  if (statusIndex > 0) return parts[statusIndex - 1];
-
-  return null;
-}
-
-function shellyBooleanValue(value: unknown): boolean | null {
-  if (typeof value === 'boolean') return value;
-
-  if (typeof value === 'number') {
-    if (value === 1) return true;
-    if (value === 0) return false;
-  }
-
-  if (typeof value === 'string') {
-    const normalized = value.trim().toLowerCase();
-    if (['true', '1', 'on'].includes(normalized)) return true;
-    if (['false', '0', 'off'].includes(normalized)) return false;
-  }
-
-  return null;
-}
-
-function shellyFiniteNumber(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-
-  return null;
-}
-
-function shellyObservedAt(
-  raw: Record<string, unknown>,
-  params: Record<string, unknown> | null,
-): string {
-  const direct = stringValue(raw.observedAt) || stringValue(raw.timestamp);
-
-  if (direct) return direct;
-
-  const timestamp =
-    shellyFiniteNumber(params?.ts) ?? shellyFiniteNumber(raw.ts);
-
-  if (timestamp != null) {
-    const milliseconds =
-      timestamp > 1_000_000_000_000 ? timestamp : timestamp * 1000;
-
-    const parsed = new Date(milliseconds);
-    if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
-  }
-
-  return new Date().toISOString();
 }
 
 function numericValue(value: unknown): number | null {

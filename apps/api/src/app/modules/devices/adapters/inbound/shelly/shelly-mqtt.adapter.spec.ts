@@ -9,6 +9,9 @@ describe('ShellyMqttAdapter', () => {
     process.env.PORTAL_TENANT_ID = 'valentin';
     process.env.PORTAL_SITE_ID = 'boyana-home';
     process.env.PORTAL_SITE_NAME = 'Boyana Home';
+    delete process.env.HOME_DISCOVERED_DEVICES_JSON;
+    delete process.env.HOME_DEVICE_REGISTRY_JSON;
+    delete process.env.DEVICE_REGISTRY_JSON;
 
     process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify([
       {
@@ -96,16 +99,17 @@ describe('ShellyMqttAdapter', () => {
       topic: 'shelly/events/rpc',
       payloadText: '{}',
       payload: {
-        src: 'shellyplus2pm-78ee4ccf5cf0',
+        src: 'shellyplus2pm-UNAPPROVED',
         params: {
           'switch:1': {
+            id: 1,
             output: true,
           },
         },
       },
     });
 
-    expect(result).toBeNull();
+    expect(result).toEqual({ reason: 'shelly device discovered', effects: [] });
   });
 
   it('returns null for unrelated JSON messages', () => {

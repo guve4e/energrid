@@ -1,4 +1,5 @@
 import { DeviceRegistryService } from '../device-registry.service';
+import { DeviceObservationService } from '../device-observation.service';
 import { EnergridMqttAdapter } from '../adapters/inbound/energrid-mqtt.adapter';
 import { LegacyFrameworkMqttAdapter } from '../adapters/inbound/legacy/legacy-framework-mqtt.adapter';
 import { LegacyTemperatureMqttAdapter } from '../adapters/inbound/legacy/legacy-temperature-mqtt.adapter';
@@ -16,7 +17,10 @@ export class DeviceMqttMessageRouter {
 
   private readonly adapters: DeviceMqttMessageAdapter[];
 
-  constructor(private readonly registry: DeviceRegistryService) {
+  constructor(
+    private readonly registry: DeviceRegistryService,
+    private readonly observation: DeviceObservationService,
+  ) {
     this.adapters = [
       this.legacyTemperature,
       new ShellyMqttAdapter(registry),
@@ -53,6 +57,28 @@ export class DeviceMqttMessageRouter {
         }
 
         if (effect.kind === 'telemetry') {
+
+          const payload = effect.payload as {
+            deviceId: string;
+            observedAt?: string;
+            origin?: string;
+            protocol?: string;
+            values?: Record<string, unknown>;
+          };
+
+          this.observation.observe({
+            deviceId: payload.deviceId,
+            observedAt:
+              payload.observedAt ||
+              new Date().toISOString(),
+            source:
+              payload.origin ||
+              payload.protocol ||
+              'unknown',
+            values:
+              payload.values || {},
+          });
+
           this.registry.ingestDeviceTelemetry(effect.payload);
         }
 

@@ -1,64 +1,68 @@
-import { execFile } from 'node:child_process'
-import { DeviceControlService } from '../devices/device-control.service'
-import { DeviceRegistryService } from '../devices/device-registry.service'
-import { HomeAutomationService } from './home-automation.service'
+import { execFile } from 'node:child_process';
+import { DeviceControlService } from '../devices/device-control.service';
+import { DeviceRegistryService } from '../devices/device-registry.service';
+import { HomeAutomationService } from './home-automation.service';
 
 jest.mock('node:child_process', () => ({
   execFile: jest.fn((_command, _args, _options, callback) => {
-    callback(null, { stdout: '', stderr: '' })
+    callback(null, { stdout: '', stderr: '' });
   }),
-}))
+}));
 
 describe('HomeAutomationService', () => {
-  const originalEnv = process.env
-  const execFileMock = jest.mocked(execFile)
+  const originalEnv = process.env;
+  const execFileMock = jest.mocked(execFile);
 
   function createService() {
-    const registry = new DeviceRegistryService()
-    return new HomeAutomationService(registry, new DeviceControlService(registry))
+    const registry = new DeviceRegistryService();
+    return new HomeAutomationService(
+      registry,
+      new DeviceControlService(registry),
+    );
   }
 
   beforeEach(() => {
-    execFileMock.mockClear()
+    execFileMock.mockClear();
     execFileMock.mockImplementation((_command, _args, _options, callback) => {
-      callback(null, { stdout: '', stderr: '' })
-      return {} as ReturnType<typeof execFile>
-    })
+      callback(null, { stdout: '', stderr: '' });
+      return {} as ReturnType<typeof execFile>;
+    });
 
-    process.env = { ...originalEnv }
-    delete process.env.HOME_AVAILABLE_DEVICES
-    delete process.env.HOME_KITCHEN_LIGHT_ON_URL
-    delete process.env.HOME_KITCHEN_LIGHT_OFF_URL
-    delete process.env.HOME_KITCHEN_LIGHT_MQTT_TOPIC
-    delete process.env.HOME_KITCHEN_LIGHT_SHELLY_RPC_DEVICES
-    delete process.env.HOME_KITCHEN_TEMP_MQTT_TOPIC
-    delete process.env.HOME_KITCHEN_TEMP_JSON_PATH
-    delete process.env.HOME_MQTT_HOST
-    delete process.env.HOME_MQTT_PORT
-    delete process.env.HOME_APPROVED_DEVICES_JSON
-    delete process.env.PORTAL_KITCHEN_TEMP_C
-  })
+    process.env = { ...originalEnv };
+    delete process.env.HOME_AVAILABLE_DEVICES;
+    delete process.env.HOME_KITCHEN_LIGHT_MQTT_TOPIC;
+    delete process.env.HOME_KITCHEN_LIGHT_SHELLY_RPC_DEVICES;
+    delete process.env.HOME_USE_DEMO_SHELLY;
+    delete process.env.HOME_KITCHEN_TEMP_MQTT_TOPIC;
+    delete process.env.HOME_KITCHEN_TEMP_JSON_PATH;
+    delete process.env.HOME_MQTT_HOST;
+    delete process.env.HOME_MQTT_PORT;
+    delete process.env.HOME_APPROVED_DEVICES_JSON;
+    delete process.env.PORTAL_KITCHEN_TEMP_C;
+  });
 
   afterAll(() => {
-    process.env = originalEnv
-  })
+    process.env = originalEnv;
+  });
 
   it('builds home context from configured temperature and devices', async () => {
-    process.env.PORTAL_KITCHEN_TEMP_C = '24.5'
-    process.env.HOME_AVAILABLE_DEVICES = 'kitchen_light,kitchen_temperature'
+    process.env.PORTAL_KITCHEN_TEMP_C = '24.5';
+    process.env.HOME_AVAILABLE_DEVICES = 'kitchen_light,kitchen_temperature';
 
-    const service = createService()
-    const context = await service.getHomeContext()
+    const service = createService();
+    const context = await service.getHomeContext();
 
-    expect(context.insideTempC).toBe(24.5)
+    expect(context.insideTempC).toBe(24.5);
     expect(context.availableDevices).toEqual([
       'kitchen_light',
       'kitchen_temperature',
-    ])
-  })
+    ]);
+  });
 
-  it('uses simulated light execution when no real adapter is configured', async () => {
-    const service = createService()
+  it('falls back to simulation when the logical kitchen light has no physical adapter', async () => {
+    process.env.HOME_AVAILABLE_DEVICES = 'kitchen_light,kitchen_temperature';
+
+    const service = createService();
 
     const results = await service.executePlan({
       intent: 'turn_on_lights',
@@ -72,22 +76,23 @@ describe('HomeAutomationService', () => {
           reason: 'test',
         },
       ],
-    })
+    });
 
     expect(results).toEqual([
       expect.objectContaining({
         status: 'success',
         adapter: 'simulated',
+        affected: ['kitchen_light'],
       }),
-    ])
-  })
+    ]);
+  });
 
   it('fans kitchen light commands out to configured Shelly RPC devices', async () => {
-    process.env.HOME_MQTT_HOST = '192.168.1.6'
+    process.env.HOME_MQTT_HOST = '192.168.1.6';
     process.env.HOME_KITCHEN_LIGHT_SHELLY_RPC_DEVICES =
-      'kitchen.light.wall.led:shellyplus1-cc7b5c0ea5f8:0,kitchen.light.island.led:shellyplus1-78ee4ccf5cf0:0,kitchen.light.cans:shellyplus1-78ee4ccf4268:0'
+      'kitchen.light.wall.led:shellyplus1-cc7b5c0ea5f8:0,kitchen.light.island.led:shellyplus1-78ee4ccf5cf0:0,kitchen.light.cans:shellyplus1-78ee4ccf4268:0';
 
-    const service = createService()
+    const service = createService();
 
     const results = await service.executePlan({
       intent: 'turn_on_lights',
@@ -101,7 +106,7 @@ describe('HomeAutomationService', () => {
           reason: 'test',
         },
       ],
-    })
+    });
 
     expect(results).toEqual([
       expect.objectContaining({
@@ -113,19 +118,19 @@ describe('HomeAutomationService', () => {
           'kitchen.light.cans',
         ],
       }),
-    ])
-    expect(execFileMock).toHaveBeenCalledTimes(3)
+    ]);
+    expect(execFileMock).toHaveBeenCalledTimes(3);
     expect(execFileMock).toHaveBeenCalledWith(
       'mosquitto_pub',
       expect.arrayContaining(['-h', '192.168.1.6', '-t', 'shelly/rpc']),
       expect.any(Object),
       expect.any(Function),
-    )
+    );
 
     const publishedPayloads = execFileMock.mock.calls.map((call) => {
-      const args = call[1] as string[]
-      return JSON.parse(args[args.indexOf('-m') + 1])
-    })
+      const args = call[1] as string[];
+      return JSON.parse(args[args.indexOf('-m') + 1]);
+    });
 
     expect(publishedPayloads).toEqual(
       expect.arrayContaining([
@@ -145,11 +150,11 @@ describe('HomeAutomationService', () => {
           params: { id: 0, on: true },
         }),
       ]),
-    )
-  })
+    );
+  });
 
   it('executes a requested bathroom light through the approved logical device', async () => {
-    process.env.HOME_MQTT_HOST = '192.168.1.6'
+    process.env.HOME_MQTT_HOST = '192.168.1.6';
     process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({
       devices: [
         {
@@ -161,9 +166,9 @@ describe('HomeAutomationService', () => {
           aliases: ['bathroom lights', 'лампи в банята'],
         },
       ],
-    })
+    });
 
-    const service = createService()
+    const service = createService();
 
     const results = await service.executePlan({
       intent: 'turn_on_lights',
@@ -178,7 +183,7 @@ describe('HomeAutomationService', () => {
           reason: 'test',
         },
       ],
-    })
+    });
 
     expect(results).toEqual([
       expect.objectContaining({
@@ -186,34 +191,34 @@ describe('HomeAutomationService', () => {
         adapter: 'mqtt',
         affected: ['bath.light.led'],
       }),
-    ])
+    ]);
 
-    const args = execFileMock.mock.calls[0]?.[1] as string[]
-    const payload = JSON.parse(args[args.indexOf('-m') + 1])
+    const args = execFileMock.mock.calls[0]?.[1] as string[];
+    const payload = JSON.parse(args[args.indexOf('-m') + 1]);
     expect(payload).toEqual(
       expect.objectContaining({
         dst: 'shellyplus1-bathroom',
         method: 'Switch.Set',
         params: { id: 0, on: true },
       }),
-    )
-  })
+    );
+  });
 
   it('reads kitchen temperature from an MQTT sensor payload', async () => {
-    process.env.HOME_MQTT_HOST = '192.168.1.6'
-    process.env.HOME_KITCHEN_TEMP_MQTT_TOPIC = 'sensors/arduino/temp'
+    process.env.HOME_MQTT_HOST = '192.168.1.6';
+    process.env.HOME_KITCHEN_TEMP_MQTT_TOPIC = 'sensors/arduino/temp';
     execFileMock.mockImplementation((_command, _args, _options, callback) => {
       callback(null, {
         stdout: '{"temperature":23.7,"humidity":45}',
         stderr: '',
-      })
-      return {} as ReturnType<typeof execFile>
-    })
+      });
+      return {} as ReturnType<typeof execFile>;
+    });
 
-    const service = createService()
-    const temperature = await service.getKitchenTemperature()
+    const service = createService();
+    const temperature = await service.getKitchenTemperature();
 
-    expect(temperature).toBe(23.7)
+    expect(temperature).toBe(23.7);
     expect(execFileMock).toHaveBeenCalledWith(
       'mosquitto_sub',
       expect.arrayContaining([
@@ -226,6 +231,6 @@ describe('HomeAutomationService', () => {
       ]),
       expect.any(Object),
       expect.any(Function),
-    )
-  })
-})
+    );
+  });
+});

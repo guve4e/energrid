@@ -17,21 +17,43 @@ describe('PortalStateService', () => {
   })
 
   function createService() {
-    return new PortalStateService(new DeviceRegistryService(), {
-      getLastScan: () => [],
-      getZones: () => [],
-    } as never, {
-      getDebugState: () => ({
-        enabled: false,
-        status: 'disabled',
-        broker: { host: '127.0.0.1', port: '1883' },
-        prefix: 'energrid/tenant-demo/site-home',
-        subscriptions: ['energrid/tenant-demo/site-home/#'],
-        legacyTemperatureTopics: [],
-        legacyDeviceTopics: [],
-        recentMessages: [],
+    const observation = {
+      getAll: () => [],
+    };
+
+    const health = {
+      getAll: () => [],
+    };
+
+    const investigation = {
+      analyze: () => ({
+        findings: [],
       }),
-    } as never, new OperationalLogService())
+    };
+
+    return new PortalStateService(
+      new DeviceRegistryService(),
+      {
+        getLastScan: () => [],
+        getZones: () => [],
+      } as never,
+      {
+        getDebugState: () => ({
+          enabled: false,
+          status: 'disabled',
+          broker: { host: '127.0.0.1', port: '1883' },
+          prefix: 'energrid/tenant-demo/site-home',
+          subscriptions: ['energrid/tenant-demo/site-home/#'],
+          legacyTemperatureTopics: [],
+          legacyDeviceTopics: [],
+          recentMessages: [],
+        }),
+      } as never,
+      new OperationalLogService(),
+      observation as never,
+      health as never,
+      investigation as never,
+    );
   }
 
   it('returns a demo portal state with kitchen temperature and voice config', () => {

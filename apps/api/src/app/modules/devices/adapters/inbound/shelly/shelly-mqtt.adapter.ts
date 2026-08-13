@@ -5,9 +5,10 @@ import type {
   DeviceMqttMessageAdapter,
 } from '../../../mqtt/device-mqtt-message-adapter';
 
-interface ShellySwitchTelemetry {
+interface ShellyComponentTelemetry {
   physicalId: string;
-  channel: number;
+  component: string;
+  channel: number | null;
   values: Record<string, number | boolean | string | null>;
   observedAt: string;
 }
@@ -22,7 +23,7 @@ export class ShellyMqttAdapter implements DeviceMqttMessageAdapter {
   }
 
   handle(message: DeviceMqttMessage): DeviceMqttAdapterResult | null {
-    const telemetry = parseShellySwitchTelemetry(
+    const telemetry = parseShellyComponentTelemetry(
       message.topic,
       message.payload,
     );
@@ -31,10 +32,22 @@ export class ShellyMqttAdapter implements DeviceMqttMessageAdapter {
 
     const deviceId = this.registry.findApprovedDeviceIdByPhysicalChannel(
       telemetry.physicalId,
+      telemetry.component,
       telemetry.channel,
     );
 
-    if (!deviceId) return null;
+    if (!deviceId) {
+      this.registry.registerDiscoveredShellyDevice(
+        telemetry.physicalId,
+        telemetry.component,
+        telemetry.channel,
+      );
+
+      return {
+        reason: 'shelly device discovered',
+        effects: [],
+      };
+    }
 
     return {
       reason: 'shelly telemetry',
@@ -55,10 +68,10 @@ export class ShellyMqttAdapter implements DeviceMqttMessageAdapter {
   }
 }
 
-function parseShellySwitchTelemetry(
+function parseShellyComponentTelemetry(
   topic: string,
   payload: unknown,
-): ShellySwitchTelemetry | null {
+): ShellyComponentTelemetry | null {
   if (!payload || typeof payload !== 'object') return null;
 
   const raw = payload as Record<string, unknown>;
@@ -74,21 +87,25 @@ function parseShellySwitchTelemetry(
       ? (raw.params as Record<string, unknown>)
       : null;
 
-  const nestedSwitch = params
+  const componentEntry = params
     ? Object.entries(params).find(
         ([key, value]) =>
-          /^switch:\d+$/.test(key) && !!value && typeof value === 'object',
+          /^(switch|em1|em1data):\d+$/.test(key) &&
+          !!value &&
+          typeof value === 'object',
       )
     : undefined;
 
-  const topicComponent = topicParts.find((part) => /^switch:\d+$/.test(part));
+  const topicComponent = topicParts.find((part) =>
+    /^(switch|em1|em1data):\d+$/.test(part),
+  );
 
   let componentName: string | null = null;
   let component: Record<string, unknown> | null = null;
 
-  if (nestedSwitch) {
-    componentName = nestedSwitch[0];
-    component = nestedSwitch[1] as Record<string, unknown>;
+  if (componentEntry) {
+    componentName = componentEntry[0];
+    component = componentEntry[1] as Record<string, unknown>;
   } else if (topicComponent) {
     componentName = topicComponent;
     component =
@@ -99,26 +116,56 @@ function parseShellySwitchTelemetry(
 
   if (!componentName || !component) return null;
 
-  const channel = Number(componentName.split(':')[1]);
-  if (!Number.isInteger(channel) || channel < 0) return null;
+  const channelPart = componentName.split(':')[1];
+  const channel = channelPart ? Number(channelPart) : null;
+
+  if (channel !== null && (!Number.isInteger(channel) || channel < 0)) {
+    return null;
+  }
+
+  const values: Record<string, number | boolean | string | null> = {};
 
   const output = shellyBooleanValue(component.output);
-  if (output == null) return null;
 
-  const values: Record<string, number | boolean | string | null> = {
-    on: output,
-  };
+  if (output != null) {
+    values.on = output;
+  }
 
-  const power = finiteNumber(component.apower);
+  const power =
+    finiteNumber(component.apower) ?? finiteNumber(component.act_power);
+
   const current = finiteNumber(component.current);
   const voltage = finiteNumber(component.voltage);
 
-  if (power != null) values.power = power;
-  if (current != null) values.current = current;
-  if (voltage != null) values.voltage = voltage;
+  const totalEnergy = finiteNumber(component.total_act_energy);
+
+  const returnedEnergy = finiteNumber(component.total_act_ret_energy);
+
+  if (power != null) {
+    values.power = power;
+  }
+
+  if (current != null) {
+    values.current = current;
+  }
+
+  if (voltage != null) {
+    values.voltage = voltage;
+  }
+
+  if (totalEnergy != null) {
+    values.energy = totalEnergy;
+  }
+
+  if (returnedEnergy != null) {
+    values.returnedEnergy = returnedEnergy;
+  }
+
+  if (Object.keys(values).length === 0) return null;
 
   return {
     physicalId,
+    component: componentName,
     channel,
     values,
     observedAt: shellyObservedAt(raw, params),
