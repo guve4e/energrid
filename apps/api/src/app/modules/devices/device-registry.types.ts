@@ -265,15 +265,12 @@ export interface DeviceExecutionTraceStage {
 }
 
 export interface DeviceExecutionActor {
-  type:
-    | 'user'
-    | 'assistant'
-    | 'automation'
-    | 'system'
-    | 'technician';
+  type: 'user' | 'assistant' | 'automation' | 'system' | 'technician';
   id?: string;
   name?: string;
 }
+
+import type { ExecutionDiagnosis } from './investigation/device-execution-diagnosis';
 
 export interface DeviceExecutionTrace {
   id: string;
@@ -287,6 +284,8 @@ export interface DeviceExecutionTrace {
   expectedValues: Record<string, number | boolean | string | null>;
   requestedAt: string;
   completedAt: string | null;
+  diagnosis?: ExecutionDiagnosis;
+
   outcome:
     | 'running'
     | 'settled'
@@ -297,7 +296,6 @@ export interface DeviceExecutionTrace {
   durationMs: number | null;
   stages: DeviceExecutionTraceStage[];
 }
-
 
 export interface ShellyRpcDeviceConfig {
   key: string;

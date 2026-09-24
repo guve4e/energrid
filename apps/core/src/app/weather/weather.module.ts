@@ -27,10 +27,15 @@ import { RiverForecastRecorderService } from './river/forecast-monitoring/river-
 import { RiverForecastEvaluatorService } from './river/forecast-monitoring/river-forecast-evaluator.service';
 import { RiverForecastPerformanceService } from './river/forecast-monitoring/river-forecast-performance.service';
 import { ForecastEngine } from './river/engines/forecast.engine';
+import { WeatherVerificationService } from './weather-verification.service';
+import { WeatherVerificationController } from './weather-verification.controller';
+import { WeatherVerificationScheduler } from './weather-verification.scheduler';
 
 @Module({
-  controllers: [WeatherController, RiverController],
+  controllers: [WeatherController, RiverController, WeatherVerificationController],
   providers: [
+    WeatherVerificationService,
+    WeatherVerificationScheduler,
     WeatherService,
     WeatherProviderService,
     WeatherRiskEngine,

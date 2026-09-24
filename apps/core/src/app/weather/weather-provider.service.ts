@@ -1,28 +1,58 @@
 import { Injectable, Logger } from '@nestjs/common';
 
+import { WeatherSnapshot } from './weather-data-quality';
+
 type OpenMeteoResponse = any;
+const numberOrNull = (value: unknown): number | null =>
+  typeof value === 'number' && Number.isFinite(value) ? value : null;
+const instant = (value: unknown): string | null => {
+  const date = typeof value === 'number' ? new Date(value * 1000) : null;
+  return date && Number.isFinite(date.getTime()) ? date.toISOString() : null;
+};
 
 @Injectable()
 export class WeatherProviderService {
   private readonly logger = new Logger(WeatherProviderService.name);
 
-  async getSnapshot() {
+  private readonly cache = new Map<string, { expires: number; snapshot: WeatherSnapshot }>();
+  private readonly pending = new Map<string, Promise<WeatherSnapshot>>();
+
+  async getSnapshot(model: 'best_match' | 'icon_seamless' | 'ncep_gfs_seamless' = 'best_match'): Promise<WeatherSnapshot> {
+    const cached = this.cache.get(model);
+    if (cached && cached.expires > Date.now()) return cached.snapshot;
+    const pending = this.pending.get(model);
+    if (pending) return pending;
+    const request = this.fetchSnapshot(model).then(snapshot => {
+      const ttl = snapshot.availability === 'available' ? 10 * 60000 : 60000;
+      this.cache.set(model, { expires: Date.now() + ttl, snapshot });
+      return snapshot;
+    }).finally(() => this.pending.delete(model));
+    this.pending.set(model, request);
+    return request;
+  }
+
+  private async fetchSnapshot(model: string): Promise<WeatherSnapshot> {
     try {
-      return await this.getOpenMeteoSnapshot();
+      return await this.getOpenMeteoSnapshot(model);
     } catch (error) {
-      this.logger.warn(`Open-Meteo failed, using fallback data: ${String(error)}`);
-      return this.getFallbackSnapshot();
+      this.logger.warn(`Open-Meteo failed, weather unavailable: ${String(error)}`);
+      return { ...this.getFallbackSnapshot(), model };
     }
   }
 
-  private async getOpenMeteoSnapshot() {
+  private async getOpenMeteoSnapshot(model: string): Promise<WeatherSnapshot> {
     const latitude = 43.9916;
     const longitude = 22.8728;
 
     const params = new URLSearchParams({
+      models: model,
       latitude: String(latitude),
       longitude: String(longitude),
       timezone: 'Europe/Sofia',
+      timeformat: 'unixtime',
+      temperature_unit: 'celsius',
+      wind_speed_unit: 'kmh',
+      precipitation_unit: 'mm',
       forecast_days: '12',
       current: [
         'temperature_2m',
@@ -57,7 +87,7 @@ export class WeatherProviderService {
       ].join(','),
     });
 
-    const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params.toString()}`);
+    const response = await fetch(`https://api.open-meteo.com/v1/forecast?${params.toString()}`, { signal: AbortSignal.timeout(8000) });
 
     if (!response.ok) throw new Error(`Open-Meteo HTTP ${response.status}`);
 
@@ -67,16 +97,19 @@ export class WeatherProviderService {
       location: 'Vidin',
       coordinates: { latitude, longitude },
       provider: 'open-meteo',
+      model,
+      availability: 'available',
+      units: { temperature: 'celsius', wind: 'km/h', precipitation: 'mm' },
       fetchedAt: new Date().toISOString(),
       current: {
-        time: data.current?.time,
-        temperature: data.current?.temperature_2m ?? null,
-        feelsLike: data.current?.apparent_temperature ?? null,
-        humidity: data.current?.relative_humidity_2m ?? null,
-        pressure: data.current?.surface_pressure ?? null,
-        windKmh: data.current?.wind_speed_10m ?? null,
-        gustKmh: data.current?.wind_gusts_10m ?? null,
-        weatherCode: data.current?.weather_code ?? null,
+        time: instant(data.current?.time),
+        temperature: numberOrNull(data.current?.temperature_2m),
+        feelsLike: numberOrNull(data.current?.apparent_temperature),
+        humidity: numberOrNull(data.current?.relative_humidity_2m),
+        pressure: numberOrNull(data.current?.surface_pressure),
+        windKmh: numberOrNull(data.current?.wind_speed_10m),
+        gustKmh: numberOrNull(data.current?.wind_gusts_10m),
+        weatherCode: numberOrNull(data.current?.weather_code),
         condition: this.describeWeatherCode(data.current?.weather_code),
       },
       hourly: this.mapHourly(data),
@@ -89,20 +122,20 @@ export class WeatherProviderService {
     const h = data.hourly;
     if (!h?.time?.length) return [];
 
-    return h.time.map((time: string, index: number) => ({
-      time,
-      temperature: h.temperature_2m?.[index] ?? null,
-      feelsLike: h.apparent_temperature?.[index] ?? null,
-      humidity: h.relative_humidity_2m?.[index] ?? null,
-      pressure: h.surface_pressure?.[index] ?? null,
-      rainChance: h.precipitation_probability?.[index] ?? null,
-      precipitationMm: h.precipitation?.[index] ?? null,
-      rainMm: h.rain?.[index] ?? null,
-      showersMm: h.showers?.[index] ?? null,
-      weatherCode: h.weather_code?.[index] ?? null,
+    return h.time.map((time: number, index: number) => ({
+      time: instant(time),
+      temperature: numberOrNull(h.temperature_2m?.[index]),
+      feelsLike: numberOrNull(h.apparent_temperature?.[index]),
+      humidity: numberOrNull(h.relative_humidity_2m?.[index]),
+      pressure: numberOrNull(h.surface_pressure?.[index]),
+      rainChance: numberOrNull(h.precipitation_probability?.[index]),
+      precipitationMm: numberOrNull(h.precipitation?.[index]),
+      rainMm: numberOrNull(h.rain?.[index]),
+      showersMm: numberOrNull(h.showers?.[index]),
+      weatherCode: numberOrNull(h.weather_code?.[index]),
       condition: this.describeWeatherCode(h.weather_code?.[index]),
-      windKmh: h.wind_speed_10m?.[index] ?? null,
-      gustKmh: h.wind_gusts_10m?.[index] ?? null,
+      windKmh: numberOrNull(h.wind_speed_10m?.[index]),
+      gustKmh: numberOrNull(h.wind_gusts_10m?.[index]),
     }));
   }
 
@@ -110,16 +143,16 @@ export class WeatherProviderService {
     const d = data.daily;
     if (!d?.time?.length) return [];
 
-    return d.time.map((date: string, index: number) => ({
-      date,
-      tempMax: d.temperature_2m_max?.[index] ?? null,
-      tempMin: d.temperature_2m_min?.[index] ?? null,
-      rainTotalMm: d.precipitation_sum?.[index] ?? null,
-      rainChanceMax: d.precipitation_probability_max?.[index] ?? null,
-      weatherCode: d.weather_code?.[index] ?? null,
+    return d.time.map((date: number, index: number) => ({
+      date: instant(date) ? new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Sofia', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(date * 1000)) : '',
+      tempMax: numberOrNull(d.temperature_2m_max?.[index]),
+      tempMin: numberOrNull(d.temperature_2m_min?.[index]),
+      rainTotalMm: numberOrNull(d.precipitation_sum?.[index]),
+      rainChanceMax: numberOrNull(d.precipitation_probability_max?.[index]),
+      weatherCode: numberOrNull(d.weather_code?.[index]),
       condition: this.describeWeatherCode(d.weather_code?.[index]),
-      windMaxKmh: d.wind_speed_10m_max?.[index] ?? null,
-      gustMaxKmh: d.wind_gusts_10m_max?.[index] ?? null,
+      windMaxKmh: numberOrNull(d.wind_speed_10m_max?.[index]),
+      gustMaxKmh: numberOrNull(d.wind_gusts_10m_max?.[index]),
     }));
   }
 
@@ -151,24 +184,15 @@ export class WeatherProviderService {
     return code == null ? 'Unknown' : map[code] ?? `Weather code ${code}`;
   }
 
-  private getFallbackSnapshot() {
+  private getFallbackSnapshot(): WeatherSnapshot {
     return {
-      location: 'Vidin',
-      provider: 'fallback',
+      location: 'Vidin', coordinates: { latitude: 43.9916, longitude: 22.8728 },
+      provider: 'open-meteo', availability: 'unavailable',
+      units: { temperature: 'celsius', wind: 'km/h', precipitation: 'mm' },
       fetchedAt: new Date().toISOString(),
-      current: {
-        temperature: 22,
-        feelsLike: 22,
-        humidity: 55,
-        pressure: 1014,
-        windKmh: 48,
-        gustKmh: 72,
-        condition: 'Thunderstorms',
-        weatherCode: 95,
-      },
-      hourly: [],
-      daily: [],
-      alerts: [],
+      current: { time: null, temperature: null, feelsLike: null, humidity: null,
+        pressure: null, windKmh: null, gustKmh: null, condition: 'Unavailable', weatherCode: null },
+      hourly: [], daily: [], alerts: [],
     };
   }
 }

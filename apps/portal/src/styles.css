@@ -2138,6 +2138,15 @@ pre {
   background: #f8fbff;
 }
 
+.approved-discovery-card {
+  cursor: pointer;
+}
+
+.approved-discovery-card:hover {
+  border-color: rgba(22, 179, 100, 0.34);
+  background: #f6fffb;
+}
+
 .discovery-source {
   display: inline-flex;
   min-height: 26px;
@@ -2148,6 +2157,11 @@ pre {
   color: #194bcb;
   font-size: 12px;
   font-weight: 800;
+}
+
+.discovery-source.approved {
+  border-color: rgba(22, 179, 100, 0.24);
+  color: #057647;
 }
 
 .discovery-card h3 {
@@ -2776,6 +2790,16 @@ pre {
   border-color: rgba(40, 99, 230, 0.35);
   background: #0d141b;
   color: #a9c4ff;
+}
+
+.theme-dark .approved-discovery-card:hover {
+  border-color: rgba(52, 211, 153, 0.36);
+  background: #07150f;
+}
+
+.theme-dark .discovery-source.approved {
+  border-color: rgba(52, 211, 153, 0.34);
+  color: #86efac;
 }
 
 .theme-dark .trust-pill {
@@ -4209,4 +4233,3 @@ pre {
   background:#fef2f2;
   color:#b42318;
 }
-

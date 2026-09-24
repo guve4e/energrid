@@ -1,209 +1,47 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { Pool } from 'pg';
-
 import { PG_POOL } from '../../../db.module';
-
-type Direction = 'rising' | 'falling' | 'stable' | 'unknown';
-
-interface DueForecast {
-  id: string;
-  station: string;
-  targetAt: Date;
-  observedLevelAtIssue: number;
-  predictedLevel: number;
-  predictedMin: number | null;
-  predictedMax: number | null;
-  predictedDirection: Direction;
-}
+import { riverDirection, scoreForecast } from '../../../forecast/forecast-verification';
 
 @Injectable()
 export class RiverForecastEvaluatorService {
-  private readonly logger = new Logger(RiverForecastEvaluatorService.name);
-
-  private readonly matchToleranceMinutes = 90;
-
-  constructor(
-    @Inject(PG_POOL)
-    private readonly pool: Pool,
-  ) {}
+  constructor(@Inject(PG_POOL) private readonly pool: Pool) {}
 
   async evaluateDueForecasts(limit = 100) {
-    const forecasts = await this.findDueForecasts(limit);
-
+    const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(Math.floor(limit), 1000)) : 100;
+    // Complete the +/-90 minute window, preserve gauge/provider identity, and
+    // match before LIMIT so old forecasts without readings cannot starve newer ones.
+    const due = await this.pool.query(`SELECT f.id, f.predicted_level::float AS predicted,
+      f.predicted_min::float AS minimum,f.predicted_max::float AS maximum,
+      f.observed_level_at_issue::float AS baseline,f.predicted_direction AS direction,
+      r.level_cm::float AS actual,r.fetched_at AS "readingAt",r.provider
+      FROM river_forecasts f JOIN LATERAL (
+        SELECT r.* FROM river_readings r
+        WHERE lower(r.station)=lower(f.station)
+          AND r.provider=f.input_snapshot->'sourceReading'->>'provider'
+          AND r.level_cm IS NOT NULL
+          AND r.level_cm::float>'-Infinity'::float8 AND r.level_cm::float<'Infinity'::float8
+          AND r.fetched_at>f.issued_at AND r.fetched_at>f.created_at
+          AND r.fetched_at BETWEEN f.target_at-interval '90 minutes' AND f.target_at+interval '90 minutes'
+        ORDER BY abs(extract(epoch FROM r.fetched_at-f.target_at)),r.fetched_at,r.level_cm LIMIT 1
+      ) r ON true
+      WHERE f.evaluated_at IS NULL AND f.verification_version='river-score-v2'
+        AND f.target_at+interval '90 minutes'<=now()
+        AND f.created_at<f.target_at AND f.issued_at<f.target_at
+      ORDER BY f.target_at,f.id LIMIT $1`, [safeLimit]);
     let evaluated = 0;
-    let awaitingReading = 0;
-
-    for (const forecast of forecasts) {
-      const actual = await this.findClosestReading(
-        forecast.station,
-        forecast.targetAt,
-      );
-
-      if (!actual) {
-        awaitingReading += 1;
-        continue;
-      }
-
-      const signedError = actual.levelCm - forecast.predictedLevel;
-
-      const absoluteError = Math.abs(signedError);
-
-      const rangeHit =
-        forecast.predictedMin == null || forecast.predictedMax == null
-          ? null
-          : actual.levelCm >= forecast.predictedMin &&
-            actual.levelCm <= forecast.predictedMax;
-
-      const actualDirection = this.directionFromChange(
-        actual.levelCm - forecast.observedLevelAtIssue,
-      );
-
-      const directionCorrect =
-        forecast.predictedDirection === 'unknown'
-          ? null
-          : actualDirection === forecast.predictedDirection;
-
-      const result = await this.pool.query(
-        `
-          UPDATE river_forecasts
-          SET
-            actual_level = $2,
-            signed_error = $3,
-            absolute_error = $4,
-            range_hit = $5,
-            direction_correct = $6,
-            evaluated_at = now()
-          WHERE id = $1
-            AND evaluated_at IS NULL
-          RETURNING id
-          `,
-        [
-          forecast.id,
-          actual.levelCm,
-          signedError,
-          absoluteError,
-          rangeHit,
-          directionCorrect,
-        ],
-      );
-
-      if (result.rowCount) {
-        evaluated += 1;
-      }
+    for (const f of due.rows) {
+      if (![f.predicted, f.actual, f.baseline].every(Number.isFinite)) continue;
+      const score = scoreForecast(f.predicted, f.actual, f.minimum, f.maximum);
+      const result = await this.pool.query(`UPDATE river_forecasts SET actual_level=$2,signed_error=$3,
+        absolute_error=$4,range_hit=$5,direction_correct=$6,evaluated_at=now(),actual_provider=$7,
+        actual_reading_at=$8,observation_time_basis='provider-time-unverified',baseline_absolute_error=$9
+        WHERE id=$1 AND evaluated_at IS NULL RETURNING id`,
+      [f.id,f.actual,score.signedError,score.absoluteError,score.rangeHit,
+        f.direction === 'unknown' ? null : f.direction === riverDirection(f.actual-f.baseline),
+        f.provider,f.readingAt,Math.abs(f.actual-f.baseline)]);
+      evaluated += result.rowCount ?? 0;
     }
-
-    if (forecasts.length || evaluated) {
-      this.logger.log(
-        [
-          'Forecast evaluation complete',
-          `due=${forecasts.length}`,
-          `evaluated=${evaluated}`,
-          `awaitingReading=${awaitingReading}`,
-        ].join(' '),
-      );
-    }
-
-    return {
-      due: forecasts.length,
-      evaluated,
-      awaitingReading,
-    };
-  }
-
-  private async findDueForecasts(limit: number): Promise<DueForecast[]> {
-    const result = await this.pool.query(
-      `
-        SELECT
-          id::text AS id,
-          station,
-          target_at AS "targetAt",
-
-          observed_level_at_issue::float
-            AS "observedLevelAtIssue",
-
-          predicted_level::float
-            AS "predictedLevel",
-
-          predicted_min::float
-            AS "predictedMin",
-
-          predicted_max::float
-            AS "predictedMax",
-
-          predicted_direction
-            AS "predictedDirection"
-
-        FROM river_forecasts
-
-        WHERE evaluated_at IS NULL
-          AND target_at <= now()
-
-        ORDER BY target_at ASC
-
-        LIMIT $1
-        `,
-      [Math.max(1, Math.min(limit, 1000))],
-    );
-
-    return result.rows;
-  }
-
-  private async findClosestReading(
-    station: string,
-    targetAt: Date,
-  ): Promise<{
-    levelCm: number;
-    fetchedAt: Date;
-  } | null> {
-    const tolerance = `${this.matchToleranceMinutes} minutes`;
-
-    const result = await this.pool.query(
-      `
-        SELECT
-          level_cm::float AS "levelCm",
-          fetched_at AS "fetchedAt"
-
-        FROM river_readings
-
-        WHERE lower(station) =
-              lower($1)
-
-          AND level_cm IS NOT NULL
-
-          AND fetched_at BETWEEN
-              $2::timestamptz -
-                $3::interval
-              AND
-              $2::timestamptz +
-                $3::interval
-
-        ORDER BY
-          abs(
-            extract(
-              epoch FROM (
-                fetched_at -
-                $2::timestamptz
-              )
-            )
-          ) ASC
-
-        LIMIT 1
-        `,
-      [station, targetAt, tolerance],
-    );
-
-    return result.rows[0] ?? null;
-  }
-
-  private directionFromChange(changeCm: number): Exclude<Direction, 'unknown'> {
-    if (changeCm >= 2) {
-      return 'rising';
-    }
-
-    if (changeCm <= -2) {
-      return 'falling';
-    }
-
-    return 'stable';
+    return { due: due.rows.length, evaluated, observationTimeBasis: 'provider-time-unverified' };
   }
 }

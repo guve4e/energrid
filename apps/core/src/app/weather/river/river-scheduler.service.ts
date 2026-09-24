@@ -8,12 +8,14 @@ import {
 import { RiverForecastRecorderService } from './forecast-monitoring/river-forecast-recorder.service';
 import { RiverCollectorService } from './river-collector.service';
 import { RiverService } from './river.service';
+import { RiverForecastEvaluatorService } from './forecast-monitoring/river-forecast-evaluator.service';
 
 @Injectable()
 export class RiverSchedulerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RiverSchedulerService.name);
 
   private timer: NodeJS.Timeout | null = null;
+  private running = false;
 
   constructor(
     private readonly collector: RiverCollectorService,
@@ -21,6 +23,7 @@ export class RiverSchedulerService implements OnModuleInit, OnModuleDestroy {
     private readonly riverService: RiverService,
 
     private readonly forecastRecorder: RiverForecastRecorderService,
+    private readonly forecastEvaluator: RiverForecastEvaluatorService,
   ) {}
 
   onModuleInit() {
@@ -54,6 +57,8 @@ export class RiverSchedulerService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async collectForecastAndEvaluateSafe() {
+    if (this.running) return;
+    this.running = true;
     try {
       const collection = await this.collector.collectNow();
 
@@ -75,6 +80,10 @@ export class RiverSchedulerService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(
         `River collection/forecast cycle failed: ${String(error)}`,
       );
+    } finally {
+      try { await this.forecastEvaluator.evaluateDueForecasts(); }
+      catch (error) { this.logger.warn(`River evaluation failed: ${String(error)}`); }
+      this.running = false;
     }
   }
 }

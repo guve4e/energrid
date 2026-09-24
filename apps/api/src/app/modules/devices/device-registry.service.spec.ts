@@ -1,6 +1,8 @@
 import { DeviceRegistryService } from './device-registry.service';
 
 describe('DeviceRegistryService', () => {
+  afterEach(() => {});
+
   const originalEnv = process.env;
 
   beforeEach(() => {
@@ -129,6 +131,55 @@ describe('DeviceRegistryService', () => {
     expect(snapshot.summary.discovered).toBe(1);
   });
 
+  it('approves and blocks discovered devices from onboarding', () => {
+    process.env.HOME_DISCOVERED_DEVICES_JSON = JSON.stringify([
+      {
+        id: 'shelly-new-channel',
+        displayName: 'Shelly new channel',
+        suggestedRoom: 'Kitchen',
+        protocol: 'mqtt',
+        transport: 'mqtt',
+        driver: 'shelly-rpc',
+        target: 'shellyplus1-new',
+        capabilities: ['switch'],
+        confidence: 0.8,
+      },
+      {
+        id: 'shelly-ignore-channel',
+        displayName: 'Shelly ignore channel',
+        protocol: 'mqtt',
+        capabilities: ['power'],
+      },
+    ]);
+
+    const service = new DeviceRegistryService();
+
+    const approved = service.approveDiscoveredDevice('shelly-new-channel');
+    expect(approved).toEqual(
+      expect.objectContaining({
+        id: 'shelly-new-channel',
+        trustStatus: 'approved',
+        zoneName: 'Kitchen',
+        adapter: expect.objectContaining({
+          configured: true,
+          target: 'shellyplus1-new',
+        }),
+      }),
+    );
+
+    expect(service.blockDiscoveredDevice('shelly-ignore-channel')).toBe(true);
+
+    const snapshot = service.getSnapshot();
+    expect(
+      snapshot.devices.find((device) => device.id === 'shelly-new-channel')
+        ?.trustStatus,
+    ).toBe('approved');
+    expect(
+      snapshot.devices.find((device) => device.id === 'shelly-ignore-channel'),
+    ).toBeUndefined();
+    expect(snapshot.summary.discovered).toBe(0);
+  });
+
   it('tracks a pending command until matching telemetry acknowledges it', () => {
     const service = new DeviceRegistryService();
 
@@ -161,6 +212,92 @@ describe('DeviceRegistryService', () => {
         .getSnapshot()
         .devices.find((device) => device.id === 'kitchen_light')?.state.command,
     ).toEqual(expect.objectContaining({ status: 'acked' }));
+  });
+
+  it('stores a running diagnosis when an execution is created', () => {
+    const service = new DeviceRegistryService();
+
+    service.markDeviceCommandPending('kitchen_light', {
+      action: 'turn_on',
+      expectedValues: { on: true },
+      ttlMs: 5000,
+    });
+
+    const trace = service.getExecutionTraces()[0];
+
+    expect(trace).toEqual(
+      expect.objectContaining({
+        deviceId: 'kitchen_light',
+        outcome: 'running',
+        diagnosis: expect.objectContaining({
+          category: 'unknown',
+          stage: 'settling',
+          confidence: 1,
+        }),
+      }),
+    );
+  });
+
+  it('stores an acknowledgement-missing diagnosis when an execution times out', () => {
+    const service = new DeviceRegistryService();
+
+    service.markDeviceCommandPending('kitchen_light', {
+      action: 'turn_on',
+      expectedValues: { on: true },
+      ttlMs: 1,
+    });
+
+    jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 10);
+
+    const trace = service.getExecutionTraces()[0];
+
+    expect(trace).toEqual(
+      expect.objectContaining({
+        deviceId: 'kitchen_light',
+        outcome: 'timed_out',
+        diagnosis: expect.objectContaining({
+          category: 'ack_missing',
+          stage: 'telemetry',
+          confidence: 0.95,
+        }),
+      }),
+    );
+  });
+
+  it('stores a successful diagnosis after matching telemetry settles', () => {
+    const service = new DeviceRegistryService();
+
+    const baseNow = Date.now();
+
+    service.markDeviceCommandPending('kitchen_light', {
+      action: 'turn_on',
+      expectedValues: { on: true },
+      ttlMs: 5000,
+    });
+
+    service.ingestDeviceTelemetry({
+      deviceId: 'kitchen_light',
+      values: { on: true },
+      observedAt: new Date(baseNow + 10).toISOString(),
+    });
+
+    jest.spyOn(Date, 'now').mockReturnValue(baseNow + 3000);
+
+    const trace = service.getExecutionTraces()[0];
+
+    expect(trace).toEqual(
+      expect.objectContaining({
+        deviceId: 'kitchen_light',
+        outcome: 'settled',
+        diagnosis: expect.objectContaining({
+          category: 'success',
+          stage: 'settling',
+          confidence: 1,
+        }),
+      }),
+    );
+
+    jest.restoreAllMocks();
   });
 
   it('imports approved site devices from the legacy Shelly registry shape', () => {

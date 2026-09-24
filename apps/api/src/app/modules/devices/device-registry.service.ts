@@ -12,6 +12,7 @@ import type {
   ShellyRpcDeviceConfig,
 } from './device-registry.types';
 import { OperationalLogService } from './operational-log.service';
+import { DeviceExecutionInvestigator } from './investigation/device-execution-investigator';
 
 export interface DiscoveredDeviceConfig {
   id?: string;
@@ -101,6 +102,7 @@ export class DeviceRegistryService {
     string,
     DiscoveredDeviceConfig
   >();
+  private readonly blockedDiscoveredDeviceIds = new Set<string>();
   private readonly liveStateByDeviceId = new Map<
     string,
     RegisteredDeviceState
@@ -112,6 +114,8 @@ export class DeviceRegistryService {
       displayUntil: number;
     }
   >();
+
+  private readonly executionInvestigator = new DeviceExecutionInvestigator();
 
   private readonly executionTraceByCommandId = new Map<
     string,
@@ -370,6 +374,97 @@ export class DeviceRegistryService {
           device.adapter.configured || device.adapter.protocol === 'simulated',
       )
       .map((device) => device.id);
+  }
+
+  approveDiscoveredDevice(deviceId: string): RegisteredDevice | null {
+    const id = safeId(deviceId);
+    if (!id) return null;
+
+    const discovered = this.getDevices().find(
+      (device) => device.id === id && device.trustStatus === 'discovered',
+    );
+    if (!discovered) return null;
+
+    const capabilities = discovered.capabilities.map(
+      (capability) => capability.kind,
+    );
+    const approved: ApprovedDeviceConfig = {
+      id: discovered.id,
+      displayName:
+        discovered.discovery?.suggestedName || discovered.displayName,
+      tenantId: discovered.tenantId,
+      siteId: discovered.siteId,
+      siteName: discovered.siteName,
+      gatewayId: discovered.gatewayId,
+      kind: discovered.kind,
+      zoneId: discovered.zoneId,
+      zoneName:
+        discovered.discovery?.suggestedRoom || discovered.zoneName,
+      protocol: discovered.adapter.protocol,
+      transport: discovered.adapter.transport,
+      driver: discovered.adapter.driver,
+      target: discovered.adapter.target,
+      bridge: discovered.adapter.bridge,
+      configured: discovered.adapter.protocol !== 'none',
+      capabilities,
+      values: discovered.state.values,
+      state: {
+        values: discovered.state.values,
+        observedAt: discovered.state.observedAt,
+        source: discovered.state.source,
+        status: discovered.state.status,
+      },
+      metadata: cleanMetadata({
+        approvedFromDiscovery: true,
+        discoverySource: discovered.discovery?.source,
+        discoveryConfidence: discovered.discovery?.confidence,
+      }),
+    };
+
+    this.liveApprovedDeviceConfigs.set(id, approved);
+    this.liveDiscoveredDeviceConfigs.delete(id);
+    this.blockedDiscoveredDeviceIds.delete(id);
+    this.operationalLog?.record({
+      level: 'info',
+      source: 'device-registry',
+      event: 'discovery.approved',
+      message: `${discovered.displayName} was approved for Energrid control.`,
+      deviceId: id,
+      status: 'approved',
+      details: {
+        protocol: discovered.adapter.protocol,
+        driver: discovered.adapter.driver,
+      },
+    });
+
+    return (
+      this.getDevices().find(
+        (device) => device.id === id && device.trustStatus === 'approved',
+      ) || null
+    );
+  }
+
+  blockDiscoveredDevice(deviceId: string): boolean {
+    const id = safeId(deviceId);
+    if (!id) return false;
+
+    const discovered = this.getDevices().find(
+      (device) => device.id === id && device.trustStatus === 'discovered',
+    );
+    if (!discovered) return false;
+
+    this.blockedDiscoveredDeviceIds.add(id);
+    this.liveDiscoveredDeviceConfigs.delete(id);
+    this.operationalLog?.record({
+      level: 'info',
+      source: 'device-registry',
+      event: 'discovery.blocked',
+      message: `${discovered.displayName} was blocked from onboarding.`,
+      deviceId: id,
+      status: 'blocked',
+    });
+
+    return true;
   }
 
   registerDiscoveredShellyDevice(
@@ -719,7 +814,11 @@ export class DeviceRegistryService {
     return [
       ...parseDiscoveredDevices(process.env.HOME_DISCOVERED_DEVICES_JSON),
       ...parseDiscoveredDevices([...this.liveDiscoveredDeviceConfigs.values()]),
-    ];
+    ].filter(
+      (device) =>
+        !this.liveApprovedDeviceConfigs.has(device.id) &&
+        !this.blockedDiscoveredDeviceIds.has(device.id),
+    );
   }
 
   private getApprovedDevicesFromConfig(): RegisteredDevice[] {
@@ -957,7 +1056,7 @@ export class DeviceRegistryService {
         },
       });
 
-      completeTrace(previousTrace, 'superseded', requestedAt);
+      this.completeExecutionTrace(previousTrace, 'superseded', requestedAt);
     }
 
     const pending = {
@@ -1000,6 +1099,10 @@ export class DeviceRegistryService {
       completedAt: null,
       outcome: 'running',
       durationMs: null,
+      diagnosis: this.executionInvestigator.investigate({
+        outcome: 'running',
+        deviceId,
+      }),
       expiresAt: pending.expiresAt,
       settlingUntil: null,
       lastVerifiedValues: null,
@@ -1075,7 +1178,7 @@ export class DeviceRegistryService {
       message,
     });
 
-    completeTrace(trace, 'failed', now);
+    this.completeExecutionTrace(trace, 'failed', now);
     return publicExecutionTrace(trace);
   }
 
@@ -1312,7 +1415,23 @@ export class DeviceRegistryService {
       },
     });
 
-    completeTrace(trace, 'drifted', observedAt);
+    this.completeExecutionTrace(trace, 'drifted', observedAt);
+  }
+
+  private completeExecutionTrace(
+    trace: DeviceExecutionTrace & {
+      expiresAt: number;
+      settlingUntil: number | null;
+      lastVerifiedValues: Record<
+        string,
+        number | boolean | string | null
+      > | null;
+    },
+    outcome: Exclude<DeviceExecutionTrace['outcome'], 'running'>,
+    completedAt: string,
+  ): void {
+    completeTrace(trace, outcome, completedAt);
+    trace.diagnosis = this.executionInvestigator.investigate(trace);
   }
 
   private refreshExecutionTraces(): void {
@@ -1342,7 +1461,7 @@ export class DeviceRegistryService {
           message: 'The device remained at the requested state.',
         });
 
-        completeTrace(trace, 'settled', completedAt);
+        this.completeExecutionTrace(trace, 'settled', completedAt);
         continue;
       }
 
@@ -1360,7 +1479,7 @@ export class DeviceRegistryService {
           },
         });
 
-        completeTrace(trace, 'timed_out', completedAt);
+        this.completeExecutionTrace(trace, 'timed_out', completedAt);
       }
     }
   }
@@ -1491,6 +1610,7 @@ function publicExecutionTrace(
     completedAt: trace.completedAt,
     outcome: trace.outcome,
     durationMs: trace.durationMs,
+    diagnosis: trace.diagnosis,
     stages: trace.stages.map((stage) => ({
       ...stage,
       evidence: stage.evidence ? { ...stage.evidence } : undefined,

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue';
-import ExecutionTimelineModal from './components/execution/ExecutionTimelineModal.vue'
+import ExecutionTimelineModal from './components/execution/ExecutionTimelineModal.vue';
+import WeatherDashboard from './components/weather/WeatherDashboard.vue';
 
 type LoginResponse = {
   accessToken: string;
@@ -173,22 +174,6 @@ type PortalState = {
     };
   }>;
 
-  deviceDiagnostics?: Array<{
-    deviceId: string;
-    category: string;
-    severity: string;
-    recommendation?: string;
-    explanation: string;
-    evidence: {
-      network: unknown;
-      registry: unknown;
-      telemetry: unknown;
-    };
-    match?: {
-      confidence: number;
-      reason: string;
-    };
-  }>;
   bus?: {
     mqtt: {
       enabled: boolean;
@@ -387,6 +372,8 @@ const state = ref<PortalState | null>(null);
 const loadingState = ref(false);
 const stateError = ref('');
 const scanningNetwork = ref(false);
+const discoveryDecisionBusy = ref<Record<string, string>>({});
+const findingHttpPageByDeviceId = ref<Record<string, boolean>>({});
 const discoveryView = ref<'capable' | 'all'>('capable');
 const mqttTopicFilter = ref('');
 const mqttPublishTopic = ref('');
@@ -460,7 +447,12 @@ const navItems = computed(() => [
   },
   { id: 'bus', label: 'Bus', active: activePage.value === 'bus' },
   { id: 'systems', label: 'Systems', active: activePage.value === 'systems' },
-  { id: 'executions', label: 'Executions', active: activePage.value === 'executions' },
+  { id: 'weather', label: 'Weather', active: activePage.value === 'weather' },
+  {
+    id: 'executions',
+    label: 'Executions',
+    active: activePage.value === 'executions',
+  },
   { id: 'logs', label: 'Logs', active: activePage.value === 'logs' },
 ]);
 
@@ -857,17 +849,18 @@ const filteredApprovedDevices = computed(() => {
 const discoveredDevices = computed(() =>
   deviceCards.value.filter((device) => device.trustStatus === 'discovered'),
 );
-
-
-const deviceDiagnostics = computed(
-  () => state.value?.deviceDiagnostics || [],
+const approvedOnboardingDevices = computed(() =>
+  approvedDevices.value
+    .filter((device) => device.metadata?.approvedFromDiscovery === true)
+    .sort((left, right) => left.displayName.localeCompare(right.displayName)),
 );
+
+const deviceDiagnostics = computed(() => state.value?.deviceDiagnostics || []);
 
 const diagnosticSummary = computed(() => ({
   total: deviceDiagnostics.value.length,
-  errors: deviceDiagnostics.value.filter(
-    (item) => item.severity === 'error',
-  ).length,
+  errors: deviceDiagnostics.value.filter((item) => item.severity === 'error')
+    .length,
   warnings: deviceDiagnostics.value.filter(
     (item) => item.severity === 'warning',
   ).length,
@@ -976,12 +969,11 @@ const selectedDevice = computed(() =>
       ) || null
     : null,
 );
-const selectedDeviceTraces = computed(() =>
-  state.value?.executionTraces
-    ?.filter(
-      (trace) => trace.deviceId === selectedDeviceId.value,
-    )
-    .slice(0, 5) || [],
+const selectedDeviceTraces = computed(
+  () =>
+    state.value?.executionTraces
+      ?.filter((trace) => trace.deviceId === selectedDeviceId.value)
+      .slice(0, 5) || [],
 );
 
 const selectedExecutionTrace = computed(() => {
@@ -1232,10 +1224,50 @@ function setActivePage(pageId: string) {
   }
 }
 
-function logDiscoveryDecision(deviceId: string, action: string) {
-  appendLog(
-    `[discovery] ${action} requested for ${deviceId}; server-side approval flow is next`,
-  );
+async function applyDiscoveryDecision(
+  device: PortalDevice,
+  action: 'approve' | 'block',
+) {
+  if (discoveryDecisionBusy.value[device.id]) return;
+
+  discoveryDecisionBusy.value = {
+    ...discoveryDecisionBusy.value,
+    [device.id]: action,
+  };
+  appendLog(`[discovery] ${action} requested for ${device.displayName}`);
+
+  try {
+    const response = await fetch(
+      `${apiBase}/portal/discovery/${encodeURIComponent(device.id)}/${action}`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken.value}` },
+      },
+    );
+    const result = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(result?.message || `Discovery ${action} failed`);
+    }
+
+    appendLog(`[discovery] ${device.displayName} ${result.status}`);
+    await loadState();
+  } catch (error) {
+    appendLog(
+      `[discovery] ${action} failed for ${device.displayName}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    stateError.value =
+      error instanceof Error ? error.message : `Discovery ${action} failed`;
+  } finally {
+    const next = { ...discoveryDecisionBusy.value };
+    delete next[device.id];
+    discoveryDecisionBusy.value = next;
+  }
+}
+
+function logDiscoveryDecision(device: PortalDevice, action: string) {
+  appendLog(`[discovery] ${action} requested for ${device.displayName}`);
 }
 
 async function scanNetwork() {
@@ -1267,6 +1299,40 @@ async function scanNetwork() {
     appendLog(`[discovery] scan failed: ${stateError.value}`);
   } finally {
     scanningNetwork.value = false;
+  }
+}
+
+async function findApprovedDeviceHttpPage(device: PortalDevice) {
+  if (findingHttpPageByDeviceId.value[device.id]) return;
+
+  findingHttpPageByDeviceId.value = {
+    ...findingHttpPageByDeviceId.value,
+    [device.id]: true,
+  };
+  stateError.value = '';
+  appendLog(`[discovery] finding HTTP page for ${device.displayName}`);
+
+  try {
+    await scanNetwork();
+    const refreshed =
+      deviceCards.value.find((candidate) => candidate.id === device.id) ||
+      device;
+    const url =
+      approvedDeviceSettingsUrl(refreshed) || approvedDeviceProxyUrl(refreshed);
+
+    if (url) {
+      appendLog(`[discovery] HTTP page matched for ${device.displayName}`);
+      window.open(url, '_blank', 'noreferrer');
+      return;
+    }
+
+    const message = `No HTTP page found for ${device.displayName}. It may be MQTT-only, offline, or not reachable from the site brain scan.`;
+    stateError.value = message;
+    appendLog(`[discovery] ${message}`);
+  } finally {
+    const next = { ...findingHttpPageByDeviceId.value };
+    delete next[device.id];
+    findingHttpPageByDeviceId.value = next;
   }
 }
 
@@ -1567,6 +1633,30 @@ function closeExecutionTrace() {
   selectedExecutionTraceId.value = null;
 }
 
+function handleExecutionRecommendation(recommendationId: string) {
+  if (recommendationId === 'inspect-mqtt') {
+    activePage.value = 'mqtt';
+    return;
+  }
+
+  if (recommendationId === 'inspect-device') {
+    const trace = selectedExecutionTrace.value;
+    const device = state.value?.devices?.find(
+      (candidate) => candidate.id === trace?.deviceId,
+    );
+
+    if (device) {
+      selectedDeviceId.value = device.id;
+    }
+
+    return;
+  }
+
+  console.warn(
+    `[EXECUTION RECOMMENDATION] ${recommendationId} is not wired yet`,
+  );
+}
+
 function deviceValuePreview(device: PortalDevice) {
   const command = device.state.command;
   if (command?.status === 'pending') {
@@ -1742,6 +1832,79 @@ function deviceProxyUrl(device: NetworkDevice) {
 
 function canProxyDevice(device: NetworkDevice) {
   return device.status === 'online' && device.protocol === 'http';
+}
+
+function openApprovedDevice(device: PortalDevice) {
+  selectDevice(device);
+  activePage.value = 'devices';
+}
+
+function openApprovedOnboardingTarget(device: PortalDevice) {
+  const url = approvedDeviceSettingsUrl(device) || approvedDeviceProxyUrl(device);
+  if (url) {
+    window.open(url, '_blank', 'noreferrer');
+    return;
+  }
+  openApprovedDevice(device);
+}
+
+function approvedDeviceNetworkMatch(device: PortalDevice) {
+  const identifiers = [
+    device.id,
+    device.adapter.target,
+    device.metadata?.physicalId,
+    device.metadata?.hardwareId,
+    device.metadata?.dst,
+  ]
+    .filter((value): value is string | number | boolean => value != null)
+    .flatMap((value) => identifierVariants(String(value)));
+
+  if (identifiers.length === 0) return null;
+
+  return (
+    networkDevices.value.find((candidate) => {
+      const networkValues = [
+        candidate.id,
+        candidate.hostname,
+        candidate.model,
+        candidate.app,
+        candidate.macAddress,
+        candidate.ipAddress,
+      ]
+        .filter(Boolean)
+        .map((value) => String(value).toLowerCase());
+
+      return identifiers.some((identifier) =>
+        networkValues.some(
+          (value) =>
+            value === identifier ||
+            value.includes(identifier) ||
+            identifier.includes(value),
+        ),
+      );
+    }) || null
+  );
+}
+
+function identifierVariants(value: string) {
+  const lower = value.toLowerCase().trim();
+  const compact = lower.replace(/[^a-z0-9]/g, '');
+  const shelly = lower.match(/shelly[a-z0-9-]+/)?.[0] || '';
+  return [...new Set([lower, compact, shelly].filter(Boolean))];
+}
+
+function approvedDeviceSettingsUrl(device: PortalDevice) {
+  if (device.adapter.protocol === 'http' && device.adapter.target?.startsWith('http')) {
+    return device.adapter.target;
+  }
+  return approvedDeviceNetworkMatch(device)?.settingsUrl || '';
+}
+
+function approvedDeviceProxyUrl(device: PortalDevice) {
+  const networkDevice = approvedDeviceNetworkMatch(device);
+  return networkDevice && canProxyDevice(networkDevice)
+    ? deviceProxyUrl(networkDevice)
+    : '';
 }
 
 function isEnergridCapableNetworkDevice(device: NetworkDevice) {
@@ -3220,7 +3383,6 @@ onBeforeUnmount(() => {
               </div>
             </dl>
           </aside>
-
         </section>
 
         <section
@@ -3534,23 +3696,139 @@ onBeforeUnmount(() => {
                 <button
                   class="primary"
                   type="button"
-                  @click="logDiscoveryDecision(device.id, 'approve')"
+                  :disabled="!!discoveryDecisionBusy[device.id]"
+                  @click="applyDiscoveryDecision(device, 'approve')"
                 >
-                  Approve
+                  {{
+                    discoveryDecisionBusy[device.id] === 'approve'
+                      ? 'Approving...'
+                      : 'Approve'
+                  }}
                 </button>
                 <button
                   class="ghost"
                   type="button"
-                  @click="logDiscoveryDecision(device.id, 'rename')"
+                  :disabled="!!discoveryDecisionBusy[device.id]"
+                  @click="logDiscoveryDecision(device, 'rename')"
                 >
                   Rename
                 </button>
                 <button
                   class="ghost"
                   type="button"
-                  @click="logDiscoveryDecision(device.id, 'block')"
+                  :disabled="!!discoveryDecisionBusy[device.id]"
+                  @click="applyDiscoveryDecision(device, 'block')"
                 >
-                  Block
+                  {{
+                    discoveryDecisionBusy[device.id] === 'block'
+                      ? 'Blocking...'
+                      : 'Block'
+                  }}
+                </button>
+              </div>
+            </article>
+          </div>
+
+          <div class="section-row discovery-section-title">
+            <h3>Approved from onboarding</h3>
+            <span>{{ approvedOnboardingDevices.length }} approved</span>
+          </div>
+
+          <div
+            class="discovery-empty compact"
+            v-if="approvedOnboardingDevices.length === 0"
+          >
+            <strong>No approved onboarding devices yet</strong>
+            <span
+              >Approved devices will stay visible here and also appear on the
+              Devices page.</span
+            >
+          </div>
+
+          <div v-else class="discovery-list">
+            <article
+              v-for="device in approvedOnboardingDevices"
+              :key="`approved-${device.id}`"
+              class="discovery-card approved-discovery-card"
+              role="button"
+              tabindex="0"
+              @click="openApprovedOnboardingTarget(device)"
+              @keydown.enter="openApprovedOnboardingTarget(device)"
+            >
+              <div>
+                <span class="discovery-source approved">approved</span>
+                <h3>{{ device.displayName }}</h3>
+                <p>
+                  {{ device.adapter.driver }} ·
+                  {{ device.adapter.target || device.adapter.protocol }}
+                </p>
+              </div>
+              <dl class="device-facts">
+                <div>
+                  <dt>Room</dt>
+                  <dd>{{ device.zoneName }}</dd>
+                </div>
+                <div>
+                  <dt>Capabilities</dt>
+                  <dd>
+                    {{
+                      device.capabilities
+                        .map((capability) => capability.kind)
+                        .join(', ')
+                    }}
+                  </dd>
+                </div>
+                <div>
+                  <dt>HTTP page</dt>
+                  <dd>
+                    {{
+                      approvedDeviceSettingsUrl(device)
+                        ? 'available'
+                        : 'run scan to match'
+                    }}
+                  </dd>
+                </div>
+              </dl>
+              <div class="discovery-actions">
+                <button
+                  class="primary"
+                  type="button"
+                  @click.stop="openApprovedDevice(device)"
+                >
+                  Open in Devices
+                </button>
+                <a
+                  v-if="approvedDeviceSettingsUrl(device)"
+                  class="ghost-link"
+                  :href="approvedDeviceSettingsUrl(device)"
+                  target="_blank"
+                  rel="noreferrer"
+                  @click.stop
+                >
+                  Open settings
+                </a>
+                <a
+                  v-if="approvedDeviceProxyUrl(device)"
+                  class="ghost-link"
+                  :href="approvedDeviceProxyUrl(device)"
+                  target="_blank"
+                  rel="noreferrer"
+                  @click.stop
+                >
+                  Via gateway
+                </a>
+                <button
+                  v-if="!approvedDeviceSettingsUrl(device)"
+                  class="ghost"
+                  type="button"
+                  :disabled="!!findingHttpPageByDeviceId[device.id]"
+                  @click.stop="findApprovedDeviceHttpPage(device)"
+                >
+                  {{
+                    findingHttpPageByDeviceId[device.id]
+                      ? 'Finding...'
+                      : 'Find HTTP page'
+                  }}
                 </button>
               </div>
             </article>
@@ -3960,8 +4238,8 @@ onBeforeUnmount(() => {
               <p class="eyebrow">Operations</p>
               <h2>Executions</h2>
               <span>
-                Review device commands from request to telemetry,
-                verification, and settlement.
+                Review device commands from request to telemetry, verification,
+                and settlement.
               </span>
             </div>
 
@@ -3970,20 +4248,13 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
-          <div
-            v-if="!state?.executionTraces?.length"
-            class="discovery-empty"
-          >
+          <div v-if="!state?.executionTraces?.length" class="discovery-empty">
             <strong>No executions yet</strong>
-            <span>
-              Run a device command to generate execution history.
-            </span>
+            <span> Run a device command to generate execution history. </span>
           </div>
 
           <div v-else class="network-table-wrap">
-
             <table class="network-table execution-table">
-
               <thead>
                 <tr>
                   <th>Device</th>
@@ -3996,14 +4267,12 @@ onBeforeUnmount(() => {
               </thead>
 
               <tbody>
-
                 <tr
                   v-for="trace in visibleExecutions"
                   :key="trace.id"
                   class="execution-row"
                   @click="openExecutionTrace(trace.id)"
                 >
-
                   <td>
                     <strong>{{ trace.deviceId }}</strong>
                   </td>
@@ -4019,35 +4288,23 @@ onBeforeUnmount(() => {
                   </td>
 
                   <td>
-                    <span
-                      :class="[
-                        'trust-pill',
-                        `execution-${trace.outcome}`
-                      ]"
-                    >
+                    <span :class="['trust-pill', `execution-${trace.outcome}`]">
                       {{ trace.outcome }}
                     </span>
                   </td>
 
-                  <td>
-                    {{ trace.durationMs || 0 }}ms
-                  </td>
+                  <td>{{ trace.durationMs || 0 }}ms</td>
 
                   <td>
                     {{ trace.completedAt || trace.requestedAt }}
                   </td>
-
                 </tr>
-
               </tbody>
-
             </table>
-
           </div>
-
         </section>
 
-<section
+        <section
           v-else-if="activePage === 'logs'"
           class="panel workspace-panel"
         >
@@ -4151,6 +4408,7 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
+        <WeatherDashboard v-else-if="activePage === 'weather'" :api-base="apiBase" :access-token="accessToken" />
         <section v-else class="panel workspace-panel">
           <div class="page-heading">
             <p class="eyebrow">Coming Next</p>
@@ -4164,14 +4422,13 @@ onBeforeUnmount(() => {
         </section>
 
         <p v-if="stateError" class="error">{{ stateError }}</p>
-
       </section>
 
       <ExecutionTimelineModal
         :trace="selectedExecutionTrace"
         @close="closeExecutionTrace"
+        @recommendation="handleExecutionRecommendation"
       />
-
     </section>
   </main>
 </template>

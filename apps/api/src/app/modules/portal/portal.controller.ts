@@ -9,6 +9,7 @@ import {
   Req,
   Res,
   Sse,
+  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common'
 import { ApiExcludeController } from '@nestjs/swagger'
@@ -16,6 +17,7 @@ import { map } from 'rxjs'
 import { DeviceControlService } from '../devices/device-control.service'
 import { DeviceLanDiscoveryService } from '../devices/device-lan-discovery.service'
 import { DeviceMqttIngestService } from '../devices/device-mqtt-ingest.service'
+import { DeviceRegistryService } from '../devices/device-registry.service'
 import {
   type DeviceProxyRequest,
   type DeviceProxyResponse,
@@ -32,6 +34,7 @@ export class PortalController {
     private readonly deviceProxy: PortalDeviceProxyService,
     private readonly deviceControl: DeviceControlService,
     private readonly mqttIngest: DeviceMqttIngestService,
+    private readonly deviceRegistry: DeviceRegistryService,
   ) {}
 
   @Get()
@@ -86,6 +89,32 @@ export class PortalController {
     return this.deviceControl.execute(deviceId, body?.action)
   }
 
+  @Post('discovery/:deviceId/approve')
+  approveDiscoveredDevice(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+    const device = this.deviceRegistry.approveDiscoveredDevice(deviceId)
+    if (!device) {
+      throw new NotFoundException(`Discovered device ${deviceId} was not found.`)
+    }
+    return { status: 'approved', device }
+  }
+
+  @Post('discovery/:deviceId/block')
+  blockDiscoveredDevice(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+    const blocked = this.deviceRegistry.blockDiscoveredDevice(deviceId)
+    if (!blocked) {
+      throw new NotFoundException(`Discovered device ${deviceId} was not found.`)
+    }
+    return { status: 'blocked', deviceId }
+  }
+
   @All('device-proxy/:deviceId')
   proxyDeviceRoot(
     @Param('deviceId') deviceId: string,
@@ -107,7 +136,7 @@ export class PortalController {
   }
 }
 
-function assertPortalControlToken(request: DeviceProxyRequest): void {
+export function assertPortalControlToken(request: DeviceProxyRequest): void {
   const expected = process.env.PORTAL_CONTROL_TOKEN || 'dev-token-admin'
   const authorization = request.headers.authorization
   const headerToken = Array.isArray(authorization)

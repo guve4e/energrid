@@ -1,13 +1,26 @@
 import { Injectable } from '@nestjs/common';
 
+import { assessWeather, forecastWindow, HIGH_WIND_KMH, WeatherSnapshot } from './weather-data-quality';
+
+const radarUnavailable = { status: 'unavailable', stormDirection: null, nearestCell: null, eta: null, trend: null };
+
 type RiskLevel = 'normal' | 'watch' | 'danger';
 
 @Injectable()
 export class WeatherIntelligenceService {
-  analyze(snapshot: any, river: any, riskReport: any) {
-    const hourly = snapshot.hourly || [];
-    const currentTime = snapshot.current?.time;
-    const startIndex = this.findCurrentHourIndex(hourly, currentTime);
+  analyze(snapshot: WeatherSnapshot, river: any, riskReport: any) {
+    const dataQuality = assessWeather(snapshot);
+    if (!dataQuality.forecastUsable) return {
+      headline: 'Weather assessment unavailable', severity: 'unknown', confidence: 'unavailable',
+      subtitle: 'Weather data is missing, incomplete or stale. Do not infer safe conditions.',
+      recommendations: ['Check weather sources before making weather-dependent decisions.'],
+      today: { tempMax: null, tempMin: null, windMaxKmh: null, gustMaxKmh: null, rainTotalMm: null, rainChanceMax: null },
+      daily: [], timeline: [], dataQuality,
+      risks: { vehicleHail: 'unknown', stormEta: 'unknown', windDanger: 'unknown', floodConcern: 'unknown' },
+      radarSummary: radarUnavailable,
+    };
+    const hourly = forecastWindow(snapshot);
+    const startIndex = 0;
 
     const next12h = hourly
       .slice(startIndex, startIndex + 12)
@@ -26,19 +39,19 @@ export class WeatherIntelligenceService {
 
     const next6h = next12h.slice(0, 7);
 
-    const hasThunderstorm = this.hasWeatherCode(next6h, [95, 96, 99]);
-    const hasHail = this.hasWeatherCode(next6h, [96, 99]);
-    const maxGust = this.max(next6h.map((h: any) => h.gustKmh));
+    const hasThunderstorm = this.hasWeatherCode([snapshot.current, ...next6h], [95, 96, 99]);
+    const hasHail = this.hasWeatherCode([snapshot.current, ...next6h], [96, 99]);
+    const maxGust = this.max([snapshot.current.gustKmh, ...next6h.map((h: any) => h.gustKmh)]);
     const maxRainChance = this.max(next6h.map((h: any) => h.rainChance));
 
     const vehicleHail = hasHail ? 'move vehicle' : hasThunderstorm ? 'monitor' : 'low';
-    const windDanger = maxGust >= 70 ? 'secure now' : maxGust >= 45 ? 'monitor' : 'low';
+    const windDanger = maxGust >= HIGH_WIND_KMH ? 'secure now' : maxGust >= 45 ? 'monitor' : 'low';
     const stormEta = this.findFirstRiskEta(next6h);
     const floodConcern =
-      river?.trend === 'rising' && river?.difference24hCm > 50 ? 'watch' : 'none';
+      !river ? 'unknown' : river.trend === 'rising' && river.difference24hCm > 50 ? 'watch' : 'none';
 
     const severity: RiskLevel =
-      hasHail || maxGust >= 70
+      hasHail || maxGust >= HIGH_WIND_KMH
         ? 'danger'
         : hasThunderstorm || maxGust >= 45 || maxRainChance >= 50
           ? 'watch'
@@ -50,21 +63,22 @@ export class WeatherIntelligenceService {
           ? 'Action needed'
           : severity === 'watch'
             ? 'Watch conditions'
-            : 'Clear next 6 hours',
+            : 'No elevated risk in available forecast',
 
       severity,
-      confidence: 'medium',
+      confidence: 'single-source',
+      dataQuality,
 
       subtitle:
         severity === 'normal'
-          ? 'No hail or severe storm activity detected near your location.'
+          ? 'This forecast model shows no elevated risk in the next six hours; this is not a radar observation.'
           : 'Weather risk is building. Monitor radar and alerts.',
 
       recommendations:
         severity === 'normal'
           ? [
               'No urgent action.',
-              'Vehicle can stay outside for now.',
+              'Check independent warnings before weather-dependent decisions.',
               'Keep normal monitoring active.',
             ]
           : [
@@ -79,17 +93,12 @@ export class WeatherIntelligenceService {
 
       risks: {
         vehicleHail,
-        stormEta: stormEta || 'clear 6h',
+        stormEta: stormEta || 'none forecast',
         windDanger,
         floodConcern,
       },
 
-      radarSummary: {
-        stormDirection: hasThunderstorm ? 'organized cells possible' : 'no organized cell',
-        nearestCell: hasThunderstorm ? 'monitor radar sector' : 'none nearby',
-        eta: stormEta || 'clear 6h',
-        trend: severity === 'normal' ? 'flat' : 'building',
-      },
+      radarSummary: radarUnavailable,
 
       timeline: next12h,
     };
@@ -124,19 +133,6 @@ export class WeatherIntelligenceService {
 
   private hasWeatherCode(hours: any[], codes: number[]) {
     return hours.some((hour) => codes.includes(hour.weatherCode));
-  }
-
-  private findCurrentHourIndex(hourly: any[], currentTime?: string) {
-    if (!hourly.length) return 0;
-    if (!currentTime) return 0;
-
-    const current = new Date(currentTime).getTime();
-
-    const exact = hourly.findIndex((hour) => hour.time === currentTime);
-    if (exact >= 0) return exact;
-
-    const firstFuture = hourly.findIndex((hour) => new Date(hour.time).getTime() >= current);
-    return firstFuture >= 0 ? firstFuture : 0;
   }
 
   private max(values: Array<number | null | undefined>) {

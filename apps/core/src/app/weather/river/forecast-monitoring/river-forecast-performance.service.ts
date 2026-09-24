@@ -11,7 +11,7 @@ export class RiverForecastPerformanceService {
   ) {}
 
   async getPerformance(station: string, days = 90) {
-    const safeDays = Math.max(1, Math.min(days, 3650));
+    const safeDays = Number.isFinite(days) ? Math.max(1, Math.min(Math.floor(days), 3650)) : 90;
 
     const summary = await this.pool.query(
       `
@@ -21,6 +21,14 @@ export class RiverForecastPerformanceService {
             AS "modelVersion",
           horizon_hours
             AS "horizonHours",
+          verification_version AS "verificationVersion",
+          observation_time_basis AS "observationTimeBasis",
+          actual_provider AS "observationSource",
+          avg(baseline_absolute_error)::float AS "baselineMaeCm",
+          CASE WHEN avg(baseline_absolute_error)>0
+            THEN 1-avg(absolute_error)/avg(baseline_absolute_error) END::float AS "skillVsPersistence",
+          count(range_hit)::int AS "rangeSamples",
+          count(direction_correct)::int AS "directionSamples",
 
           count(*)::int
             AS samples,
@@ -89,7 +97,7 @@ export class RiverForecastPerformanceService {
         GROUP BY
           station,
           model_version,
-          horizon_hours
+          horizon_hours,verification_version,observation_time_basis,actual_provider
 
         ORDER BY
           model_version,
@@ -113,6 +121,7 @@ export class RiverForecastPerformanceService {
               lower($1)
 
           AND evaluated_at IS NULL
+          AND issued_at >= now() - make_interval(days => $2)
 
         GROUP BY
           horizon_hours
@@ -120,7 +129,7 @@ export class RiverForecastPerformanceService {
         ORDER BY
           horizon_hours
         `,
-      [station],
+      [station, safeDays],
     );
 
     const recent = await this.pool.query(
@@ -163,7 +172,11 @@ export class RiverForecastPerformanceService {
           confidence,
 
           confidence_score::float
-            AS "confidenceScore"
+            AS "confidenceScore",
+          verification_version AS "verificationVersion",
+          observation_time_basis AS "observationTimeBasis",
+          actual_reading_at AS "actualReadingAt",
+          actual_provider AS "observationSource"
 
         FROM river_forecasts
 
@@ -171,18 +184,20 @@ export class RiverForecastPerformanceService {
               lower($1)
 
           AND evaluated_at IS NOT NULL
+          AND issued_at >= now() - make_interval(days => $2)
 
         ORDER BY
           evaluated_at DESC
 
         LIMIT 20
         `,
-      [station],
+      [station, safeDays],
     );
 
     return {
       station,
       windowDays: safeDays,
+      note: 'Legacy scores are separate. River provider timestamps are not verified observation times; scores are provisional. Confidence scores are heuristic, not calibrated probabilities.',
 
       summary: summary.rows.map((row) => ({
         ...row,

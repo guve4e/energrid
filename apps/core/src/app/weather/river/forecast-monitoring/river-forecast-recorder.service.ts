@@ -53,7 +53,7 @@ interface RiverForecastDashboard {
 export class RiverForecastRecorderService {
   private readonly logger = new Logger(RiverForecastRecorderService.name);
 
-  private readonly modelVersion = 'vidin-local-linear-v1';
+  private readonly modelVersion = 'vidin-local-linear-v2';
 
   constructor(
     @Inject(PG_POOL)
@@ -67,7 +67,7 @@ export class RiverForecastRecorderService {
 
     if (
       !main ||
-      main.levelCm == null ||
+      main.levelCm == null || !Number.isFinite(Number(main.levelCm)) || !main.provider ||
       !main.fetchedAt ||
       !forecast?.projection
     ) {
@@ -82,9 +82,12 @@ export class RiverForecastRecorderService {
       };
     }
 
-    const issuedAt = new Date(main.fetchedAt);
+    const readingAt = new Date(main.fetchedAt);
+    // Forecast issue time is when it was made, never the timestamp of an older input.
+    const issuedAt = new Date();
 
-    if (Number.isNaN(issuedAt.getTime())) {
+    if (Number.isNaN(readingAt.getTime()) || readingAt.getTime() > issuedAt.getTime() + 60000 ||
+      issuedAt.getTime() - readingAt.getTime() > 26 * 3600000) {
       this.logger.warn(
         'Forecast recording skipped: invalid station reading timestamp.',
       );
@@ -121,8 +124,11 @@ export class RiverForecastRecorderService {
         hours: number;
         projection: ProjectionWindow;
       } =>
-        item.projection != null &&
-        Number.isFinite(Number(item.projection.expectedCm)),
+        item.projection != null && item.projection.expectedCm != null &&
+        Number.isFinite(Number(item.projection.expectedCm)) &&
+        (item.projection.minCm == null || Number.isFinite(Number(item.projection.minCm))) &&
+        (item.projection.maxCm == null || Number.isFinite(Number(item.projection.maxCm))) &&
+        (item.projection.minCm == null || item.projection.maxCm == null || item.projection.minCm <= item.projection.maxCm),
     );
 
     if (!horizons.length) {
@@ -152,7 +158,8 @@ export class RiverForecastRecorderService {
 
         provider: main.provider ?? null,
 
-        fetchedAt: issuedAt.toISOString(),
+        fetchedAt: readingAt.toISOString(),
+        timestampBasis: 'provider-reported-or-fetch-time; not verified observation time',
       },
 
       localForecast: {
@@ -196,7 +203,9 @@ export class RiverForecastRecorderService {
             predicted_direction,
             confidence,
             confidence_score,
-            input_snapshot
+            input_snapshot,
+            issued_hour,
+            verification_version
           )
           VALUES (
             $1,
@@ -211,12 +220,14 @@ export class RiverForecastRecorderService {
             $10,
             $11,
             $12,
-            $13::jsonb
+            $13::jsonb,
+            date_trunc('hour', $3::timestamptz),
+            'river-score-v2'
           )
           ON CONFLICT (
             station,
             model_version,
-            issued_at,
+            issued_hour,
             horizon_hours
           )
           DO NOTHING

@@ -165,6 +165,7 @@ h1{margin:0;font-size:64px;line-height:.9}
 
     <article class="card">
       <div class="label">Risks overview</div>
+      <p id="comparison" class="muted">Loading forecast sources…</p>
       <div id="risks"></div>
     </article>
 
@@ -225,7 +226,7 @@ function iconFor(code){
 function initMap(){
   map=L.map('map',{zoomControl:true,minZoom:5,maxZoom:12}).setView([43.9916,22.8728],7);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
-    minZoom:5,maxZoom:19,attribution:''
+    minZoom:5,maxZoom:19,attribution:'© OpenStreetMap contributors'
   }).addTo(map);
   L.marker([43.9916,22.8728]).addTo(map).bindPopup('Vidin / Danube');
 }
@@ -239,15 +240,10 @@ async function loadRadar(){
     const res=await fetch('https://api.rainviewer.com/public/weather-maps.json');
     const data=await res.json();
 
-    radarFrames=[
-      ...(data.radar?.nowcast||[])
-    ];
+    radarFrames=[...(data.radar?.past||[])];
+    radarIndex=0;
 
-    if(!radarFrames.length){
-      radarFrames=[...(data.radar?.past||[])].slice(-1);
-    }
-
-    if(!radarFrames.length||!map)return;
+    if(!radarFrames.length||!map)throw new Error('No radar frames');
 
     if(radarTimer)clearInterval(radarTimer);
 
@@ -258,10 +254,11 @@ async function loadRadar(){
       if(radarLayer)map.removeLayer(radarLayer);
 
       radarLayer=L.tileLayer(data.host+frame.path+'/256/{z}/{x}/{y}/2/1_1.png',{
+        attribution:'RainViewer',
         opacity:.72,
         zIndex:10,
         maxZoom:10,
-        maxNativeZoom:10,
+        maxNativeZoom:7,
         noWrap:true
       }).addTo(map);
 
@@ -271,7 +268,7 @@ async function loadRadar(){
       });
 
       document.querySelector('.radarHeader .muted').textContent =
-        'RainViewer nowcast · frame ' + (index+1) + '/' + radarFrames.length + ' · ' + time;
+        'RainViewer past radar · frame ' + (index+1) + '/' + radarFrames.length + ' · ' + time + (Date.now()-frame.time*1000>30*60000?' · historical (over 30 min old)':'');
     }
 
     showFrame(radarIndex);
@@ -282,6 +279,9 @@ async function loadRadar(){
     },900);
 
   }catch(e){
+    if(radarTimer)clearInterval(radarTimer);
+    if(radarLayer&&map){map.removeLayer(radarLayer);radarLayer=null;}
+    document.querySelector('.radarHeader .muted').textContent='Radar unavailable';
     console.warn('Radar failed',e);
   }
 }
@@ -306,15 +306,19 @@ async function loadWeather(){
   const res=await fetch('/core/weather/dashboard');
   const data=await res.json();
   renderDanube(data.river);
-  const level=data.riskReport?.level||'low';
+  const level=data.riskReport?.level||'unknown';
+  const unavailable=level==='unknown';
   document.getElementById('hero').className='hero '+level;
-  document.getElementById('riskTitle').textContent=level==='high'?'WARNING':level==='medium'?'ELEVATED RISK':'NORMAL';
+  document.getElementById('riskTitle').textContent=unavailable?'WEATHER UNAVAILABLE':level==='high'?'WARNING':level==='medium'?'ELEVATED RISK':'NORMAL';
 
   document.getElementById('summary').textContent=data.summary||'';
   document.getElementById('meta').textContent=data.location+' · '+(data.fetchedAt||'');
   document.getElementById('updated').textContent='Last update: '+new Date().toLocaleTimeString();
 
-  document.getElementById('provider').textContent=data.provider||'--';
+  document.getElementById('provider').textContent=(data.provider||'--')+' / '+(data.model||'--');
+  document.getElementById('comparison').textContent=data.comparison
+    ? 'Forecast comparison: '+data.comparison.status+' · '+data.comparison.usableModels+' usable models · shared Open-Meteo delivery. '+data.comparison.sources.map(s=>s.model+': '+s.dataQuality.status).join('; ')
+    : 'Forecast comparison unavailable';
   document.getElementById('alertCount').textContent=(data.alerts||[]).length;
   document.getElementById('riskCount').textContent=(data.riskReport?.risks||[]).length;
 
@@ -324,19 +328,22 @@ async function loadWeather(){
   document.getElementById('condition').textContent=data.current?.condition||'--';
   document.getElementById('wind').textContent=(data.current?.windKmh??'--')+' km/h';
   document.getElementById('gust').textContent=(data.current?.gustKmh??'--')+' km/h';
-  document.getElementById('rainNow').textContent=((data.hourly||[])[0]?.precipitationMm??0)+' mm';
+  document.getElementById('rainNow').textContent=((data.intelligence?.timeline||[])[0]?.precipitationMm??'--')+' mm';
   document.getElementById('code').textContent=code??'--';
 
   const risks=data.riskReport?.risks||[];
-  document.getElementById('risks').innerHTML=risks.length
+  document.getElementById('risks').innerHTML=unavailable
+    ? '<p>Risk cannot be assessed from the available weather data.</p>' : level==='medium' && !risks.length
+    ? '<p>Forecast conditions warrant monitoring.</p>' : risks.length
     ? risks.map(r=>'<span class="risk">'+r+'</span>').join('')
     : '<div class="ok">✓ No major risks detected.</div><p class="muted">Weather conditions are within normal range.</p>';
 
-  document.getElementById('actions').textContent=risks.length
+  document.getElementById('actions').textContent=unavailable
+    ? 'Check an independent weather source. Automatic weather actions are unavailable.' : level==='medium' || risks.length
     ? 'Check outdoor materials, windows, irrigation, and exposed equipment.'
     : 'No action required.';
 
-  document.getElementById('hours').innerHTML=(data.hourly||[]).slice(0,12).map(h=>{
+  document.getElementById('hours').innerHTML=(data.intelligence?.timeline||[]).slice(0,12).map(h=>{
     const t=h.time?new Date(h.time).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'--';
     const risky=(h.gustKmh||0)>60||[95,96,99].includes(h.weatherCode);
     const rainy=(h.rainChance||0)>30||(h.precipitationMm||0)>0;

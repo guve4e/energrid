@@ -1,5 +1,11 @@
 import { VoiceSttService } from './voice-stt.service'
 
+// Provider-selection tests never construct a real external client.
+jest.mock('openai', () => ({
+  __esModule: true,
+  default: jest.fn().mockImplementation(() => ({})),
+}))
+
 describe('VoiceSttService provider selection', () => {
   const originalEnv = process.env
 
