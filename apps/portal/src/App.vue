@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, ref } from 'vue';
 import ExecutionTimelineModal from './components/execution/ExecutionTimelineModal.vue';
 import WeatherDashboard from './components/weather/WeatherDashboard.vue';
+import { pageFromPath, pathForPage } from './portal-route';
 
 type LoginResponse = {
   accessToken: string;
@@ -406,7 +407,7 @@ const endpointMode = ref(
 const userMenuOpen = ref(false);
 const notificationsOpen = ref(false);
 const mobileMenuOpen = ref(false);
-const activePage = ref('assistant');
+const activePage = ref(pageFromPath(location.pathname));
 const selectedDeviceId = ref<string | null>(null);
 const selectedExecutionTraceId = ref<string | null>(null);
 const deviceActionBusy = ref<Record<string, boolean>>({});
@@ -1210,11 +1211,15 @@ const deviceSummary = computed(() => {
   };
 });
 
-function setActivePage(pageId: string) {
+function setActivePage(pageId: string, syncUrl = true) {
   activePage.value = pageId;
   selectedDeviceId.value = null;
   selectedExecutionTraceId.value = null;
   closeMobileMenu();
+  if (syncUrl) {
+    const path = pathForPage(pageId);
+    if (location.pathname !== path) history.pushState({}, '', path);
+  }
   if (pageId === 'assistant') void loadVoiceRuns();
   if (pageId === 'bus') {
     void loadMqttBus();
@@ -1222,6 +1227,10 @@ function setActivePage(pageId: string) {
   } else {
     stopMqttBusStream();
   }
+}
+
+function handlePortalRouteChange() {
+  setActivePage(pageFromPath(location.pathname), false);
 }
 
 async function applyDiscoveryDecision(
@@ -2551,7 +2560,10 @@ if (accessToken.value && user.value) {
   loadVoiceRuns();
 }
 
+window.addEventListener('popstate', handlePortalRouteChange);
+
 onBeforeUnmount(() => {
+  window.removeEventListener('popstate', handlePortalRouteChange);
   stopMqttBusStream();
   disconnectVoice();
   cleanupAudio();

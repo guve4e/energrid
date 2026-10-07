@@ -64,6 +64,27 @@ describe('weather data quality and decisions', () => {
     expect(result.confidence).toBe('single-source');
     expect(result.radarSummary).toMatchObject({ status: 'unavailable', nearestCell: null, eta: null });
   });
+  it('summarizes rain as millimeters and liters per square meter', () => {
+    const s = snapshot();
+    s.hourly = Array.from({ length: 24 }, (_, i) => ({
+      ...s.hourly[0],
+      time: new Date(Math.floor(now / HOUR_MS) * HOUR_MS + i * HOUR_MS).toISOString(),
+      rainChance: i < 18 ? 70 : 10,
+      precipitationMm: i < 18 ? 1.2 : 0,
+      weatherCode: i < 18 ? 61 : 0,
+    }));
+    const result = intelligence.analyze(s, null, risk.evaluate(s));
+    expect(result.rain).toMatchObject({
+      duration: 'all-day',
+      totalMm: 21.6,
+      litersPerSquareMeter: 21.6,
+      wetHours: 18,
+      assessedHours: 24,
+      maxHourlyMm: 1.2,
+      maxRainChance: 70,
+    });
+    expect(result.rain.summary).toContain('21.6 L/m²');
+  });
 });
 
 describe('weather provider boundary', () => {
@@ -159,6 +180,43 @@ it('surfaces future danger and river failure through the dashboard', async () =>
   expect(dashboard.comparison.status).toBe('disagreement');
   expect(dashboard.river).toBeNull();
   expect(dashboard.intelligence.risks.floodConcern).toBe('unknown');
+});
+
+it('returns a populated daily dashboard horizon without changing the selected risk model', async () => {
+  const icon = snapshot(); icon.model = 'icon_seamless';
+  icon.daily = [
+    { date: '2026-09-23', tempMax: 24, tempMin: 12, rainTotalMm: 0, rainChanceMax: 0,
+      weatherCode: 1, condition: 'Mainly clear', windMaxKmh: 10, gustMaxKmh: 15 },
+    { date: '2026-09-24', tempMax: null, tempMin: null, rainTotalMm: null, rainChanceMax: null,
+      weatherCode: null, condition: 'Unknown', windMaxKmh: null, gustMaxKmh: null },
+  ];
+  const gfs = snapshot(); gfs.model = 'ncep_gfs_seamless';
+  gfs.daily = [
+    { date: '2026-09-23', tempMax: 30, tempMin: 15, rainTotalMm: 2, rainChanceMax: 40,
+      weatherCode: 61, condition: 'Slight rain', windMaxKmh: 15, gustMaxKmh: 20 },
+    { date: '2026-09-24', tempMax: 29, tempMin: 14, rainTotalMm: 1, rainChanceMax: 30,
+      weatherCode: 3, condition: 'Overcast', windMaxKmh: 14, gustMaxKmh: 19 },
+  ];
+  const provider = { getSnapshot: jest.fn().mockResolvedValueOnce(icon).mockResolvedValueOnce(gfs) };
+  const river = { getVidinRiverData: jest.fn().mockResolvedValue(null) };
+
+  const dashboard = await new WeatherService(provider as never, risk, river as never, intelligence).getDashboard();
+
+  expect(dashboard.model).toBe('icon_seamless');
+  expect(dashboard.daily).toHaveLength(2);
+  expect(dashboard.daily[0]).toMatchObject({
+    date: '2026-09-23',
+    sourceModel: 'ncep_gfs_seamless',
+    agreement: 'disagreement',
+    isFallback: true,
+  });
+  expect(dashboard.daily[1]).toMatchObject({
+    date: '2026-09-24',
+    sourceModel: 'ncep_gfs_seamless',
+    agreement: 'single-model',
+    isFallback: true,
+  });
+  expect(dashboard.intelligence.daily).toEqual(dashboard.daily);
 });
 
 it('does not count duplicate model snapshots as independent corroboration', () => {

@@ -15,6 +15,8 @@ export function mapDraftToEstimateRequest(
   }
 
   switch (draft.jobType) {
+    case 'residential_installation':
+      throw new Error('A residential circuit proposal is not a priced bill of quantities');
     case 'boiler_installation':
       return {
         tenantSlug: draft.tenantSlug,
@@ -78,17 +80,10 @@ export function mapDraftToEstimateRequest(
     case 'ac_installation':
       return {
         tenantSlug: draft.tenantSlug,
-        points: [
-          {
-            kind: 'power_point',
-            quantity: draft.quantity ?? 1,
-            routeLengthMeters: draft.routeLengthMeters ?? 0,
-            wallType: draft.wallType ?? 'none',
-          },
-        ],
-        devices: [],
-        panels: [],
-        notes: draft.notes ?? null,
+        devices: [{ kind: 'ac_connection', quantity: draft.quantity!,
+          routeLengthMeters: draft.connectionMode === 'new_line_required' ? draft.routeLengthMeters : 0,
+          wallType: draft.connectionMode === 'new_line_required' ? draft.wallType : 'none' }],
+        points: [], panels: [], notes: draft.notes ?? null,
       };
 
     case 'points':
@@ -112,7 +107,7 @@ export function mapDraftToEstimateRequest(
         tenantSlug: draft.tenantSlug,
         points: [],
         devices: [],
-        panels: draft.panelKind ? [{ kind: draft.panelKind, quantity: 1 }] : [],
+        panels: draft.panelKind ? [{ kind: draft.panelKind, quantity: draft.quantity! }] : [],
         notes: draft.notes ?? null,
       };
   }

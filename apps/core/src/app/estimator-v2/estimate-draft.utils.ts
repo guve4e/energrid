@@ -1,48 +1,26 @@
 import type { EstimateConversationDraft } from './estimate-draft.types';
 import type { EstimateUpdate } from './estimate-intake.types';
 
-export function createEmptyEstimateDraft(
-  tenantSlug: string,
-): EstimateConversationDraft {
-  return {
-    tenantSlug,
-    notes: '',
-  };
+export function createEmptyEstimateDraft(tenantSlug: string): EstimateConversationDraft {
+  return { tenantSlug, notes: '' };
 }
 
-export function computeMissingFields(draft: any): string[] {
+export function computeMissingFields(draft: EstimateConversationDraft): string[] {
   if (!draft.jobType) return ['jobType'];
-
-  switch (draft.jobType) {
-    case 'boiler_replacement': {
-      const missing: string[] = [];
-
-      if (!draft.quantity) missing.push('quantity');
-
-      if (!draft.connectionMode && !draft.powerSource) {
-        missing.push('connectionMode');
-      }
-
-      return missing;
-    }
-
-    case 'boiler_installation': {
-      const missing: string[] = [];
-
-      if (!draft.quantity) missing.push('quantity');
-      if (!draft.powerSource) missing.push('powerSource');
-      if (!draft.routeLengthMeters) missing.push('routeLengthMeters');
-
-      if (draft.routeLengthMeters && !draft.wallType) {
-        missing.push('wallType');
-      }
-
-      return missing;
-    }
-
-    default:
-      return [];
+  const missing: string[] = [];
+  if (!Number.isInteger(draft.quantity) || Number(draft.quantity) <= 0) missing.push('quantity');
+  if (draft.jobType === 'panel') {
+    if (!draft.panelKind) missing.push('panelKind');
+    return missing;
   }
+  const isPoint = draft.jobType === 'points';
+  const mode = draft.connectionMode || (draft.powerSource === 'panel' ? 'new_line_required' : draft.powerSource === 'existing_line' ? 'existing_cable_only' : undefined);
+  if (!isPoint && !mode) missing.push('connectionMode');
+  if (isPoint || mode === 'new_line_required') {
+    if (!Number.isFinite(draft.routeLengthMeters) || Number(draft.routeLengthMeters) <= 0) missing.push('routeLengthMeters');
+    if (!draft.wallType) missing.push('wallType');
+  }
+  return missing;
 }
 
 export function mergeEstimateDraft(input: {
@@ -51,71 +29,32 @@ export function mergeEstimateDraft(input: {
   tenantSlug: string;
   rawMessage?: string;
 }): EstimateConversationDraft {
-  const draft =
-    input.currentDraft ?? createEmptyEstimateDraft(input.tenantSlug);
-
-  const nextDraft: EstimateConversationDraft = {
-    ...draft,
-    tenantSlug: input.tenantSlug,
-  };
-
-  const msg = input.rawMessage?.toLowerCase() ?? '';
-
-  // 🔥 INTENT DETECTION (minimal)
-  if (/защо|zashto/.test(msg)) {
-    nextDraft.currentIntent = 'question_why';
-  } else {
-    nextDraft.currentIntent = 'answer';
+  const old = input.currentDraft ?? createEmptyEstimateDraft(input.tenantSlug);
+  const changed = input.update.jobType && old.jobType && input.update.jobType !== old.jobType;
+  const sameBoiler = String(input.update.jobType).startsWith('boiler_') && String(old.jobType).startsWith('boiler_');
+  const reset = (changed && !sameBoiler) || input.update.scopeSwitch;
+  const draft = reset ? createEmptyEstimateDraft(input.tenantSlug) : old;
+  const next: EstimateConversationDraft = { ...draft, tenantSlug: input.tenantSlug };
+  if (input.update.jobType) next.jobType = input.update.jobType;
+  for (const [key, value] of Object.entries(input.update.updates ?? {})) {
+    if (value != null) (next as unknown as Record<string, unknown>)[key] = value;
   }
-
-  // 🔥 FORCE replacement detection
-  if (/podmeni|podmqna|smqna|замяна|подмяна|replace/.test(msg)) {
-    nextDraft.jobType = 'boiler_replacement';
-    nextDraft.quantity = nextDraft.quantity ?? 1;
-  }
-
-  if (input.update.jobType) {
-    nextDraft.jobType = input.update.jobType;
-  }
-
   const updates = input.update.updates ?? {};
-
-  // 🔥 APPLY DIRECT UPDATES
-  Object.assign(nextDraft, updates);
-
-  // 🔥 FALLBACK: bind short answers to last asked field
-  if (
-    Object.keys(updates).length === 0 &&
-    draft.currentQuestionField
-  ) {
-    if (draft.currentQuestionField === 'routeLengthMeters') {
-      const match = msg.match(/\d+/);
-      if (match) {
-        nextDraft.routeLengthMeters = Number(match[0]);
-      }
-    }
-
-    if (draft.currentQuestionField === 'quantity') {
-      const match = msg.match(/\d+/);
-      if (match) {
-        nextDraft.quantity = Number(match[0]);
-      }
-    }
-
-    if (draft.currentQuestionField === 'connectionMode') {
-      if (/да|yes|има|ok/.test(msg)) {
-        nextDraft.connectionMode = 'existing_cable_only';
-      }
-      if (/не|no/.test(msg)) {
-        nextDraft.connectionMode = 'new_line_required';
-      }
+  if (['areaSqm', 'propertyType', 'buildingStage', 'hasBoiler', 'hasAc', 'acCount', 'hasCooker', 'hasWashingMachine'].some(key =>
+    key in updates && (updates as Record<string, unknown>)[key] !== (draft as unknown as Record<string, unknown>)[key])) next.planAccepted = false;
+  if (updates.hasAc === false) delete next.acCount;
+  else if (updates.acCount != null) next.hasAc = true;
+  if (updates.connectionMode) next.powerSource = updates.connectionMode === 'existing_cable_only' ? 'existing_line' : 'panel';
+  else if (updates.powerSource) next.connectionMode = updates.powerSource === 'existing_line' ? 'existing_cable_only' : 'new_line_required';
+  const message = input.rawMessage?.trim().toLowerCase() ?? '';
+  if (!reset && Object.keys(updates).length === 0 && draft.currentQuestionField) {
+    const match = message.match(/^(\d+(?:[.,]\d+)?)\s*(?:m|м|метра|meters|броя|бр\.?)?$/);
+    if (match && (draft.currentQuestionField === 'quantity' || draft.currentQuestionField === 'routeLengthMeters')) {
+      next[draft.currentQuestionField] = Number(match[1].replace(',', '.'));
     }
   }
-
-  nextDraft.notes = [draft.notes, input.rawMessage]
-    .filter(Boolean)
-    .join(' | ')
-    .slice(0, 2000);
-
-  return nextDraft;
+  next.currentIntent = input.update.askExplanation ? 'explain' : 'answer';
+  delete next.currentQuestionField;
+  next.notes = [draft.notes, input.rawMessage].filter(Boolean).join(' | ').slice(-2000);
+  return next;
 }

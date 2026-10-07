@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ResidentialTemplateRepository } from './residential-template.repository';
 import { CatalogRepository } from '../estimator/catalog.repository';
 import { CatalogV2Service } from './catalog-v2.service';
 import { EstimateExplanationService } from './estimate-explanation.service';
@@ -10,6 +11,7 @@ import { StoveStrategy } from './strategies/stove.strategy';
 
 @Module({
   providers: [
+    ResidentialTemplateRepository,
     CatalogRepository,
     CatalogV2Service,
     EstimateExplanationService,

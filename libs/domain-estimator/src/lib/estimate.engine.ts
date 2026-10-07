@@ -49,6 +49,7 @@ function addLine(
   if (safeQty === 0) return;
 
   const unitPrice = Number(row.base_price);
+  safePositive(unitPrice, `catalog price for ${row.code}`);
   const subtotal = round2(safeQty * unitPrice);
 
   lines.push({
@@ -121,6 +122,7 @@ function handlePointInput(
   catalogMap: Map<string, PricingCatalogRow>,
   point: EstimatePointInput,
 ): void {
+  if (!['power_point', 'low_current_point'].includes(point.kind)) throw new Error('Invalid point kind');
   const quantity = safePositive(point.quantity, 'point.quantity');
   const routeLengthMeters = safePositive(
     point.routeLengthMeters,
@@ -255,6 +257,10 @@ export function estimateProject(
   catalog: PricingCatalogRow[],
   input: EstimateRequestInput,
 ): EstimateResult {
+  for (const item of [...(input.points ?? []), ...(input.devices ?? []), ...(input.panels ?? [])]) {
+    if (!Number.isInteger(item.quantity) || item.quantity < 0) throw new Error('Quantity must be a non-negative integer');
+    if ('wallType' in item && item.wallType != null && !['none', 'brick', 'concrete'].includes(item.wallType)) throw new Error('Invalid wall type');
+  }
   const catalogMap = mapCatalog(catalog);
   const lines: EstimateLineResult[] = [];
 

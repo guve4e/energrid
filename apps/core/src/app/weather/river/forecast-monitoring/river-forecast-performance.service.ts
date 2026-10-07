@@ -87,6 +87,7 @@ export class RiverForecastPerformanceService {
               lower($1)
 
           AND evaluated_at IS NOT NULL
+          AND verification_version = 'river-score-v2'
 
           AND issued_at >=
               now() -
@@ -121,6 +122,7 @@ export class RiverForecastPerformanceService {
               lower($1)
 
           AND evaluated_at IS NULL
+          AND verification_version = 'river-score-v2'
           AND issued_at >= now() - make_interval(days => $2)
 
         GROUP BY
@@ -184,6 +186,7 @@ export class RiverForecastPerformanceService {
               lower($1)
 
           AND evaluated_at IS NOT NULL
+          AND verification_version = 'river-score-v2'
           AND issued_at >= now() - make_interval(days => $2)
 
         ORDER BY

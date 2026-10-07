@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 
 import { assessWeather, forecastWindow, HIGH_WIND_KMH, WeatherSnapshot } from './weather-data-quality';
+import { assessRain, unavailableRainAssessment } from './weather-rain-assessment';
 
 const radarUnavailable = { status: 'unavailable', stormDirection: null, nearestCell: null, eta: null, trend: null };
 
@@ -15,6 +16,7 @@ export class WeatherIntelligenceService {
       subtitle: 'Weather data is missing, incomplete or stale. Do not infer safe conditions.',
       recommendations: ['Check weather sources before making weather-dependent decisions.'],
       today: { tempMax: null, tempMin: null, windMaxKmh: null, gustMaxKmh: null, rainTotalMm: null, rainChanceMax: null },
+      rain: unavailableRainAssessment(),
       daily: [], timeline: [], dataQuality,
       risks: { vehicleHail: 'unknown', stormEta: 'unknown', windDanger: 'unknown', floodConcern: 'unknown' },
       radarSummary: radarUnavailable,
@@ -88,6 +90,7 @@ export class WeatherIntelligenceService {
             ],
 
       today: this.todaySummary(snapshot),
+      rain: assessRain(snapshot),
 
       daily: (snapshot.daily || []).slice(0, 12),
 

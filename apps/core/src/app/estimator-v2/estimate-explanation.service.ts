@@ -43,7 +43,7 @@ export class EstimateExplanationService {
     return [
       explanation.summaryBg,
       '',
-      ...explanation.steps.slice(0, 4).map((x, i) => `${i + 1}. ${x}`),
+      ...explanation.steps.map((x, i) => `${i + 1}. ${x}`),
     ]
       .filter(Boolean)
       .join('\n');

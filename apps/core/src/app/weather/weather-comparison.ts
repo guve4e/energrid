@@ -1,6 +1,7 @@
 import { assessWeather, forecastWindow, WeatherSnapshot } from './weather-data-quality';
 import { WeatherRiskEngine } from './weather-risk.engine';
 import { WeatherIntelligenceService } from './weather-intelligence.service';
+import { decideWeatherModel } from './weather-model-decision';
 
 export function compareWeather(snapshots: WeatherSnapshot[], river: unknown,
   riskEngine: WeatherRiskEngine, intelligenceService: WeatherIntelligenceService) {
@@ -10,30 +11,43 @@ export function compareWeather(snapshots: WeatherSnapshot[], river: unknown,
     risk: riskEngine.evaluate(snapshot),
     intelligence: intelligenceService.analyze(snapshot, river, undefined),
   }));
-  const usable = outcomes.filter(source => source.quality.forecastUsable);
-  const rank = (severity: string) => severity === 'danger' ? 2 : severity === 'watch' ? 1 : 0;
-  // Preserve the most cautious usable model's view, rather than blending incompatible forecasts.
-  const selected = [...usable].sort((a, b) => rank(b.intelligence.severity) - rank(a.intelligence.severity))[0] ?? outcomes[0];
-  const horizons = usable.map(source => forecastWindow(source.snapshot).slice(0, 7));
-  const maxSpread = (field: 'gustKmh' | 'rainChance') => horizons.length < 2 ? null :
-    Math.max(...Array.from({ length: 7 }, (_, index) => {
-      const values = horizons.map(hours => hours[index][field]!);
-      return Math.max(...values) - Math.min(...values);
-    }));
-  const gustSpreadKmh = maxSpread('gustKmh');
-  const rainChanceSpreadPoints = maxSpread('rainChance');
-  const disagrees = new Set(usable.map(source => source.intelligence.severity)).size > 1 ||
-    (gustSpreadKmh ?? 0) >= 20 || (rainChanceSpreadPoints ?? 0) >= 40;
+  const decision = decideWeatherModel(outcomes.map(source => {
+    const horizon = forecastWindow(source.snapshot).slice(0, 7);
+    return {
+      key: source.snapshot.provider + ':' + (source.snapshot.model ?? 'unspecified'),
+      provider: source.snapshot.provider,
+      model: source.snapshot.model ?? null,
+      usable: source.quality.forecastUsable,
+      severity: source.intelligence.severity,
+      maxGustKmh: max(horizon.map(hour => hour.gustKmh)),
+      maxRainChance: max(horizon.map(hour => hour.rainChance)),
+      rainTotalMm: sum(horizon.map(hour => hour.precipitationMm)),
+    };
+  }));
+  const selected = outcomes.find(source =>
+    source.snapshot.provider + ':' + (source.snapshot.model ?? 'unspecified') === decision.selectedKey) ?? outcomes[0];
   return { selected, comparison: {
-    status: usable.length < 2 ? 'insufficient-data' : disagrees ? 'disagreement' : 'agreement',
-    selectedModel: selected.snapshot.model ?? null,
-    selectionPolicy: 'most-cautious-usable-model',
-    usableModels: usable.length,
+    status: decision.status,
+    selectedModel: decision.selectedModel,
+    selectionPolicy: decision.selectionPolicy,
+    selectionReason: decision.selectionReason,
+    usableModels: decision.usableModels,
     transportProviders: [...new Set(snapshots.map(s => s.provider))],
-    gustSpreadKmh, rainChanceSpreadPoints,
+    gustSpreadKmh: decision.gustSpreadKmh,
+    rainChanceSpreadPoints: decision.rainChanceSpreadPoints,
+    disagreementReasons: decision.disagreementReasons,
     automationEligible: false,
     sources: outcomes.map(source => ({ provider: source.snapshot.provider, model: source.snapshot.model,
       fetchedAt: source.snapshot.fetchedAt, dataQuality: source.quality,
       severity: source.intelligence.severity })),
   } };
+}
+
+function max(values: Array<number | null | undefined>) {
+  const clean = values.filter((value): value is number => typeof value === 'number');
+  return clean.length ? Math.max(...clean) : 0;
+}
+
+function sum(values: Array<number | null | undefined>) {
+  return values.reduce<number>((total, value) => total + (typeof value === 'number' ? value : 0), 0);
 }

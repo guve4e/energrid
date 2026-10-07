@@ -5,6 +5,7 @@ import {
   Param,
   Post,
   Query,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ApiOperation, ApiParam, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { RiverCollectorService } from './river-collector.service';
@@ -104,7 +105,7 @@ export class RiverController {
   @ApiOperation({ summary: 'Get forecast performance for a station' })
   @ApiParam({ name: 'station', example: 'vidin' })
   @ApiQuery({ name: 'days', required: false, example: 90 })
-  getForecastPerformance(
+  async getForecastPerformance(
     @Param('station') station: string,
     @Query('days') rawDays = '90',
   ) {
@@ -112,6 +113,23 @@ export class RiverController {
 
     const days = Number.isFinite(parsedDays) ? parsedDays : 90;
 
-    return this.forecastPerformance.getPerformance(station, days);
+    try {
+      return await this.forecastPerformance.getPerformance(station, days);
+    } catch (error) {
+      if (['42P01', '42703'].includes((error as { code?: string }).code ?? '')) {
+        return {
+          status: 'migration-required',
+          station,
+          windowDays: Number.isFinite(days) ? Math.max(1, Math.min(Math.floor(days), 3650)) : 90,
+          summary: [],
+          pending: [],
+          recent: [],
+          note: 'River forecast verification storage is not initialized.',
+          generatedAt: new Date().toISOString(),
+        };
+      }
+
+      throw new ServiceUnavailableException('River forecast verification is temporarily unavailable');
+    }
   }
 }

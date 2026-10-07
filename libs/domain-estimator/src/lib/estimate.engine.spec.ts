@@ -2,6 +2,18 @@ import { describe, expect, it } from 'vitest';
 import { estimateProject } from './estimate.engine';
 import type { PricingCatalogRow } from './estimate.types';
 
+describe('invalid estimate input', () => {
+  it('rejects fractional item counts and invalid point types', () => {
+    expect(() => estimateProject([], { tenantSlug: 'energrid', points: [{ kind: 'power_point', quantity: 1.5, routeLengthMeters: 3 }] })).toThrow('integer');
+    expect(() => estimateProject([], { tenantSlug: 'energrid', points: [{ kind: 'invalid' as any, quantity: 1, routeLengthMeters: 3 }] })).toThrow('Invalid point');
+  });
+  it('rejects invalid catalog prices instead of producing a misleading total', () => {
+    for (const price of [-10, NaN, Infinity]) {
+      expect(() => estimateProject([{ code: 'power_point_up_to_3m', base_price: price, is_active: true } as PricingCatalogRow], { tenantSlug: 'energrid', points: [{ kind: 'power_point', quantity: 1, routeLengthMeters: 3 }] })).toThrow('catalog price');
+    }
+  });
+});
+
 const catalog: PricingCatalogRow[] = [
   {
     code: 'power_point_up_to_3m',

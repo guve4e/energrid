@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Logger, Post } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Post, NotFoundException } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { EstimatorService } from './estimator.service';
 import { EstimatorPersistenceService } from './estimator-persistence.service';
@@ -11,7 +11,6 @@ import { CatalogV2Service } from '../estimator-v2/catalog-v2.service';
 @ApiTags('estimator')
 @Controller('estimator')
 export class EstimatorController {
-  private readonly logger = new Logger(EstimatorController.name);
 
   constructor(
     private readonly estimatorService: EstimatorService,
@@ -40,6 +39,19 @@ export class EstimatorController {
     };
   }
 
+  @Get('pilot/context')
+  async pilotContext() {
+    if (process.env.ESTIMATOR_PILOT_ENABLED !== 'true') throw new NotFoundException();
+    return this.estimatorV2Service.residentialContext();
+  }
+
+  @Post('pilot/calculate')
+  async pilotCalculate(@Body() body: { facts: unknown }) {
+    if (process.env.ESTIMATOR_PILOT_ENABLED !== 'true') throw new NotFoundException();
+    if (!body?.facts || JSON.stringify(body.facts).length > 8000) throw new BadRequestException('Invalid facts');
+    return this.estimatorV2Service.calculateResidential(body.facts);
+  }
+
   @Post('preview')
   @ApiOperation({ summary: 'Preview an estimate without persisting it' })
   async preview(@Body() body: PreviewEstimateDto) {
@@ -51,12 +63,8 @@ export class EstimatorController {
   async assistantStep(@Body() body: AssistantStepDto) {
     const useEstimatorV2 = process.env.ESTIMATOR_V2_ENABLED === 'true';
 
-    this.logger.warn(
-      `assistant-step route useEstimatorV2=${useEstimatorV2} tenant=${body.tenantSlug} message="${body.message}"`,
-    );
 
     if (useEstimatorV2) {
-      this.logger.warn('assistant-step using V2 service');
       return this.estimatorV2Service.step({
         tenantSlug: body.tenantSlug,
         message: body.message,
@@ -64,7 +72,6 @@ export class EstimatorController {
       });
     }
 
-    this.logger.warn('assistant-step using OLD service');
     return this.estimatorService.assistantStep(body);
   }
 
@@ -72,5 +79,18 @@ export class EstimatorController {
   @ApiOperation({ summary: 'Persist a confirmed estimate' })
   async persist(@Body() body: PersistEstimateDto) {
     return this.estimatorPersistenceService.persistEstimate(body);
+  }
+
+  @Post('assistant-step-v2')
+  @ApiOperation({ summary: 'Catalog-grounded estimate conversation for the public estimator' })
+  async assistantStepV2(@Body() body: { message: string; customerHistory?: string[]; draft?: import('../estimator-v2/estimate-draft.types').EstimateConversationDraft }) {
+    if (typeof body?.message !== 'string' || !body.message.trim() || body.message.length > 4000) {
+      throw new BadRequestException('Message must contain 1–4000 characters');
+    }
+    if (body.draft && (typeof body.draft !== 'object' || Array.isArray(body.draft) || JSON.stringify(body.draft).length > 8000)) {
+      throw new BadRequestException('Invalid estimate draft');
+    }
+    if (body.customerHistory && (!Array.isArray(body.customerHistory) || body.customerHistory.length > 12 || body.customerHistory.some(text => typeof text !== 'string') || body.customerHistory.join('\n').length > 8000)) throw new BadRequestException('Invalid customer history');
+    return this.estimatorV2Service.step({ tenantSlug: 'energrid', message: body.message.trim(), draft: body.draft, ...(body.customerHistory ? { customerHistory: body.customerHistory } : {}) });
   }
 }

@@ -6,6 +6,8 @@ import { WeatherIntelligenceService } from './weather-intelligence.service';
 import { WeatherSnapshot, HOUR_MS } from './weather-data-quality';
 import { RiverForecastRecorderService } from './river/forecast-monitoring/river-forecast-recorder.service';
 import { RiverSchedulerService } from './river/river-scheduler.service';
+import { RiverController } from './river/river.controller';
+import { RiverForecastPerformanceService } from './river/forecast-monitoring/river-forecast-performance.service';
 
 export function verificationSnapshot(now = Date.now()): WeatherSnapshot {
   const reading = { time: new Date(now).toISOString(), temperature: 20, feelsLike: 20, humidity: 50,
@@ -84,5 +86,30 @@ describe('river verification corrections', () => {
     const scheduler = new RiverSchedulerService({ collectNow: jest.fn().mockRejectedValue(new Error('offline')) } as never,{} as never,{} as never,evaluator as never);
     await (scheduler as unknown as { collectForecastAndEvaluateSafe(): Promise<void> }).collectForecastAndEvaluateSafe();
     expect(evaluator.evaluateDueForecasts).toHaveBeenCalledTimes(1);
+  });
+  it('marks missing river verification storage explicitly', async () => {
+    const controller = new RiverController({} as never,{} as never,{} as never,{} as never,{} as never,
+      { getPerformance: jest.fn().mockRejectedValue({ code: '42703' }) } as never);
+
+    await expect(controller.getForecastPerformance('Vidin')).resolves.toMatchObject({
+      status: 'migration-required',
+      station: 'Vidin',
+      summary: [],
+      pending: [],
+      recent: [],
+    });
+  });
+  it('keeps legacy river scores out of the current v2 performance panel', async () => {
+    const query = jest.fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+
+    await new RiverForecastPerformanceService({ query } as never).getPerformance('Vidin');
+
+    expect(query.mock.calls).toHaveLength(3);
+    for (const [sql] of query.mock.calls) {
+      expect(sql).toContain("verification_version = 'river-score-v2'");
+    }
   });
 });

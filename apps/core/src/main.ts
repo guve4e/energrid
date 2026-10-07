@@ -4,13 +4,16 @@ import * as path from 'path';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app/app.module';
+import { EstimatorLocalModule } from './app/estimator-local.module';
 
 dotenv.config({
   path: path.resolve(process.cwd(), '.env'),
 });
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const localEstimator = process.env.LOCAL_ESTIMATOR_ONLY === 'true';
+  if (localEstimator) process.env.PGOPTIONS = '-c default_transaction_read_only=on';
+  const app = await NestFactory.create(localEstimator ? EstimatorLocalModule : AppModule);
 
   app.setGlobalPrefix('core');
   app.enableCors();
@@ -41,7 +44,7 @@ async function bootstrap() {
   });
 
   const port = Number(process.env.CORE_PORT || 3020);
-  await app.listen(port);
+  await app.listen(port, localEstimator ? '127.0.0.1' : '0.0.0.0');
 
   console.log(`[core] listening on http://localhost:${port}/core`);
   console.log(`[core] docs available at http://localhost:${port}/core/docs`);

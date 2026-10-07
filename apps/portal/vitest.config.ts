@@ -3,5 +3,5 @@ import vue from '@vitejs/plugin-vue';
 export default defineConfig({
   root: __dirname,
   plugins: [vue()],
-  test: { environment: 'jsdom', include: ['src/components/weather/*.spec.ts'] },
+  test: { environment: 'jsdom', include: ['src/**/*.spec.ts'] },
 });

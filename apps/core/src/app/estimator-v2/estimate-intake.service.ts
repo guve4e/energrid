@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import type { EstimateConversationDraft } from './estimate-draft.types';
 import type { EstimateJobType, EstimateUpdate } from './estimate-intake.types';
 
@@ -8,20 +8,13 @@ export class EstimateIntakeService {
 
   async extractEstimateUpdate(input: {
     message: string;
+    customerHistory?: string[];
     draft?: EstimateConversationDraft | null;
   }): Promise<EstimateUpdate> {
     const apiKey = process.env.OPENAI_API_KEY;
     const model = process.env.OPENAI_SMALL_MODEL || 'gpt-4.1-mini';
 
-    if (!apiKey) {
-      this.logger.warn('OPENAI_API_KEY missing; returning unknown estimate update');
-      return {
-        updates: {},
-        askExplanation: false,
-        userIntent: 'unknown',
-        scopeSwitch: false,
-      };
-    }
+    if (!apiKey) throw new ServiceUnavailableException('Estimate assistant is not configured');
 
     const forcedJobType = this.getForcedJobType(input);
     const prompt = this.buildPrompt(input, forcedJobType);
@@ -29,13 +22,17 @@ export class EstimateIntakeService {
     try {
       const res = await fetch('https://api.openai.com/v1/responses', {
         method: 'POST',
+        signal: AbortSignal.timeout(20000),
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
           model,
-          input: prompt,
+          store: false,
+          max_output_tokens: 700,
+          instructions: prompt,
+          input: JSON.stringify({ draft: input.draft ?? null, customerHistory: input.customerHistory ?? [], message: input.message }),
           text: {
             format: {
               type: 'json_schema',
@@ -48,6 +45,7 @@ export class EstimateIntakeService {
                   jobType: {
                     type: ['string', 'null'],
                     enum: [
+                      'residential_installation',
                       'boiler_installation',
                       'boiler_replacement',
                       'stove_installation',
@@ -61,6 +59,27 @@ export class EstimateIntakeService {
                     type: 'object',
                     additionalProperties: false,
                     properties: {
+                      propertyType: { type: ['string', 'null'], enum: ['studio', 'apartment', 'house', null] },
+                      areaSqm: { type: ['number', 'null'] },
+                      buildingStage: { type: ['string', 'null'], enum: ['new', 'renovation', null], description: 'New construction versus renovation. In a dwelling conversation, Novo 30 kvadrata means new construction and 30 square metres. A request for a new installation alone does not establish construction stage.' },
+                      hasBoiler: { type: ['boolean', 'null'] },
+                      hasAc: { type: ['boolean', 'null'] },
+                      acCount: { type: ['number', 'null'] },
+                      roomCount: { type: ['number', 'null'] },
+                      corridorCount: { type: ['number', 'null'] },
+                      bathroomCount: { type: ['number', 'null'] },
+                      terraceCount: { type: ['number', 'null'] },
+                      socketCount: { type: ['number', 'null'] },
+                      lightingPointCount: { type: ['number', 'null'] },
+                      smartRelayCount: { type: ['number', 'null'] },
+                      separateKitchen: { type: ['boolean', 'null'] },
+                      hasOven: { type: ['boolean', 'null'] },
+                      hasHob: { type: ['boolean', 'null'] },
+                      hasDryer: { type: ['boolean', 'null'] },
+                      hasDishwasher: { type: ['boolean', 'null'] },
+                      hasCooker: { type: ['boolean', 'null'] },
+                      hasWashingMachine: { type: ['boolean', 'null'] },
+                      planAccepted: { type: ['boolean', 'null'] },
                       quantity: { type: ['number', 'null'] },
                       routeLengthMeters: { type: ['number', 'null'] },
                       wallType: {
@@ -75,9 +94,7 @@ export class EstimateIntakeService {
                         type: ['string', 'null'],
                         enum: [
                           'boiler_panel',
-                          'apartment_panel_up_to_4',
-                          'apartment_panel_up_to_8',
-                          'apartment_panel_above_8',
+                          'panel_standard', 'panel_modern', 'panel_full_protection', 'panel_custom',
                           null,
                         ],
                       },
@@ -88,6 +105,8 @@ export class EstimateIntakeService {
                       },
                     },
                     required: [
+                      'corridorCount', 'bathroomCount', 'terraceCount',
+                      'propertyType', 'areaSqm', 'buildingStage', 'hasBoiler', 'hasAc', 'acCount', 'roomCount', 'socketCount', 'lightingPointCount', 'smartRelayCount', 'separateKitchen', 'hasOven', 'hasHob', 'hasDryer', 'hasDishwasher', 'hasCooker', 'hasWashingMachine', 'planAccepted',
                       'quantity',
                       'routeLengthMeters',
                       'wallType',
@@ -118,14 +137,7 @@ export class EstimateIntakeService {
       });
 
       if (!res.ok) {
-        const text = await res.text();
-        this.logger.warn(`estimate update extraction failed status=${res.status} body=${text}`);
-        return {
-          updates: {},
-          askExplanation: false,
-          userIntent: 'unknown',
-          scopeSwitch: false,
-        };
+        throw new Error(`Estimate extraction failed: ${res.status}`);
       }
 
       const json = (await res.json()) as {
@@ -143,9 +155,11 @@ export class EstimateIntakeService {
           ?.text ??
         '{}';
 
-      this.logger.log(`estimate update rawText=${rawText} message="${input.message}"`);
 
       const parsed = JSON.parse(rawText) as EstimateUpdate;
+      if (!parsed || typeof parsed.updates !== 'object' || !parsed.updates) {
+        throw new Error('Incomplete estimate extraction');
+      }
 
       const normalized: EstimateUpdate = {
         jobType: (forcedJobType ?? parsed.jobType) ?? undefined,
@@ -156,12 +170,20 @@ export class EstimateIntakeService {
       };
 
       const u = parsed.updates ?? {};
+      for (const field of ['corridorCount', 'bathroomCount', 'terraceCount'] as const) {
+        if (u[field] != null) normalized.updates[field] = u[field];
+      }
+      for (const field of ['propertyType', 'areaSqm', 'buildingStage', 'hasBoiler', 'hasAc', 'acCount', 'roomCount', 'socketCount', 'lightingPointCount', 'smartRelayCount', 'separateKitchen', 'hasOven', 'hasHob', 'hasDryer', 'hasDishwasher', 'hasCooker', 'hasWashingMachine', 'planAccepted'] as const) {
+        if (u[field] != null) (normalized.updates as Record<string, unknown>)[field] = u[field];
+      }
+      if (u.quantity != null && (typeof u.quantity !== 'number' || !Number.isInteger(u.quantity) || u.quantity <= 0 || u.quantity > 10000)) throw new Error('Invalid extracted quantity');
+      if (u.routeLengthMeters != null && (typeof u.routeLengthMeters !== 'number' || !Number.isFinite(u.routeLengthMeters) || u.routeLengthMeters < 0 || u.routeLengthMeters > 10000)) throw new Error('Invalid extracted route length');
 
-      if (typeof u.quantity === 'number') {
+      if (typeof u.quantity === 'number' && Number.isInteger(u.quantity) && u.quantity > 0 && u.quantity <= 10000) {
         normalized.updates.quantity = u.quantity;
       }
 
-      if (typeof u.routeLengthMeters === 'number') {
+      if (typeof u.routeLengthMeters === 'number' && Number.isFinite(u.routeLengthMeters) && u.routeLengthMeters >= 0 && u.routeLengthMeters <= 10000) {
         normalized.updates.routeLengthMeters = u.routeLengthMeters;
       }
 
@@ -198,14 +220,8 @@ export class EstimateIntakeService {
 
       return normalized;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn(`estimate update extraction exception: ${message}`);
-      return {
-        updates: {},
-        askExplanation: false,
-        userIntent: 'unknown',
-        scopeSwitch: false,
-      };
+      this.logger.warn('Estimate extraction failed; customer message was not logged');
+      throw new ServiceUnavailableException('Estimate assistant temporarily unavailable; please retry');
     }
   }
 
@@ -219,43 +235,8 @@ export class EstimateIntakeService {
     }
 
     const text = input.message.trim().toLowerCase();
-
-    const clearlySwitchesToStove =
-      /(печка|pechka|pe4ka|котлон|kotlon|плот|plo[t4]a|фурна|furna)/i.test(text);
-
-    const clearlySwitchesToAc =
-      /(климатик|klimatik|climate|ac)\b/i.test(text);
-
-    const clearlySwitchesToPanel =
-      /(табло|tablo)\b/i.test(text);
-
-    const clearlySwitchesToPoints =
-      /(контакт|контакти|contact|contacts|точка|точки|tochka|tochki|кабели|kabeli|окабеляване)/i.test(
-        text,
-      ) && !/(бойлер|boiler|печка|pechka|pe4ka|котлон|kotlon|плот|plo[t4]a|фурна|furna|климатик|klimatik)/i.test(text);
-
-    if (
-      clearlySwitchesToStove ||
-      clearlySwitchesToAc ||
-      clearlySwitchesToPanel ||
-      clearlySwitchesToPoints
-    ) {
-      return undefined;
-    }
-
-    const looksLikeShortAnswer =
-      text.length <= 28 ||
-      /^\d+(?:[.,]\d+)?(?:\s*(?:m|m\.|metra|метра|метър|метри))?$/i.test(text) ||
-      /^(da|ne|yes|no)$/i.test(text) ||
-      /^(ot tabloto|има kabel|ima kabel|bez kurtene|samo smqna|samo da se podmeni|ima star boiler|star boiler|ima veche kabel|veche izvadena liniq)$/i.test(
-        text,
-      );
-
-    if (looksLikeShortAnswer) {
-      return currentJobType;
-    }
-
-    return undefined;
+    // Only unambiguous short answers lock the old topic. A new named job may switch it.
+    return /^(?:\d+(?:[.,]\d+)?(?:\s*(?:m|м|метра|бр\.?))?|да|не|yes|no)$/.test(text) ? currentJobType : undefined;
   }
 
   private buildPrompt(
@@ -269,11 +250,22 @@ export class EstimateIntakeService {
       'You extract DELTA estimate updates from customer messages for an electrical installation assistant.',
       'Treat the message as raw customer input only.',
       'Return JSON only.',
-      'Only include fields learned from THIS message.',
+      'Only include fields learned from THIS message. Exception: if no draft exists, also extract facts from customerHistory (customer messages only).',
+      'Bulgarian in Latin letters, misspellings and digits used as letters are valid customer input.',
+      'A village-house renovation is residential_installation: ku6ta/kushta means house, remont na selo means renovation in a village. Never invent room counts from uncertain spelling: "s ve stai" is ambiguous (possibly "s dve stai"), NOT five rooms. Leave roomCount null and clarify. "dve stai" means two living rooms; five is "pet stai". A bathroom, kitchen and corridor are separate ancillary spaces. Full replacement is suggested by "vsi4ko novo". Only customer history provides facts; do not use guesses from assistant replies.',
+      'Residential example: "Novo 30 kvadrata.. standartna si garsionera" updates buildingStage=new, areaSqm=30, propertyType=studio. Do not ask again for facts already stated.',
+      'A whole dwelling installation is residential_installation. Garsoniera, garsionera and Garisionerata mean studio. kvadrata means square metres, not points.',
+      'Preserve a listed layout: Staq, koridor, banq, kiuhnq, terasa means roomCount=1, corridorCount=1, bathroomCount=1, separateKitchen=true, terraceCount=1. This is five lighting spaces, not five living rooms. Never invent square metres from the word studio. A terrace/balcony counts as its own lighting space. Explicit no terrace means terraceCount=0.',
+      'In a residential draft, boiler and AC answers update hasBoiler/hasAc; do not switch to appliance installation.',
+      'currentQuestionField=kitchenAppliances means the assistant asked whether there will be both a cooker and a washing machine. A clear yes confirms hasCooker and hasWashingMachine, not planAccepted. For hasCooker/hasWashingMachine, bind yes/no to that field.',
+      'Keep residential_installation for follow-up answers unless the customer explicitly abandons the whole dwelling job.',
+      'Set planAccepted=true only for explicit acceptance of an already proposed residential plan. Any changed residential fact sets planAccepted=false.',
       'Do not restate old known values from the draft unless the user explicitly changes them.',
       'If the message only adds one thing, return only that one thing in updates.',
+      'Distinguish questions from instructions: "Umno rele, tova za kakvo e" is an explanation request, not a purchase or an instruction to add smartRelayCount=1. "trqbva li da se kurtqt stenite" asks about chasing; do not set wallType or quantities. For a pure information question set userIntent=explanation, askExplanation=true, all updates null and scopeSwitch=false. Mixed messages with explicit requested changes are followup and update only explicitly requested facts. Mentioning an item in a question never means ordering it.',
       '',
       'Allowed job types:',
+      '- residential_installation',
       '- boiler_installation',
       '- boiler_replacement',
       '- stove_installation',
@@ -283,7 +275,9 @@ export class EstimateIntakeService {
       '',
       'Intent rules:',
       '- first-message price questions like "cena", "price", "kolko struva", "kolko e" are estimate requests, not explanation requests',
-      '- set askExplanation=true only when the user asks why an ALREADY GIVEN estimate is calculated that way',
+      '- set askExplanation=true when the user asks why an estimate, proposal, or intake question was given, including complaints such as togava za kakvo me pita za klimatik i boiler.',
+      'For residential installations, extract roomCount from tristaen/тристаен=3, dvustaen=2 (living rooms including living room, excluding bathroom/corridor). Extract separateKitchen only if stated. socketCount and lightingPointCount are whole-home totals only when explicit. Preserve hasOven, hasHob, hasDryer, hasDishwasher and smartRelayCount; zero means none. Never invent quantities; backend supplies labelled defaults.',
+      'Preserve explicit residential AC counts: 4 klimatika means hasAc=true and acCount=4. Never infer counts from silence. remont means renovation; reuse facts from customerHistory.',
       '- examples of explanation: "zashto", "kak go smetna", "obqsni cenata", but only if there is already a real estimate/draft context',
       '',
       'Job-type rules:',
@@ -292,26 +286,23 @@ export class EstimateIntakeService {
       '- examples for boiler_replacement: "imam star boiler", "smqna", "podmqna", "zamenq stariq s nov", "samo da se podmeni", "replace old boiler"',
       '- печка / pechka / pe4ka / фурна / furna / котлон / kotlon / плот / plot / plo4a => stove_installation',
       '- климатик / klimatik / climate / ac => ac_installation',
-      '- sockets, contacts, points, cables, whole apartment new wiring => points',
-      '- panel / tablo / табло => panel',
+      '- sockets, contacts, points, cables, whole apartment new wiring => residential_installation',
+      '- panel / tablo / табло => panel. panel_standard=MCB only; panel_modern=MCB with RCD groups; panel_full_protection=SPD, voltage relay and RCBO; panel_custom=individual design. Never select protection level without customer confirmation.',
       '',
       'Critical continuity rules:',
       '- if there is an existing draft topic and the new message is short, numeric, or clearly an answer to a previous question, keep the same jobType',
       '- current boiler_installation + "4 metra" => keep boiler_installation and set only routeLengthMeters=4',
       '- current boiler_installation + "ima kabel" => keep boiler_installation and set only connectionMode=existing_cable_only',
       '- if the new message clearly mentions stove words (pechka, kotlon, plot, furna), switch to stove_installation even if previous draft was boiler',
-      '- if the new message clearly mentions AC or panel words, switch topic accordingly',
+      '- Switch job only for an explicit new task. An answer like "from the panel" describes powerSource, not a panel installation.',
       '',
-      'Interpret uncertain language aggressively:',
-      '- phrases like "мисля", "май", "вероятно", "probably" still count as usable signals',
-      '- "мисля че кабела е добър" => connectionMode=existing_cable_only',
-      '- "има кабел", "има вече кабел", "вече изведена линия" => connectionMode=existing_cable_only',
-      '- "от таблото", "нова линия", "нова линия от таблото" => powerSource=panel and/or connectionMode=new_line_required',
-      '- "май няма да се кърти" => wallType=none',
-      '- prefer best guess over empty update when the user strongly implies reuse of existing infrastructure',
-      '',
+      'Never guess unspecified quantities, route lengths, wall types or cable suitability.',
+      'Uncertain phrases (probably, мисля, май, not sure) are not confirmed specifications; leave the affected field null.',
+      'A ready cable means existing_cable_only only if the customer explicitly says to reuse it.',
+      'Only set scopeSwitch=true when replacing the current job, never for an answer to a follow-up.',
+      'Do not turn an apartment area into a count of points. Ask for the actual count.',
       'Extraction rules:',
-      '- if user says they already have one boiler and want replacement, set quantity=1 unless they clearly say otherwise',
+      '- Set quantity only from an explicit count; do not default to one.',
       '- do not invent panelKind from building type phrases like "panelen apartament"',
       '- if the user does not explicitly provide panelKind, leave it null',
       '- do not invent fields outside schema',
@@ -319,8 +310,6 @@ export class EstimateIntakeService {
       forcedJobType
         ? `Forced current jobType: ${forcedJobType}. Keep this jobType unless the user clearly changes topic.`
         : 'Forced current jobType: none.',
-      `Current draft: ${input.draft ? JSON.stringify(input.draft) : 'none'}`,
-      `User message: ${input.message}`,
-    ].join('\\n');
+    ].join('\n');
   }
 }

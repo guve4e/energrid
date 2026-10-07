@@ -50,6 +50,10 @@ export interface EstimatePanelInput {
     | 'apartment_panel_up_to_4'
     | 'apartment_panel_up_to_8'
     | 'apartment_panel_above_8'
+    | 'panel_standard'
+    | 'panel_modern'
+    | 'panel_full_protection'
+    | 'panel_custom'
     | 'boiler_panel';
   quantity: number;
 }

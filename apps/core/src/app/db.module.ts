@@ -10,6 +10,7 @@ export const PG_POOL = 'PG_POOL';
       provide: PG_POOL,
       useFactory: () => {
         return new Pool({
+          options: process.env.LOCAL_ESTIMATOR_ONLY === 'true' ? '-c default_transaction_read_only=on' : undefined,
           host: process.env.PGHOST,
           port: Number(process.env.PGPORT),
           database: process.env.PGDATABASE,
