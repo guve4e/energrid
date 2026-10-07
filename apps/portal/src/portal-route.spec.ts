@@ -1,0 +1,20 @@
+import { describe, expect, it } from 'vitest';
+import { pageFromPath, pathForPage } from './portal-route';
+
+describe('portal route helpers', () => {
+  it.each([
+    ['/', 'assistant'],
+    ['/weather', 'weather'],
+    ['/weather/', 'weather'],
+    ['/devices/shelly', 'devices'],
+    ['/not-a-page', 'assistant'],
+  ])('maps %s to %s', (path, page) => {
+    expect(pageFromPath(path)).toBe(page);
+  });
+
+  it('creates stable shareable paths for portal pages', () => {
+    expect(pathForPage('assistant')).toBe('/');
+    expect(pathForPage('weather')).toBe('/weather/');
+    expect(pathForPage('logs')).toBe('/logs/');
+  });
+});
