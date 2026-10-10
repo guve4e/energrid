@@ -217,6 +217,10 @@ it('returns a populated daily dashboard horizon without changing the selected ri
     isFallback: true,
   });
   expect(dashboard.intelligence.daily).toEqual(dashboard.daily);
+  expect(dashboard.dayDetails.map(day => ({ date: day.date, model: day.sourceModel }))).toEqual([
+    { date: '2026-09-23', model: 'ncep_gfs_seamless' },
+    { date: '2026-09-24', model: 'ncep_gfs_seamless' },
+  ]);
 });
 
 it('does not count duplicate model snapshots as independent corroboration', () => {

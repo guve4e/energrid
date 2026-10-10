@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import ForecastDayDetail from './ForecastDayDetail.vue';
+import type { ForecastDay as WeatherDay, ForecastDayDetails } from './forecast-types';
 
 const props = defineProps<{ apiBase: string; accessToken: string }>();
 interface Source { model: string; fetchedAt: string; severity: string; dataQuality: { status: string; reasons: string[] } }
@@ -8,15 +10,10 @@ interface Dashboard {
   current: { temperature: number | null; windKmh: number | null; gustKmh: number | null };
   intelligence: { headline: string; severity: string; confidence: string; rain?: RainAssessment };
   daily?: WeatherDay[];
+  dayDetails?: ForecastDayDetails[];
   dailyOutlook?: { agreementDays: number; disagreementDays: number; singleModelDays: number; sourceModels: string[] };
   comparison: { status: string; selectedModel: string; selectionReason?: string; disagreementReasons?: string[]; sources: Source[] };
   dataQuality: { status: string };
-}
-interface WeatherDay {
-  date: string; tempMax: number | null; tempMin: number | null; rainTotalMm: number | null;
-  rainChanceMax: number | null; weatherCode: number | null; condition: string; gustMaxKmh: number | null;
-  sourceModel?: string | null; agreement?: 'agreement' | 'disagreement' | 'single-model';
-  selectionReason?: string; disagreementReasons?: string[];
 }
 interface RainAssessment {
   duration: string; headline: string; summary: string; totalMm: number; litersPerSquareMeter: number;
@@ -34,6 +31,13 @@ interface RiverScore {
   directionAccuracyPct: number | null; verificationVersion: string; observationTimeBasis: string;
 }
 const dashboard = ref<Dashboard | null>(null);
+const selectedDate = ref<string | null>(null);
+const selectedDay = computed(() => {
+  const days = dashboard.value?.daily?.slice(0, 10) ?? [];
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: dashboard.value?.dayDetails?.[0]?.timezone || 'Europe/Sofia', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  return days.find(day => day.date === selectedDate.value) ?? days.find(day => day.date === today) ?? days[0];
+});
+const selectedDetail = computed(() => dashboard.value?.dayDetails?.find(detail => detail.date === selectedDay.value?.date));
 const weather = ref<{ status: string; summary: WeatherScore[]; pending?: { scheduled: number; awaitingObservations: number }; note?: string } | null>(null);
 const river = ref<{ status?: string; summary: RiverScore[]; note?: string } | null>(null);
 const errors = ref<Record<string, string>>({});
@@ -71,7 +75,7 @@ const dailyOutlookLabel = (days: WeatherDay[] = []) => {
 };
 const dayAgreementLabel = (day: WeatherDay) =>
   day.agreement === 'disagreement' ? 'Cautious' :
-    day.agreement === 'single-model' ? 'Single model' : 'Agreed';
+    day.agreement === 'single-model' ? 'Single model' : day.agreement === 'agreement' ? 'Agreed' : 'Unverified';
 const daySourceLabel = (day: WeatherDay) => day.sourceModel ? modelName(day.sourceModel) : 'Selected forecast';
 const rainImpactLabel = (value: number | null | undefined) => {
   if (value == null || !Number.isFinite(Number(value))) return 'unknown rain';
@@ -148,9 +152,29 @@ onBeforeUnmount(() => { disposed = true; controller?.abort(); if (timer) clearIn
         <article><span>Wind gust</span><strong>{{ number(dashboard.current.gustKmh) }} km/h</strong></article>
         <article><span>Selected forecast source</span><strong>{{ modelName(dashboard.comparison.selectedModel || 'Unavailable') }}</strong><small v-if="dashboard.comparison.selectionReason">{{ dashboard.comparison.selectionReason }}</small></article>
       </div>
+      <section v-if="dashboard.daily?.length" class="daily-forecast" aria-labelledby="ten-day-forecast">
+        <div class="section-title">
+          <h3 id="ten-day-forecast">10-day forecast</h3>
+          <span>{{ dailyOutlookLabel(dashboard.daily) }}</span>
+        </div>
+        <div class="daily-grid">
+          <button v-for="day in dashboard.daily.slice(0, 10)" :key="day.date" type="button" :class="['day-card', `agreement-${day.agreement || 'unknown'}`]" :aria-pressed="selectedDay?.date === day.date" :aria-label="`Forecast for ${dayLabel(day.date)}`" aria-controls="selected-day-panel" @click="selectedDate = day.date">
+            <span>{{ dayLabel(day.date) }}</span>
+            <em class="day-badge">{{ dayAgreementLabel(day) }}</em>
+            <strong>{{ iconFor(day.weatherCode) }}</strong>
+            <span class="day-condition">{{ day.condition }}</span>
+            <b>{{ number(day.tempMax) }}° / {{ number(day.tempMin) }}°</b>
+            <small>{{ dailyRainImpact(day.rainTotalMm) }}</small>
+            <small>{{ rainImpactLabel(day.rainTotalMm) }} · {{ number(day.rainChanceMax, 0) }}% rain</small>
+            <small>{{ number(day.gustMaxKmh, 0) }} km/h gust</small>
+            <small>{{ daySourceLabel(day) }}</small>
+          </button>
+        </div>
+        <ForecastDayDetail v-if="selectedDay" id="selected-day-panel" :day="selectedDay" :detail="selectedDetail" />
+      </section>
       <section v-if="dashboard.intelligence.rain" class="rain-card" aria-labelledby="rain-outlook">
         <div>
-          <p class="eyebrow">Rain intelligence</p>
+          <p class="eyebrow">Next 24 hours · Rain intelligence</p>
           <h3 id="rain-outlook">{{ dashboard.intelligence.rain.headline }}</h3>
           <p>{{ dashboard.intelligence.rain.summary }}</p>
         </div>
@@ -159,25 +183,6 @@ onBeforeUnmount(() => { disposed = true; controller?.abort(); if (timer) clearIn
           <article><span>Wet hours</span><strong>{{ dashboard.intelligence.rain.wetHours }}/{{ dashboard.intelligence.rain.assessedHours }}</strong><small>{{ label(dashboard.intelligence.rain.duration) }}</small></article>
           <article><span>Peak hour</span><strong>{{ number(dashboard.intelligence.rain.maxHourlyMm) }} mm</strong><small>{{ number(dashboard.intelligence.rain.maxRainChance, 0) }}% max chance</small></article>
           <article><span>Window</span><strong>{{ hour(dashboard.intelligence.rain.startsAt) }}</strong><small>to {{ hour(dashboard.intelligence.rain.endsAt) }}</small></article>
-        </div>
-      </section>
-      <section v-if="dashboard.daily?.length" class="daily-forecast" aria-labelledby="ten-day-forecast">
-        <div class="section-title">
-          <h3 id="ten-day-forecast">10-day forecast</h3>
-          <span>{{ dailyOutlookLabel(dashboard.daily) }}</span>
-        </div>
-        <div class="daily-grid">
-          <article v-for="day in dashboard.daily.slice(0, 10)" :key="day.date" :class="['day-card', `agreement-${day.agreement || 'unknown'}`]">
-            <span>{{ dayLabel(day.date) }}</span>
-            <em class="day-badge">{{ dayAgreementLabel(day) }}</em>
-            <strong>{{ iconFor(day.weatherCode) }}</strong>
-            <p>{{ day.condition }}</p>
-            <b>{{ number(day.tempMax) }}° / {{ number(day.tempMin) }}°</b>
-            <small>{{ dailyRainImpact(day.rainTotalMm) }}</small>
-            <small>{{ rainImpactLabel(day.rainTotalMm) }} · {{ number(day.rainChanceMax, 0) }}% rain</small>
-            <small>{{ number(day.gustMaxKmh, 0) }} km/h gust</small>
-            <small>{{ daySourceLabel(day) }}</small>
-          </article>
         </div>
       </section>
       <h3>Forecast sources</h3>
@@ -228,17 +233,18 @@ onBeforeUnmount(() => { disposed = true; controller?.abort(); if (timer) clearIn
 <style scoped>
 .weather-page{display:grid;gap:20px;min-width:0}.weather-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.weather-header h2{margin:4px 0 12px}.weather-header p{margin-bottom:0}.weather-muted{color:#64748b;font-size:13px;line-height:1.6;margin:0}.weather-notice{background:#edf3ff;border:1px solid #cbdaf5;border-radius:12px;padding:16px;line-height:1.5}.weather-notice.caution{background:#fff7e6;border-color:#f0d69a;color:#5d4108}.weather-notice p{margin:8px 0}.weather-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.weather-metrics article{padding:20px;border:1px solid #d8e0ec;border-radius:12px}.weather-metrics span,.weather-metrics strong,.weather-metrics small,.rain-grid span,.rain-grid strong,.rain-grid small,.day-card span,.day-card strong,.day-card b,.day-card small{display:block}.weather-metrics strong{font-size:24px;margin-top:8px}.weather-metrics small{color:#64748b;font-size:12px;line-height:1.35;margin-top:8px}.rain-card{border:1px solid #bdd3f4;background:#f8fbff;border-radius:12px;padding:18px;grid-template-columns:minmax(220px,.8fr) 1fr;align-items:start}.rain-card p{margin:0;color:#475569;line-height:1.5}.rain-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.rain-grid article{min-height:92px;padding:14px;border:1px solid #d8e0ec;border-radius:8px;background:#fff}.rain-grid span,.day-card span{color:#64748b;font-size:12px;font-weight:800;text-transform:uppercase}.rain-grid strong{font-size:22px;margin:6px 0 4px}.rain-grid small{color:#64748b;font-size:12px}.section-title{display:flex;align-items:end;justify-content:space-between;gap:12px}.section-title h3{margin:0}.section-title span{color:#64748b;font-size:12px;font-weight:800}.daily-grid{display:grid;grid-template-columns:repeat(10,minmax(112px,1fr));gap:8px;overflow-x:auto;padding-bottom:4px}.day-card{min-height:214px;padding:12px;border:1px solid #d8e0ec;border-radius:8px;background:#fff}.day-card.agreement-disagreement{border-color:#f0c36d;background:#fffaf0}.day-card strong{font-size:24px;line-height:1;margin:10px 0 8px}.day-card p{height:34px;margin:0 0 10px;color:#475569;font-size:12px;line-height:1.4;overflow:hidden}.day-card b{font-size:17px;margin-bottom:7px}.day-card small{color:#64748b;font-size:11px;line-height:1.35}.day-badge{display:inline-block;margin-top:8px;padding:3px 7px;border-radius:999px;background:#edf3ff;color:#2563eb;font-size:10px;font-style:normal;font-weight:800;text-transform:uppercase}.agreement-disagreement .day-badge{background:#fff1c7;color:#9a5b00}.agreement-single-model .day-badge{background:#f1f5f9;color:#475569}.weather-table{overflow-x:auto}.weather-table table{width:100%;border-collapse:collapse;font-size:13px}.weather-table th,.weather-table td{text-align:left;padding:14px 10px;border-bottom:1px solid #d8e0ec;vertical-align:top}.weather-table small{display:block;color:#64748b;font-size:11px;margin-top:6px;max-width:320px}.weather-page h3{margin:8px 0 12px}.weather-page section{display:grid;gap:12px}
 @media(max-width:1100px){.daily-grid{grid-template-columns:repeat(10,126px)}}
+.day-card{font:inherit;text-align:left;cursor:pointer;color:inherit;min-width:0;letter-spacing:0;transition:border-color .15s,box-shadow .15s}.day-card[aria-pressed=true]{border-color:#2563eb;box-shadow:inset 0 0 0 1px #2563eb}.day-card:hover{border-color:#2563eb}.day-card:focus-visible{outline:3px solid #2563eb;outline-offset:-3px}.day-card .day-condition{height:34px;margin:0 0 10px;color:#475569;font-size:12px;line-height:1.4;overflow:hidden;font-weight:400;text-transform:none}.daily-grid{padding:3px 0 8px}.day-card>span:first-child{min-height:30px}
 @media(max-width:900px){.rain-card{grid-template-columns:1fr}.rain-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:700px){.weather-metrics,.rain-grid{grid-template-columns:1fr}.weather-header{flex-direction:column}.weather-metrics strong{font-size:21px}}
-:global(.theme-dark) .weather-notice{background:#14223a;border-color:#31415c;color:#e2e8f0}
-:global(.theme-dark) .weather-notice.caution{background:#362a15;border-color:#735727;color:#ffe5aa}
-:global(.theme-dark) .weather-muted,:global(.theme-dark) .weather-table small{color:#a5b4c8}
-:global(.theme-dark) .rain-card{background:#101b2e;border-color:#31415c}
-:global(.theme-dark) .rain-card p,:global(.theme-dark) .rain-grid span,:global(.theme-dark) .rain-grid small,:global(.theme-dark) .section-title span,:global(.theme-dark) .day-card span,:global(.theme-dark) .day-card small,:global(.theme-dark) .day-card p{color:#a5b4c8}
-:global(.theme-dark) .rain-grid article,:global(.theme-dark) .day-card{background:#111827;border-color:#31415c}
-:global(.theme-dark) .day-card.agreement-disagreement{background:#2d2414;border-color:#735727}
-:global(.theme-dark) .day-badge{background:#14223a;color:#93c5fd}
-:global(.theme-dark) .agreement-disagreement .day-badge{background:#4a3411;color:#fde68a}
-:global(.theme-dark) .agreement-single-model .day-badge{background:#1f2937;color:#cbd5e1}
-:global(.theme-dark) .weather-table th,:global(.theme-dark) .weather-table td,:global(.theme-dark) .weather-metrics article{border-color:#31415c}
+.theme-dark .weather-notice{background:#14223a;border-color:#31415c;color:#e2e8f0}
+.theme-dark .weather-notice.caution{background:#362a15;border-color:#735727;color:#ffe5aa}
+.theme-dark .weather-muted,.theme-dark .weather-table small{color:#a5b4c8}
+.theme-dark .rain-card{background:#101b2e;border-color:#31415c}
+.theme-dark .rain-card p,.theme-dark .rain-grid span,.theme-dark .rain-grid small,.theme-dark .section-title span,.theme-dark .day-card span,.theme-dark .day-card small,.theme-dark .day-card p{color:#a5b4c8}
+.theme-dark .rain-grid article,.theme-dark .day-card{background:#111827;border-color:#31415c}
+.theme-dark .day-card.agreement-disagreement{background:#2d2414;border-color:#735727}
+.theme-dark .day-badge{background:#14223a;color:#93c5fd}
+.theme-dark .agreement-disagreement .day-badge{background:#4a3411;color:#fde68a}
+.theme-dark .agreement-single-model .day-badge{background:#1f2937;color:#cbd5e1}
+.theme-dark .weather-table th,.theme-dark .weather-table td,.theme-dark .weather-metrics article{border-color:#31415c}
 </style>

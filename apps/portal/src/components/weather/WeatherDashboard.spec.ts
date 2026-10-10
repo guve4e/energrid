@@ -21,9 +21,9 @@ const forecast = { location: 'Vidin', fetchedAt: new Date().toISOString(), summa
     { model: 'ncep_gfs_seamless', fetchedAt: new Date().toISOString(), severity: 'unknown', dataQuality: { status: 'stale', reasons: ['stale_or_invalid_timestamp'] } },
   ], selectionReason: 'Selected because it reports the highest weather risk among usable models.' }, dataQuality: { status: 'available' } };
 let wrapper: ReturnType<typeof mount> | undefined;
-afterEach(() => { wrapper?.unmount(); wrapper = undefined; vi.unstubAllGlobals(); });
-function responses(weather: object = { status: 'awaiting-observations', summary: [], pending: { scheduled: 4, awaitingObservations: 2 } }) {
-  return vi.fn(async (url: string) => ({ ok: true, json: async () => url.endsWith('/dashboard') ? forecast : url.endsWith('/river-performance') ? { summary: [] } : weather }));
+afterEach(() => { wrapper?.unmount(); wrapper = undefined; vi.unstubAllGlobals(); vi.useRealTimers(); });
+function responses(weather: object = { status: 'awaiting-observations', summary: [], pending: { scheduled: 4, awaitingObservations: 2 } }, dashboard: object = forecast) {
+  return vi.fn(async (url: string) => ({ ok: true, json: async () => url.endsWith('/dashboard') ? dashboard : url.endsWith('/river-performance') ? { summary: [] } : weather }));
 }
 function responsesWithRiver(river: object) {
   return vi.fn(async (url: string) => ({
@@ -67,6 +67,33 @@ describe('weather page', () => {
     await wrapper.get('button').trigger('click'); await flushPromises();
     expect(wrapper.text()).not.toContain('Storm risk in one model');
     expect(wrapper.text()).toContain('Current forecast: offline');
+  });
+  it('defaults to today and switches the selected day without changing current conditions or fetching again', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-06T09:00:00Z'));
+    const fetch = responses(); vi.stubGlobal('fetch', fetch);
+    wrapper = mount(WeatherDashboard, { props: { apiBase: '', accessToken: 'test' } });
+    await flushPromises();
+    expect(wrapper.get('.day-card[aria-pressed="true"]').text()).toContain('Oct 6');
+    await wrapper.findAll('.day-card')[1].trigger('click');
+    expect(wrapper.get('#selected-day-title').text()).toContain('October 7');
+    expect(wrapper.get('#selected-day-panel').text()).toContain('Cautious · models differ');
+    expect(wrapper.get('#selected-day-panel').text()).toContain('NOAA GFS');
+    expect(wrapper.get('.weather-metrics').text()).toContain('20.0 °C');
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(wrapper.get('#selected-day-panel').text()).toContain('Hourly details unavailable');
+  });
+  it('preserves a selected day on refresh and falls back when that day leaves the horizon', async () => {
+    const fetch = responses(); vi.stubGlobal('fetch', fetch);
+    wrapper = mount(WeatherDashboard, { props: { apiBase: '', accessToken: 'test' } });
+    await flushPromises();
+    await wrapper.findAll('.day-card')[1].trigger('click');
+    await wrapper.get('button').trigger('click'); await flushPromises();
+    expect(wrapper.get('#selected-day-title').text()).toContain('October 7');
+    fetch.mockImplementation(responses(undefined, { ...forecast, daily: forecast.daily.slice(5) }));
+    await wrapper.get('button').trigger('click'); await flushPromises();
+    expect(wrapper.get('#selected-day-title').text()).not.toContain('October 7');
+    expect(wrapper.findAll('.day-card[aria-pressed="true"]')).toHaveLength(1);
   });
   it('shows the backend weather outage reason instead of hiding it behind a retry message', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({

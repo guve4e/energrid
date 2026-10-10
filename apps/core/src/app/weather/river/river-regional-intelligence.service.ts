@@ -302,7 +302,7 @@ export class RiverRegionalIntelligenceService {
   private headlineFromAssessment(assessment: RegionalAssessment): string {
     switch (assessment) {
       case 'record-low':
-        return 'Lowest July range in the available historical archive';
+        return 'Lowest seasonal range in the available historical archive';
       case 'exceptionally-low':
         return 'Historically exceptional low-water conditions';
       case 'below-normal':

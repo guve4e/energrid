@@ -60,6 +60,30 @@ An adapter with that dedicated credential can send a batch to `POST /core/weathe
 
 Example dates must be replaced with real measurement timestamps. Ingestion accepts up to 100 readings from the last 30 days; batches are transactional. Scoring happens on the next hourly cycle. With no station connected, the UI honestly shows “awaiting measured observations.”
 
+## Daily explorer data
+
+`GET /core/weather/dashboard` also returns `dayDetails`, ordered to match `daily`.
+The portal weather bridge forwards this unchanged. Room dashboards can consume the
+same data without inheriting the general page's layout or selection state.
+
+Each entry contains the local calendar `date`, `timezone`, UTC `startsAt`/`endsAt`,
+the day's chosen `sourceProvider`/`sourceModel`, all available hourly parameters,
+coverage, statistics, and the available models' daily forecasts for comparison.
+Hourly data always comes from the source selected for that particular day.
+Daily totals remain the provider's daily totals; they are not replaced by sums of
+partially available hourly data.
+
+Coverage distinguishes complete, partial, and unavailable hourly forecasts. It
+counts 23 or 25 hours on daylight-saving transition dates. Null measurements remain
+null; hourly lines break at missing intervals. Wet hours and rain windows count
+available hours with at least 0.1 mm of forecast precipitation. Humidity and pressure
+averages use available values only. Statistics are forecasts, not observations.
+
+The general page and portal default to today in the forecast timezone, preserve a
+chosen date across refreshes, and fall back to today or the first forecast date when
+the chosen date leaves the horizon. Selecting a day does not change current weather
+or recent radar observations. No storage migration is needed for these details.
+
 ## Verification commands
 
 ```sh

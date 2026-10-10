@@ -5,6 +5,7 @@ import { WeatherRiskEngine } from './weather-risk.engine';
 import { DanubeProviderService } from './danube-provider.service';
 import { WeatherIntelligenceService } from './weather-intelligence.service';
 import { buildDailyOutlook } from './weather-daily-outlook';
+import { buildWeatherDayDetails } from './weather-day-details';
 
 @Injectable()
 export class WeatherService {
@@ -36,7 +37,8 @@ export class WeatherService {
       level: intelligence.severity === 'danger' ? 'high' :
         intelligence.severity === 'watch' ? 'medium' : selected.risk.level,
     };
-    return { ...selected.snapshot, daily: dailyOutlook.days, dailyOutlook, river, riskReport, intelligence, comparison,
+    const dayDetails = buildWeatherDayDetails(dailyOutlook.days, snapshots);
+    return { ...selected.snapshot, daily: dailyOutlook.days, dailyOutlook, dayDetails, river, riskReport, intelligence, comparison,
       dataQuality: selected.quality, summary: intelligence.subtitle };
   }
 }
