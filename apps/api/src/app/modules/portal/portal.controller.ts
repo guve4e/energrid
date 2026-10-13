@@ -15,9 +15,11 @@ import {
 import { ApiExcludeController } from '@nestjs/swagger'
 import { map } from 'rxjs'
 import { DeviceControlService } from '../devices/device-control.service'
+import { DeviceDiagnosticsService } from '../devices/device-diagnostics.service'
 import { DeviceLanDiscoveryService } from '../devices/device-lan-discovery.service'
 import { DeviceMqttIngestService } from '../devices/device-mqtt-ingest.service'
 import { DeviceRegistryService } from '../devices/device-registry.service'
+import { shellyLanCandidates } from '../devices/adapters/inbound/shelly/shelly-lan-candidates'
 import {
   type DeviceProxyRequest,
   type DeviceProxyResponse,
@@ -35,6 +37,7 @@ export class PortalController {
     private readonly deviceControl: DeviceControlService,
     private readonly mqttIngest: DeviceMqttIngestService,
     private readonly deviceRegistry: DeviceRegistryService,
+    private readonly diagnostics: DeviceDiagnosticsService,
   ) {}
 
   @Get()
@@ -49,8 +52,14 @@ export class PortalController {
   }
 
   @Get('network/scan')
-  scanNetwork() {
-    return this.lanDiscovery.scanNow()
+  async scanNetwork(@Req() request: DeviceProxyRequest) {
+    assertPortalControlToken(request)
+    const scan = await this.lanDiscovery.scanNow()
+    for (const device of scan.devices) {
+      for (const candidate of shellyLanCandidates(device))
+        this.deviceRegistry.registerDiscoveredDevice(candidate)
+    }
+    return scan
   }
 
   @Get('bus/mqtt')
@@ -87,6 +96,25 @@ export class PortalController {
   ) {
     assertPortalControlToken(request)
     return this.deviceControl.execute(deviceId, body?.action)
+  }
+
+  @Post('devices/:deviceId/control')
+  configureDeviceControl(
+    @Param('deviceId') deviceId: string,
+    @Body() body: { binding?: unknown },
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+    return { device: this.deviceControl.configure(deviceId, body?.binding ?? null), persistence: 'runtime' }
+  }
+
+  @Post('devices/:deviceId/diagnostics')
+  checkDeviceConnection(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+    return this.diagnostics.check(deviceId)
   }
 
   @Post('discovery/:deviceId/approve')

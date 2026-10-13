@@ -1,7 +1,7 @@
 {
   "name": "domain-telemetry",
-  "$schema": "../node_modules/nx/schemas/project-schema.json",
-  "sourceRoot": "domain-telemetry/src",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "libs/domain-telemetry/src",
   "projectType": "library",
   "tags": [],
   "// targets": "to see all targets run: nx show project domain-telemetry --web",

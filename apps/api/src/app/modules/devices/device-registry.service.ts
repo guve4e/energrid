@@ -1,4 +1,9 @@
 import { Injectable } from '@nestjs/common';
+import {
+  deviceControlState,
+  parseDeviceControlBinding,
+  type DeviceControlBinding,
+} from '@energrid/domain-devices';
 import type {
   DeviceCapabilityKind,
   DeviceExecutionTrace,
@@ -42,6 +47,7 @@ export interface DiscoveredDeviceConfig {
     | 'simulated';
   confidence?: number;
   reason?: string;
+  metadata?: Record<string, string | number | boolean>;
 }
 
 interface ApprovedDeviceConfig {
@@ -94,6 +100,10 @@ interface ApprovedDeviceConfig {
 
 @Injectable()
 export class DeviceRegistryService {
+  private readonly controlBindings = new Map<
+    string,
+    DeviceControlBinding | null
+  >();
   private readonly liveApprovedDeviceConfigs = new Map<
     string,
     ApprovedDeviceConfig
@@ -131,7 +141,19 @@ export class DeviceRegistryService {
 
   private readonly latestCommandIdByDeviceId = new Map<string, string>();
 
-  constructor(private readonly operationalLog?: OperationalLogService) {}
+  constructor(private readonly operationalLog?: OperationalLogService) {
+    const configured: unknown = JSON.parse(
+      process.env.HOME_DEVICE_CONTROL_BINDINGS_JSON || '{}',
+    );
+    if (
+      !configured ||
+      typeof configured !== 'object' ||
+      Array.isArray(configured)
+    )
+      throw new Error('HOME_DEVICE_CONTROL_BINDINGS_JSON must be an object.');
+    for (const [id, binding] of Object.entries(configured))
+      this.controlBindings.set(id, parseDeviceControlBinding(binding));
+  }
 
   getSnapshot(): DeviceRegistrySnapshot {
     const allDevices = this.getDevices();
@@ -164,10 +186,12 @@ export class DeviceRegistryService {
         discovered: devices.filter(
           (device) => device.trustStatus === 'discovered',
         ).length,
-        controllable: devices.filter((device) =>
-          device.capabilities.some((capability) =>
-            capability.actions.some((action) => action !== 'read'),
-          ),
+        controllable: devices.filter(
+          (device) =>
+            device.control?.status === 'ready' &&
+            device.capabilities.some((capability) =>
+              capability.actions.some((action) => action !== 'read'),
+            ),
         ).length,
         sensors: devices.filter((device) =>
           device.capabilities.some((capability) =>
@@ -236,10 +260,7 @@ export class DeviceRegistryService {
         commandTopic: mqttTopicFor(identity, 'kitchen_light', 'command'),
         stateTopic: mqttTopicFor(identity, 'kitchen_light', 'state'),
       },
-      state: unknownState(
-        'configured by adapter',
-        hasShellyGroup || hasGenericLightMqtt,
-      ),
+      state: unknownState('configured by adapter'),
       responseProfile: responseProfile({
         latencyMs: 600,
         notes: 'Logical light group fans out to physical adapters.',
@@ -284,6 +305,9 @@ export class DeviceRegistryService {
       metadata: {
         dst: device.dst,
         switchId: device.switchId,
+        physicalId: device.dst,
+        channel: device.switchId,
+        component: `switch:${device.switchId}`,
       },
     }));
 
@@ -363,12 +387,95 @@ export class DeviceRegistryService {
       ...this.getDiscoveredDevices(),
     ]);
 
-    return devices.map((device) => this.withLiveState(device));
+    const result = devices.map((device) => ({
+      ...this.withLiveState(device),
+      control: deviceControlState(
+        device,
+        this.controlBindings.get(device.id) || null,
+      ),
+    }));
+    const groupState = (
+      device: RegisteredDevice,
+      seen = new Set<string>(),
+    ): boolean => {
+      if (seen.has(device.id) || device.trustStatus !== 'approved')
+        return false;
+      if (
+        !device.capabilities.some(
+          (c) =>
+            c.actions.includes('turn_on') && c.actions.includes('turn_off'),
+        )
+      )
+        return false;
+      if (!device.memberDeviceIds?.length)
+        return (
+          device.adapter.protocol === 'simulated' ||
+          device.control?.status === 'ready'
+        );
+      const next = new Set(seen).add(device.id);
+      return device.memberDeviceIds.every((id) => {
+        const member = result.find((item) => item.id === id);
+        return !!member && groupState(member, next);
+      });
+    };
+    for (const device of result) {
+      if (device.memberDeviceIds?.length)
+        device.control = {
+          status: groupState(device) ? 'ready' : 'needs-setup',
+          binding: null,
+          reason: "Group control uses every member's explicit route.",
+        };
+      else if (
+        device.adapter.protocol === 'simulated' &&
+        device.trustStatus === 'approved' &&
+        device.control.status !== 'read-only'
+      )
+        device.control = {
+          status: 'ready',
+          binding: null,
+          reason: 'Simulation only.',
+        };
+    }
+    return result;
+  }
+
+  configureDeviceControl(deviceId: string, value: unknown): RegisteredDevice {
+    const device = this.getDevices().find((item) => item.id === deviceId);
+    if (!device || device.trustStatus !== 'approved')
+      throw new Error('Approve this device before configuring control.');
+    if (
+      device.tenantId !== configuredSite().tenantId ||
+      device.siteId !== configuredSite().siteId
+    )
+      throw new Error('Control configuration is limited to this site.');
+    if (
+      device.memberDeviceIds?.length ||
+      device.adapter.protocol === 'simulated'
+    )
+      throw new Error('Configure the physical member routes instead.');
+    const binding = parseDeviceControlBinding(value);
+    const state = deviceControlState(device, binding);
+    if (binding && !['ready', 'disabled'].includes(state.status))
+      throw new Error(state.reason);
+    this.controlBindings.set(deviceId, binding);
+    this.operationalLog?.record({
+      level: 'info',
+      source: 'device-registry',
+      event: 'device.control_configured',
+      deviceId,
+      message: `Control route ${binding ? binding.kind : 'removed'}; switching ${binding?.enabled ? 'enabled' : 'disabled'}.`,
+    });
+    return this.getDevices().find((item) => item.id === deviceId)!;
   }
 
   getAvailableDeviceIds(): string[] {
     return this.getDevices()
       .filter((device) => device.trustStatus === 'approved')
+      .filter(
+        (device) =>
+          !device.capabilities.some((c) => c.actions.includes('turn_on')) ||
+          device.control?.status === 'ready',
+      )
       .filter(
         (device) =>
           device.adapter.configured || device.adapter.protocol === 'simulated',
@@ -398,8 +505,7 @@ export class DeviceRegistryService {
       gatewayId: discovered.gatewayId,
       kind: discovered.kind,
       zoneId: discovered.zoneId,
-      zoneName:
-        discovered.discovery?.suggestedRoom || discovered.zoneName,
+      zoneName: discovered.discovery?.suggestedRoom || discovered.zoneName,
       protocol: discovered.adapter.protocol,
       transport: discovered.adapter.transport,
       driver: discovered.adapter.driver,
@@ -415,6 +521,7 @@ export class DeviceRegistryService {
         status: discovered.state.status,
       },
       metadata: cleanMetadata({
+        ...discovered.metadata,
         approvedFromDiscovery: true,
         discoverySource: discovered.discovery?.source,
         discoveryConfidence: discovered.discovery?.confidence,
@@ -428,7 +535,7 @@ export class DeviceRegistryService {
       level: 'info',
       source: 'device-registry',
       event: 'discovery.approved',
-      message: `${discovered.displayName} was approved for Energrid control.`,
+      message: `${discovered.displayName} was approved; control requires a separate route and permission.`,
       deviceId: id,
       status: 'approved',
       details: {
@@ -471,15 +578,19 @@ export class DeviceRegistryService {
     physicalId: string,
     component: string,
     channel: number | null,
+    commandTopic?: string,
   ): void {
     const id = `${physicalId}:${component}`;
     const capability: DeviceCapabilityKind = component.startsWith('switch:')
       ? 'switch'
       : 'power';
 
-    if (this.liveDiscoveredDeviceConfigs.has(id)) {
+    const existing = this.liveDiscoveredDeviceConfigs.get(id);
+    if (
+      existing &&
+      (!commandTopic || existing.metadata?.mqttCommandTopic === commandTopic)
+    )
       return;
-    }
 
     this.liveDiscoveredDeviceConfigs.set(id, {
       id,
@@ -494,6 +605,13 @@ export class DeviceRegistryService {
       source: 'mqtt',
       confidence: 0.8,
       reason: 'Discovered from Shelly MQTT telemetry',
+      metadata: cleanMetadata({
+        ...existing?.metadata,
+        physicalId,
+        component,
+        channel: channel ?? undefined,
+        mqttCommandTopic: commandTopic,
+      }),
     });
 
     this.operationalLog?.record({
@@ -518,6 +636,7 @@ export class DeviceRegistryService {
 
     this.liveDiscoveredDeviceConfigs.set(id, {
       ...config,
+      metadata: cleanMetadata({ ...this.liveDiscoveredDeviceConfigs.get(id)?.metadata, ...config.metadata }),
       confidence: config.confidence ?? 0.5,
       reason: config.reason || 'Discovered device awaiting approval.',
     });
@@ -1669,13 +1788,12 @@ function valuesMatch(
 
 function unknownState(
   source: string,
-  configured = true,
 ): RegisteredDeviceState {
   return {
     values: {},
     observedAt: null,
     source,
-    status: configured ? 'unknown' : 'offline',
+    status: 'unknown',
   };
 }
 
@@ -1900,7 +2018,7 @@ function normalizeApprovedDevice(item: unknown): RegisteredDevice | null {
       values,
       observedAt: raw.state?.observedAt ?? raw.lastSeen ?? null,
       source: raw.state?.source || raw.origin || protocol,
-      status: normalizeOnlineStatus(raw.state?.status || raw.status),
+      status: raw.state?.observedAt || raw.lastSeen ? normalizeOnlineStatus(raw.state?.status || raw.status) : 'unknown',
     },
     responseProfile: responseProfile({
       latencyMs: latencyForProtocol(protocol),
@@ -1913,15 +2031,17 @@ function normalizeApprovedDevice(item: unknown): RegisteredDevice | null {
       : safePolicy(),
     metadata: cleanMetadata({
       ...raw.metadata,
-      origin: raw.origin,
-      hardwareId: raw.hardwareId || raw.physicalId,
-      physicalId: raw.physicalId,
-      channel: raw.channel ?? raw.switchId,
-      channelName: raw.channelName,
-      component: raw.component,
-      model: raw.model,
-      groups: raw.groups?.join(','),
-      aliases: raw.aliases?.slice(0, 8).join(', '),
+      ...cleanMetadata({
+        origin: raw.origin,
+        hardwareId: raw.hardwareId || raw.physicalId,
+        physicalId: raw.physicalId,
+        channel: raw.channel ?? raw.switchId,
+        channelName: raw.channelName,
+        component: raw.component,
+        model: raw.model,
+        groups: raw.groups?.join(','),
+        aliases: raw.aliases?.slice(0, 8).join(', '),
+      }),
     }),
   };
 }
@@ -2279,7 +2399,7 @@ function normalizeDiscoveredDevice(
       telemetryTopic: mqttTopicFor(identity, id, 'telemetry'),
       statusTopic: mqttTopicFor(identity, id, 'status'),
     },
-    state: unknownState(source, false),
+    state: unknownState(source),
     responseProfile: responseProfile({
       confidence: clampConfidence(raw.confidence),
       notes:
@@ -2298,6 +2418,7 @@ function normalizeDiscoveredDevice(
       reason:
         raw.reason || 'Discovered on the local network but not approved yet.',
     },
+    metadata: cleanMetadata(raw.metadata || {}),
   };
 }
 

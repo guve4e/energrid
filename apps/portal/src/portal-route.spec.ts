@@ -6,6 +6,7 @@ describe('portal route helpers', () => {
     ['/', 'assistant'],
     ['/weather', 'weather'],
     ['/weather/', 'weather'],
+    ['/energy/', 'energy'],
     ['/devices/shelly', 'devices'],
     ['/not-a-page', 'assistant'],
   ])('maps %s to %s', (path, page) => {
@@ -15,6 +16,7 @@ describe('portal route helpers', () => {
   it('creates stable shareable paths for portal pages', () => {
     expect(pathForPage('assistant')).toBe('/');
     expect(pathForPage('weather')).toBe('/weather/');
+    expect(pathForPage('energy')).toBe('/energy/');
     expect(pathForPage('logs')).toBe('/logs/');
   });
 });

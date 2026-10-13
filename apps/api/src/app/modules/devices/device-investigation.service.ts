@@ -1,6 +1,5 @@
 import { Injectable } from '@nestjs/common';
 import type { NetworkDiscoveredDevice, RegisteredDevice } from './device-registry.types';
-import { DeviceRegistryService } from './device-registry.service';
 import type { DeviceMemory } from './device-observation.service';
 import type { DeviceHealthSnapshot } from './device-health.service';
 
@@ -45,10 +44,6 @@ export interface DeviceDiagnostic {
 @Injectable()
 export class DeviceInvestigationService {
 
-  constructor(
-    private readonly registry: DeviceRegistryService,
-  ) {}
-
   analyze(input: {
     networkDevices: NetworkDiscoveredDevice[];
     registeredDevices: RegisteredDevice[];
@@ -61,7 +56,7 @@ export class DeviceInvestigationService {
     const approvedIds = new Set(
       input.registeredDevices
         .filter(device => device.trustStatus === 'approved')
-        .map(device => device.id)
+        .flatMap(device => [device.id, device.metadata?.physicalId].filter(Boolean))
     );
 
     const memoryIds = new Set(
@@ -71,30 +66,6 @@ export class DeviceInvestigationService {
     for (const network of input.networkDevices) {
 
       if (!approvedIds.has(network.id)) {
-
-        if (network.vendor === 'Shelly') {
-          this.registry.registerDiscoveredDevice({
-            id: network.id,
-            displayName:
-              `${network.vendor} ${network.model || 'device'}`,
-            suggestedName: network.id,
-            protocol:
-              network.protocol === 'unknown'
-                ? 'http'
-                : network.protocol,
-            transport:
-              network.protocol === 'http'
-                ? 'http'
-                : undefined,
-            driver: 'shelly-rpc',
-            target: network.ipAddress,
-            capabilities: ['switch'],
-            source: 'http',
-            confidence: network.confidence,
-            reason:
-              'Discovered by LAN investigation.',
-          });
-        }
 
         diagnostics.push({
           deviceId: network.id,
@@ -140,14 +111,8 @@ export class DeviceInvestigationService {
       if (health.status !== 'healthy') {
         diagnostics.push({
           deviceId: health.deviceId,
-          category:
-            health.status === 'unreachable'
-              ? 'offline'
-              : 'missing_telemetry',
-          severity:
-            health.status === 'unreachable'
-              ? 'error'
-              : 'warning',
+          category: 'missing_telemetry',
+          severity: 'warning',
           evidence: {
             network: {
               detected: false,

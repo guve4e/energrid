@@ -1,4 +1,4 @@
-const portalPages = new Set(['assistant', 'devices', 'discovery', 'bus', 'systems', 'weather', 'executions', 'logs']);
+const portalPages = new Set(['assistant', 'devices', 'discovery', 'bus', 'systems', 'energy', 'weather', 'executions', 'logs']);
 
 export function pageFromPath(pathname: string): string {
   const page = pathname.split('/').filter(Boolean)[0] || 'assistant';

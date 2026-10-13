@@ -1,12 +1,21 @@
 import {
   BadRequestException,
   Injectable,
-  Logger,
+  ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DeviceRegistryService } from './device-registry.service';
+import {
+  parseDeviceControlBinding,
+  deviceControlState,
+  type DeviceControlBinding,
+} from '@energrid/domain-devices';
+import {
+  ShellyHttpControl,
+  shellyHttpCredentials,
+} from './adapters/outbound/shelly-http-control';
 import type {
   DeviceCapabilityAction,
   RegisteredDevice,
@@ -26,9 +35,24 @@ export interface DeviceActionResult {
 
 @Injectable()
 export class DeviceControlService {
-  private readonly logger = new Logger(DeviceControlService.name);
+  private readonly http = new ShellyHttpControl();
 
   constructor(private readonly registry: DeviceRegistryService) {}
+
+  configure(deviceId: string, value: unknown): RegisteredDevice {
+    try {
+      const binding = parseDeviceControlBinding(value);
+      if (binding?.kind === 'shelly-http')
+        shellyHttpCredentials(binding.credentialRef);
+      return this.registry.configureDeviceControl(deviceId, binding);
+    } catch (error) {
+      throw new BadRequestException(
+        error instanceof Error
+          ? error.message
+          : 'Invalid control configuration.',
+      );
+    }
+  }
 
   async execute(
     deviceId: string,
@@ -43,6 +67,16 @@ export class DeviceControlService {
     if (!device)
       throw new NotFoundException(`Device ${deviceId} was not found.`);
 
+    if (
+      device.trustStatus !== 'approved' ||
+      device.tenantId !== (process.env.PORTAL_TENANT_ID || 'tenant-demo') ||
+      device.siteId !==
+        (process.env.PORTAL_SITE_ID || process.env.HOME_SITE_ID || 'site-home')
+    )
+      throw new ForbiddenException(
+        'Control is limited to approved devices in this site.',
+      );
+
     if (!deviceSupportsAction(device, action)) {
       throw new BadRequestException(
         `${device.displayName} does not expose ${action}.`,
@@ -55,7 +89,56 @@ export class DeviceControlService {
       );
     }
 
+    const problem = this.controlProblem(device, action, new Set());
+    if (problem)
+      return {
+        deviceId,
+        action,
+        status: 'failed',
+        adapter: 'none',
+        message: problem,
+        affectedDeviceIds: [],
+      };
     return this.executeBinarySwitch(device, action === 'turn_on', action);
+  }
+
+  private controlProblem(
+    device: RegisteredDevice,
+    action: DeviceCapabilityAction,
+    seen: Set<string>,
+  ): string | null {
+    if (seen.has(device.id))
+      return 'Circular device group; no command was sent.';
+    if (
+      device.trustStatus !== 'approved' ||
+      device.tenantId !== (process.env.PORTAL_TENANT_ID || 'tenant-demo') ||
+      device.siteId !==
+        (process.env.PORTAL_SITE_ID || process.env.HOME_SITE_ID || 'site-home')
+    )
+      return 'Every group member must be approved in this site.';
+    if (!deviceSupportsAction(device, action))
+      return 'A group member has no switching capability.';
+    if (device.memberDeviceIds?.length) {
+      const next = new Set(seen).add(device.id);
+      for (const id of device.memberDeviceIds) {
+        const member = this.findDevice(id);
+        if (!member) return 'A group member is missing; no command was sent.';
+        const problem = this.controlProblem(member, action, next);
+        if (problem) return problem;
+      }
+      return null;
+    }
+    if (device.adapter.protocol === 'simulated') return null;
+    const binding = parseDeviceControlBinding(device.control?.binding);
+    const state = deviceControlState(device, binding);
+    if (state.status === 'ready' && binding?.kind === 'shelly-http') {
+      try {
+        shellyHttpCredentials(binding.credentialRef);
+      } catch {
+        return 'The server credential reference is not configured.';
+      }
+    }
+    return state.status === 'ready' ? null : state.reason;
   }
 
   private async executeBinarySwitch(
@@ -85,33 +168,10 @@ export class DeviceControlService {
       };
     }
 
-    if (!device.adapter.configured) {
-      return {
-        deviceId: device.id,
-        action,
-        status: 'failed',
-        adapter: 'none',
-        message: 'Device adapter is not configured.',
-        affectedDeviceIds: [],
-      };
-    }
-
-    if (isShellyRpcDevice(device)) {
-      return this.executeShellyRpc(device, on, action);
-    }
-
-    if (device.adapter.commandTopic || device.adapter.target) {
-      return this.executeGenericMqttSwitch(device, on, action);
-    }
-
-    return {
-      deviceId: device.id,
-      action,
-      status: 'failed',
-      adapter: 'none',
-      message: `No control adapter for ${device.adapter.driver}.`,
-      affectedDeviceIds: [],
-    };
+    const binding = device.control!.binding!;
+    if (binding.kind === 'generic-mqtt')
+      return this.executeGenericMqttSwitch(device, on, action, binding.topic);
+    return this.executeShellyRpc(device, on, action, binding);
   }
 
   private async executeMemberSwitches(
@@ -119,29 +179,11 @@ export class DeviceControlService {
     on: boolean,
     action: DeviceCapabilityAction,
   ): Promise<DeviceActionResult> {
-    const members =
-      device.memberDeviceIds
-        ?.map((id) => this.findDevice(id))
-        .filter((member): member is RegisteredDevice => !!member) || [];
-    const switchMembers = members.filter((member) =>
-      deviceSupportsAction(member, action),
+    const members = [...new Set(device.memberDeviceIds!)].map(
+      (id) => this.findDevice(id)!,
     );
-
-    if (switchMembers.length === 0) {
-      return {
-        deviceId: device.id,
-        action,
-        status: 'failed',
-        adapter: 'none',
-        message: 'Logical device has no controllable switch members.',
-        affectedDeviceIds: [],
-      };
-    }
-
     const results = await Promise.all(
-      switchMembers.map((member) =>
-        this.executeBinarySwitch(member, on, action),
-      ),
+      members.map((member) => this.executeBinarySwitch(member, on, action)),
     );
     const failed = results.filter((result) => result.status === 'failed');
     const pending = results.filter((result) => result.status === 'pending');
@@ -158,7 +200,9 @@ export class DeviceControlService {
             : 'success',
       adapter: results.some((result) => result.adapter === 'mqtt')
         ? 'mqtt'
-        : 'none',
+        : results.some((result) => result.adapter === 'http')
+          ? 'http'
+          : 'none',
       message:
         failed.length > 0
           ? `${failed.length} member switch command(s) failed.`
@@ -173,28 +217,18 @@ export class DeviceControlService {
     device: RegisteredDevice,
     on: boolean,
     action: DeviceCapabilityAction,
+    binding: Extract<
+      DeviceControlBinding,
+      { kind: 'shelly-mqtt' | 'shelly-http' }
+    >,
   ): Promise<DeviceActionResult> {
-    const topic = process.env.HOME_SHELLY_RPC_TOPIC || 'shelly/rpc';
-    const dst =
-      stringMetadata(device, 'dst') ||
-      stringMetadata(device, 'physicalId') ||
-      stringMetadata(device, 'hardwareId') ||
-      device.adapter.target;
-    const switchId =
-      numberMetadata(device, 'switchId') ??
-      numberMetadata(device, 'channel') ??
-      0;
-
-    if (!dst) {
-      return {
-        deviceId: device.id,
-        action,
-        status: 'failed',
-        adapter: 'mqtt',
-        message: 'Shelly RPC destination is missing.',
-        affectedDeviceIds: [],
-      };
-    }
+    const transport = binding.kind === 'shelly-http' ? 'http' : 'mqtt';
+    const topic =
+      binding.kind === 'shelly-mqtt'
+        ? binding.topic
+        : `${binding.baseUrl}/rpc/Switch.Set`;
+    const dst = binding.physicalId;
+    const switchId = binding.channel;
 
     const payload = JSON.stringify({
       id: Date.now(),
@@ -211,21 +245,35 @@ export class DeviceControlService {
     });
 
     try {
-      await this.publishMqtt(topic, payload);
+      let reportedOn: boolean | null = null;
+      if (binding.kind === 'shelly-http')
+        reportedOn = await this.http.setSwitch(binding, on);
+      else await this.publishMqtt(topic, payload);
 
       this.registry.markDeviceCommandPublished(device.id, command.id, {
         topic,
-        adapter: 'shelly-rpc',
+        adapter: binding.kind,
       });
+      if (reportedOn !== null)
+        this.registry.ingestDeviceTelemetry({
+          deviceId: device.id,
+          values: { on: reportedOn },
+          observedAt: new Date().toISOString(),
+          origin: 'shelly-http',
+          status: 'online',
+        });
+      const confirmed = reportedOn === on;
 
       return {
         deviceId: device.id,
         action,
-        status: 'pending',
-        adapter: 'mqtt',
-        message: `Published Shelly ${action} to ${dst} switch ${switchId}; waiting for acknowledgement.`,
+        status: confirmed ? 'success' : 'pending',
+        adapter: transport,
+        message: confirmed
+          ? 'Shelly relay state confirmed over HTTP.'
+          : `Sent Shelly ${action} to ${dst} switch ${switchId}; waiting for state confirmation.`,
         affectedDeviceIds: [device.id],
-        command,
+        command: this.findDevice(device.id)?.state.command || command,
       };
     } catch (error) {
       const message = errorMessage(error);
@@ -246,7 +294,7 @@ export class DeviceControlService {
         deviceId: device.id,
         action,
         status: 'failed',
-        adapter: 'mqtt',
+        adapter: transport,
         message,
         affectedDeviceIds: [],
         command: failedCommand,
@@ -258,19 +306,8 @@ export class DeviceControlService {
     device: RegisteredDevice,
     on: boolean,
     action: DeviceCapabilityAction,
+    topic: string,
   ): Promise<DeviceActionResult> {
-    const topic = device.adapter.commandTopic || device.adapter.target;
-    if (!topic) {
-      return {
-        deviceId: device.id,
-        action,
-        status: 'failed',
-        adapter: 'mqtt',
-        message: 'MQTT command topic is missing.',
-        affectedDeviceIds: [],
-      };
-    }
-
     const command = this.registry.markDeviceCommandPending(device.id, {
       action,
       expectedValues: { on },
@@ -353,13 +390,17 @@ export class DeviceControlService {
     if (process.env.HOME_MQTT_PASSWORD)
       args.push('-P', process.env.HOME_MQTT_PASSWORD);
 
-    await execFileAsync(
-      process.env.HOME_MQTT_PUB_BIN || 'mosquitto_pub',
-      args,
-      {
-        timeout: Number(process.env.HOME_DEVICE_WRITE_TIMEOUT_MS || 2500),
-      },
-    );
+    try {
+      await execFileAsync(
+        process.env.HOME_MQTT_PUB_BIN || 'mosquitto_pub',
+        args,
+        {
+          timeout: Number(process.env.HOME_DEVICE_WRITE_TIMEOUT_MS || 2500),
+        },
+      );
+    } catch {
+      throw new Error('MQTT command publication failed.');
+    }
   }
 }
 
@@ -370,36 +411,6 @@ function deviceSupportsAction(
   return device.capabilities.some((capability) =>
     capability.actions.includes(action),
   );
-}
-
-function isShellyRpcDevice(device: RegisteredDevice): boolean {
-  return (
-    device.adapter.driver.includes('shelly') ||
-    !!stringMetadata(device, 'dst') ||
-    !!stringMetadata(device, 'physicalId') ||
-    !!stringMetadata(device, 'hardwareId')
-  );
-}
-
-function stringMetadata(
-  device: RegisteredDevice,
-  key: string,
-): string | undefined {
-  const value = device.metadata?.[key];
-  return typeof value === 'string' && value.trim() ? value : undefined;
-}
-
-function numberMetadata(
-  device: RegisteredDevice,
-  key: string,
-): number | undefined {
-  const value = device.metadata?.[key];
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return undefined;
 }
 
 function isDeviceAction(value: string): value is DeviceCapabilityAction {

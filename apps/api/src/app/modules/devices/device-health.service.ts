@@ -3,7 +3,7 @@ import { DeviceObservationService, type DeviceMemory } from './device-observatio
 
 export interface DeviceHealthSnapshot {
   deviceId: string;
-  status: 'healthy' | 'degraded' | 'unreachable';
+  status: 'healthy' | 'degraded' | 'stale';
   confidence: number;
   ageSeconds: number;
   lastSeen: string;
@@ -55,11 +55,11 @@ export class DeviceHealthService {
 
     return {
       deviceId: memory.deviceId,
-      status: 'unreachable',
+      status: 'stale',
       confidence: 0.95,
       ageSeconds,
-        lastSeen: memory.lastSeen,
-      reason: 'No recent telemetry',
+      lastSeen: memory.lastSeen,
+      reason: 'No recent telemetry; device reachability has not been checked',
     };
   }
 }

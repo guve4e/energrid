@@ -3,3 +3,8 @@ dist
 .nx/cache
 .nx/workspace-data
 .env
+
+# local
+.venv/
+.run/
+libs/coverage/

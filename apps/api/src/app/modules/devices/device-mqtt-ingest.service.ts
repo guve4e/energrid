@@ -4,6 +4,7 @@ import {
   Logger,
   OnModuleDestroy,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
 import {
   execFile,
@@ -17,6 +18,11 @@ import { OperationalLogService } from './operational-log.service';
 import { DeviceObservationService } from './device-observation.service';
 import { DeviceMqttMessageRouter } from './mqtt/device-mqtt-message-router';
 import type { DeviceCapabilityKind } from './device-registry.types';
+import { TelemetryIngestService } from '../telemetry/telemetry-ingest.service';
+import {
+  DurableMqttSubscriber,
+  durableMqttOptions,
+} from './mqtt/durable-mqtt-subscriber';
 
 const execFileAsync = promisify(execFile);
 
@@ -42,6 +48,7 @@ export interface MqttDebugState {
   legacyTemperatureTopics: string[];
   legacyDeviceTopics: string[];
   recentMessages: MqttDebugMessage[];
+  delivery?: { connected: boolean; qosZeroMessages: number };
 }
 
 export interface MqttDebugPublishResult {
@@ -54,6 +61,7 @@ export interface MqttDebugPublishResult {
 export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(DeviceMqttIngestService.name);
   private process: ChildProcessWithoutNullStreams | null = null;
+  private durableSubscriber?: DurableMqttSubscriber;
   private buffer = '';
   private recentMessages: MqttDebugMessage[] = [];
   private readonly debugMessages = new Subject<MqttDebugMessage>();
@@ -63,8 +71,13 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
     private readonly registry: DeviceRegistryService,
     private readonly operationalLog: OperationalLogService,
     private readonly observation: DeviceObservationService,
+    @Optional() private readonly telemetry?: TelemetryIngestService,
   ) {
-    this.messageRouter = new DeviceMqttMessageRouter(registry, observation);
+    this.messageRouter = new DeviceMqttMessageRouter(
+      registry,
+      observation,
+      telemetry,
+    );
   }
 
   onModuleInit(): void {
@@ -78,6 +91,15 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
       prefix,
       this.messageRouter.subscriptions(prefix),
     );
+    if (this.telemetry?.status().enabled) {
+      this.durableSubscriber = new DurableMqttSubscriber(
+        durableMqttOptions(process.env),
+        debugTopics,
+        (topic, payload) => this.handlePayload(topic, payload),
+      );
+      this.durableSubscriber.start();
+      return;
+    }
     const args = [
       '-h',
       process.env.HOME_MQTT_HOST || '127.0.0.1',
@@ -153,7 +175,8 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  onModuleDestroy(): void {
+  async onModuleDestroy(): Promise<void> {
+    await this.durableSubscriber?.stop();
     this.process?.kill();
     this.process = null;
     this.debugMessages.complete();
@@ -173,7 +196,7 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
       enabled: mqttIngestEnabled(),
       status: !mqttIngestEnabled()
         ? 'disabled'
-        : this.process
+        : this.process || this.durableSubscriber?.status().connected
           ? 'running'
           : 'stopped',
       broker: mqttBroker(),
@@ -182,6 +205,9 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
       legacyTemperatureTopics,
       legacyDeviceTopics,
       recentMessages: [...this.recentMessages].reverse(),
+      ...(this.durableSubscriber
+        ? { delivery: this.durableSubscriber.status() }
+        : {}),
     };
   }
 
@@ -250,18 +276,24 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
     while (newlineIndex >= 0) {
       const line = this.buffer.slice(0, newlineIndex).trim();
       this.buffer = this.buffer.slice(newlineIndex + 1);
-      if (line) this.handleLine(line);
+      if (line)
+        void this.handleLine(line).catch(() =>
+          this.logger.error('MQTT telemetry could not be buffered.'),
+        );
       newlineIndex = this.buffer.indexOf('\n');
     }
   }
 
-  private handleLine(line: string): void {
+  private handleLine(line: string): Promise<void> {
     const separator = line.indexOf(' ');
-    if (separator <= 0) return;
+    if (separator <= 0) return Promise.resolve();
 
     const topic = line.slice(0, separator);
     const payloadText = line.slice(separator + 1);
+    return this.handlePayload(topic, payloadText);
+  }
 
+  private handlePayload(topic: string, payloadText: string): Promise<void> {
     let payload: unknown;
     try {
       payload = JSON.parse(payloadText);
@@ -286,7 +318,7 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
           },
         });
       }
-      return;
+      return Promise.resolve();
     }
 
     const routed = this.messageRouter.route({
@@ -297,7 +329,7 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
 
     if (routed) {
       this.recordDebugMessage(topic, payloadText, true, true, routed.reason);
-      return;
+      return routed.persisted;
     }
 
     this.recordDebugMessage(
@@ -307,6 +339,7 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
       false,
       'json topic outside known handlers',
     );
+    return Promise.resolve();
   }
 
   private ingestLegacyTemperature(

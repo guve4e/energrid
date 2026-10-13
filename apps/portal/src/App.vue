@@ -1,7 +1,15 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref } from 'vue';
 import ExecutionTimelineModal from './components/execution/ExecutionTimelineModal.vue';
 import WeatherDashboard from './components/weather/WeatherDashboard.vue';
+import EnergyDashboard from './components/energy/EnergyDashboard.vue';
+import DeviceControlSetup from './components/devices/DeviceControlSetup.vue';
+import DeviceSwitchControl from './components/devices/DeviceSwitchControl.vue';
+import DeviceConnectionDiagnostics from './components/devices/DeviceConnectionDiagnostics.vue';
+import { filterInventoryDevices, inventoryConnectionStatus, isExampleDevice, needsControlSetup } from './components/devices/device-inventory';
+import { matchNetworkDevice } from './components/devices/device-network';
+import { canSwitchDevice, controlRouteLabel } from './components/devices/device-control';
+import type { DeviceControlState } from '@energrid/domain-devices';
 import { pageFromPath, pathForPage } from './portal-route';
 
 type LoginResponse = {
@@ -98,6 +106,7 @@ type PortalState = {
       telemetryTopic?: string;
       statusTopic?: string;
     };
+    control?: DeviceControlState;
     state: {
       values: Record<string, number | boolean | string | null>;
       observedAt: string | null;
@@ -145,6 +154,7 @@ type PortalState = {
     model?: string;
     app?: string;
     generation?: number;
+    components?: Array<{ component: string; channel: number }>;
     discoveredAt: string;
     reason: string;
   }>;
@@ -375,7 +385,7 @@ const stateError = ref('');
 const scanningNetwork = ref(false);
 const discoveryDecisionBusy = ref<Record<string, string>>({});
 const findingHttpPageByDeviceId = ref<Record<string, boolean>>({});
-const discoveryView = ref<'capable' | 'all'>('capable');
+const discoveryView = ref<'capable' | 'all'>('all');
 const mqttTopicFilter = ref('');
 const mqttPublishTopic = ref('');
 const mqttPublishPayload = ref('{"type":"debug_ping","source":"portal"}');
@@ -411,6 +421,10 @@ const activePage = ref(pageFromPath(location.pathname));
 const selectedDeviceId = ref<string | null>(null);
 const selectedExecutionTraceId = ref<string | null>(null);
 const deviceActionBusy = ref<Record<string, boolean>>({});
+const deviceActionError = ref<Record<string, string>>({});
+const deviceSheet = ref<HTMLElement | null>(null);
+const deviceApprovalFilter = ref<'approved' | 'discovered'>('approved');
+const deviceSourceFilter = ref('site');
 const deviceSearch = ref('');
 const deviceCapabilityFilter = ref('all');
 const deviceZoneFilter = ref('all');
@@ -448,6 +462,7 @@ const navItems = computed(() => [
   },
   { id: 'bus', label: 'Bus', active: activePage.value === 'bus' },
   { id: 'systems', label: 'Systems', active: activePage.value === 'systems' },
+  { id: 'energy', label: 'Energy', active: activePage.value === 'energy' },
   { id: 'weather', label: 'Weather', active: activePage.value === 'weather' },
   {
     id: 'executions',
@@ -768,7 +783,7 @@ const approvedDevices = computed(() =>
 );
 const deviceCapabilityOptions = computed(() => {
   const capabilities = new Set<string>();
-  for (const device of approvedDevices.value) {
+  for (const device of deviceCards.value) {
     for (const capability of device.capabilities)
       capabilities.add(capability.kind);
   }
@@ -776,77 +791,20 @@ const deviceCapabilityOptions = computed(() => {
 });
 const deviceZoneOptions = computed(() => {
   const zones = new Map<string, string>();
-  for (const device of approvedDevices.value)
+  for (const device of deviceCards.value)
     zones.set(device.zoneId, device.zoneName);
   return [...zones.entries()]
     .map(([id, name]) => ({ id, name }))
     .sort((left, right) => left.name.localeCompare(right.name));
 });
-const filteredApprovedDevices = computed(() => {
-  const search = deviceSearch.value.trim().toLowerCase();
-
-  return approvedDevices.value
-    .filter((device) => {
-      if (
-        deviceCapabilityFilter.value !== 'all' &&
-        !device.capabilities.some(
-          (capability) => capability.kind === deviceCapabilityFilter.value,
-        )
-      ) {
-        return false;
-      }
-      if (
-        deviceZoneFilter.value !== 'all' &&
-        device.zoneId !== deviceZoneFilter.value
-      )
-        return false;
-      if (
-        deviceStatusFilter.value === 'online' &&
-        device.state.status !== 'online'
-      )
-        return false;
-      if (
-        deviceStatusFilter.value === 'offline' &&
-        device.state.status !== 'offline'
-      )
-        return false;
-      if (
-        deviceStatusFilter.value === 'controllable' &&
-        !canToggleDevice(device)
-      )
-        return false;
-      if (
-        deviceStatusFilter.value === 'needs_setup' &&
-        device.adapter.configured
-      )
-        return false;
-
-      if (!search) return true;
-      return [
-        device.displayName,
-        device.zoneName,
-        device.kind,
-        device.adapter.driver,
-        device.adapter.protocol,
-        device.adapter.transport,
-        device.adapter.target,
-        device.adapter.commandTopic,
-        device.adapter.telemetryTopic,
-        device.state.status,
-        device.memberDeviceIds?.join(' '),
-        device.capabilities.map((capability) => capability.kind).join(' '),
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase()
-        .includes(search);
-    })
-    .sort((left, right) => {
-      const zone = left.zoneName.localeCompare(right.zoneName);
-      if (zone !== 0) return zone;
-      return left.displayName.localeCompare(right.displayName);
-    });
-});
+const filteredInventoryDevices = computed(() => filterInventoryDevices(deviceCards.value, {
+  approval: deviceApprovalFilter.value,
+  source: deviceSourceFilter.value,
+  search: deviceSearch.value,
+  capability: deviceCapabilityFilter.value,
+  zone: deviceZoneFilter.value,
+  status: deviceStatusFilter.value,
+}));
 const discoveredDevices = computed(() =>
   deviceCards.value.filter((device) => device.trustStatus === 'discovered'),
 );
@@ -872,9 +830,7 @@ const deviceSourceStats = computed(() => {
       device.adapter.transport || device.adapter.protocol,
     ),
   ).length;
-  const needsSetup = deviceCards.value.filter(
-    (device) => !device.adapter.configured,
-  ).length;
+  const needsSetup = deviceCards.value.filter(needsControlSetup).length;
   return [
     {
       label: 'Received',
@@ -892,9 +848,9 @@ const deviceSourceStats = computed(() => {
       detail: 'needs approval',
     },
     {
-      label: 'Needs setup',
+      label: 'Control setup',
       value: `${needsSetup}`,
-      detail: 'adapter not configured',
+      detail: 'approved switches without control',
     },
   ];
 });
@@ -1213,6 +1169,7 @@ const deviceSummary = computed(() => {
 
 function setActivePage(pageId: string, syncUrl = true) {
   activePage.value = pageId;
+  window.scrollTo({ top: 0 });
   selectedDeviceId.value = null;
   selectedExecutionTraceId.value = null;
   closeMobileMenu();
@@ -1221,6 +1178,8 @@ function setActivePage(pageId: string, syncUrl = true) {
     if (location.pathname !== path) history.pushState({}, '', path);
   }
   if (pageId === 'assistant') void loadVoiceRuns();
+  if (pageId === 'devices') void loadState();
+  if (pageId === 'discovery') void refreshDiscovery();
   if (pageId === 'bus') {
     void loadMqttBus();
     startMqttBusStream();
@@ -1260,6 +1219,9 @@ async function applyDiscoveryDecision(
 
     appendLog(`[discovery] ${device.displayName} ${result.status}`);
     await loadState();
+    if (action === 'approve' && activePage.value === 'devices') {
+      deviceApprovalFilter.value = 'approved';
+    }
   } catch (error) {
     appendLog(
       `[discovery] ${action} failed for ${device.displayName}: ${
@@ -1280,6 +1242,7 @@ function logDiscoveryDecision(device: PortalDevice, action: string) {
 }
 
 async function scanNetwork() {
+  if (scanningNetwork.value) return;
   scanningNetwork.value = true;
   stateError.value = '';
   try {
@@ -1302,6 +1265,7 @@ async function scanNetwork() {
     appendLog(
       `[discovery] scan complete; ${result.devices.length} devices visible`,
     );
+    await loadState();
   } catch (error) {
     stateError.value =
       error instanceof Error ? error.message : 'Network scan unavailable';
@@ -1309,6 +1273,25 @@ async function scanNetwork() {
   } finally {
     scanningNetwork.value = false;
   }
+}
+
+async function refreshDiscovery() {
+  await loadState();
+  if (!stateError.value && !networkDevices.value.length) await scanNetwork();
+}
+
+async function reviewNetworkDevice(device: NetworkDevice) {
+  await loadState();
+  const channel = deviceCards.value.find(candidate => candidate.metadata?.physicalId === device.id);
+  if (!channel) { stateError.value = 'No supported channels are available. Run a new scan or check device authentication.'; return; }
+  setActivePage('devices');
+  deviceApprovalFilter.value = channel.trustStatus === 'approved' ? 'approved' : 'discovered';
+  deviceSourceFilter.value = 'site';
+  deviceCapabilityFilter.value = 'all';
+  deviceZoneFilter.value = 'all';
+  deviceStatusFilter.value = 'all';
+  deviceSearch.value = device.id;
+  selectDevice(channel);
 }
 
 async function findApprovedDeviceHttpPage(device: PortalDevice) {
@@ -1620,18 +1603,24 @@ function deviceCommandLabel(device: PortalDevice) {
 
 function deviceStatusClass(device: PortalDevice) {
   if (!device.adapter.configured) return 'amber';
-  if (device.state.status === 'online') return 'green';
-  if (device.state.status === 'offline') return 'amber';
+  if (inventoryConnectionStatus(device) === 'online') return 'green';
+  if (inventoryConnectionStatus(device) === 'offline') return 'amber';
   return 'blue';
 }
 
 function selectDevice(device: PortalDevice) {
   selectedDeviceId.value = device.id;
+  void nextTick(() => { deviceSheet.value?.scrollTo?.({ top: 0 }); });
 }
 
 function closeDeviceSheet() {
   selectedDeviceId.value = null;
   selectedExecutionTraceId.value = null;
+}
+
+function selectMemberDevice(id: string) {
+  const member = deviceCards.value.find(device => device.id === id);
+  if (member) selectDevice(member);
 }
 
 function openExecutionTrace(traceId: string) {
@@ -1667,6 +1656,7 @@ function handleExecutionRecommendation(recommendationId: string) {
 }
 
 function deviceValuePreview(device: PortalDevice) {
+  if (device.trustStatus !== 'approved') return 'Awaiting approval';
   const command = device.state.command;
   if (command?.status === 'pending') {
     return `Pending ${expectedOnLabel(command.expectedValues)}`;
@@ -1697,7 +1687,7 @@ function deviceValuePreview(device: PortalDevice) {
   if (Object.keys(values).length > 0) return JSON.stringify(values);
   if (device.memberDeviceIds?.length)
     return `${device.memberDeviceIds.length} members`;
-  return device.state.status;
+  return device.state.observedAt === null ? 'No readings yet' : device.state.status;
 }
 
 function deviceStateDetail(device: PortalDevice) {
@@ -1706,7 +1696,7 @@ function deviceStateDetail(device: PortalDevice) {
   if (command?.status === 'acked') return 'confirmed by telemetry';
   if (command?.status === 'no_ack') return 'published, no telemetry ack';
   if (command?.status === 'failed') return 'publish failed';
-  return device.adapter.configured ? 'configured' : 'needs setup';
+  return device.state.observedAt === null ? 'connectivity not checked' : device.adapter.configured ? 'configured' : 'needs setup';
 }
 
 function expectedOnLabel(
@@ -1735,42 +1725,9 @@ function canToggleDevice(device: PortalDevice) {
 
 function canSendToggle(device: PortalDevice) {
   return (
-    canToggleDevice(device) &&
-    device.adapter.configured &&
+    canSwitchDevice(device) &&
     device.state.command?.status !== 'pending'
   );
-}
-
-function deviceIsOn(device: PortalDevice) {
-  const values = device.state.values;
-  return Boolean(values.on ?? values.output ?? values.switch ?? values.powered);
-}
-
-function deviceControlIsOn(device: PortalDevice) {
-  if (device.state.command?.status === 'pending') {
-    const expected = device.state.command.expectedValues;
-    const on =
-      expected.on ?? expected.output ?? expected.switch ?? expected.powered;
-    if (typeof on === 'boolean') return on;
-  }
-  return deviceIsOn(device);
-}
-
-function deviceCommandIsPending(device: PortalDevice) {
-  return device.state.command?.status === 'pending';
-}
-
-function deviceToggleLabel(device: PortalDevice) {
-  if (!device.adapter.configured) return 'Setup';
-  return deviceActionBusy.value[device.id]
-    ? 'Sending'
-    : deviceIsOn(device)
-      ? 'On'
-      : 'Off';
-}
-
-async function toggleDevice(device: PortalDevice) {
-  return sendDeviceAction(device, deviceIsOn(device) ? 'turn_off' : 'turn_on');
 }
 
 async function sendDeviceAction(
@@ -1780,6 +1737,7 @@ async function sendDeviceAction(
   if (!canSendToggle(device) || deviceActionBusy.value[device.id]) return;
 
   deviceActionBusy.value = { ...deviceActionBusy.value, [device.id]: true };
+  deviceActionError.value = { ...deviceActionError.value, [device.id]: '' };
   appendLog(`[device] ${action} requested for ${device.displayName}`);
 
   try {
@@ -1795,7 +1753,7 @@ async function sendDeviceAction(
       },
     );
     const result = await response.json().catch(() => null);
-    if (!response.ok) {
+    if (!response.ok || !result || result.status === 'failed') {
       throw new Error(result?.message || 'Device action failed');
     }
 
@@ -1807,6 +1765,10 @@ async function sendDeviceAction(
       await waitForDeviceCommand(device.id, result.command.id);
     }
   } catch (error) {
+    deviceActionError.value = {
+      ...deviceActionError.value,
+      [device.id]: error instanceof Error ? error.message : 'Device action failed',
+    };
     appendLog(
       `[device] ${action} failed: ${error instanceof Error ? error.message : String(error)}`,
     );
@@ -1844,12 +1806,12 @@ function canProxyDevice(device: NetworkDevice) {
 }
 
 function openApprovedDevice(device: PortalDevice) {
+  setActivePage('devices');
   selectDevice(device);
-  activePage.value = 'devices';
 }
 
 function openApprovedOnboardingTarget(device: PortalDevice) {
-  const url = approvedDeviceSettingsUrl(device) || approvedDeviceProxyUrl(device);
+  const url = approvedDeviceProxyUrl(device) || approvedDeviceSettingsUrl(device);
   if (url) {
     window.open(url, '_blank', 'noreferrer');
     return;
@@ -1858,51 +1820,13 @@ function openApprovedOnboardingTarget(device: PortalDevice) {
 }
 
 function approvedDeviceNetworkMatch(device: PortalDevice) {
-  const identifiers = [
-    device.id,
-    device.adapter.target,
-    device.metadata?.physicalId,
-    device.metadata?.hardwareId,
-    device.metadata?.dst,
-  ]
-    .filter((value): value is string | number | boolean => value != null)
-    .flatMap((value) => identifierVariants(String(value)));
-
-  if (identifiers.length === 0) return null;
-
-  return (
-    networkDevices.value.find((candidate) => {
-      const networkValues = [
-        candidate.id,
-        candidate.hostname,
-        candidate.model,
-        candidate.app,
-        candidate.macAddress,
-        candidate.ipAddress,
-      ]
-        .filter(Boolean)
-        .map((value) => String(value).toLowerCase());
-
-      return identifiers.some((identifier) =>
-        networkValues.some(
-          (value) =>
-            value === identifier ||
-            value.includes(identifier) ||
-            identifier.includes(value),
-        ),
-      );
-    }) || null
-  );
-}
-
-function identifierVariants(value: string) {
-  const lower = value.toLowerCase().trim();
-  const compact = lower.replace(/[^a-z0-9]/g, '');
-  const shelly = lower.match(/shelly[a-z0-9-]+/)?.[0] || '';
-  return [...new Set([lower, compact, shelly].filter(Boolean))];
+  return matchNetworkDevice(device, networkDevices.value);
 }
 
 function approvedDeviceSettingsUrl(device: PortalDevice) {
+  const scanned = approvedDeviceNetworkMatch(device)?.settingsUrl;
+  if (scanned) return scanned;
+  if (typeof device.metadata?.httpBaseUrl === 'string') return device.metadata.httpBaseUrl;
   if (device.adapter.protocol === 'http' && device.adapter.target?.startsWith('http')) {
     return device.adapter.target;
   }
@@ -1923,8 +1847,7 @@ function isEnergridCapableNetworkDevice(device: NetworkDevice) {
   return (
     vendor.includes('shelly') ||
     model.includes('shelly') ||
-    app.includes('shelly') ||
-    canProxyDevice(device)
+    app.includes('shelly')
   );
 }
 
@@ -2556,7 +2479,8 @@ function delta(start: number, end: number) {
 
 if (accessToken.value && user.value) {
   setEndpointMode(endpointMode.value);
-  loadState();
+  if (activePage.value === 'discovery') void refreshDiscovery();
+  else void loadState();
   loadVoiceRuns();
 }
 
@@ -3002,17 +2926,15 @@ onBeforeUnmount(() => {
 
         <section
           v-else-if="activePage === 'devices'"
-          class="panel workspace-panel"
+          class="panel workspace-panel devices-workspace"
         >
           <div class="page-heading">
-            <p class="eyebrow">Approved Inventory</p>
+            <p class="eyebrow">Site Inventory</p>
             <h2>Devices</h2>
-            <span
-              >Everything the assistant is allowed to understand and operate at
-              this site.</span
-            >
+            <button type="button" class="ghost" :disabled="loadingState" @click="loadState">{{ loadingState ? 'Refreshing...' : 'Refresh' }}</button>
           </div>
 
+          <div class="device-inventory-content">
           <div class="summary-strip">
             <div>
               <span>Total</span>
@@ -3048,6 +2970,11 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          <div class="inventory-views" role="group" aria-label="Device approval">
+            <button type="button" :aria-pressed="deviceApprovalFilter === 'approved'" @click="deviceApprovalFilter = 'approved'">Approved {{ approvedDevices.length }}</button>
+            <button type="button" :aria-pressed="deviceApprovalFilter === 'discovered'" @click="deviceApprovalFilter = 'discovered'">Pending {{ discoveredDevices.length }}</button>
+          </div>
+
           <div class="device-inventory-toolbar">
             <label class="search-field inventory-search">
               <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -3058,14 +2985,20 @@ onBeforeUnmount(() => {
               <input
                 v-model="deviceSearch"
                 type="search"
+                aria-label="Search devices"
                 placeholder="Search devices, topics, zones"
               />
             </label>
+            <select v-model="deviceSourceFilter" aria-label="Filter by source">
+              <option value="site">Site devices</option>
+              <option value="examples">Examples</option>
+              <option value="all">All sources</option>
+            </select>
             <select
               v-model="deviceCapabilityFilter"
               aria-label="Filter by capability"
             >
-              <option value="all">All capabilities</option>
+              <option value="all">All types</option>
               <option
                 v-for="capability in deviceCapabilityOptions"
                 :key="capability"
@@ -3091,11 +3024,11 @@ onBeforeUnmount(() => {
               <option value="controllable">Controllable</option>
               <option value="needs_setup">Needs setup</option>
             </select>
-            <span>{{ filteredApprovedDevices.length }} shown</span>
+            <span>{{ filteredInventoryDevices.length }} shown</span>
           </div>
 
           <div
-            v-if="approvedDevices.length === 0"
+            v-if="deviceCards.length === 0"
             class="discovery-empty compact"
           >
             <strong>No approved devices yet</strong>
@@ -3105,7 +3038,7 @@ onBeforeUnmount(() => {
             >
           </div>
           <div
-            v-else-if="filteredApprovedDevices.length === 0"
+            v-else-if="filteredInventoryDevices.length === 0"
             class="discovery-empty compact"
           >
             <strong>No devices match this filter</strong>
@@ -3128,14 +3061,16 @@ onBeforeUnmount(() => {
               </thead>
               <tbody>
                 <tr
-                  v-for="device in filteredApprovedDevices"
+                  v-for="device in filteredInventoryDevices"
                   :key="device.id"
                   :class="{ selected: selectedDeviceId === device.id }"
                   @click="selectDevice(device)"
                 >
                   <td data-label="Device">
-                    <strong>{{ device.displayName }}</strong>
+                    <button type="button" class="device-name-button" @click.stop="selectDevice(device)">{{ device.displayName }}</button>
                     <span>{{ device.kind }} · {{ device.id }}</span>
+                    <span v-if="isExampleDevice(device)" class="device-example-label">Example / simulation</span>
+                    <span v-else-if="device.trustStatus !== 'approved'" class="device-approval-label">Approval required</span>
                   </td>
                   <td data-label="Zone">
                     <strong>{{ device.zoneName }}</strong>
@@ -3161,62 +3096,24 @@ onBeforeUnmount(() => {
                     <span>{{ deviceStateDetail(device) }}</span>
                   </td>
                   <td data-label="Control">
-                    <div
-                      v-if="canToggleDevice(device)"
-                      class="device-switch-control"
-                      :class="{
-                        busy:
-                          deviceActionBusy[device.id] ||
-                          deviceCommandIsPending(device),
-                        noAck: device.state.command?.status === 'no_ack',
-                      }"
-                      role="group"
-                      :aria-label="`Control ${device.displayName}`"
-                    >
-                      <button
-                        type="button"
-                        :class="{
-                          active: !deviceControlIsOn(device),
-                          off: !deviceControlIsOn(device),
-                        }"
-                        :disabled="
-                          !canSendToggle(device) || deviceActionBusy[device.id]
-                        "
-                        :title="
-                          device.adapter.configured
-                            ? 'Turn off'
-                            : 'Adapter is not configured yet'
-                        "
-                        @click.stop="sendDeviceAction(device, 'turn_off')"
-                      >
-                        Off
-                      </button>
-                      <button
-                        type="button"
-                        :class="{
-                          active: deviceControlIsOn(device),
-                          on: deviceControlIsOn(device),
-                        }"
-                        :disabled="
-                          !canSendToggle(device) || deviceActionBusy[device.id]
-                        "
-                        :title="
-                          device.adapter.configured
-                            ? 'Turn on'
-                            : 'Adapter is not configured yet'
-                        "
-                        @click.stop="sendDeviceAction(device, 'turn_on')"
-                      >
-                        On
-                      </button>
-                    </div>
+                    <DeviceSwitchControl
+                      v-if="canSwitchDevice(device)"
+                      :device="device"
+                      :busy="deviceActionBusy[device.id]"
+                      :error="deviceActionError[device.id]"
+                      @action="sendDeviceAction(device, $event)"
+                    />
+                    <button v-else-if="device.trustStatus !== 'approved'" type="button" class="ghost" @click.stop="selectDevice(device)">Review device</button>
+                    <button v-else-if="canToggleDevice(device)" type="button" class="secondary" @click.stop="selectDevice(device)">{{ device.memberDeviceIds?.length ? 'Set up members' : 'Configure control' }}</button>
                     <span v-else class="trust-pill approved">Read only</span>
+                    <span v-if="canToggleDevice(device)">{{ controlRouteLabel(device) }}</span>
                   </td>
                 </tr>
               </tbody>
             </table>
           </div>
 
+          </div>
           <div
             v-if="selectedDevice"
             class="device-sheet-backdrop"
@@ -3224,8 +3121,10 @@ onBeforeUnmount(() => {
           ></div>
           <aside
             v-if="selectedDevice"
+            ref="deviceSheet"
             class="device-sheet"
             aria-label="Device details"
+            @keydown.esc="closeDeviceSheet"
           >
             <div class="device-sheet-handle"></div>
             <div class="device-sheet-head">
@@ -3246,24 +3145,43 @@ onBeforeUnmount(() => {
               </button>
             </div>
 
+            <div class="device-setup-actions">
+              <div v-if="selectedDevice.trustStatus !== 'approved'" class="device-approval-actions">
+                <strong>Approval required</strong>
+                <button type="button" class="primary" :disabled="!!discoveryDecisionBusy[selectedDevice.id]" @click="applyDiscoveryDecision(selectedDevice, 'approve')">{{ discoveryDecisionBusy[selectedDevice.id] ? 'Approving...' : 'Approve device' }}</button>
+                <p v-if="stateError" role="alert">{{ stateError }}</p>
+              </div>
+              <div v-if="selectedDevice.memberDeviceIds?.length" class="device-member-links">
+                <h4>Member devices</h4>
+                <button v-for="id in selectedDevice.memberDeviceIds" :key="id" type="button" class="ghost" :disabled="!deviceCards.some(device => device.id === id)" @click="selectMemberDevice(id)">{{ deviceCards.find(device => device.id === id)?.displayName || id }}</button>
+              </div>
+              <DeviceSwitchControl v-if="canSwitchDevice(selectedDevice)" :device="selectedDevice" :busy="deviceActionBusy[selectedDevice.id]" :error="deviceActionError[selectedDevice.id]" @action="sendDeviceAction(selectedDevice, $event)" />
+              <div class="network-actions">
+                <a v-if="approvedDeviceProxyUrl(selectedDevice)" class="ghost-link" :href="approvedDeviceProxyUrl(selectedDevice)">Via gateway</a>
+                <a v-if="approvedDeviceSettingsUrl(selectedDevice)" class="ghost-link" :href="approvedDeviceSettingsUrl(selectedDevice)" target="_blank" rel="noreferrer">Open settings</a>
+              </div>
+              <DeviceConnectionDiagnostics :key="selectedDevice.id" :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" />
+              <DeviceControlSetup :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" @saved="loadState" />
+            </div>
+
             <dl class="device-facts detail-facts">
               <div>
                 <dt>Status</dt>
                 <dd>
-                  {{ selectedDevice.state.status }} ·
+                  {{ selectedDevice.trustStatus === 'approved' ? (selectedDevice.state.observedAt === null ? 'no readings yet' : selectedDevice.state.status) : 'awaiting approval' }} ·
                   {{
                     selectedDevice.adapter.configured
-                      ? 'configured'
-                      : 'needs setup'
+                      ? 'readings configured'
+                      : 'readings need setup'
                   }}
                 </dd>
               </div>
               <div>
-                <dt>Adapter</dt>
+                <dt>Readings adapter</dt>
                 <dd>{{ adapterLabel(selectedDevice) }}</dd>
               </div>
               <div>
-                <dt>Route</dt>
+                <dt>Readings source</dt>
                 <dd>
                   {{
                     selectedDevice.adapter.target ||
@@ -3289,51 +3207,6 @@ onBeforeUnmount(() => {
                   }}
                 </dd>
               </div>
-              <div v-if="canToggleDevice(selectedDevice)">
-                <dt>Control</dt>
-                <dd>
-                  <div
-                    class="device-switch-control detail-switch-control"
-                    :class="{
-                      busy:
-                        deviceActionBusy[selectedDevice.id] ||
-                        deviceCommandIsPending(selectedDevice),
-                      noAck: selectedDevice.state.command?.status === 'no_ack',
-                    }"
-                    role="group"
-                    :aria-label="`Control ${selectedDevice.displayName}`"
-                  >
-                    <button
-                      type="button"
-                      :class="{
-                        active: !deviceControlIsOn(selectedDevice),
-                        off: !deviceControlIsOn(selectedDevice),
-                      }"
-                      :disabled="
-                        !canSendToggle(selectedDevice) ||
-                        deviceActionBusy[selectedDevice.id]
-                      "
-                      @click="sendDeviceAction(selectedDevice, 'turn_off')"
-                    >
-                      Off
-                    </button>
-                    <button
-                      type="button"
-                      :class="{
-                        active: deviceControlIsOn(selectedDevice),
-                        on: deviceControlIsOn(selectedDevice),
-                      }"
-                      :disabled="
-                        !canSendToggle(selectedDevice) ||
-                        deviceActionBusy[selectedDevice.id]
-                      "
-                      @click="sendDeviceAction(selectedDevice, 'turn_on')"
-                    >
-                      On
-                    </button>
-                  </div>
-                </dd>
-              </div>
               <div v-if="selectedDevice.memberDeviceIds?.length">
                 <dt>Members</dt>
                 <dd>{{ selectedDevice.memberDeviceIds.join(', ') }}</dd>
@@ -3344,7 +3217,7 @@ onBeforeUnmount(() => {
                   {{
                     Object.keys(selectedDevice.state.values).length
                       ? JSON.stringify(selectedDevice.state.values)
-                      : selectedDevice.state.status
+                      : (selectedDevice.state.observedAt === null ? 'unknown - no readings yet' : selectedDevice.state.status)
                   }}
                 </dd>
               </div>
@@ -3386,11 +3259,11 @@ onBeforeUnmount(() => {
               </div>
 
               <div v-if="selectedDevice.adapter.commandTopic">
-                <dt>Command topic</dt>
+                <dt>Site-bus command topic</dt>
                 <dd>{{ selectedDevice.adapter.commandTopic }}</dd>
               </div>
               <div v-if="selectedDevice.adapter.telemetryTopic">
-                <dt>Telemetry topic</dt>
+                <dt>Site-bus telemetry topic</dt>
                 <dd>{{ selectedDevice.adapter.telemetryTopic }}</dd>
               </div>
             </dl>
@@ -3473,7 +3346,7 @@ onBeforeUnmount(() => {
 
         <section
           v-else-if="activePage === 'discovery'"
-          class="panel workspace-panel"
+          class="panel workspace-panel discovery-workspace"
         >
           <div class="page-heading split-heading">
             <div>
@@ -3525,17 +3398,19 @@ onBeforeUnmount(() => {
                 <div class="segmented compact">
                   <button
                     type="button"
-                    :class="{ active: discoveryView === 'capable' }"
-                    @click="discoveryView = 'capable'"
-                  >
-                    Energrid capable
-                  </button>
-                  <button
-                    type="button"
                     :class="{ active: discoveryView === 'all' }"
+                    :aria-pressed="discoveryView === 'all'"
                     @click="discoveryView = 'all'"
                   >
                     All devices
+                  </button>
+                  <button
+                    type="button"
+                    :class="{ active: discoveryView === 'capable' }"
+                    :aria-pressed="discoveryView === 'capable'"
+                    @click="discoveryView = 'capable'"
+                  >
+                    Shelly devices
                   </button>
                 </div>
               </div>
@@ -3595,6 +3470,7 @@ onBeforeUnmount(() => {
                       <strong>{{
                         device.vendor || device.hostname || 'Network device'
                       }}</strong>
+                      <span>{{ device.id }}</span>
                       <span>{{
                         device.hostname ||
                         device.app ||
@@ -3626,6 +3502,8 @@ onBeforeUnmount(() => {
                     </td>
                     <td data-label="Actions">
                       <div class="network-actions">
+                        <button v-if="device.components?.length || deviceCards.some(candidate => candidate.metadata?.physicalId === device.id)" type="button" class="primary" @click="reviewNetworkDevice(device)">Review channels</button>
+                        <span v-else>{{ device.vendor === 'Shelly' ? 'Channels unavailable' : 'Adapter needed' }}</span>
                         <a
                           v-if="device.settingsUrl"
                           class="ghost-link"
@@ -3639,8 +3517,6 @@ onBeforeUnmount(() => {
                           v-if="canProxyDevice(device)"
                           class="ghost-link"
                           :href="deviceProxyUrl(device)"
-                          target="_blank"
-                          rel="noreferrer"
                         >
                           Via gateway
                         </a>
@@ -3823,8 +3699,6 @@ onBeforeUnmount(() => {
                   v-if="approvedDeviceProxyUrl(device)"
                   class="ghost-link"
                   :href="approvedDeviceProxyUrl(device)"
-                  target="_blank"
-                  rel="noreferrer"
                   @click.stop
                 >
                   Via gateway
@@ -4421,6 +4295,7 @@ onBeforeUnmount(() => {
         </section>
 
         <WeatherDashboard v-else-if="activePage === 'weather'" :api-base="apiBase" :access-token="accessToken" />
+        <EnergyDashboard v-else-if="activePage === 'energy'" :api-base="apiBase" :access-token="accessToken" />
         <section v-else class="panel workspace-panel">
           <div class="page-heading">
             <p class="eyebrow">Coming Next</p>

@@ -94,7 +94,7 @@ describe('PortalStateService', () => {
     const state = createService().getState()
 
     expect(state.deviceSummary.total).toBe(5)
-    expect(state.deviceSummary.controllable).toBe(4)
+    expect(state.deviceSummary.controllable).toBe(0)
     expect(state.deviceSummary.sensors).toBe(1)
     expect(state.deviceSummary.systems).toBe(5)
     expect(state.systems.map((system) => system.id)).toEqual(

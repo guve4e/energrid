@@ -1,3 +1,5 @@
+import type { DeviceControlState } from '@energrid/domain-devices';
+
 export type DeviceTrustStatus = 'discovered' | 'approved' | 'blocked';
 export type DeviceKind = 'logical' | 'physical';
 export type DeviceProtocol =
@@ -126,6 +128,7 @@ export interface RegisteredDevice {
   trustStatus: DeviceTrustStatus;
   capabilities: RegisteredDeviceCapability[];
   adapter: RegisteredDeviceAdapter;
+  control?: DeviceControlState;
   state: RegisteredDeviceState;
   responseProfile: DeviceResponseProfile;
   policy: DevicePolicyProfile;
@@ -223,6 +226,7 @@ export interface NetworkDiscoveredDevice {
   model?: string;
   app?: string;
   generation?: number;
+  components?: Array<{ component: string; channel: number }>;
   discoveredAt: string;
   reason: string;
 }

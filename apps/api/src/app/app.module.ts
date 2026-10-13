@@ -3,8 +3,9 @@ import { PanelModule } from './modules/panel/panel.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { VoiceModule } from './modules/voice/voice.module';
 import { PortalModule } from './modules/portal/portal.module';
+import { EnergyModule } from './modules/energy/energy.module';
 
 @Module({
-  imports: [PanelModule, AuthModule, VoiceModule, PortalModule],
+  imports: [PanelModule, AuthModule, VoiceModule, PortalModule, EnergyModule],
 })
 export class AppModule {}

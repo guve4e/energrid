@@ -77,7 +77,7 @@ export class DeviceExecutionInvestigator {
       stage: 'telemetry',
       confidence: 0.95,
       summary:
-        'Command was published but no acknowledgement telemetry arrived before timeout.',
+        'No matching state confirmation arrived before the deadline. The command outcome is unknown.',
       evidence: [
         {
           label: 'Device',
@@ -87,10 +87,10 @@ export class DeviceExecutionInvestigator {
       ],
       suspects: [
         {
-          title: 'Missing telemetry acknowledgement',
-          confidence: 0.95,
+          title: 'Delivery or confirmation could not be verified',
+          confidence: 0,
           explanation:
-            'The command left Energrid successfully but matching telemetry never arrived.',
+            'A timeout alone cannot tell whether delivery failed, the device rejected the command, or confirmation was lost. Check the current connection without retrying the switch.',
         },
       ],
       recommendations: [

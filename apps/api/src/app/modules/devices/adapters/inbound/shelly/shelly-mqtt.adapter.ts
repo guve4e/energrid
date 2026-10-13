@@ -1,4 +1,5 @@
 import { DeviceRegistryService } from '../../../device-registry.service';
+import type { ElectricalReading } from '@energrid/domain-telemetry';
 import type {
   DeviceMqttAdapterResult,
   DeviceMqttMessage,
@@ -11,6 +12,19 @@ interface ShellyComponentTelemetry {
   channel: number | null;
   values: Record<string, number | boolean | string | null>;
   observedAt: string;
+  readings: Array<
+    Pick<
+      ElectricalReading,
+      | 'schemaVersion'
+      | 'channel'
+      | 'metric'
+      | 'value'
+      | 'unit'
+      | 'quality'
+      | 'observedAt'
+      | 'timestampBasis'
+    >
+  >;
 }
 
 export class ShellyMqttAdapter implements DeviceMqttMessageAdapter {
@@ -19,28 +33,64 @@ export class ShellyMqttAdapter implements DeviceMqttMessageAdapter {
   constructor(private readonly registry: DeviceRegistryService) {}
 
   subscriptions(): string[] {
-    return ['shelly/#'];
+    // Gen2+ defaults put the device ID at the root, not under a shared "shelly" prefix.
+    return ['shelly/#', '+/events/rpc', '+/status/+'];
   }
 
   handle(message: DeviceMqttMessage): DeviceMqttAdapterResult | null {
-    const telemetry = parseShellyComponentTelemetry(
-      message.topic,
-      message.payload,
-    );
+    const raw = normalizeShellyPayload(message.topic, message.payload);
+    const params =
+      raw &&
+      typeof raw === 'object' &&
+      raw.params &&
+      typeof raw.params === 'object'
+        ? (raw.params as Record<string, unknown>)
+        : null;
+    const entries = params
+      ? Object.entries(params).filter(([key]) =>
+          /^(switch|em1|em1data):\d+$/.test(key),
+        )
+      : [];
+    if (entries.length > 1) {
+      if (entries.length > 32) return null;
+      const results = entries
+        .map(([key, value]) =>
+          this.handle({
+            ...message,
+            payload: { ...raw, params: { ts: params?.ts, [key]: value } },
+          }),
+        )
+        .filter((result) => result !== null);
+      if (!results.length) return null;
+      return {
+        reason: 'shelly telemetry',
+        effects: results.flatMap((result) => result.effects),
+      };
+    }
+    const telemetry = parseShellyComponentTelemetry(message.topic, raw);
 
     if (!telemetry) return null;
 
-    const deviceId = this.registry.findApprovedDeviceIdByPhysicalChannel(
-      telemetry.physicalId,
-      telemetry.component,
-      telemetry.channel,
-    );
+    const deviceId =
+      this.registry.findApprovedDeviceIdByPhysicalChannel(
+        telemetry.physicalId,
+        telemetry.component,
+        telemetry.channel,
+      ) ||
+      (telemetry.component.startsWith('em1data:')
+        ? this.registry.findApprovedDeviceIdByPhysicalChannel(
+            telemetry.physicalId,
+            telemetry.component.replace('em1data:', 'em1:'),
+            telemetry.channel,
+          )
+        : null);
 
     if (!deviceId) {
       this.registry.registerDiscoveredShellyDevice(
         telemetry.physicalId,
-        telemetry.component,
+        telemetry.component.replace('em1data:', 'em1:'),
         telemetry.channel,
+        shellyCommandTopic(message.topic),
       );
 
       return {
@@ -57,6 +107,9 @@ export class ShellyMqttAdapter implements DeviceMqttMessageAdapter {
           payload: {
             deviceId,
             values: telemetry.values,
+            ...(telemetry.readings.length
+              ? { readings: telemetry.readings }
+              : {}),
             observedAt: telemetry.observedAt,
             origin: 'shelly-mqtt',
             protocol: 'mqtt',
@@ -66,6 +119,34 @@ export class ShellyMqttAdapter implements DeviceMqttMessageAdapter {
       ],
     };
   }
+}
+
+function normalizeShellyPayload(
+  topic: string,
+  payload: unknown,
+): Record<string, unknown> | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload))
+    return null;
+  const raw = payload as Record<string, unknown>;
+  const snapshotId = /^shelly\/status\/([^/]+)$/.exec(topic)?.[1];
+  if (!snapshotId) return raw;
+  if (
+    (raw.id !== undefined && raw.id !== snapshotId) ||
+    (raw.src !== undefined && raw.src !== snapshotId)
+  )
+    return null;
+  if (raw.params && typeof raw.params === 'object') return raw;
+
+  // The existing status publisher puts all components at the payload root.
+  return { ...raw, src: snapshotId, params: raw };
+}
+
+function shellyCommandTopic(topic: string): string | undefined {
+  const prefix =
+    /^(.*)\/(?:events\/rpc|status\/(?:switch|em1|em1data):\d+)$/.exec(
+      topic,
+    )?.[1];
+  return prefix ? `${prefix}/rpc` : undefined;
 }
 
 function parseShellyComponentTelemetry(
@@ -161,14 +242,58 @@ function parseShellyComponentTelemetry(
     values.returnedEnergy = returnedEnergy;
   }
 
-  if (Object.keys(values).length === 0) return null;
+  const clock = shellyObservedAt(raw, params);
+  const observedAt = clock.observedAt;
+  const readings: ShellyComponentTelemetry['readings'] = [];
+  const add = (
+    metric: ElectricalReading['metric'],
+    field: unknown,
+    scale = 1,
+  ) => {
+    if (field === undefined) return;
+    const number = finiteNumber(field);
+    const value =
+      number === null || (metric !== 'power' && number < 0)
+        ? null
+        : number * scale;
+    readings.push({
+      schemaVersion: 1,
+      channel: componentName!.replace('em1data:', 'em1:'),
+      metric,
+      value,
+      unit: metric === 'power' ? 'W' : 'kWh',
+      quality: value === null ? 'invalid' : 'measured',
+      observedAt,
+      timestampBasis: clock.timestampBasis,
+    });
+  };
+  add('power', 'apower' in component ? component.apower : component.act_power);
+  const imported = component.aenergy as Record<string, unknown> | undefined;
+  const exported = component.ret_aenergy as Record<string, unknown> | undefined;
+  // Shelly cumulative energy fields are Wh; canonical totals are kWh.
+  add(
+    'energy_import_total',
+    'total_act_energy' in component
+      ? component.total_act_energy
+      : imported?.total,
+    1 / 1000,
+  );
+  add(
+    'energy_export_total',
+    'total_act_ret_energy' in component
+      ? component.total_act_ret_energy
+      : exported?.total,
+    1 / 1000,
+  );
+  if (Object.keys(values).length === 0 && !readings.length) return null;
 
   return {
     physicalId,
     component: componentName,
     channel,
     values,
-    observedAt: shellyObservedAt(raw, params),
+    observedAt,
+    readings,
   };
 }
 
@@ -214,10 +339,10 @@ function finiteNumber(value: unknown): number | null {
 function shellyObservedAt(
   raw: Record<string, unknown>,
   params: Record<string, unknown> | null,
-): string {
+): { observedAt: string; timestampBasis: ElectricalReading['timestampBasis'] } {
   const direct = stringValue(raw.observedAt) || stringValue(raw.timestamp);
 
-  if (direct) return direct;
+  if (direct) return { observedAt: direct, timestampBasis: 'device-observed' };
 
   const timestamp = finiteNumber(params?.ts) ?? finiteNumber(raw.ts);
 
@@ -226,10 +351,17 @@ function shellyObservedAt(
       timestamp > 1_000_000_000_000 ? timestamp : timestamp * 1000;
 
     const parsed = new Date(milliseconds);
-    if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
+    if (!Number.isNaN(parsed.getTime()))
+      return {
+        observedAt: parsed.toISOString(),
+        timestampBasis: 'device-observed',
+      };
   }
 
-  return new Date().toISOString();
+  return {
+    observedAt: new Date().toISOString(),
+    timestampBasis: 'collector-received',
+  };
 }
 
 function stringValue(value: unknown): string | null {

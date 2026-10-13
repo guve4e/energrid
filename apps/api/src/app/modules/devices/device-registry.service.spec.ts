@@ -1,12 +1,19 @@
 import { DeviceRegistryService } from './device-registry.service';
 
 describe('DeviceRegistryService', () => {
+  it('does not infer offline from missing configuration or missing observations', () => {
+    const snapshot = new DeviceRegistryService().getSnapshot();
+    const unobserved = snapshot.devices.filter(d => d.state.observedAt === null);
+    expect(unobserved.length).toBeGreaterThan(0);
+    expect(unobserved.every(d => d.state.status === 'unknown')).toBe(true);
+  });
   afterEach(() => {});
 
   const originalEnv = process.env;
 
   beforeEach(() => {
     process.env = { ...originalEnv };
+    delete process.env.HOME_DEVICE_CONTROL_BINDINGS_JSON;
     delete process.env.HOME_KITCHEN_LIGHT_SHELLY_RPC_DEVICES;
     delete process.env.HOME_KITCHEN_LIGHT_MQTT_TOPIC;
     delete process.env.HOME_KITCHEN_TEMP_MQTT_TOPIC;
@@ -61,7 +68,7 @@ describe('DeviceRegistryService', () => {
       total: 5,
       approved: 5,
       discovered: 0,
-      controllable: 4,
+      controllable: 0,
       sensors: 1,
       systems: 5,
       learningEnabled: 5,
@@ -435,13 +442,10 @@ describe('DeviceRegistryService', () => {
       waterPump?.capabilities.map((capability) => capability.kind),
     ).toEqual(expect.arrayContaining(['power', 'pump']));
     expect(service.getAvailableDeviceIds()).toEqual(
-      expect.arrayContaining([
-        'bath_light',
-        'bath.light.led',
-        'mainline',
-        'water-pump',
-      ]),
+      expect.arrayContaining(['mainline', 'water-pump']),
     );
+    expect(service.getAvailableDeviceIds()).not.toContain('bath_light');
+    expect(service.getAvailableDeviceIds()).not.toContain('bath.light.led');
   });
 
   it('scopes the active snapshot to the current tenant site while keeping site summaries', () => {

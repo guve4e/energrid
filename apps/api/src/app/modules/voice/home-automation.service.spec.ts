@@ -15,6 +15,21 @@ describe('HomeAutomationService', () => {
 
   function createService() {
     const registry = new DeviceRegistryService();
+    for (const device of registry.getDevices()) {
+      if (
+        device.kind === 'physical' &&
+        device.adapter.driver.includes('shelly') &&
+        typeof device.metadata?.channel === 'number'
+      ) {
+        registry.configureDeviceControl(device.id, {
+          kind: 'shelly-mqtt',
+          enabled: true,
+          physicalId: device.metadata.physicalId || device.adapter.target,
+          channel: device.metadata.channel,
+          topic: 'shelly/rpc',
+        });
+      }
+    }
     return new HomeAutomationService(
       registry,
       new DeviceControlService(registry),
@@ -29,6 +44,7 @@ describe('HomeAutomationService', () => {
     });
 
     process.env = { ...originalEnv };
+    delete process.env.HOME_DEVICE_CONTROL_BINDINGS_JSON;
     delete process.env.HOME_AVAILABLE_DEVICES;
     delete process.env.HOME_KITCHEN_LIGHT_MQTT_TOPIC;
     delete process.env.HOME_KITCHEN_LIGHT_SHELLY_RPC_DEVICES;

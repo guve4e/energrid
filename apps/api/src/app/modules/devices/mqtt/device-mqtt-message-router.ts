@@ -4,6 +4,7 @@ import { EnergridMqttAdapter } from '../adapters/inbound/energrid-mqtt.adapter';
 import { LegacyFrameworkMqttAdapter } from '../adapters/inbound/legacy/legacy-framework-mqtt.adapter';
 import { LegacyTemperatureMqttAdapter } from '../adapters/inbound/legacy/legacy-temperature-mqtt.adapter';
 import { ShellyMqttAdapter } from '../adapters/inbound/shelly/shelly-mqtt.adapter';
+import type { TelemetryIngestService } from '../../telemetry/telemetry-ingest.service';
 import type {
   DeviceMqttAdapterResult,
   DeviceMqttMessage,
@@ -20,6 +21,7 @@ export class DeviceMqttMessageRouter {
   constructor(
     private readonly registry: DeviceRegistryService,
     private readonly observation: DeviceObservationService,
+    private readonly telemetry?: TelemetryIngestService,
   ) {
     this.adapters = [
       this.legacyTemperature,
@@ -45,11 +47,15 @@ export class DeviceMqttMessageRouter {
     return this.legacyFramework.subscriptions();
   }
 
-  route(message: DeviceMqttMessage): DeviceMqttAdapterResult | null {
+  route(
+    message: DeviceMqttMessage,
+  ): (DeviceMqttAdapterResult & { persisted: Promise<void> }) | null {
     for (const adapter of this.adapters) {
       const result = adapter.handle(message);
 
       if (!result) continue;
+
+      const persistence: Promise<void>[] = [];
 
       for (const effect of result.effects) {
         if (effect.kind === 'registry') {
@@ -57,7 +63,6 @@ export class DeviceMqttMessageRouter {
         }
 
         if (effect.kind === 'telemetry') {
-
           const payload = effect.payload as {
             deviceId: string;
             observedAt?: string;
@@ -68,18 +73,22 @@ export class DeviceMqttMessageRouter {
 
           this.observation.observe({
             deviceId: payload.deviceId,
-            observedAt:
-              payload.observedAt ||
-              new Date().toISOString(),
-            source:
-              payload.origin ||
-              payload.protocol ||
-              'unknown',
-            values:
-              payload.values || {},
+            observedAt: payload.observedAt || new Date().toISOString(),
+            source: payload.origin || payload.protocol || 'unknown',
+            values: payload.values || {},
           });
 
           this.registry.ingestDeviceTelemetry(effect.payload);
+          if (this.telemetry)
+            persistence.push(
+              this.telemetry.capture(
+                effect.payload,
+                this.registry
+                  .getDevices()
+                  .find((device) => device.id === payload.deviceId),
+                adapter.id,
+              ),
+            );
         }
 
         if (effect.kind === 'status') {
@@ -87,7 +96,10 @@ export class DeviceMqttMessageRouter {
         }
       }
 
-      return result;
+      return {
+        ...result,
+        persisted: Promise.all(persistence).then(() => undefined),
+      };
     }
 
     return null;

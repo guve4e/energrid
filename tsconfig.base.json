@@ -21,6 +21,12 @@
     "target": "es2022",
     "baseUrl": ".",
     "paths": {
+      "@energrid/domain-devices": [
+        "libs/domain-devices/src/index.ts"
+      ],
+      "@energrid/domain-telemetry": [
+        "libs/domain-telemetry/src/index.ts"
+      ],
       "@energrid/stt-stream-core": [
         "packages/stt-stream-core/src/index.ts"
       ],

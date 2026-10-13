@@ -34,11 +34,12 @@ describe('DeviceHealthService', () => {
     expect(result.confidence).toBe(0.7);
   });
 
-  it('returns unreachable when telemetry is old', () => {
+  it('reports stale telemetry without claiming the device is unreachable', () => {
     const result = service.evaluate(memory(600));
 
-    expect(result.status).toBe('unreachable');
+    expect(result.status).toBe('stale');
     expect(result.confidence).toBe(0.95);
+    expect(result.reason).toContain('reachability has not been checked');
   });
 
   it('never returns invalid confidence values', () => {

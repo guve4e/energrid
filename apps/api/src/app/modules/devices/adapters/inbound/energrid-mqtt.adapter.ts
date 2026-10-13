@@ -34,6 +34,16 @@ export class EnergridMqttAdapter implements DeviceMqttMessageAdapter {
       message.topic.endsWith('/telemetry') ||
       message.topic.endsWith('/state')
     ) {
+      const payload = message.payload as Record<string, unknown> | null;
+      if (payload && typeof payload === 'object' && 'readings' in payload) {
+        const parts = message.topic.slice(prefix.length + 1).split('/');
+        if (
+          parts.length !== 3 ||
+          parts[0] !== 'devices' ||
+          payload.deviceId !== parts[1]
+        )
+          return { reason: 'reading topic identity mismatch', effects: [] };
+      }
       return {
         reason: 'device telemetry',
         effects: [

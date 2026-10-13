@@ -20,6 +20,15 @@ describe('DeviceControlService', () => {
       return {} as ReturnType<typeof execFile>;
     });
     process.env = { ...originalEnv };
+    process.env.HOME_DEVICE_CONTROL_BINDINGS_JSON = JSON.stringify({
+      'kitchen.island.light': {
+        kind: 'shelly-mqtt',
+        enabled: true,
+        physicalId: 'shellyplus1-78ee4ccf5cf0',
+        channel: 0,
+        topic: 'shelly/rpc',
+      },
+    });
     delete process.env.HOME_APPROVED_DEVICES_JSON;
     delete process.env.HOME_SHELLY_RPC_TOPIC;
     delete process.env.HOME_MQTT_HOST;

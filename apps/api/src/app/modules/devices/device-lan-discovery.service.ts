@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { networkInterfaces } from 'node:os'
 import { promisify } from 'node:util'
+import { privateShellyBaseUrl } from '@energrid/domain-devices'
 import type {
   NetworkDiscoveredDevice,
   NetworkDiscoveryZone,
@@ -344,6 +345,9 @@ async function enrichNetworkDevice(
     model: shelly.model,
     app: shelly.app,
     generation: shelly.gen,
+    components: shelly.gen && shelly.gen >= 2 && shelly.id
+      ? await probeShellyComponents(candidate.ipAddress)
+      : [],
     reason: 'Shelly HTTP API responded on the local network.',
   }
 }
@@ -601,6 +605,7 @@ async function probeShelly(ipAddress: string): Promise<{
       const response = await fetch(url, {
         signal: controller.signal,
         headers: { Accept: 'application/json' },
+        redirect: 'error',
       })
 
       if (!response.ok) continue
@@ -622,6 +627,39 @@ async function probeShelly(ipAddress: string): Promise<{
   }
 
   return null
+}
+
+export async function probeShellyComponents(ipAddress: string): Promise<NonNullable<NetworkDiscoveredDevice['components']>> {
+  let baseUrl: string
+  try { baseUrl = privateShellyBaseUrl(`http://${ipAddress}`) }
+  catch { return [] }
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 1500)
+  try {
+    const response = await fetch(`${baseUrl}/rpc/Shelly.GetStatus`, {
+      signal: controller.signal,
+      headers: { Accept: 'application/json' },
+      redirect: 'error',
+    })
+    if (!response.ok) return []
+    const body: unknown = await response.json()
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return []
+    const result: NonNullable<NetworkDiscoveredDevice['components']> = []
+    for (const [component, value] of Object.entries(body)) {
+      const match = /^(switch|em1):(\d+)$/.exec(component)
+      if (!match || !value || typeof value !== 'object' || Array.isArray(value)) continue
+      const channel = Number(match[2])
+      const status = value as Record<string, unknown>
+      if (!Number.isInteger(channel) || channel > 31 || status.id !== channel) continue
+      if (match[1] === 'switch' && typeof status.output !== 'boolean') continue
+      result.push({ component, channel })
+    }
+    return result
+  } catch {
+    return []
+  } finally {
+    clearTimeout(timeout)
+  }
 }
 
 function looksLikeShelly(body: Record<string, unknown>): boolean {
