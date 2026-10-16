@@ -117,6 +117,15 @@ describe('weather page', () => {
     wrapper = mount(WeatherDashboard, { props: { apiBase: '', accessToken: 'test' } }); await flushPromises();
     expect(wrapper.text()).toContain('Forecast storage needs initialization');
   });
+  it('passes daily verification and collection health through the existing independent performance request', async () => {
+    vi.stubGlobal('fetch', responses({status:'awaiting-observations',summary:[],
+      daily:{status:'awaiting-observations',summary:[],recent:[]},
+      collection:{status:'configuration-required',source:null,note:'Connect a measured station.'}}));
+    wrapper = mount(WeatherDashboard,{props:{apiBase:'',accessToken:'test'}}); await flushPromises();
+    expect(wrapper.text()).toContain('Forecast versus measured weather');
+    expect(wrapper.text()).toContain('Measurement source not connected');
+    expect(wrapper.text()).toContain('Hourly forecast accuracy');
+  });
   it('explains missing river scoring storage separately', async () => {
     vi.stubGlobal('fetch', responsesWithRiver({ status: 'migration-required', summary: [] }));
     wrapper = mount(WeatherDashboard, { props: { apiBase: '', accessToken: 'test' } }); await flushPromises();

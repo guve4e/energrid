@@ -52,6 +52,134 @@ function render(value = device, fetch = fetchMock()) {
   return { page, fetch };
 }
 describe('explicit device control UI', () => {
+  it('leaves an unknown address truly empty, with no sample IP, and keeps its known-address status while typing', async () => {
+    const { page, fetch } = render();
+    await page.get('select').setValue('http');
+    const input = page.get('input[type="url"]');
+    expect((input.element as HTMLInputElement).value).toBe('');
+    expect(input.attributes('placeholder')).toBeUndefined();
+    expect(page.text()).toContain('Known addressNot discovered');
+    expect(
+      page.get('button[type="submit"]').attributes('disabled'),
+    ).toBeDefined();
+    await page.get('form').trigger('submit');
+    expect(fetch).not.toHaveBeenCalled();
+    await input.setValue('http://192.168.7.99');
+    expect(page.text()).toContain('Known addressNot discovered');
+    expect((input.element as HTMLInputElement).value).toBe(
+      'http://192.168.7.99',
+    );
+  });
+  it.each([
+    'http://example.com',
+    'http://127.0.0.1',
+    'http://192.168.7.21/path',
+    'not-an-address',
+  ])(
+    'rejects an invalid HTTP draft before sending configuration: %s',
+    async (address) => {
+      const { page, fetch } = render();
+      await page.get('select').setValue('http');
+      await page.get('input[type="url"]').setValue(address);
+      await page.get('form').trigger('submit');
+      expect(fetch).not.toHaveBeenCalled();
+      expect(page.get('[role="alert"]').text()).not.toBe('');
+    },
+  );
+  const networkDevice = { id: physicalId, ipAddress: '192.168.7.21' };
+  it('prefills an MQTT-discovered device from its matching cached LAN address without a request or permission change', async () => {
+    const { page, fetch } = render();
+    await page.setProps({ networkDevices: [networkDevice] });
+    await page.get('select').setValue('http');
+    expect(
+      (page.get('input[type="url"]').element as HTMLInputElement).value,
+    ).toBe('http://192.168.7.21');
+    expect(
+      (page.get('input[type="checkbox"]').element as HTMLInputElement).checked,
+    ).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it('fills a late discovery result while preserving the chosen transport and switching permission', async () => {
+    const { page } = render();
+    await page.get('select').setValue('http');
+    await page.setProps({ networkDevices: [networkDevice] });
+    expect(
+      (page.get('input[type="url"]').element as HTMLInputElement).value,
+    ).toBe('http://192.168.7.21');
+    expect(page.get('select').element.value).toBe('http');
+    expect(
+      (page.get('input[type="checkbox"]').element as HTMLInputElement).checked,
+    ).toBe(false);
+  });
+  it('preserves a manually entered draft during background discovery changes', async () => {
+    const { page } = render();
+    await page.get('select').setValue('http');
+    await page.get('input[type="url"]').setValue('http://192.168.7.99');
+    await page.setProps({ networkDevices: [networkDevice] });
+    expect(
+      (page.get('input[type="url"]').element as HTMLInputElement).value,
+    ).toBe('http://192.168.7.99');
+  });
+  it('keeps a saved HTTP route ahead of discovered address suggestions', async () => {
+    const { page } = render({
+      ...device,
+      control: {
+        status: 'ready',
+        reason: '',
+        binding: {
+          kind: 'shelly-http',
+          enabled: true,
+          physicalId,
+          channel: 1,
+          baseUrl: 'http://192.168.7.99',
+        },
+      },
+    });
+    await page.setProps({ networkDevices: [networkDevice] });
+    expect(
+      (page.get('input[type="url"]').element as HTMLInputElement).value,
+    ).toBe('http://192.168.7.99');
+  });
+  it('requests address discovery explicitly and uses the result only in the unsaved draft', async () => {
+    const { page, fetch } = render();
+    await page.get('select').setValue('http');
+    await page.get('input[type="url"]').setValue('http://192.168.7.99');
+    await page
+      .findAll('button')
+      .find((b) => b.text() === 'Find address')!
+      .trigger('click');
+    expect(page.emitted('find-address')).toHaveLength(1);
+    await page.setProps({ findingAddress: true });
+    expect(page.get('input[type="url"]').attributes('disabled')).toBeDefined();
+    expect(
+      page.get('button[type="submit"]').attributes('disabled'),
+    ).toBeDefined();
+    await page.get('form').trigger('submit');
+    expect(fetch).not.toHaveBeenCalled();
+    await page.setProps({
+      networkDevices: [networkDevice],
+      findingAddress: false,
+    });
+    expect(
+      (page.get('input[type="url"]').element as HTMLInputElement).value,
+    ).toBe('http://192.168.7.21');
+    expect(fetch).not.toHaveBeenCalled();
+    expect(page.emitted('saved')).toBeUndefined();
+  });
+  it('explains a missing local address and reports a failed search without calling it offline', async () => {
+    const { page } = render();
+    await page.get('select').setValue('http');
+    expect(page.text()).toContain('No local address is known');
+    await page
+      .findAll('button')
+      .find((b) => b.text() === 'Find address')!
+      .trigger('click');
+    await page.setProps({ findingAddress: true });
+    await page.setProps({ findingAddress: false });
+    expect(page.text()).toContain('No matching device was found');
+    await page.setProps({ addressSearchError: 'Network scan unavailable' });
+    expect(page.get('[role="alert"]').text()).toBe('Network scan unavailable');
+  });
   it('preserves an unsaved route when the same device is refreshed', async () => {
     const { page } = render();
     await page.get('select').setValue('http');
@@ -63,6 +191,71 @@ describe('explicit device control UI', () => {
     expect(
       (page.get('input[type="url"]').element as HTMLInputElement).value,
     ).toBe('http://192.168.7.99');
+  });
+  it('does not apply a previous relay lookup after selecting different hardware', async () => {
+    const { page, fetch } = render();
+    await page.get('select').setValue('http');
+    await page
+      .findAll('button')
+      .find((b) => b.text() === 'Find address')!
+      .trigger('click');
+    await page.setProps({ findingAddress: true });
+    const nextPhysicalId = 'shellyplus1-aabbccddeeff';
+    await page.setProps({
+      device: {
+        ...device,
+        id: `${nextPhysicalId}:switch:0`,
+        metadata: {
+          physicalId: nextPhysicalId,
+          channel: 0,
+          component: 'switch:0',
+        },
+      },
+    });
+    await page.setProps({
+      networkDevices: [networkDevice],
+      findingAddress: false,
+    });
+    await page.get('select').setValue('http');
+    expect(
+      (page.get('input[type="url"]').element as HTMLInputElement).value,
+    ).toBe('');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it('can explicitly replace a saved route address in the draft without saving the route', async () => {
+    const configured: ControlSetupDevice = {
+      ...device,
+      control: {
+        status: 'disabled',
+        reason: '',
+        binding: {
+          kind: 'shelly-http',
+          enabled: false,
+          physicalId,
+          channel: 1,
+          baseUrl: 'http://192.168.7.99',
+        },
+      },
+    };
+    const { page, fetch } = render(configured);
+    await page
+      .findAll('button')
+      .find((b) => b.text() === 'Find address')!
+      .trigger('click');
+    await page.setProps({ findingAddress: true });
+    await page.setProps({
+      findingAddress: false,
+      networkDevices: [networkDevice],
+    });
+    expect(
+      (page.get('input[type="url"]').element as HTMLInputElement).value,
+    ).toBe('http://192.168.7.21');
+    expect(configured.control?.binding).toMatchObject({
+      baseUrl: 'http://192.168.7.99',
+      enabled: false,
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(page.emitted('saved')).toBeUndefined();
   });
   it('prefills a discovered HTTP address without enabling switching', async () => {
     const { page, fetch } = render({

@@ -89,6 +89,101 @@ async function render(path: string, fetch: unknown) {
   await flushPromises();
 }
 describe('device onboarding page workflow with mocked services', () => {
+  it('keeps repeated search, combined filters, empty results and approval-tab changes interactive without reloading', async () => {
+    const kitchen = { ...relay, trustStatus: 'approved', control: { status: 'needs-setup', binding: null, reason: '' } };
+    const meter = { ...kitchen, id: 'meter', displayName: 'Utility meter', zoneId: 'utility', zoneName: 'Utility', capabilities: [{ kind: 'power', actions: ['read'] }], control: { status: 'read-only', binding: null, reason: '' } };
+    const example = { ...kitchen, id: 'example', displayName: 'Example relay', metadata: { simulated: true } };
+    const pending = { ...relay, id: 'pending', displayName: 'Pending relay' };
+    const state = data([kitchen, meter, example, pending]);
+    const fetch = vi.fn(async (url: string) => ({ ok: true, json: async () => url === '/portal/state' ? structuredClone(state) : { runs: [] } }));
+    await render('/devices/', fetch);
+    const initialRequests = fetch.mock.calls.length;
+    const search = page!.get('[aria-label="Search devices"]');
+    const count = () => page!.get('.inventory-filter-summary [role="status"]').text();
+    const table = page!.get('.device-table-wrap').element;
+    table.scrollTop = 250;
+    table.scrollLeft = 90;
+    await search.setValue('Kitchen');
+    expect(count()).toBe('1 shown');
+    expect(table.scrollTop).toBe(0);
+    expect(table.scrollLeft).toBe(0);
+    expect(page!.get('tbody').text()).toContain('Kitchen Shelly');
+    await search.setValue('missing-device');
+    expect(count()).toBe('0 shown');
+    expect(page!.text()).toContain('No devices match this filter');
+    await button('Clear filters').trigger('click');
+    expect(count()).toBe('2 shown');
+    await page!.get('[aria-label="Filter by capability"]').setValue('power');
+    expect(count()).toBe('1 shown');
+    expect(page!.get('tbody').text()).toContain('Utility meter');
+    await page!.get('[aria-label="Filter by zone"]').setValue('kitchen');
+    expect(count()).toBe('0 shown');
+    await button('Clear filters').trigger('click');
+    await page!.get('[aria-label="Filter by status"]').setValue('needs_setup');
+    expect(count()).toBe('1 shown');
+    await button('Pending 1').trigger('click');
+    expect(count()).toBe('0 shown');
+    await button('Clear filters').trigger('click');
+    expect(count()).toBe('1 shown');
+    expect(button('Pending 1').attributes('aria-pressed')).toBe('true');
+    expect(page!.get('tbody').text()).toContain('Pending relay');
+    await button('Approved 3').trigger('click');
+    await page!.get('[aria-label="Filter by source"]').setValue('examples');
+    expect(count()).toBe('1 shown');
+    expect(page!.get('tbody').text()).toContain('Example relay');
+    await button('Clear filters').trigger('click');
+    expect(count()).toBe('2 shown');
+    expect(button('Clear filters').attributes('disabled')).toBeDefined();
+    expect(fetch.mock.calls.length).toBe(initialRequests);
+  });
+  it('keeps search and an edited setup draft when state is refreshed', async () => {
+    const approved = { ...relay, trustStatus: 'approved', control: { status: 'needs-setup', binding: null, reason: '' } };
+    const state = data([approved]);
+    const fetch = vi.fn(async (url: string) => ({ ok: true, json: async () => url === '/portal/state' ? structuredClone(state) : { runs: [] } }));
+    await render('/devices/', fetch);
+    await page!.get('[aria-label="Search devices"]').setValue('Kitchen');
+    await button('Kitchen Shelly').trigger('click');
+    const setup = page!.get('.control-setup');
+    await setup.get('select').setValue('http');
+    await setup.get('input[type="url"]').setValue('http://192.168.7.99');
+    await button('Refresh').trigger('click');
+    await flushPromises();
+    expect((page!.get('[aria-label="Search devices"]').element as HTMLInputElement).value).toBe('Kitchen');
+    expect(setup.get('select').element.value).toBe('http');
+    expect((setup.get('input[type="url"]').element as HTMLInputElement).value).toBe('http://192.168.7.99');
+    expect(page!.get('.inventory-filter-summary [role="status"]').text()).toBe('1 shown');
+    expect(fetch.mock.calls.some(([url]) => /\/(actions|control|approve)$/.test(url))).toBe(false);
+  });
+  it('finds and fills the local address for an MQTT-discovered device without saving or switching', async () => {
+    const mqttRelay = {
+      ...relay,
+      trustStatus: 'approved',
+      adapter: { ...relay.adapter, protocol: 'mqtt', driver: 'shelly-discovered', target: network.id },
+      metadata: { physicalId: network.id, channel: 0, component: 'switch:0' },
+      control: { status: 'needs-setup', binding: null, reason: 'No route' },
+    };
+    const state = data([mqttRelay]);
+    const fetch = vi.fn(async (url: string) => {
+      if (url === '/portal/network/scan') {
+        state.networkDevices = [network];
+        return { ok: true, json: async () => ({ devices: [network], zones: [] }) };
+      }
+      return { ok: true, json: async () => url === '/portal/state' ? structuredClone(state) : { runs: [] } };
+    });
+    await render('/devices/', fetch);
+    await button('Kitchen Shelly').trigger('click');
+    const setup = page!.get('.control-setup');
+    await setup.get('select').setValue('http');
+    expect((setup.get('input[type="url"]').element as HTMLInputElement).value).toBe('');
+    expect(fetch.mock.calls.filter(([url]) => url === '/portal/network/scan')).toHaveLength(0);
+    await button('Find address').trigger('click');
+    await flushPromises();
+    expect((setup.get('input[type="url"]').element as HTMLInputElement).value).toBe('http://192.168.7.21');
+    expect(setup.get('select').element.value).toBe('http');
+    expect((setup.get('input[type="checkbox"]').element as HTMLInputElement).checked).toBe(false);
+    expect(fetch.mock.calls.filter(([url]) => url === '/portal/network/scan')).toHaveLength(1);
+    expect(fetch.mock.calls.some(([url]) => /\/(control|actions|approve)$/.test(url))).toBe(false);
+  });
   it('shows all detected devices, reviews a channel, then keeps approval and switching separate', async () => {
     const state = data();
     const fetch = vi.fn(async (url: string, options?: RequestInit) => {

@@ -1,13 +1,26 @@
 import { Body, Controller, Get, Headers, Post, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { VIDIN_LOCATION, WeatherObservation, WeatherVerificationService } from './weather-verification.service';
+import { WeatherDailyVerificationService } from './weather-daily-verification.service';
+import { WeatherObservationCollector } from './weather-observation-collector.service';
 
 @Controller('weather')
 export class WeatherVerificationController {
-  constructor(private readonly verification: WeatherVerificationService) {}
+  constructor(private readonly verification: WeatherVerificationService,
+    private readonly daily: WeatherDailyVerificationService,
+    private readonly observations: WeatherObservationCollector) {}
   @Get('performance')
   async performance() {
-    try { return await this.verification.performance(); }
+    try {
+      const hourly = await this.verification.performance();
+      let daily;
+      try { daily = await this.daily.performance(); }
+      catch (error) {
+        if (!['42P01', '42703'].includes((error as { code?: string }).code ?? '')) throw error;
+        daily = { status: 'migration-required', summary: [], recent: [] };
+      }
+      return { ...hourly, daily, collection: this.observations.status() };
+    }
     catch (error) {
       if (['42P01', '42703'].includes((error as { code?: string }).code ?? '')) {
         return { status: 'migration-required', summary: [], note: 'Forecast verification storage is not initialized.' };

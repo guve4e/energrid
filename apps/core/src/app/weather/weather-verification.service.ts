@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 import { PG_POOL } from '../db.module';
 import { brierScore, scoreForecast } from '../forecast/forecast-verification';
 import { assessWeather, HOUR_MS, WeatherSnapshot } from './weather-data-quality';
+import { weatherObservationSource } from './weather-observations';
 
 export const weatherLocation = (s: WeatherSnapshot) => `${s.coordinates.latitude.toFixed(5)},${s.coordinates.longitude.toFixed(5)}`;
 export const VIDIN_LOCATION = '43.99160,22.87280';
@@ -108,7 +109,7 @@ export class WeatherVerificationService {
       ) o ON true
       WHERE f.evaluated_at IS NULL AND f.target_at+interval '15 minutes'<=now()
         AND f.created_at<coalesce(f.window_start_at,f.target_at)
-      ORDER BY f.target_at,f.id LIMIT 500`, [process.env.WEATHER_OBSERVATION_SOURCE ?? '']);
+      ORDER BY f.target_at,f.id LIMIT 500`, [weatherObservationSource()]);
     let evaluated = 0;
     for (const row of due.rows) {
       const probability = row.metric === 'rain_probability';
@@ -141,7 +142,7 @@ export class WeatherVerificationService {
       count(*) FILTER (WHERE target_at<=now())::int AS "awaitingObservations"
       FROM weather_forecasts WHERE location=$1 AND evaluated_at IS NULL AND issued_at>=now()-interval '90 days'`, [location]);
     return { status: summary.rows.length ? 'available' : 'awaiting-observations', location, windowDays: 90,
-      observationSource: process.env.WEATHER_OBSERVATION_SOURCE || null,
+      observationSource: weatherObservationSource() || null,
       summary: summary.rows, pending: pending.rows[0], generatedAt: new Date().toISOString(),
       note: 'Scores use measured observations. Model agreement is not measured accuracy. Rain event: hourly total >0.1 mm.' };
   }

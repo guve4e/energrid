@@ -8,6 +8,7 @@ import {
   WeatherHour,
   WeatherSnapshot,
 } from './weather-data-quality';
+import { validWeatherDate, weatherDayWindow } from './weather-calendar';
 
 export interface WeatherDayDetails {
   date: string;
@@ -71,7 +72,7 @@ export function buildWeatherDayDetails(
   ];
 
   return days
-    .filter((day) => validCalendarDate(day.date))
+    .filter((day) => validWeatherDate(day.date))
     .map((day) => {
       const source = sources.find(
         (s) =>
@@ -93,12 +94,8 @@ export function buildWeatherDayDetails(
         ).values(),
       ].sort((a, b) => Date.parse(a.time!) - Date.parse(b.time!));
       // Counting actual local-day instants also handles 23/25-hour daylight-saving days.
-      const midnight = Date.parse(`${day.date}T00:00:00Z`);
-      const instants = Array.from(
-        { length: 50 },
-        (_, i) => midnight + (i - 13) * HOUR_MS,
-      ).filter((instant) => localDate(instant) === day.date);
-      const expectedHours = instants.length;
+      const window = weatherDayWindow(day.date, timezone);
+      const expectedHours = window.expectedHours;
       const precipitation = hours.filter(
         (hour) => finite(hour.precipitationMm) && hour.precipitationMm >= 0,
       );
@@ -117,8 +114,8 @@ export function buildWeatherDayDetails(
       return {
         date: day.date,
         timezone,
-        startsAt: new Date(instants[0]).toISOString(),
-        endsAt: new Date(instants.at(-1)! + HOUR_MS).toISOString(),
+        startsAt: window.startsAt.toISOString(),
+        endsAt: window.endsAt.toISOString(),
         sourceProvider: day.sourceProvider,
         sourceModel: day.sourceModel,
         hours,
@@ -172,13 +169,4 @@ function mean(values: Array<number | null>) {
           10,
       ) / 10
     : null;
-}
-
-function validCalendarDate(value: string) {
-  const instant = Date.parse(`${value}T00:00:00Z`);
-  return (
-    /^\d{4}-\d{2}-\d{2}$/.test(value) &&
-    Number.isFinite(instant) &&
-    new Date(instant).toISOString().slice(0, 10) === value
-  );
 }

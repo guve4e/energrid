@@ -1,18 +1,39 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import type { DeviceControlBinding } from '@energrid/domain-devices';
+import {
+  privateShellyBaseUrl,
+  type DeviceControlBinding,
+} from '@energrid/domain-devices';
 import { controlRouteLabel, type ControlSetupDevice } from './device-control';
+import {
+  discoveredShellyAddress,
+  type NetworkIdentity,
+} from './device-network';
 
 const props = defineProps<{
   device: ControlSetupDevice;
   apiBase: string;
   accessToken: string;
+  networkDevices?: NetworkIdentity[];
+  findingAddress?: boolean;
+  addressSearchError?: string;
 }>();
-const emit = defineEmits<{ saved: [] }>();
+const emit = defineEmits<{ saved: []; 'find-address': [] }>();
 const mode = ref<'none' | 'mqtt' | 'http'>('none');
 const enabled = ref(false);
 const topic = ref('');
 const address = ref('');
+const addressEdited = ref(false);
+const addressSearchRequested = ref(false);
+const addressSearchPending = ref(false);
+const discoveredAddress = computed(() =>
+  discoveredShellyAddress(props.device, props.networkDevices || []),
+);
+const knownAddress = computed(() =>
+  props.device.control?.binding?.kind === 'shelly-http'
+    ? props.device.control.binding.baseUrl
+    : discoveredAddress.value,
+);
 const credentialRef = ref('');
 const busy = ref(false);
 const error = ref('');
@@ -69,7 +90,10 @@ watch(
     address.value =
       binding?.kind === 'shelly-http'
         ? binding.baseUrl
-        : String(props.device.metadata?.httpBaseUrl || '');
+        : discoveredAddress.value || '';
+    addressEdited.value = false;
+    addressSearchRequested.value = false;
+    addressSearchPending.value = false;
     credentialRef.value =
       binding?.kind === 'shelly-http' ? binding.credentialRef || '' : '';
     error.value = '';
@@ -78,8 +102,36 @@ watch(
   { immediate: true },
 );
 
+watch(discoveredAddress, (value) => {
+  if (
+    !addressEdited.value &&
+    props.device.control?.binding?.kind !== 'shelly-http'
+  )
+    address.value = value || '';
+});
+
+watch(
+  () => props.findingAddress,
+  (finding, previous) => {
+    if (!finding && previous && addressSearchPending.value) {
+      addressSearchPending.value = false;
+      if (discoveredAddress.value) {
+        address.value = discoveredAddress.value;
+        addressEdited.value = false;
+      }
+    }
+  },
+);
+
+function findAddress() {
+  if (busy.value || props.findingAddress) return;
+  addressSearchRequested.value = true;
+  addressSearchPending.value = true;
+  emit('find-address');
+}
+
 async function save() {
-  if (!editable.value || busy.value) return;
+  if (!editable.value || busy.value || props.findingAddress) return;
   error.value = '';
   saved.value = false;
   let binding: DeviceControlBinding | null = null;
@@ -88,18 +140,28 @@ async function save() {
       error.value = 'Relay identity is incomplete.';
       return;
     }
-    if (mode.value === 'http')
+    if (mode.value === 'http') {
+      let baseUrl: string;
+      try {
+        baseUrl = privateShellyBaseUrl(address.value.trim());
+      } catch (cause) {
+        error.value =
+          cause instanceof Error
+            ? cause.message
+            : 'A local Shelly address is required.';
+        return;
+      }
       binding = {
         kind: 'shelly-http',
         enabled: enabled.value,
         physicalId: physicalId.value,
         channel: channel.value as number,
-        baseUrl: address.value.trim(),
+        baseUrl,
         ...(credentialRef.value.trim()
           ? { credentialRef: credentialRef.value.trim() }
           : {}),
       };
-    else
+    } else
       binding = shelly.value
         ? {
             kind: 'shelly-mqtt',
@@ -173,6 +235,10 @@ async function save() {
         <dt>Relay channel</dt>
         <dd>{{ channel ?? 'Unknown' }}</dd>
       </div>
+      <div v-if="shelly">
+        <dt>Known address</dt>
+        <dd>{{ knownAddress || 'Not discovered' }}</dd>
+      </div>
       <div v-if="editable">
         <dt>Settings storage</dt>
         <dd>Runtime session</dd>
@@ -201,9 +267,40 @@ async function save() {
             v-model="address"
             required
             type="url"
-            :disabled="busy"
-            placeholder="http://192.168.7.15"
+            :disabled="busy || findingAddress"
+            @input="addressEdited = true"
+            autocomplete="off"
+            autocapitalize="none"
+            :spellcheck="false"
         /></label>
+        <div class="address-discovery">
+          <p v-if="!knownAddress && !addressSearchRequested">
+            No local address is known for this device.
+          </p>
+          <p
+            v-if="
+              addressSearchRequested && !findingAddress && addressSearchError
+            "
+            role="alert"
+          >
+            {{ addressSearchError }}
+          </p>
+          <p
+            v-else-if="
+              addressSearchRequested && !findingAddress && !discoveredAddress
+            "
+            role="status"
+          >
+            No matching device was found on this gateway's local network.
+          </p>
+          <button
+            type="button"
+            :disabled="busy || findingAddress"
+            @click="findAddress"
+          >
+            {{ findingAddress ? 'Finding address...' : 'Find address' }}
+          </button>
+        </div>
         <label
           >Server credential reference<input
             v-model="credentialRef"
@@ -226,7 +323,12 @@ async function save() {
       <p v-if="saved" role="status">Control settings saved.</p>
       <button
         type="submit"
-        :disabled="busy || (mode !== 'none' && !identityComplete)"
+        :disabled="
+          busy ||
+          findingAddress ||
+          (mode !== 'none' && !identityComplete) ||
+          (mode === 'http' && !address.trim())
+        "
       >
         {{ busy ? 'Saving...' : 'Save control settings' }}
       </button>
@@ -311,6 +413,23 @@ button:disabled {
 p {
   margin: 0;
   font-size: 13px;
+}
+.address-discovery {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.address-discovery p {
+  flex: 1 1 200px;
+  color: var(--muted, #64748b);
+}
+.address-discovery [role='alert'] {
+  color: #d14b4b;
+}
+.address-discovery button {
+  min-height: 44px;
 }
 [role='alert'] {
   color: #d14b4b;

@@ -44,25 +44,29 @@ describe('weather verification boundaries', () => {
   it('requires the configured observation credential and never trusts a caller source label', async () => {
     process.env = { ...originalEnv, WEATHER_OBSERVATION_TOKEN: 'test-secret', WEATHER_OBSERVATION_SOURCE: 'outdoor-station' };
     const ingest = jest.fn().mockResolvedValue({ recorded: 1 });
-    const controller = new WeatherVerificationController({ ingest } as never);
+    const controller = new WeatherVerificationController({ ingest } as never, {} as never, {} as never);
     await expect(controller.observe('Bearer wrong',{ observations: [] })).rejects.toThrow();
     expect(ingest).not.toHaveBeenCalled();
     await controller.observe('Bearer test-secret',{ observations: [] });
     expect(ingest).toHaveBeenCalledWith('outdoor-station','43.99160,22.87280',[]);
   });
   it('marks missing storage explicitly', async () => {
-    const controller = new WeatherVerificationController({ performance: jest.fn().mockRejectedValue({ code: '42P01' }) } as never);
+    const controller = new WeatherVerificationController({ performance: jest.fn().mockRejectedValue({ code: '42P01' }) } as never, {} as never, {} as never);
     expect(await controller.performance()).toMatchObject({ status: 'migration-required' });
   });
   it('does not overlap weather cycles and evaluates even after collection failure', async () => {
     let reject!: (reason: Error) => void;
     const provider = { getSnapshot: jest.fn(() => new Promise((_resolve, r) => { reject = r; })) };
     const verification = { record: jest.fn(), evaluate: jest.fn().mockResolvedValue({ evaluated: 0 }) };
-    const scheduler = new WeatherVerificationScheduler(provider as never,new WeatherRiskEngine(),new WeatherIntelligenceService(),verification as never);
+    const daily = { record: jest.fn(), evaluate: jest.fn().mockResolvedValue({ evaluated: 0 }) };
+    const observations = { collect: jest.fn().mockResolvedValue({ status: 'configuration-required' }) };
+    const scheduler = new WeatherVerificationScheduler(provider as never,new WeatherRiskEngine(),new WeatherIntelligenceService(),verification as never,daily as never,observations as never);
     const running = scheduler.runCycle(); await scheduler.runCycle();
     expect(provider.getSnapshot).toHaveBeenCalledTimes(2);
     reject(new Error('offline')); await running;
     expect(verification.evaluate).toHaveBeenCalledTimes(1);
+    expect(observations.collect).toHaveBeenCalledTimes(1);
+    expect(daily.evaluate).toHaveBeenCalledTimes(1);
   });
 });
 

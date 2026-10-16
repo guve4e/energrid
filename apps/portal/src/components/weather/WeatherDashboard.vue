@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import ForecastDayDetail from './ForecastDayDetail.vue';
+import DailyVerification, { type DailyPerformance, type ObservationCollection } from './DailyVerification.vue';
+import { weatherModelName as modelName } from './weather-model-label';
 import type { ForecastDay as WeatherDay, ForecastDayDetails } from './forecast-types';
 
 const props = defineProps<{ apiBase: string; accessToken: string }>();
@@ -38,7 +40,7 @@ const selectedDay = computed(() => {
   return days.find(day => day.date === selectedDate.value) ?? days.find(day => day.date === today) ?? days[0];
 });
 const selectedDetail = computed(() => dashboard.value?.dayDetails?.find(detail => detail.date === selectedDay.value?.date));
-const weather = ref<{ status: string; summary: WeatherScore[]; pending?: { scheduled: number; awaitingObservations: number }; note?: string } | null>(null);
+const weather = ref<{ status: string; summary: WeatherScore[]; pending?: { scheduled: number; awaitingObservations: number }; note?: string; daily?: DailyPerformance; collection?: ObservationCollection } | null>(null);
 const river = ref<{ status?: string; summary: RiverScore[]; note?: string } | null>(null);
 const errors = ref<Record<string, string>>({});
 const loading = ref(false);
@@ -46,11 +48,6 @@ const lastRefresh = ref<string | null>(null);
 let controller: AbortController | undefined;
 let timer: ReturnType<typeof setInterval> | undefined;
 let disposed = false;
-const names: Record<string,string> = { icon_seamless: 'DWD ICON', ncep_gfs_seamless: 'NOAA GFS', 'selected-cautious': 'Selected forecast' };
-const modelName = (value: string) => {
-  const model = value.split(':').at(-1) || value;
-  return names[model] || model;
-};
 const number = (value: number | null | undefined, digits = 1) => value == null || !Number.isFinite(Number(value)) ? '—' : Number(value).toFixed(digits);
 const time = (value: string | null) => value ? new Date(value).toLocaleString() : '—';
 const hour = (value: string | null | undefined) => value ? new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—';
@@ -194,7 +191,8 @@ onBeforeUnmount(() => { disposed = true; controller?.abort(); if (timer) clearIn
         </tr></tbody></table></div>
     </template>
 
-    <section aria-labelledby="weather-accuracy"><h3 id="weather-accuracy">Measured weather accuracy · last 90 days</h3>
+    <DailyVerification v-if="weather && weather.status !== 'migration-required'" :daily="weather.daily" :collection="weather.collection" />
+    <section aria-labelledby="weather-accuracy"><h3 id="weather-accuracy">Hourly forecast accuracy · last 90 days</h3>
       <p v-if="errors['1']" class="weather-notice" role="alert">{{ errors['1'] }}</p>
       <p v-else-if="weather?.status === 'migration-required'" class="weather-notice">Forecast storage needs initialization before recording can start.</p>
       <template v-else-if="weather">

@@ -30,12 +30,18 @@ import { ForecastEngine } from './river/engines/forecast.engine';
 import { WeatherVerificationService } from './weather-verification.service';
 import { WeatherVerificationController } from './weather-verification.controller';
 import { WeatherVerificationScheduler } from './weather-verification.scheduler';
+import { WeatherDailyVerificationService } from './weather-daily-verification.service';
+import { WeatherObservationCollector } from './weather-observation-collector.service';
+import { WeatherStationDailyService } from './weather-station-daily.service';
 
 @Module({
   controllers: [WeatherController, RiverController, WeatherVerificationController],
   providers: [
     WeatherVerificationService,
     WeatherVerificationScheduler,
+    WeatherDailyVerificationService,
+    WeatherObservationCollector,
+    WeatherStationDailyService,
     WeatherService,
     WeatherProviderService,
     WeatherRiskEngine,

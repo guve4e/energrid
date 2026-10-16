@@ -4287,6 +4287,16 @@ pre {
   min-width: 0;
 }
 
+.inventory-filter-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 44px;
+}
+.inventory-filter-summary > span { white-space: nowrap; font-size: 12px; }
+.inventory-filter-summary button { min-height: 44px; font-size: 12px; }
+
 .device-table {
   table-layout: fixed;
   min-width: 0;
@@ -4384,6 +4394,7 @@ pre {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .device-inventory-toolbar .inventory-search { grid-column: 1 / -1; }
+  .device-inventory-toolbar .inventory-filter-summary { grid-column: 1 / -1; }
   .summary-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .summary-strip > div:nth-child(n + 4),
   .device-source-strip { display: none; }

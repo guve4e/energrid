@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import ExecutionTimelineModal from './components/execution/ExecutionTimelineModal.vue';
 import WeatherDashboard from './components/weather/WeatherDashboard.vue';
 import EnergyDashboard from './components/energy/EnergyDashboard.vue';
@@ -423,6 +423,7 @@ const selectedExecutionTraceId = ref<string | null>(null);
 const deviceActionBusy = ref<Record<string, boolean>>({});
 const deviceActionError = ref<Record<string, string>>({});
 const deviceSheet = ref<HTMLElement | null>(null);
+const deviceTableWrap = ref<HTMLElement | null>(null);
 const deviceApprovalFilter = ref<'approved' | 'discovered'>('approved');
 const deviceSourceFilter = ref('site');
 const deviceSearch = ref('');
@@ -805,6 +806,22 @@ const filteredInventoryDevices = computed(() => filterInventoryDevices(deviceCar
   zone: deviceZoneFilter.value,
   status: deviceStatusFilter.value,
 }));
+const hasInventoryFilters = computed(() => !!deviceSearch.value || deviceSourceFilter.value !== 'site' || deviceCapabilityFilter.value !== 'all' || deviceZoneFilter.value !== 'all' || deviceStatusFilter.value !== 'all');
+
+watch([deviceSearch, deviceSourceFilter, deviceCapabilityFilter, deviceZoneFilter, deviceStatusFilter, deviceApprovalFilter], () => {
+  if (deviceTableWrap.value) {
+    deviceTableWrap.value.scrollTop = 0;
+    deviceTableWrap.value.scrollLeft = 0;
+  }
+}, { flush: 'post' });
+
+function clearInventoryFilters() {
+  deviceSearch.value = '';
+  deviceSourceFilter.value = 'site';
+  deviceCapabilityFilter.value = 'all';
+  deviceZoneFilter.value = 'all';
+  deviceStatusFilter.value = 'all';
+}
 const discoveredDevices = computed(() =>
   deviceCards.value.filter((device) => device.trustStatus === 'discovered'),
 );
@@ -3024,7 +3041,10 @@ onBeforeUnmount(() => {
               <option value="controllable">Controllable</option>
               <option value="needs_setup">Needs setup</option>
             </select>
-            <span>{{ filteredInventoryDevices.length }} shown</span>
+            <div class="inventory-filter-summary">
+              <span role="status" aria-live="polite" aria-atomic="true">{{ filteredInventoryDevices.length }} shown</span>
+              <button type="button" class="ghost" :disabled="!hasInventoryFilters" @click="clearInventoryFilters">Clear filters</button>
+            </div>
           </div>
 
           <div
@@ -3047,7 +3067,7 @@ onBeforeUnmount(() => {
               filters.</span
             >
           </div>
-          <div v-else class="network-table-wrap device-table-wrap">
+          <div v-else ref="deviceTableWrap" class="network-table-wrap device-table-wrap">
             <table class="network-table device-table">
               <thead>
                 <tr>
@@ -3161,7 +3181,7 @@ onBeforeUnmount(() => {
                 <a v-if="approvedDeviceSettingsUrl(selectedDevice)" class="ghost-link" :href="approvedDeviceSettingsUrl(selectedDevice)" target="_blank" rel="noreferrer">Open settings</a>
               </div>
               <DeviceConnectionDiagnostics :key="selectedDevice.id" :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" />
-              <DeviceControlSetup :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" @saved="loadState" />
+              <DeviceControlSetup :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" :network-devices="networkDevices" :finding-address="scanningNetwork" :address-search-error="stateError" @find-address="scanNetwork" @saved="loadState" />
             </div>
 
             <dl class="device-facts detail-facts">

@@ -1,4 +1,5 @@
 import type { ControlSetupDevice } from './device-control';
+import { privateShellyBaseUrl } from '@energrid/domain-devices';
 
 export interface NetworkIdentity {
   id: string;
@@ -54,4 +55,49 @@ export function matchNetworkDevice<T extends NetworkIdentity>(
       }),
     ) || null
   );
+}
+
+export function discoveredShellyAddress(
+  device: ControlSetupDevice,
+  network: NetworkIdentity[],
+): string | null {
+  if (!device.adapter.driver.includes('shelly')) return null;
+  const physicalId = device.metadata?.physicalId;
+  if (typeof physicalId !== 'string' || !physicalId) return null;
+  const hardwareMac = mac(physicalId);
+  const matches = network.filter(
+    (candidate) =>
+      candidate.id.toLowerCase() === physicalId.toLowerCase() ||
+      (!!hardwareMac &&
+        [candidate.id, candidate.macAddress].some(
+          (value) => !!value && mac(value) === hardwareMac,
+        )),
+  );
+  const origins = new Set(
+    matches
+      .map((candidate) => localOrigin(`http://${candidate.ipAddress}`))
+      .filter((origin): origin is string => !!origin),
+  );
+  if (origins.size > 1) return null;
+  if (origins.size === 1) return [...origins][0];
+  const metadata = localOrigin(device.metadata?.httpBaseUrl);
+  if (metadata) return metadata;
+  if (device.adapter.protocol === 'http' && device.adapter.target) {
+    try {
+      const target = new URL(device.adapter.target);
+      if (!target.username && !target.password)
+        return localOrigin(target.origin);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function localOrigin(value: unknown): string | null {
+  try {
+    return privateShellyBaseUrl(value);
+  } catch {
+    return null;
+  }
 }
