@@ -1,16 +1,55 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import ExecutionTimelineModal from './components/execution/ExecutionTimelineModal.vue';
 import WeatherDashboard from './components/weather/WeatherDashboard.vue';
 import EnergyDashboard from './components/energy/EnergyDashboard.vue';
+import HomeDashboard from './components/home/HomeDashboard.vue';
+import WakeWordSamples from './components/home/WakeWordSamples.vue';
+import MobileDashboard from './components/mobile/MobileDashboard.vue';
+import DisplayDashboard from './components/display/DisplayDashboard.vue';
 import DeviceControlSetup from './components/devices/DeviceControlSetup.vue';
 import DeviceSwitchControl from './components/devices/DeviceSwitchControl.vue';
 import DeviceConnectionDiagnostics from './components/devices/DeviceConnectionDiagnostics.vue';
 import { filterInventoryDevices, inventoryConnectionStatus, isExampleDevice, needsControlSetup } from './components/devices/device-inventory';
 import { matchNetworkDevice } from './components/devices/device-network';
 import { canSwitchDevice, controlRouteLabel } from './components/devices/device-control';
+import { deviceHealthNotifications, failedActionNotification, mergeNotifications, type DashboardNotification, type DeviceHealth } from './notifications';
 import type { DeviceControlState } from '@energrid/domain-devices';
 import { pageFromPath, pathForPage } from './portal-route';
+
+type NativeWakeWordBridge = {
+  getStatus: () => string;
+  setEnabled: (enabled: boolean) => void;
+  beginCommandCapture: () => void;
+  startManualCommandCapture: () => string;
+  endManualCommandCapture: () => void;
+  assistantTurnFinished: () => void;
+  getSamples: () => string;
+  getRecorderCapabilities: () => string;
+  getReviewSegments: () => string;
+  labelClip: (clipId: string, label: string, occurrencesJson: string) => boolean;
+  deleteClip: (clipId: string) => boolean;
+  getUploadConfig: () => string;
+  configureUpload: (baseUrl: string, token: string) => string;
+  uploadPending: () => boolean;
+  pauseResearchForAssistant: () => void;
+  resumeResearchAfterAssistant: () => void;
+  startSampleRecording: (label: string) => void;
+  stopSampleRecording: () => void;
+  exportSamples: () => void;
+};
+
+type NativeNotificationsBridge = {
+  testNotification: () => void;
+};
+
+declare global {
+  interface Window {
+    EnergridWakeWord?: NativeWakeWordBridge;
+    EnergridNotifications?: NativeNotificationsBridge;
+    energridNativeVoiceAudio?: (base64Pcm: string) => void;
+  }
+}
 
 type LoginResponse = {
   accessToken: string;
@@ -46,6 +85,7 @@ type PortalExecutionTrace = {
 
 type PortalState = {
   executionTraces?: PortalExecutionTrace[];
+  deviceHealth?: DeviceHealth[];
   tenant: { id: string; name: string };
   site: { id: string; name: string; mode: string };
   sites?: Array<{
@@ -353,6 +393,7 @@ const tokenKey = 'energrid.portal.token';
 const userKey = 'energrid.portal.user';
 const themeKey = 'energrid.portal.theme.v2';
 const endpointModeKey = 'energrid.portal.endpointMode';
+const notificationsKey = 'energrid.portal.notifications.v1';
 
 function cleanBaseUrl(url: string) {
   return url.replace(/\/$/, '');
@@ -410,12 +451,24 @@ const voiceRunsLoading = ref(false);
 const voiceRunsError = ref('');
 const connected = ref(false);
 const recording = ref(false);
+const nativeWakeEnabled = ref(false);
+const nativeWakeStatus = ref('unavailable');
+const nativeVoiceTurn = ref(false);
+const nativeManualTurn = ref(false);
+let holdToTalkPressed = false;
+const nativeWakeAvailable = typeof window !== 'undefined' && !!window.EnergridWakeWord;
+const nativeNotificationsAvailable = typeof window !== 'undefined' && !!window.EnergridNotifications;
 const theme = ref(localStorage.getItem(themeKey) || 'dark');
 const endpointMode = ref(
   localStorage.getItem(endpointModeKey) || 'same-origin',
 );
 const userMenuOpen = ref(false);
 const notificationsOpen = ref(false);
+const notifications = ref<DashboardNotification[]>(readNotifications());
+const unreadNotifications = computed(() => notifications.value.filter((item) => !item.readAt).length);
+let previousDeviceHealth: DeviceHealth[] | null = null;
+let notificationRefreshTimer: ReturnType<typeof setInterval> | undefined;
+let notificationRefreshActive = false;
 const mobileMenuOpen = ref(false);
 const activePage = ref(pageFromPath(location.pathname));
 const selectedDeviceId = ref<string | null>(null);
@@ -450,6 +503,7 @@ const clientTrace = ref({
 });
 
 const navItems = computed(() => [
+  { id: 'home', label: 'Home', active: activePage.value === 'home' },
   {
     id: 'assistant',
     label: 'Assistant',
@@ -473,11 +527,37 @@ const navItems = computed(() => [
   { id: 'logs', label: 'Logs', active: activePage.value === 'logs' },
 ]);
 
-const notifications = [
-  { tone: 'green', text: 'Kitchen temperature sensor online' },
-  { tone: 'blue', text: 'Voice gateway ready' },
-  { tone: 'amber', text: 'Local STT can be slow on Pi CPU' },
-];
+function readNotifications(): DashboardNotification[] {
+  try {
+    const saved = JSON.parse(localStorage.getItem(notificationsKey) || '[]');
+    return Array.isArray(saved) ? saved.slice(0, 100) : [];
+  } catch {
+    return [];
+  }
+}
+
+function addNotifications(items: DashboardNotification[]) {
+  if (!items.length) return;
+  notifications.value = mergeNotifications(notifications.value, items);
+  localStorage.setItem(notificationsKey, JSON.stringify(notifications.value));
+}
+
+function markNotificationRead(item: DashboardNotification) {
+  if (item.readAt) return;
+  item.readAt = new Date().toISOString();
+  localStorage.setItem(notificationsKey, JSON.stringify(notifications.value));
+}
+
+function markAllNotificationsRead() {
+  const readAt = new Date().toISOString();
+  notifications.value = notifications.value.map((item) => ({ ...item, readAt: item.readAt || readAt }));
+  localStorage.setItem(notificationsKey, JSON.stringify(notifications.value));
+}
+
+function clearNotifications() {
+  notifications.value = [];
+  localStorage.setItem(notificationsKey, '[]');
+}
 
 const starterIdentity = {
   tenantId: 'tenant-live',
@@ -1770,7 +1850,7 @@ async function sendDeviceAction(
       },
     );
     const result = await response.json().catch(() => null);
-    if (!response.ok || !result || result.status === 'failed') {
+    if (!response.ok || !result || ['failed', 'no_ack'].includes(result.status)) {
       throw new Error(result?.message || 'Device action failed');
     }
 
@@ -1782,12 +1862,14 @@ async function sendDeviceAction(
       await waitForDeviceCommand(device.id, result.command.id);
     }
   } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
     deviceActionError.value = {
       ...deviceActionError.value,
-      [device.id]: error instanceof Error ? error.message : 'Device action failed',
+      [device.id]: reason,
     };
+    addNotifications([failedActionNotification(device.id, device.displayName, action, reason)]);
     appendLog(
-      `[device] ${action} failed: ${error instanceof Error ? error.message : String(error)}`,
+      `[device] ${action} failed: ${reason}`,
     );
   } finally {
     const next = { ...deviceActionBusy.value };
@@ -1805,6 +1887,12 @@ async function waitForDeviceCommand(deviceId: string, commandId: string) {
     );
     const command = device?.state.command;
     if (!command || command.id !== commandId || command.status !== 'pending') {
+      if (command?.id === commandId && ['failed', 'no_ack'].includes(command.status)) {
+        const reason = command.message || `Command ${command.status.replace('_', ' ')}`;
+        const name = device?.displayName || deviceId;
+        deviceActionError.value = { ...deviceActionError.value, [deviceId]: reason };
+        addNotifications([failedActionNotification(deviceId, name, command.action, reason)]);
+      }
       return;
     }
   }
@@ -1939,6 +2027,9 @@ function logout() {
   accessToken.value = '';
   user.value = null;
   state.value = null;
+  previousDeviceHealth = null;
+  if (notificationRefreshTimer) clearInterval(notificationRefreshTimer);
+  notificationRefreshTimer = undefined;
   localStorage.removeItem(tokenKey);
   localStorage.removeItem(userKey);
 }
@@ -1962,20 +2053,46 @@ function toggleNotifications() {
   userMenuOpen.value = false;
 }
 
+async function refreshNotifications() {
+  if (notificationRefreshActive || !accessToken.value || document.hidden) return;
+  notificationRefreshActive = true;
+  try {
+    await loadState(true);
+  } finally {
+    notificationRefreshActive = false;
+  }
+}
+
 function toggleUserMenu() {
   userMenuOpen.value = !userMenuOpen.value;
   notificationsOpen.value = false;
+}
+
+function sendMobileDeviceAction(deviceId: string, action: 'turn_on' | 'turn_off') {
+  const device = deviceCards.value.find((candidate) => candidate.id === deviceId);
+  if (device) void sendDeviceAction(device, action);
+}
+
+function testMobileNotification() {
+  window.EnergridNotifications?.testNotification();
+}
+
+function markMobileNotificationRead(id: string) {
+  const item = notifications.value.find((notification) => notification.id === id);
+  if (item) markNotificationRead(item);
 }
 
 function closeMobileMenu() {
   mobileMenuOpen.value = false;
 }
 
-async function loadState() {
-  loadingState.value = true;
-  stateError.value = '';
+async function loadState(silent = false) {
+  if (!silent) {
+    loadingState.value = true;
+    stateError.value = '';
+  }
   try {
-    appendLog(`[portal] loading state from ${serverLabel.value}`);
+    if (!silent) appendLog(`[portal] loading state from ${serverLabel.value}`);
     const response = await fetch(`${apiBase}/portal/state`, {
       headers: { Authorization: `Bearer ${accessToken.value}` },
     });
@@ -1984,16 +2101,26 @@ async function loadState() {
       return;
     }
     if (!response.ok) throw new Error('State unavailable');
-    state.value = (await response.json()) as PortalState;
+    const nextState = (await response.json()) as PortalState;
+    state.value = nextState;
+    if (nextState.deviceHealth) {
+      if (previousDeviceHealth) {
+        const names = Object.fromEntries((nextState.devices || []).map((device) => [device.id, device.displayName]));
+        addNotifications(deviceHealthNotifications(previousDeviceHealth, nextState.deviceHealth, names));
+      }
+      previousDeviceHealth = nextState.deviceHealth;
+    }
     if (activePage.value === 'bus') {
       await loadMqttBus();
       startMqttBusStream();
     }
   } catch (error) {
-    stateError.value =
-      error instanceof Error ? error.message : 'State unavailable';
+    if (!silent) {
+      stateError.value =
+        error instanceof Error ? error.message : 'State unavailable';
+    }
   } finally {
-    loadingState.value = false;
+    if (!silent) loadingState.value = false;
   }
 }
 
@@ -2207,6 +2334,11 @@ function attachVoiceListeners(socket: WebSocket) {
     voiceStatus.value = 'closed';
     ws = null;
     appendLog('[voice] closed');
+    if (nativeVoiceTurn.value) {
+      recording.value = false;
+      nativeVoiceTurn.value = false;
+      window.EnergridWakeWord?.assistantTurnFinished();
+    }
   });
 
   socket.addEventListener('error', () => {
@@ -2238,12 +2370,24 @@ function attachVoiceListeners(socket: WebSocket) {
       playAudioBase64(event.audioBase64, event.format);
     }
     if (event.type === 'turn_end') {
+      recording.value = false;
       metrics.value = event.metrics || null;
       voiceStatus.value = 'turn complete';
       appendLog(`[diagnostic] ${bottleneckMessage.value}`);
       setTimeout(() => void loadVoiceRuns(), 250);
+      if (nativeVoiceTurn.value) {
+        nativeVoiceTurn.value = false;
+        window.EnergridWakeWord?.assistantTurnFinished();
+      }
     }
-    if (event.type === 'error') voiceStatus.value = `error: ${event.message}`;
+    if (event.type === 'error') {
+      recording.value = false;
+      voiceStatus.value = `error: ${event.message}`;
+      if (nativeVoiceTurn.value) {
+        nativeVoiceTurn.value = false;
+        window.EnergridWakeWord?.assistantTurnFinished();
+      }
+    }
   });
 }
 
@@ -2296,6 +2440,8 @@ function formatEvent(event: Record<string, any>) {
 }
 
 async function startRecording(event?: PointerEvent) {
+  if (nativeVoiceTurn.value || recording.value) return;
+  holdToTalkPressed = true;
   event?.preventDefault();
   if (event?.currentTarget instanceof HTMLElement) {
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -2303,24 +2449,61 @@ async function startRecording(event?: PointerEvent) {
   try {
     await connectVoice();
   } catch {
+    holdToTalkPressed = false;
     return;
   }
+  if (!holdToTalkPressed) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  await pauseResearchCaptureForAssistant();
+  if (!holdToTalkPressed) {
+    await resumeResearchCaptureAfterAssistant();
+    return;
+  }
   resetTurn();
   pcmQueue = [];
   recording.value = true;
+  if (window.EnergridWakeWord) {
+    nativeVoiceTurn.value = true;
+    nativeManualTurn.value = true;
+    voiceStatus.value = 'recording';
+    clientTrace.value.recordStartAt = performance.now();
+    appendLog('[audio] native Hold-to-talk capture started');
+    const result = window.EnergridWakeWord.startManualCommandCapture();
+    if (result === 'busy') {
+      nativeVoiceTurn.value = false;
+      nativeManualTurn.value = false;
+      recording.value = false;
+      voiceStatus.value = 'microphone busy';
+      appendLog('[audio] native microphone is busy');
+      await resumeResearchCaptureAfterAssistant();
+    } else if (result === 'permission_pending') {
+      voiceStatus.value = 'allow microphone, then press again';
+      nativeVoiceTurn.value = false;
+      nativeManualTurn.value = false;
+      recording.value = false;
+      await resumeResearchCaptureAfterAssistant();
+    }
+    return;
+  }
   voiceStatus.value = 'recording';
   clientTrace.value.recordStartAt = performance.now();
   appendLog('[audio] recording started');
 
-  mediaStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      channelCount: 1,
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    },
-  });
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+  } catch (error) {
+    recording.value = false;
+    await resumeResearchCaptureAfterAssistant();
+    appendLog(`[audio] microphone unavailable: ${String(error)}`);
+    return;
+  }
 
   audioContext = new AudioContext();
   source = audioContext.createMediaStreamSource(mediaStream);
@@ -2343,6 +2526,8 @@ async function startRecording(event?: PointerEvent) {
 }
 
 async function stopRecording(event?: PointerEvent) {
+  if (nativeVoiceTurn.value && !nativeManualTurn.value && event) return;
+  holdToTalkPressed = false;
   event?.preventDefault();
   if (
     event?.currentTarget instanceof HTMLElement &&
@@ -2351,6 +2536,14 @@ async function stopRecording(event?: PointerEvent) {
     event.currentTarget.releasePointerCapture(event.pointerId);
   }
   if (!recording.value) return;
+  if (nativeManualTurn.value) {
+    recording.value = false;
+    voiceStatus.value = 'sending';
+    clientTrace.value.releaseAt = performance.now();
+    appendLog('[audio] native Hold-to-talk released');
+    window.EnergridWakeWord?.endManualCommandCapture();
+    return;
+  }
   recording.value = false;
   voiceStatus.value = 'sending';
   clientTrace.value.releaseAt = performance.now();
@@ -2361,7 +2554,90 @@ async function stopRecording(event?: PointerEvent) {
       `[audio] released, turn sent chunks=${clientTrace.value.audioChunksSent} bytes=${formatBytes(clientTrace.value.audioBytesSent)} held=${delta(clientTrace.value.recordStartAt, clientTrace.value.releaseAt)}`,
     );
   }
+  if (nativeVoiceTurn.value) {
+    nativeVoiceTurn.value = false;
+    return;
+  }
   await cleanupAudio();
+}
+
+function updateNativeWakeStatus(event: Event) {
+  const detail = (event as CustomEvent<{ enabled?: boolean; status?: string }>).detail;
+  if (typeof detail?.enabled === 'boolean') nativeWakeEnabled.value = detail.enabled;
+  if (typeof detail?.status === 'string') nativeWakeStatus.value = detail.status;
+}
+
+function handleNativeWakeWord() {
+  void startNativeVoiceTurn();
+}
+
+function syncNativeWakeStatus() {
+  const bridge = window.EnergridWakeWord;
+  if (!bridge) {
+    nativeWakeStatus.value = 'unavailable';
+    return;
+  }
+  try {
+    updateNativeWakeStatus(new CustomEvent('energrid-wake-status', { detail: JSON.parse(bridge.getStatus()) }));
+  } catch (error) {
+    appendLog(`[wake-word] could not read native status: ${String(error)}`);
+  }
+}
+
+function toggleNativeWakeWord() {
+  const bridge = window.EnergridWakeWord;
+  if (!bridge) return;
+  const nextEnabled = !nativeWakeEnabled.value;
+  nativeWakeEnabled.value = nextEnabled;
+  bridge.setEnabled(nextEnabled);
+}
+
+async function startNativeVoiceTurn() {
+  if (nativeVoiceTurn.value || recording.value) return;
+  setActivePage('assistant');
+  await nextTick();
+  try {
+    await connectVoice();
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    resetTurn();
+    pcmQueue = [];
+    recording.value = true;
+    nativeVoiceTurn.value = true;
+    voiceStatus.value = 'recording after wake word';
+    clientTrace.value.recordStartAt = performance.now();
+    appendLog('[wake-word] detected locally; starting one assistant command');
+    window.EnergridWakeWord?.beginCommandCapture();
+  } catch (error) {
+    nativeVoiceTurn.value = false;
+    recording.value = false;
+    appendLog(`[wake-word] could not start assistant turn: ${String(error)}`);
+    window.EnergridWakeWord?.assistantTurnFinished();
+  }
+}
+
+function receiveNativeVoiceAudio(base64Pcm: string) {
+  if (!nativeVoiceTurn.value || !ws || ws.readyState !== WebSocket.OPEN) return;
+  const bytes = Uint8Array.from(atob(base64Pcm), (character) => character.charCodeAt(0));
+  ws.send(bytes.buffer);
+  clientTrace.value.audioChunksSent += 1;
+  clientTrace.value.audioBytesSent += bytes.byteLength;
+}
+
+function endNativeVoiceTurn() {
+  if (!nativeVoiceTurn.value) return;
+  recording.value = false;
+  voiceStatus.value = 'sending';
+  nativeManualTurn.value = false;
+  clientTrace.value.releaseAt = performance.now();
+  if (ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'end_of_turn' }));
+    appendLog(
+      `[wake-word] local silence ended command chunks=${clientTrace.value.audioChunksSent} bytes=${formatBytes(clientTrace.value.audioBytesSent)}`,
+    );
+  } else {
+    nativeVoiceTurn.value = false;
+    window.EnergridWakeWord?.assistantTurnFinished();
+  }
 }
 
 function trackClientAudio(input: Float32Array) {
@@ -2428,6 +2704,35 @@ async function cleanupAudio() {
   source = null;
   mediaStream = null;
   audioContext = null;
+  await resumeResearchCaptureAfterAssistant();
+}
+
+let researchCapturePausedForAssistant = false;
+
+async function pauseResearchCaptureForAssistant() {
+  const bridge = window.EnergridWakeWord;
+  if (!bridge) return;
+  let state: { status?: string; category?: string } = {};
+  try { state = JSON.parse(bridge.getSamples()); } catch { return; }
+  if (!state.category?.startsWith('background:') || state.status !== 'recording') return;
+  researchCapturePausedForAssistant = true;
+  await new Promise<void>((resolve) => {
+    let timeout: ReturnType<typeof setTimeout>;
+    const done = () => {
+      clearTimeout(timeout);
+      window.removeEventListener('energrid-research-paused', done);
+      resolve();
+    };
+    window.addEventListener('energrid-research-paused', done, { once: true });
+    timeout = setTimeout(done, 2500);
+    bridge.pauseResearchForAssistant();
+  });
+}
+
+async function resumeResearchCaptureAfterAssistant() {
+  if (!researchCapturePausedForAssistant) return;
+  researchCapturePausedForAssistant = false;
+  window.EnergridWakeWord?.resumeResearchAfterAssistant();
 }
 
 function playAudioBase64(base64: string, format = 'wav') {
@@ -2502,9 +2807,27 @@ if (accessToken.value && user.value) {
 }
 
 window.addEventListener('popstate', handlePortalRouteChange);
+window.energridNativeVoiceAudio = receiveNativeVoiceAudio;
+window.addEventListener('energrid-wake-status', updateNativeWakeStatus);
+window.addEventListener('energrid-native-wake-word', handleNativeWakeWord);
+window.addEventListener('energrid-native-command-ended', endNativeVoiceTurn);
+
+onMounted(() => {
+  syncNativeWakeStatus();
+  document.addEventListener('visibilitychange', refreshNotifications);
+  if (accessToken.value) {
+    notificationRefreshTimer = setInterval(() => void refreshNotifications(), 30_000);
+  }
+});
 
 onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', refreshNotifications);
+  if (notificationRefreshTimer) clearInterval(notificationRefreshTimer);
   window.removeEventListener('popstate', handlePortalRouteChange);
+  window.removeEventListener('energrid-wake-status', updateNativeWakeStatus);
+  window.removeEventListener('energrid-native-wake-word', handleNativeWakeWord);
+  window.removeEventListener('energrid-native-command-ended', endNativeVoiceTurn);
+  window.energridNativeVoiceAudio = undefined;
   stopMqttBusStream();
   disconnectVoice();
   cleanupAudio();
@@ -2541,6 +2864,45 @@ onBeforeUnmount(() => {
     </section>
   </main>
 
+  <MobileDashboard
+    v-else-if="activePage === 'mobile'"
+    :site-name="state?.site.name || 'Home'"
+    :tenant-name="state?.tenant.name || 'Energrid'"
+    :devices="deviceCards"
+    :sensors="state?.zones.flatMap((zone) => zone.sensors) || []"
+    :unread-count="unreadNotifications"
+    :notifications="notifications"
+    :action-busy="deviceActionBusy"
+    :action-errors="deviceActionError"
+    :notifications-available="nativeNotificationsAvailable"
+    @action="sendMobileDeviceAction"
+    @assistant="setActivePage('assistant')"
+    @notifications-test="testMobileNotification"
+    @notification-read="markMobileNotificationRead"
+  />
+
+  <DisplayDashboard
+    v-else-if="activePage === 'display'"
+    :site-name="state?.site.name || 'Home'"
+    :tenant-name="state?.tenant.name || 'Energrid'"
+    :devices="deviceCards"
+    :sensors="state?.zones.flatMap((zone) => zone.sensors) || []"
+    :unread-count="unreadNotifications"
+    :api-base="apiBase"
+    :access-token="accessToken"
+  />
+
+  <HomeDashboard
+    v-else-if="activePage === 'home'"
+    :api-base="apiBase"
+    :access-token="accessToken"
+    :native-wake-available="nativeWakeAvailable"
+    :native-wake-enabled="nativeWakeEnabled"
+    :native-wake-status="nativeWakeStatus"
+    @toggle-wake-word="toggleNativeWakeWord"
+    @assistant="setActivePage('assistant')"
+  />
+
   <main
     v-else
     :class="['admin-shell', `theme-${theme}`, { 'menu-open': mobileMenuOpen }]"
@@ -2569,21 +2931,30 @@ onBeforeUnmount(() => {
             class="icon-button"
             type="button"
             aria-label="Notifications"
+            :aria-expanded="notificationsOpen"
             @click="toggleNotifications"
           >
-            <span aria-hidden="true">●</span>
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg>
+            <span v-if="unreadNotifications" class="notification-count">{{ unreadNotifications > 99 ? '99+' : unreadNotifications }}</span>
           </button>
           <div v-if="notificationsOpen" class="popover notification-popover">
-            <strong>Notifications</strong>
-            <ul>
+            <div class="notification-heading"><strong>Notifications</strong><span>{{ unreadNotifications }} unread</span></div>
+            <div class="notification-tools">
+              <button type="button" :disabled="!unreadNotifications" @click="markAllNotificationsRead">Mark all read</button>
+              <button type="button" :disabled="!notifications.length" @click="clearNotifications">Clear</button>
+            </div>
+            <ul v-if="notifications.length">
               <li
                 v-for="notification in notifications"
-                :key="notification.text"
+                :key="notification.id"
+                :class="{ unread: !notification.readAt }"
+                @click="markNotificationRead(notification)"
               >
-                <span :class="['dot', notification.tone]"></span>
-                {{ notification.text }}
+                <span :class="['notification-severity', notification.severity]"></span>
+                <span class="notification-copy"><strong>{{ notification.title }}</strong><span>{{ notification.message }}</span><small>{{ new Date(notification.createdAt).toLocaleString() }}</small></span>
               </li>
             </ul>
+            <p v-else class="notification-empty">You're all caught up.</p>
           </div>
         </div>
         <button
@@ -2685,21 +3056,30 @@ onBeforeUnmount(() => {
               class="icon-button"
               type="button"
               aria-label="Notifications"
+              :aria-expanded="notificationsOpen"
               @click="toggleNotifications"
             >
-              <span aria-hidden="true">●</span>
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg>
+              <span v-if="unreadNotifications" class="notification-count">{{ unreadNotifications > 99 ? '99+' : unreadNotifications }}</span>
             </button>
             <div v-if="notificationsOpen" class="popover notification-popover">
-              <strong>Notifications</strong>
-              <ul>
+              <div class="notification-heading"><strong>Notifications</strong><span>{{ unreadNotifications }} unread</span></div>
+              <div class="notification-tools">
+                <button type="button" :disabled="!unreadNotifications" @click="markAllNotificationsRead">Mark all read</button>
+                <button type="button" :disabled="!notifications.length" @click="clearNotifications">Clear</button>
+              </div>
+              <ul v-if="notifications.length">
                 <li
                   v-for="notification in notifications"
-                  :key="notification.text"
+                  :key="notification.id"
+                  :class="{ unread: !notification.readAt }"
+                  @click="markNotificationRead(notification)"
                 >
-                  <span :class="['dot', notification.tone]"></span>
-                  {{ notification.text }}
+                  <span :class="['notification-severity', notification.severity]"></span>
+                  <span class="notification-copy"><strong>{{ notification.title }}</strong><span>{{ notification.message }}</span><small>{{ new Date(notification.createdAt).toLocaleString() }}</small></span>
                 </li>
               </ul>
+              <p v-else class="notification-empty">You're all caught up.</p>
             </div>
           </div>
           <button
@@ -2733,6 +3113,7 @@ onBeforeUnmount(() => {
       </header>
 
       <section class="workspace">
+
         <section
           v-if="activePage === 'assistant'"
           class="panel assistant-panel premium-panel"
@@ -2760,6 +3141,18 @@ onBeforeUnmount(() => {
             <span>Route {{ effectiveRouteLabel }}</span>
             <span>STT {{ state?.voice.provider || '--' }}</span>
             <span>{{ voiceStatus }}</span>
+            <button
+              v-if="nativeWakeAvailable"
+              class="secondary wake-word-toggle"
+              type="button"
+              :aria-pressed="nativeWakeEnabled"
+              @click="toggleNativeWakeWord"
+            >
+              {{ nativeWakeEnabled ? 'Wake word on' : 'Wake word off' }}
+            </button>
+            <span v-if="nativeWakeAvailable" class="wake-word-state">
+              {{ nativeWakeStatus === 'model_missing' ? 'Wake model needed' : nativeWakeStatus.replaceAll('_', ' ') }}
+            </span>
           </div>
 
           <div class="route-controls">
@@ -2798,6 +3191,8 @@ onBeforeUnmount(() => {
             This HTTPS page cannot use ws://192.168.1.60 directly. Open the LAN
             portal, or later use split DNS/local HTTPS for the fast path.
           </p>
+
+          <WakeWordSamples v-if="nativeWakeAvailable" />
 
           <div class="talk-stage">
             <button

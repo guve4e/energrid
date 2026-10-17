@@ -25,6 +25,10 @@ export default defineConfig({
     port: 4300,
     proxy: {
       '/auth': apiProxyTarget,
+      '/portal/energy/temperatures/history': {
+        target: 'http://127.0.0.1:3001',
+        changeOrigin: true,
+      },
       '/portal': {
         target: apiProxyTarget,
         ws: true,

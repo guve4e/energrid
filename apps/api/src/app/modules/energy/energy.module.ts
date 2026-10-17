@@ -1,3 +1,4 @@
+import { TemperatureHistoryController } from './temperature-history.controller';
 import { Module } from '@nestjs/common';
 import { MongoClient } from 'mongodb';
 import { EnergyController } from './energy.controller';
@@ -28,7 +29,7 @@ import {
 
 @Module({
   imports: [TelemetryModule],
-  controllers: [EnergyController, TelemetryHistoryController],
+  controllers: [EnergyController, TelemetryHistoryController, TemperatureHistoryController],
   providers: [
     {
       provide: LEGACY_POWER_CONFIG,

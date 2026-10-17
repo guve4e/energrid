@@ -337,6 +337,29 @@ p {
 
 .notification-area .icon-button {
   color: #16b364;
+  position: relative;
+}
+
+.notification-area .icon-button svg {
+  width: 19px;
+  height: 19px;
+}
+
+.notification-count {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  display: grid;
+  min-width: 17px;
+  height: 17px;
+  place-items: center;
+  padding: 0 4px;
+  border: 2px solid #fff;
+  border-radius: 999px;
+  background: #d92d20;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
 }
 
 .notification-area,
@@ -387,11 +410,101 @@ p {
 
 .notification-popover ul {
   display: grid;
-  gap: 10px;
-  margin: 12px 0 0;
+  gap: 0;
+  max-height: min(420px, calc(100vh - 180px));
+  overflow-y: auto;
+  margin: 8px -14px -14px;
   padding: 0;
   list-style: none;
   color: #475467;
+}
+
+.notification-heading,
+.notification-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.notification-heading > span {
+  color: #667085;
+  font-size: 12px;
+}
+
+.notification-tools {
+  justify-content: flex-start;
+  margin-top: 8px;
+}
+
+.notification-tools button {
+  border: 0;
+  padding: 3px 0;
+  background: transparent;
+  color: #2863e6;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.notification-tools button:disabled {
+  color: #98a2b3;
+  cursor: default;
+}
+
+.notification-popover li {
+  display: flex;
+  gap: 10px;
+  padding: 11px 14px;
+  border-top: 1px solid #eef1f6;
+  cursor: pointer;
+}
+
+.notification-popover li.unread {
+  background: #f5f8ff;
+}
+
+.notification-severity {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #2863e6;
+}
+
+.notification-severity.warning {
+  background: #dc9b20;
+}
+
+.notification-severity.critical {
+  background: #d92d20;
+}
+
+.notification-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.notification-copy strong {
+  color: #101828;
+  font-size: 13px;
+}
+
+.notification-copy span,
+.notification-copy small,
+.notification-empty {
+  overflow-wrap: anywhere;
+  color: #667085;
+  font-size: 12px;
+}
+
+.notification-copy small {
+  font-size: 10px;
+}
+
+.notification-empty {
+  margin: 14px 0 0;
 }
 
 .user-popover {
@@ -613,6 +726,12 @@ p {
   color: #475467;
   font-size: 13px;
   font-weight: 700;
+}
+
+.assistant-status-row .wake-word-toggle {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 13px;
 }
 
 .route-controls {
@@ -2393,24 +2512,48 @@ pre {
 
 .theme-dark {
   color-scheme: dark;
-  background: #020617;
-  color: #edf4f2;
+  background: #111b2d;
+  color: #edf4ff;
 }
 
 .theme-dark.admin-shell,
 .theme-dark.login-screen {
-  background: #020617;
+  background:
+    radial-gradient(circle at 92% 0%, rgba(67, 117, 235, 0.2), transparent 34rem),
+    #111b2d;
 }
 
 .theme-dark .app-main {
-  background: #020617;
+  background: #111b2d;
 }
 
 .theme-dark .sidebar,
 .theme-dark .login-panel {
-  border-color: #1f2937;
-  background: #111827;
+  border-color: #314563;
+  background: #18263b;
   box-shadow: none;
+}
+
+.theme-dark .login-panel {
+  background:
+    radial-gradient(circle at 100% 0%, rgba(73, 126, 242, 0.2), transparent 58%),
+    linear-gradient(145deg, #1c2b43, #17253a);
+  box-shadow: 0 24px 70px rgba(3, 9, 22, 0.28);
+}
+
+.theme-dark .login-lead,
+.theme-dark .login-panel label {
+  color: #b2c2d9;
+}
+
+.theme-dark .login-panel input {
+  border-color: #3b5273;
+  background: #111d30;
+  color: #f2f6ff;
+}
+
+.theme-dark .login-panel .error {
+  color: #fda29b;
 }
 
 .theme-dark .topbar {
@@ -2419,14 +2562,14 @@ pre {
 }
 
 .theme-dark .panel {
-  border-color: #243143;
-  background: #080d1d;
+  border-color: #304562;
+  background: #17253a;
   box-shadow: none;
 }
 
 .theme-dark .sidebar {
-  border-color: #1f2937;
-  background: #111827;
+  border-color: #2b3e5a;
+  background: #17243a;
   box-shadow: none;
 }
 
@@ -2441,8 +2584,8 @@ pre {
 .theme-dark .voice-log,
 .theme-dark .voice-runs,
 .theme-dark .voice-run-card {
-  border-color: #243143;
-  background: #050917;
+  border-color: #304562;
+  background: #1a2940;
 }
 
 .theme-dark .brand-copy strong,
@@ -2463,7 +2606,79 @@ pre {
 .theme-dark .run-body p,
 .theme-dark pre,
 .theme-dark .side-card strong {
-  color: #f7fbfb;
+  color: #f2f6ff;
+}
+
+.theme-dark .assistant-heading h2,
+.theme-dark .page-heading h2,
+.theme-dark .section-row h2,
+.theme-dark .execution-table th,
+.theme-dark .execution-table td,
+.theme-dark .execution-table td strong,
+.theme-dark .execution-table td span,
+.theme-dark .execution-timeline li,
+.theme-dark .execution-timeline li p,
+.theme-dark .execution-timeline li strong,
+.theme-dark .summary-strip span,
+.theme-dark .device-table th,
+.theme-dark .device-table td,
+.theme-dark .bus-table th,
+.theme-dark .bus-table td,
+.theme-dark .log-table th,
+.theme-dark .log-table td,
+.theme-dark .network-table th,
+.theme-dark .network-table td,
+.theme-dark .mqtt-pipeline-outcome strong,
+.theme-dark .user-popover span,
+.theme-dark .notification-copy strong {
+  color: #edf4ff;
+}
+
+.theme-dark .assistant-heading > div:first-child > span,
+.theme-dark .page-heading > span,
+.theme-dark .page-heading span,
+.theme-dark .section-row > span,
+.theme-dark .summary-strip span,
+.theme-dark .side-card span,
+.theme-dark .side-card small,
+.theme-dark .discovery-empty span,
+.theme-dark .device-table th,
+.theme-dark .execution-table td::before,
+.theme-dark .execution-timeline li small,
+.theme-dark .notification-heading > span,
+.theme-dark .notification-copy span,
+.theme-dark .notification-copy small,
+.theme-dark .notification-empty {
+  color: #a9bbd3;
+}
+
+.theme-dark .execution-row,
+.theme-dark .execution-table tr.execution-row {
+  border-color: #304562;
+  background: #1a2940;
+  color: #edf4ff;
+}
+
+.theme-dark .execution-row:hover,
+.theme-dark .execution-table tr.execution-row:hover {
+  background: #223653;
+}
+
+.theme-dark .trace-modal,
+.theme-dark .execution-card,
+.theme-dark .execution-timeline li,
+.theme-dark .mqtt-pipeline-outcome {
+  border-color: #304562;
+  background: #1a2940;
+  color: #edf4ff;
+}
+
+.theme-dark .notification-popover li {
+  border-color: #304562;
+}
+
+.theme-dark .notification-popover li.unread {
+  background: #203451;
 }
 
 .theme-dark .run-body {
@@ -2473,12 +2688,12 @@ pre {
 .theme-dark .device-row:hover,
 .theme-dark .device-row.selected {
   border-color: rgba(40, 99, 230, 0.55);
-  background: #0d1730;
+  background: #223653;
 }
 
 .theme-dark .device-toggle {
-  border-color: #263954;
-  background: #111827;
+  border-color: #3a5272;
+  background: #202f47;
   color: #cbd5e1;
 }
 
@@ -2489,8 +2704,8 @@ pre {
 }
 
 .theme-dark .device-switch-control {
-  border-color: #263954;
-  background: #111827;
+  border-color: #3a5272;
+  background: #202f47;
 }
 
 .theme-dark .device-switch-control button {
@@ -2531,14 +2746,14 @@ pre {
 }
 
 .theme-dark .device-inventory-toolbar select {
-  border-color: #243143;
-  background: #050917;
+  border-color: #304562;
+  background: #142239;
   color: #e2e8f0;
 }
 
 .theme-dark .inventory-search {
-  border-color: #243143;
-  background: #050917;
+  border-color: #304562;
+  background: #142239;
 }
 
 .theme-dark .inventory-search input {
@@ -2600,13 +2815,13 @@ pre {
 }
 
 .theme-dark .side-nav button.active {
-  border-color: transparent;
-  background: #243044;
+  border-color: #3c5d8d;
+  background: #263d5f;
   color: #ffffff;
 }
 
 .theme-dark .side-nav button {
-  color: #a8b3c7;
+  color: #c0cde0;
 }
 
 .theme-dark .nav-icon {
@@ -2614,14 +2829,14 @@ pre {
 }
 
 .theme-dark .assistant-status-row span {
-  border-color: #243143;
-  background: rgba(5, 9, 23, 0.72);
+  border-color: #354d6c;
+  background: rgba(20, 34, 57, 0.9);
   color: #c7d7e5;
 }
 
 .theme-dark .segmented {
-  border-color: #243143;
-  background: #0d141b;
+  border-color: #354d6c;
+  background: #142239;
 }
 
 .theme-dark .segmented button {
@@ -2648,8 +2863,13 @@ pre {
 .theme-dark .network-table-wrap,
 .theme-dark .scan-origin div,
 .theme-dark .system-card {
-  border-color: #243143;
-  background: #050917;
+  border-color: #304562;
+  background: #1a2940;
+}
+
+.theme-dark .summary-strip div,
+.theme-dark .device-source-strip div {
+  border-color: #344c6b;
 }
 
 .theme-dark .mqtt-toolbar,
