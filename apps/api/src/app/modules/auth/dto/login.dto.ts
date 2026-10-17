@@ -2,14 +2,13 @@ import { ApiProperty } from '@nestjs/swagger';
 
 export class LoginDto {
   @ApiProperty({
-    example: 'admin@energrid.local',
-    description: 'Development user email.',
+    example: 'you@example.com',
+    description: 'Configured portal email.',
   })
   email!: string;
 
   @ApiProperty({
-    example: 'admin123',
-    description: 'Development user password.',
+    description: 'Configured portal password.',
   })
   password!: string;
 }

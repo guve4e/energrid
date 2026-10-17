@@ -21,7 +21,20 @@ python3 apps/audio-ingest/server.py \
 
 The bearer token must be at least 24 characters. Keep it private. Restrict TCP port `8765` in the Linux firewall to the home LAN subnet. The service rejects wildcard and public bind addresses, checks both the configured storage quota and real free disk space, and reports both through `GET /health`. `GET /health` is intentionally unauthenticated and contains no recording metadata.
 
-For a persistent installation, run it under a dedicated unprivileged Linux account using systemd. Keep the token in a root-readable environment file rather than in the unit command line. Set the unit to restart on failure and the storage path on a mounted disk. Test a reboot and a service restart before leaving unattended collection enabled.
+For a persistent installation, run it under an unprivileged Linux account using systemd. Keep the token in a private environment file rather than in the unit command line. Set the unit to restart on failure and the storage path on a mounted disk. Test a reboot and a service restart before leaving unattended collection enabled.
+
+### AMD home-server user service
+
+The checked-in `energrid-audio-ingest.service` is configured for the current AMD host and runs as the `home` user. Install the updated `server.py` and `review.html` into `/home/home/energrid-audio-ingest`, then create `/home/home/.config/energrid-audio-ingest.env` with one line, `ENERGRID_INGEST_TOKEN=<the existing token>`, and permissions `600`. Do not put the token in the unit file or command line. Install and start the unit with:
+
+```sh
+mkdir -p ~/.config/systemd/user
+cp energrid-audio-ingest.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now energrid-audio-ingest.service
+```
+
+User services start at login by default. To start this service automatically after boot before `home` logs in, an administrator must enable lingering once with `sudo loginctl enable-linger home`. The unit checks that the data partition is mounted before starting. A missing mount fails closed; it never creates a substitute storage directory on the root filesystem.
 
 ## Android configuration
 

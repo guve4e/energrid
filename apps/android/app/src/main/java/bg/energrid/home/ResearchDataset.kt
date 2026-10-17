@@ -5,6 +5,9 @@ import android.provider.Settings
 import android.util.Base64
 import org.json.JSONObject
 import java.io.File
+import java.io.RandomAccessFile
+import java.security.MessageDigest
+import java.time.Instant
 import java.security.KeyStore
 import java.net.URI
 import javax.crypto.Cipher
@@ -89,6 +92,185 @@ internal object ResearchDataset {
         endedAt: String,
         recovered: Boolean = false,
     ): SavedSegment = saveSegment(context, file, category, sessionId, startedAt, endedAt, recovered)
+
+    /** Adds sidecars for legacy WAVs without changing their audio bytes or existing metadata. */
+    fun reconcileMissingMetadata(context: Context): ReconciliationResult {
+        return reconcileDirectory(context, File(context.filesDir, "wakeword-samples"))
+    }
+
+    internal fun reconcileDirectory(context: Context, root: File): ReconciliationResult {
+        if (!root.isDirectory) return ReconciliationResult(0, 0)
+        val manifest = readBackgroundManifest(File(root, "background_manifest.csv"))
+        var recovered = 0
+        var invalid = 0
+        root.walkTopDown().filter { it.isFile && it.extension.equals("wav", ignoreCase = true) }.forEach { audio ->
+            val metadataFile = File(audio.parentFile, "${audio.nameWithoutExtension}.json")
+            if (metadataFile.exists()) return@forEach
+            val metadata = runCatching { recoveredMetadata(context, root, audio, manifest) }.getOrNull()
+            if (metadata == null) {
+                invalid++
+                return@forEach
+            }
+            val temporary = File(metadataFile.parentFile, "${metadataFile.name}.recovery.tmp")
+            runCatching {
+                temporary.writeText(metadata.toString(), Charsets.UTF_8)
+                if (!metadataFile.exists()) check(temporary.renameTo(metadataFile))
+                else temporary.delete()
+                if (metadataFile.exists()) recovered++
+            }.onFailure { temporary.delete() }
+        }
+        return ReconciliationResult(recovered, invalid)
+    }
+
+    private data class ManifestRecord(
+        val fileName: String,
+        val category: String,
+        val sessionId: String,
+        val segment: Int,
+        val duration: Double,
+    )
+
+    data class ReconciliationResult(val recovered: Int, val invalid: Int)
+
+    private fun readBackgroundManifest(file: File): Map<String, ManifestRecord> {
+        if (!file.isFile) return emptyMap()
+        return runCatching {
+            file.readLines().drop(1).mapNotNull { line ->
+                val columns = line.split(',')
+                if (columns.size < 5) return@mapNotNull null
+                val path = columns[0].substringAfterLast('/')
+                val category = columns[1]
+                val session = columns[2]
+                val segment = columns[3].toIntOrNull() ?: return@mapNotNull null
+                val duration = columns[4].toDoubleOrNull() ?: return@mapNotNull null
+                path to ManifestRecord(path, category, session, segment, duration)
+            }.toMap()
+        }.getOrDefault(emptyMap())
+    }
+
+    private data class WavFormat(val sampleRate: Int, val channels: Int, val bits: Int, val dataBytes: Long)
+
+    private fun recoveredMetadata(
+        context: Context,
+        root: File,
+        audio: File,
+        manifest: Map<String, ManifestRecord>,
+    ): JSONObject? {
+        val wav = readWavFormat(audio) ?: return null
+        if (wav.sampleRate != 16000 || wav.channels != 1 || wav.bits != 16 || wav.dataBytes <= 0) return null
+        val duration = wav.dataBytes / (wav.sampleRate.toDouble() * wav.channels * wav.bits / 8.0)
+        val digest = MessageDigest.getInstance("SHA-256")
+        audio.inputStream().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        val sha = digest.digest().joinToString("") { "%02x".format(it) }
+        val relative = audio.relativeTo(root).invariantSeparatorsPath
+        val row = manifest[audio.name]
+        val background = relative.startsWith("negative/") && audio.name.startsWith("background_")
+        val inferred = if (background) inferBackgroundIdentity(audio, row, manifest.values) else null
+        val sessionId = inferred?.first ?: "unknown"
+        val category = when {
+            row != null -> row.category
+            inferred != null -> inferred.third
+            relative.startsWith("positive/") -> "legacy_wake_sample"
+            relative.startsWith("negative/") -> "legacy_unspecified"
+            else -> "legacy_unspecified"
+        }
+        val clipId = if (inferred != null) "${sessionId}_${audio.nameWithoutExtension}" else "recovered_${sha.take(32)}"
+        val start = when {
+            inferred?.second != null -> inferred.second
+            else -> epochFromName(audio.nameWithoutExtension)?.let(Instant::ofEpochMilli)?.toString()
+        }
+        val timestampSource = when {
+            inferred?.second != null -> "session_id_epoch_plus_manifest_segment_offsets_estimated"
+            start != null -> "epoch_millis_in_filename"
+            else -> "unavailable"
+        }
+        val endedAt = Instant.ofEpochMilli(audio.lastModified()).toString()
+        return JSONObject()
+            .put("clip_id", clipId)
+            .put("timestamp", start ?: JSONObject.NULL)
+            .put("started_at", start ?: "unknown")
+            .put("ended_at", endedAt)
+            .put("ended_at_source", "filesystem_modification_time")
+            .put("timestamp_source", timestampSource)
+            .put("timestamp_precision", if (timestampSource.contains("estimated")) "estimated" else if (start == null) "unknown" else "filename_or_session")
+            .put("label", "unlabeled")
+            .put("label_source", "none")
+            .put("model_version", "")
+            .put("confidence_score", JSONObject.NULL)
+            .put("duration_seconds", duration)
+            .put("sample_rate", wav.sampleRate)
+            .put("channels", wav.channels)
+            .put("sample_format", "pcm_s16le")
+            .put("device_id", deviceId(context))
+            .put("session_id", sessionId)
+            .put("session_id_source", if (sessionId == "unknown") "unavailable" else "filename_and_manifest")
+            .put("category", category)
+            .put("recording_environment", if (background) category else "unknown")
+            .put("sha256", sha)
+            .put("bytes", audio.length())
+            .put("upload_status", "queued")
+            .put("recovered_metadata", true)
+            .put("metadata_source", if (row != null) "background_manifest_filename_and_wav" else "filename_path_and_wav")
+            .put("source_file", relative)
+            .put("manifest_duration_seconds", row?.duration ?: JSONObject.NULL)
+    }
+
+    private fun inferBackgroundIdentity(
+        audio: File,
+        row: ManifestRecord?,
+        manifest: Collection<ManifestRecord>,
+    ): Triple<String, String?, String>? {
+        if (row != null) {
+            val start = sessionSegmentStart(row, manifest)
+            return Triple(row.sessionId, start, row.category)
+        }
+        val category = audio.parentFile?.name ?: return null
+        val prefix = "background_${category}_"
+        if (!audio.nameWithoutExtension.startsWith(prefix)) return null
+        val suffix = audio.nameWithoutExtension.substringAfterLast('_', "")
+        val segment = suffix.toIntOrNull() ?: return null
+        val session = audio.nameWithoutExtension.removePrefix(prefix).substringBeforeLast('_')
+        return Triple(session, sessionEpoch(session)?.let(Instant::ofEpochMilli)?.toString(), category).also { require(segment > 0) }
+    }
+
+    private fun sessionSegmentStart(record: ManifestRecord, manifest: Collection<ManifestRecord>): String? {
+        val sessionStart = sessionEpoch(record.sessionId) ?: return null
+        return runCatching {
+            val priorSeconds = manifest.filter {
+                it.sessionId == record.sessionId && it.category == record.category && it.segment < record.segment
+            }.sumOf { it.duration }
+            Instant.ofEpochMilli(sessionStart + (priorSeconds * 1000).toLong()).toString()
+        }.getOrNull()
+    }
+
+    private fun sessionEpoch(value: String): Long? = value.toLongOrNull()?.takeIf { it in 1_600_000_000_000L..2_200_000_000_000L }
+
+    private fun epochFromName(name: String): Long? = name.substringAfterLast('_').toLongOrNull()
+        ?.takeIf { it in 1_600_000_000_000L..2_200_000_000_000L }
+
+    private fun readWavFormat(file: File): WavFormat? = runCatching {
+        RandomAccessFile(file, "r").use { input ->
+            if (input.length() < 44) return null
+            val header = ByteArray(44)
+            input.readFully(header)
+            if (String(header, 0, 4, Charsets.US_ASCII) != "RIFF" || String(header, 8, 4, Charsets.US_ASCII) != "WAVE" || String(header, 36, 4, Charsets.US_ASCII) != "data") return null
+            fun intLE(offset: Int): Int = (header[offset].toInt() and 0xff) or
+                ((header[offset + 1].toInt() and 0xff) shl 8) or
+                ((header[offset + 2].toInt() and 0xff) shl 16) or
+                ((header[offset + 3].toInt() and 0xff) shl 24)
+            fun shortLE(offset: Int): Int = (header[offset].toInt() and 0xff) or ((header[offset + 1].toInt() and 0xff) shl 8)
+            val dataBytes = intLE(40).toLong() and 0xffffffffL
+            if (dataBytes + 44L != file.length()) return null
+            WavFormat(intLE(24), shortLE(22), shortLE(34), dataBytes)
+        }
+    }.getOrNull()
 
     fun configure(context: Context, baseUrl: String, token: String) {
         require(baseUrl.startsWith("http://") || baseUrl.startsWith("https://")) { "Use an HTTP(S) LAN address" }

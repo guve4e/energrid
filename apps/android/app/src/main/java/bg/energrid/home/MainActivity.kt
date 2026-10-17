@@ -41,6 +41,7 @@ class MainActivity : AppCompatActivity() {
     private val preferences by lazy { getSharedPreferences("wake-word", MODE_PRIVATE) }
     private var pageReady = false
     private var pendingSampleLabel: String? = null
+    private var pendingDailyLabel: String? = null
     private var pendingManualPermission = false
     private val tabletExperience: Boolean by lazy { resources.configuration.smallestScreenWidthDp >= 600 }
     private val mobileExperience: Boolean get() = !tabletExperience
@@ -64,7 +65,10 @@ class MainActivity : AppCompatActivity() {
                 webView.evaluateJavascript("window.dispatchEvent(new CustomEvent('energrid-research-paused'))", null)
             }
             val state = intent?.getStringExtra(SampleRecordingService.EXTRA_STATUS)
-            if (state == "stopped") uploadQueue.enqueuePending()
+            if (state == "stopped") {
+                SegmentUploadScheduler.schedule(this@MainActivity)
+                uploadQueue.enqueuePending()
+            }
             if (state == "stopped" && preferences.getBoolean(PREF_WAKE_ENABLED, false) &&
                 getSharedPreferences(SampleRecordingService.PREFERENCES, MODE_PRIVATE)
                     .getString(SampleRecordingService.KEY_CATEGORY, null) == null) {
@@ -132,6 +136,10 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onSamplesChanged(status: String, positive: Int, negative: Int) {
+                if (status == "saved" && ::uploadQueue.isInitialized) {
+                    SegmentUploadScheduler.schedule(applicationContext)
+                    uploadQueue.enqueuePending()
+                }
                 runOnUiThread {
                     val detail = JSONObject().put("status", status).put("positive", positive).put("negative", negative)
                     webView.evaluateJavascript(
@@ -182,6 +190,8 @@ class MainActivity : AppCompatActivity() {
 
         setContentView(webView)
         uploadQueue = SegmentUploadQueue(applicationContext)
+        SegmentUploadScheduler.schedule(applicationContext)
+        uploadQueue.enqueuePending()
         val filter = IntentFilter(SampleRecordingService.ACTION_STATUS)
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(sampleStatusReceiver, filter, RECEIVER_NOT_EXPORTED)
         else @Suppress("DEPRECATION") registerReceiver(sampleStatusReceiver, filter)
@@ -221,9 +231,23 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        resumeDailyRecordingAfterAppOpen()
         if (tabletExperience && ::wakeWordController.isInitialized && preferences.getBoolean(PREF_WAKE_ENABLED, false)) {
             enableWakeWord()
         }
+    }
+
+    private fun resumeDailyRecordingAfterAppOpen() {
+        val settings = getSharedPreferences(SampleRecordingService.PREFERENCES, MODE_PRIVATE)
+        if (!settings.getBoolean(SampleRecordingService.KEY_DAILY_ENABLED, false)) return
+        val category = settings.getString(SampleRecordingService.KEY_DAILY_CATEGORY, null) ?: return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return
+        ContextCompat.startForegroundService(
+            this,
+            Intent(this, SampleRecordingService::class.java)
+                .setAction(SampleRecordingService.ACTION_ENABLE_DAILY)
+                .putExtra(SampleRecordingService.EXTRA_LABEL, category),
+        )
     }
 
     override fun onPause() {
@@ -250,8 +274,12 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             val sampleLabel = pendingSampleLabel.also { pendingSampleLabel = null }
-            if (sampleLabel != null) startSampleRecordingInternal(sampleLabel)
-            else wakeWordController.setEnabled(true)
+            val dailyLabel = pendingDailyLabel.also { pendingDailyLabel = null }
+            when {
+                dailyLabel != null -> enableDailyRecordingInternal(dailyLabel)
+                sampleLabel != null -> startSampleRecordingInternal(sampleLabel)
+                else -> wakeWordController.setEnabled(true)
+            }
         } else {
             if (pendingManualPermission) {
                 pendingManualPermission = false
@@ -259,6 +287,7 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             pendingSampleLabel = null
+            pendingDailyLabel = null
             preferences.edit().putBoolean(PREF_WAKE_ENABLED, false).apply()
             publishWakeStatus("permission_denied")
         }
@@ -289,6 +318,16 @@ class MainActivity : AppCompatActivity() {
                 .putExtra(SampleRecordingService.EXTRA_LABEL, label)
             ContextCompat.startForegroundService(this, serviceIntent)
         } else wakeWordController.startSampleRecording(label)
+    }
+
+    private fun enableDailyRecordingInternal(label: String) {
+        wakeWordController.setEnabled(false)
+        ContextCompat.startForegroundService(
+            this,
+            Intent(this, SampleRecordingService::class.java)
+                .setAction(SampleRecordingService.ACTION_ENABLE_DAILY)
+                .putExtra(SampleRecordingService.EXTRA_LABEL, label),
+        )
     }
 
     private fun publishWakeStatus(status: String) {
@@ -419,6 +458,10 @@ class MainActivity : AppCompatActivity() {
                 .getString(SampleRecordingService.KEY_CATEGORY, null)
             counts.put("status", if (category != null) "recording" else counts.optString("status", "idle"))
                 .put("category", category ?: "")
+                .put("dailyScheduleEnabled", getSharedPreferences(SampleRecordingService.PREFERENCES, MODE_PRIVATE)
+                    .getBoolean(SampleRecordingService.KEY_DAILY_ENABLED, false))
+                .put("dailyCategory", getSharedPreferences(SampleRecordingService.PREFERENCES, MODE_PRIVATE)
+                    .getString(SampleRecordingService.KEY_DAILY_CATEGORY, "") ?: "")
             return counts.toString()
         }
 
@@ -427,6 +470,7 @@ class MainActivity : AppCompatActivity() {
             .put("backgroundSessions", true)
             .put("segmentedWav", true)
             .put("researchMode", true)
+            .put("dailySchedule", true)
             .put("localReview", true)
             .put("lanUpload", true)
             .put("backgroundCategories", org.json.JSONArray(listOf("tv", "english_tv", "conversation", "household", "mixed")))
@@ -449,14 +493,19 @@ class MainActivity : AppCompatActivity() {
             .toString()
 
         @JavascriptInterface
+        fun getUploadStatus(): String = uploadQueue.statusJson()
+
+        @JavascriptInterface
         fun configureUpload(baseUrl: String, token: String): String = runCatching {
             ResearchDataset.configure(this@MainActivity, baseUrl, token)
+            SegmentUploadScheduler.schedule(this@MainActivity)
             uploadQueue.enqueuePending()
             JSONObject().put("ok", true).toString()
         }.getOrElse { JSONObject().put("ok", false).put("error", it.message ?: "Configuration failed").toString() }
 
         @JavascriptInterface
         fun uploadPending(): Boolean {
+            SegmentUploadScheduler.schedule(this@MainActivity)
             uploadQueue.enqueuePending()
             return true
         }
@@ -474,9 +523,36 @@ class MainActivity : AppCompatActivity() {
         }
 
         @JavascriptInterface
+        fun enableDailySchedule(label: String) {
+            runOnUiThread {
+                if (!label.startsWith("background:")) return@runOnUiThread
+                if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                    this@MainActivity.enableDailyRecordingInternal(label)
+                } else {
+                    pendingDailyLabel = label
+                    ActivityCompat.requestPermissions(
+                        this@MainActivity,
+                        arrayOf(Manifest.permission.RECORD_AUDIO),
+                        REQUEST_MICROPHONE,
+                    )
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun disableDailySchedule() {
+            runOnUiThread {
+                startService(Intent(this@MainActivity, SampleRecordingService::class.java)
+                    .setAction(SampleRecordingService.ACTION_DISABLE_DAILY))
+            }
+        }
+
+        @JavascriptInterface
         fun stopSampleRecording() {
             runOnUiThread {
-                if (mobileExperience) {
+                val category = getSharedPreferences(SampleRecordingService.PREFERENCES, MODE_PRIVATE)
+                    .getString(SampleRecordingService.KEY_CATEGORY, null)
+                if (category?.startsWith("background:") == true) {
                     startService(Intent(this@MainActivity, SampleRecordingService::class.java).setAction(SampleRecordingService.ACTION_STOP))
                 } else wakeWordController.stopSampleRecording()
             }

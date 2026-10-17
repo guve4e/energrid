@@ -129,6 +129,8 @@ class IngestTests(unittest.TestCase):
         self.assertEqual(stored.read_bytes(), audio)
         status, result = self.request("GET", url, headers=self.auth())
         self.assertTrue(result["complete"])
+        self.assertEqual(result["sha256"], digest)
+        self.assertEqual(result["bytes"], len(audio))
 
     def test_duplicate_hash_is_idempotent_and_review_delete_updates_index(self):
         audio = sample_wav()
@@ -163,6 +165,33 @@ class IngestTests(unittest.TestCase):
         metadata = self.metadata()
         with self.assertRaises(ValueError):
             self.http.store.receive(metadata, audio, "0" * 64)
+
+    def test_same_clip_id_with_different_audio_is_rejected_without_overwrite(self):
+        first_audio = sample_wav()
+        first_hash = hashlib.sha256(first_audio).hexdigest()
+        self.http.store.receive(self.metadata(), first_audio, first_hash)
+
+        changed_audio = sample_wav(seconds=2)
+        changed_hash = hashlib.sha256(changed_audio).hexdigest()
+        with self.assertRaisesRegex(ValueError, "clip id already exists"):
+            self.http.store.receive(self.metadata(), changed_audio, changed_hash)
+
+        rows = list(self.http.store.iter_rows())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["sha256"], first_hash)
+        self.assertEqual((self.root / rows[0]["path"]).read_bytes(), first_audio)
+
+    def test_same_clip_id_and_same_audio_is_idempotent(self):
+        audio = sample_wav()
+        digest = hashlib.sha256(audio).hexdigest()
+        self.http.store.receive(self.metadata(), audio, digest)
+
+        result, duplicate = self.http.store.receive(self.metadata(), audio, digest)
+
+        self.assertTrue(duplicate)
+        self.assertEqual(result["sha256"], digest)
+        self.assertEqual(result["bytes"], len(audio))
+        self.assertEqual(len(list(self.http.store.iter_rows())), 1)
 
 
 if __name__ == "__main__":

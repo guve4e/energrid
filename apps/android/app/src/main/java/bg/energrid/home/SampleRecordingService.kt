@@ -17,6 +17,16 @@ class SampleRecordingService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var recording = false
     private var pausedForAssistant = false
+    private var lastCaptureFailed = false
+    private val scheduleHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val timeChangeReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: Intent?) {
+            reconcileDailySchedule()
+        }
+    }
+    private val scheduleBoundary = object : Runnable {
+        override fun run() = reconcileDailySchedule()
+    }
     private lateinit var uploadQueue: SegmentUploadQueue
     private val retryHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val retryUploads = object : Runnable {
@@ -31,6 +41,7 @@ class SampleRecordingService : Service() {
         super.onCreate()
         createChannel()
         uploadQueue = SegmentUploadQueue(applicationContext)
+        SegmentUploadScheduler.schedule(applicationContext)
         controller = WakeWordController(applicationContext, object : WakeWordController.Listener {
             override fun onStatus(status: String) = Unit
             override fun onWakeWordDetected() = Unit
@@ -39,8 +50,10 @@ class SampleRecordingService : Service() {
 
             override fun onSamplesChanged(status: String, positive: Int, negative: Int) {
                 sendStatus(status, positive, negative)
+                lastCaptureFailed = status == "error" || status == "storage_limit"
                 if (status in setOf("saved", "too_short") && pausedForAssistant) {
                     recording = false
+                    releaseWakeLock()
                     updateNotification("Paused for assistant · research session will resume")
                     sendStatus("paused_for_assistant", positive, negative)
                 } else if (status == "saved" || status == "error" || status == "too_short") finishRecording()
@@ -48,6 +61,8 @@ class SampleRecordingService : Service() {
 
             override fun onSegmentSaved(segment: SavedSegment) {
                 sendSegmentStatus(segment)
+                SegmentUploadScheduler.schedule(applicationContext)
+        registerTimeChangeReceiver()
                 uploadQueue.enqueuePending()
             }
         })
@@ -57,6 +72,7 @@ class SampleRecordingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
+                disableDailySchedule()
                 if (recording) {
                     updateNotification("Stopping recording…")
                     controller?.stopSampleRecording()
@@ -65,8 +81,16 @@ class SampleRecordingService : Service() {
             }
             ACTION_PAUSE_FOR_ASSISTANT -> pauseForAssistant()
             ACTION_RESUME_AFTER_ASSISTANT -> resumeAfterAssistant(startId)
+            ACTION_ENABLE_DAILY -> enableDailySchedule(intent.getStringExtra(EXTRA_LABEL), startId)
+            ACTION_DISABLE_DAILY -> {
+                disableDailySchedule()
+                if (recording) controller?.stopSampleRecording()
+                else if (pausedForAssistant || getSharedPreferences(PREFERENCES, MODE_PRIVATE).contains(KEY_CATEGORY)) finishRecording()
+                else stopScheduleService()
+            }
             ACTION_START -> startRecording(intent.getStringExtra(EXTRA_LABEL), startId, java.util.UUID.randomUUID().toString())
-            null -> resumeSavedSession(startId)
+            ACTION_SCHEDULE_TICK -> reconcileDailySchedule()
+            null -> resumeServiceState(startId)
             else -> stopSelf(startId)
         }
         return START_STICKY
@@ -119,6 +143,10 @@ class SampleRecordingService : Service() {
             finishRecording()
             return
         }
+        if (isDailyEnabled() && !DailyRecordingSchedule.isRecordingTime(java.time.Instant.now())) {
+            finishRecording()
+            return
+        }
         recording = true
         pausedForAssistant = false
         sendStatus("recording", 0, 0)
@@ -142,16 +170,99 @@ class SampleRecordingService : Service() {
         startRecording(label, startId, sessionId)
     }
 
+    private fun resumeServiceState(startId: Int) {
+        if (isDailyEnabled()) {
+            startForeground(NOTIFICATION_ID, buildNotification("Daily schedule enabled · checking local recording window", ongoing = true))
+            reconcileDailySchedule()
+        } else resumeSavedSession(startId)
+    }
+
+    private fun enableDailySchedule(label: String?, startId: Int) {
+        if (label.isNullOrBlank() || !label.startsWith("background:")) {
+            Log.w(TAG, "Rejected invalid daily recording category")
+            stopSelf(startId)
+            return
+        }
+        getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit()
+            .putBoolean(KEY_DAILY_ENABLED, true)
+            .putString(KEY_DAILY_CATEGORY, label)
+            .apply()
+        startForeground(NOTIFICATION_ID, buildNotification("Daily schedule enabled · 08:00–00:00 Sofia", ongoing = true))
+        reconcileDailySchedule()
+    }
+
+    private fun disableDailySchedule() {
+        getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit()
+            .putBoolean(KEY_DAILY_ENABLED, false)
+            .remove(KEY_DAILY_CATEGORY)
+            .apply()
+        scheduleHandler.removeCallbacks(scheduleBoundary)
+    }
+
+    private fun stopScheduleService() {
+        retryHandler.removeCallbacks(retryUploads)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun reconcileDailySchedule() {
+        if (!isDailyEnabled()) return
+        scheduleHandler.removeCallbacks(scheduleBoundary)
+        scheduleHandler.removeCallbacks(dailyRetry)
+        val prefs = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+        val category = prefs.getString(KEY_DAILY_CATEGORY, null) ?: return
+        if (DailyRecordingSchedule.isRecordingTime(java.time.Instant.now())) {
+            if (!recording && !pausedForAssistant) {
+                startRecording(category, 0, java.util.UUID.randomUUID().toString())
+            }
+            if (recording) updateNotification("Daily research recording active · ${category.substringAfter(':')}")
+        } else if (recording) {
+            updateNotification("Daily recording window ended · finalizing segment")
+            controller?.stopSampleRecording()
+        } else {
+            updateNotification("Daily schedule enabled · next recording at 08:00 Sofia")
+        }
+        val delay = DailyRecordingSchedule.millisUntilNextBoundary(java.time.Instant.now())
+        scheduleHandler.postDelayed(scheduleBoundary, delay)
+    }
+
+    private val dailyRetry = Runnable { reconcileDailySchedule() }
+
+    private fun registerTimeChangeReceiver() {
+        val filter = android.content.IntentFilter().apply {
+            addAction(Intent.ACTION_TIME_CHANGED)
+            addAction(Intent.ACTION_TIMEZONE_CHANGED)
+        }
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(timeChangeReceiver, filter, RECEIVER_NOT_EXPORTED)
+        else @Suppress("DEPRECATION") registerReceiver(timeChangeReceiver, filter)
+    }
+
+    private fun isDailyEnabled(): Boolean = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+        .getBoolean(KEY_DAILY_ENABLED, false)
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
+    }
+
     private fun finishRecording() {
         if (!recording && !pausedForAssistant && !getSharedPreferences(PREFERENCES, MODE_PRIVATE).contains(KEY_CATEGORY)) return
         recording = false
         pausedForAssistant = false
         retryHandler.removeCallbacks(retryUploads)
         uploadQueue.enqueuePending()
-        wakeLock?.let { if (it.isHeld) it.release() }
-        wakeLock = null
+        releaseWakeLock()
         getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit().remove(KEY_CATEGORY).remove(KEY_SESSION_ID).apply()
-        sendStatus("stopped", 0, 0)
+        sendStatus(if (isDailyEnabled()) "scheduled_idle" else "stopped", 0, 0)
+        if (isDailyEnabled()) {
+            val withinWindow = DailyRecordingSchedule.isRecordingTime(java.time.Instant.now())
+            updateNotification(if (withinWindow) "Daily recording paused · retrying shortly" else "Daily schedule enabled · next recording at 08:00 Sofia")
+            scheduleHandler.removeCallbacks(scheduleBoundary)
+            if (withinWindow && lastCaptureFailed) scheduleHandler.postDelayed(dailyRetry, DAILY_RETRY_MS)
+            else reconcileDailySchedule()
+            lastCaptureFailed = false
+            return
+        }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -211,6 +322,9 @@ class SampleRecordingService : Service() {
 
     override fun onDestroy() {
         retryHandler.removeCallbacks(retryUploads)
+        scheduleHandler.removeCallbacks(scheduleBoundary)
+        scheduleHandler.removeCallbacks(dailyRetry)
+        runCatching { unregisterReceiver(timeChangeReceiver) }
         if (recording) controller?.stopSampleRecording()
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
@@ -228,6 +342,9 @@ class SampleRecordingService : Service() {
         const val ACTION_STATUS = "bg.energrid.home.action.SAMPLE_RECORDING_STATUS"
         const val ACTION_PAUSE_FOR_ASSISTANT = "bg.energrid.home.action.PAUSE_RESEARCH_FOR_ASSISTANT"
         const val ACTION_RESUME_AFTER_ASSISTANT = "bg.energrid.home.action.RESUME_RESEARCH_AFTER_ASSISTANT"
+        const val ACTION_ENABLE_DAILY = "bg.energrid.home.action.ENABLE_DAILY_RESEARCH"
+        const val ACTION_DISABLE_DAILY = "bg.energrid.home.action.DISABLE_DAILY_RESEARCH"
+        const val ACTION_SCHEDULE_TICK = "bg.energrid.home.action.DAILY_RESEARCH_TICK"
         const val EXTRA_LABEL = "label"
         const val EXTRA_STATUS = "status"
         const val EXTRA_POSITIVE = "positive"
@@ -238,10 +355,13 @@ class SampleRecordingService : Service() {
         const val PREFERENCES = "sample-recording"
         const val KEY_CATEGORY = "category"
         const val KEY_SESSION_ID = "session_id"
+        const val KEY_DAILY_ENABLED = "daily_enabled"
+        const val KEY_DAILY_CATEGORY = "daily_category"
 
         private const val TAG = "EnergridRecording"
-        private const val CHANNEL_ID = "energrid_audio_recording"
+        const val CHANNEL_ID = "energrid_audio_recording"
         private const val NOTIFICATION_ID = 2001
         private const val UPLOAD_RETRY_MS = 60_000L
+        private const val DAILY_RETRY_MS = 60_000L
     }
 }

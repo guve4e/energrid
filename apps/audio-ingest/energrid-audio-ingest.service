@@ -1,0 +1,25 @@
+[Unit]
+Description=Energrid research audio ingestion
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/home/energrid-audio-ingest
+EnvironmentFile=/home/home/.config/energrid-audio-ingest.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStartPre=/usr/bin/mountpoint -q /media/home/5eaeb1c4-f3af-41d7-a8ce-b1a92af1ce44
+ExecStart=/usr/bin/python3 /home/home/energrid-audio-ingest/server.py --host 192.168.1.138 --port 8765 --storage /media/home/5eaeb1c4-f3af-41d7-a8ce-b1a92af1ce44/energrid-audio --quota-gb 300 --min-free-mb 2048
+Restart=on-failure
+RestartSec=60s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/media/home/5eaeb1c4-f3af-41d7-a8ce-b1a92af1ce44/energrid-audio
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=default.target

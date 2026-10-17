@@ -69,6 +69,8 @@ export class PortalController {
   }
 
   @Sse('bus/mqtt/events')
+  @Header('Cache-Control', 'no-cache, no-transform')
+  @Header('X-Accel-Buffering', 'no')
   streamMqttBus(@Req() request: DeviceProxyRequest) {
     assertPortalControlToken(request)
     return this.mqttIngest.streamDebugMessages().pipe(
@@ -228,11 +230,11 @@ function portalHtml(): string {
       <h1>Energrid Portal</h1>
       <div class="field">
         <label for="email">Email</label>
-        <input id="email" autocomplete="username" value="admin@energrid.local" />
+        <input id="email" autocomplete="username" value="guve4e@gmail.com" />
       </div>
       <div class="field">
         <label for="password">Password</label>
-        <input id="password" autocomplete="current-password" type="password" value="admin123" />
+        <input id="password" autocomplete="current-password" type="password" />
       </div>
       <button id="loginBtn">Sign In</button>
       <div id="loginError" class="error"></div>

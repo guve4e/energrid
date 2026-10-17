@@ -9,6 +9,9 @@ type RecorderBridge = {
   labelClip?: (clipId: string, label: string, occurrencesJson: string) => boolean;
   deleteClip?: (clipId: string) => boolean;
   getUploadConfig?: () => string;
+  getUploadStatus?: () => string;
+  enableDailySchedule?: (label: string) => void;
+  disableDailySchedule?: () => void;
   configureUpload?: (baseUrl: string, token: string) => string;
   uploadPending?: () => boolean;
   startSampleRecording: (label: string) => void;
@@ -23,6 +26,8 @@ const negative = ref(0);
 const status = ref('idle');
 const label = ref('positive');
 const recording = ref(false);
+const dailyScheduleEnabled = ref(false);
+const dailyCategory = ref('');
 const backgroundSupported = ref(false);
 const supportedBackgroundCategories = ref(['tv', 'conversation', 'household', 'mixed']);
 const nativeAvailable = ref(false);
@@ -36,8 +41,10 @@ const ingestUrl = ref('');
 const ingestToken = ref('');
 const ingestConfigured = ref(false);
 const ingestMessage = ref('');
+const uploadStatus = ref({ recorded: 0, uploaded: 0, pending: 0, failed: 0, missingMetadata: 0, lastSuccessfulUpload: null as string | null, serverStatus: 'unknown', configured: false });
 let recordingStartedAt = 0;
 let timer: ReturnType<typeof setInterval> | undefined;
+let uploadTimer: ReturnType<typeof setInterval> | undefined;
 
 const labels = [
   { value: 'positive', text: 'Wake phrase' },
@@ -66,7 +73,8 @@ function updateCounts(detail?: { positive?: number; negative?: number; status?: 
   if (typeof detail?.category === 'string' && detail.category.startsWith('background:')) label.value = detail.category;
   if (detail?.status) {
     status.value = detail.status;
-    recording.value = detail.status === 'recording';
+    if (detail.status === 'recording') recording.value = true;
+    else if (detail.status !== 'segment_saved') recording.value = false;
     if (recording.value && !timer) {
       recordingStartedAt = Date.now();
       timer = setInterval(() => { elapsedSeconds.value = Math.floor((Date.now() - recordingStartedAt) / 1000); }, 1000);
@@ -76,11 +84,31 @@ function updateCounts(detail?: { positive?: number; negative?: number; status?: 
       elapsedSeconds.value = 0;
     }
   }
+  refreshSamples();
+}
+
+function refreshSamples() {
+  try {
+    const result = JSON.parse(getRecorderBridge()?.getSamples?.() || '{}');
+    dailyScheduleEnabled.value = result.dailyScheduleEnabled === true;
+    dailyCategory.value = typeof result.dailyCategory === 'string' ? result.dailyCategory : '';
+  } catch { /* Keep the last known schedule state visible. */ }
+}
+
+function toggleDailySchedule() {
+  const bridge = getRecorderBridge();
+  if (!bridge) return;
+  if (dailyScheduleEnabled.value) bridge.disableDailySchedule?.();
+  else if (consentConfirmed.value && isBackground.value) bridge.enableDailySchedule?.(label.value);
+  else status.value = 'consent_required';
+  window.setTimeout(refreshSamples, 500);
 }
 
 function handleSamples(event: Event) {
   updateCounts((event as CustomEvent).detail);
   if ((event as CustomEvent).detail?.status === 'segment_saved') refreshReview();
+  refreshUploads();
+  refreshSamples();
 }
 
 function record() {
@@ -158,6 +186,16 @@ function saveIngestConfig() {
 function retryUpload() {
   getRecorderBridge()?.uploadPending?.();
   ingestMessage.value = 'Upload queue retry requested.';
+  window.setTimeout(refreshUploads, 1500);
+}
+
+function refreshUploads() {
+  try {
+    const result = JSON.parse(getRecorderBridge()?.getUploadStatus?.() || '{}');
+    const previousMissing = uploadStatus.value.missingMetadata;
+    uploadStatus.value = { ...uploadStatus.value, ...result };
+    if (Number(result.missingMetadata || 0) < previousMissing) refreshReview();
+  } catch { /* Keep the last known upload state visible. */ }
 }
 
 onMounted(() => {
@@ -179,21 +217,24 @@ onMounted(() => {
     status.value = 'unavailable';
   }
   refreshReview();
+  refreshUploads();
+  uploadTimer = setInterval(refreshUploads, 10000);
   window.addEventListener('energrid-wake-samples', handleSamples);
 });
 
 onBeforeUnmount(() => window.removeEventListener('energrid-wake-samples', handleSamples));
 onBeforeUnmount(() => { if (timer) clearInterval(timer); });
+onBeforeUnmount(() => { if (uploadTimer) clearInterval(uploadTimer); });
 </script>
 
 <template>
   <section class="wake-sample-tools" aria-label="Wake word sample recorder">
     <div class="wake-sample-copy">
       <strong>Train “Energrid”</strong>
-      <span>Recordings stay on this device. Wake-phrase samples stop after 8 seconds; background sessions continue until you stop them.</span>
+      <span>Wake-phrase samples stop after 8 seconds. Background sessions save five-minute WAV parts and upload to the configured LAN server.</span>
     </div>
     <div class="wake-sample-actions">
-      <select v-model="label" aria-label="Recording label" :disabled="recording">
+      <select v-model="label" aria-label="Recording label" :disabled="recording || dailyScheduleEnabled">
         <option v-for="item in visibleLabels" :key="item.value" :value="item.value">{{ item.text }}</option>
       </select>
       <label v-if="isBackground && !recording" class="research-consent">
@@ -206,9 +247,23 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); });
       <button class="secondary" type="button" :disabled="positive + negative === 0" @click="shareSamples">
         Share samples
       </button>
+      <button class="secondary" type="button" :disabled="!nativeAvailable || !backgroundSupported || recording || (!dailyScheduleEnabled && (!isBackground || !consentConfirmed))" @click="toggleDailySchedule">
+        {{ dailyScheduleEnabled ? 'Disable daily schedule' : 'Enable daily schedule · 08:00–00:00' }}
+      </button>
       <span class="wake-sample-count">{{ positive }} wake · {{ negative }} background segments · {{ status.replaceAll('_', ' ') }} · background saved locally in 5-minute WAV parts</span>
       <strong v-if="recording" class="wake-recording-label">Recording: {{ labels.find((item) => item.value === label)?.text || label }}</strong>
       <span v-if="recorderMessage" class="wake-sample-message" role="status">{{ recorderMessage }}</span>
+    </div>
+    <div v-if="dailyScheduleEnabled" class="research-live" role="status">
+      DAILY SCHEDULE ACTIVE · {{ labels.find((item) => item.value === dailyCategory)?.text || dailyCategory }} · Europe/Sofia, 08:00–00:00. After a tablet reboot, tap “Resume schedule” in the notification.
+    </div>
+    <div class="research-upload-status" role="status" aria-live="polite">
+      <span><strong>{{ uploadStatus.recorded }}</strong> recorded</span>
+      <span><strong>{{ uploadStatus.uploaded }}</strong> uploaded</span>
+      <span><strong>{{ uploadStatus.pending }}</strong> pending</span>
+      <span><strong>{{ uploadStatus.failed }}</strong> failed</span>
+      <span>Server: <strong>{{ uploadStatus.serverStatus }}</strong></span>
+      <span>Last upload: <strong>{{ uploadStatus.lastSuccessfulUpload ? new Date(uploadStatus.lastSuccessfulUpload).toLocaleString() : 'never' }}</strong></span>
     </div>
     <div v-if="recording && isBackground" class="research-live" role="status">
       <span class="research-live-dot"></span> RESEARCH RECORDING ACTIVE · {{ labels.find((item) => item.value === label)?.text }} · {{ Math.floor(elapsedSeconds / 60) }}m {{ elapsedSeconds % 60 }}s · audio is being saved locally
@@ -257,6 +312,8 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); });
   border-top: 1px solid #dce4f2;
   border-bottom: 1px solid #dce4f2;
 }
+.research-upload-status { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 8px 18px; padding-top: 10px; border-top: 1px solid #dce4f2; color: #52617b; font-size: 12px; }
+.research-upload-status strong { color: #182033; }
 .wake-sample-copy { display: grid; gap: 4px; }
 .wake-sample-copy strong { color: #182033; font-size: 14px; }
 .wake-sample-copy span, .wake-sample-count { color: #64718a; font-size: 12px; }

@@ -30,6 +30,14 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 class Store:
     def __init__(self, root: Path, quota_bytes: int, min_free_bytes: int):
         self.root = root.resolve()
@@ -55,11 +63,20 @@ class Store:
             for row in rows:
                 if row.get("device_id") == device_id and row.get("session_id") == session_id:
                     out.write(json.dumps(row, ensure_ascii=False) + "\n")
+            out.flush()
+            os.fsync(out.fileno())
         os.replace(temp, path)
+        sync_directory(path.parent)
 
     def existing_hash(self, digest: str) -> dict | None:
         for row in self.iter_rows():
             if row.get("sha256") == digest:
+                return row
+        return None
+
+    def existing_clip(self, clip_id: str) -> dict | None:
+        for row in self.iter_rows():
+            if row.get("clip_id") == clip_id:
                 return row
         return None
 
@@ -106,9 +123,16 @@ class Store:
         if self.root not in target.parents:
             raise ValueError("invalid storage path")
         with self.lock:
+            same_clip = self.existing_clip(clip_id)
+            if same_clip:
+                if same_clip.get("sha256") != actual or same_clip.get("bytes") != len(body):
+                    raise ValueError("clip id already exists with different audio")
+                return {"clip_id": clip_id, "sha256": actual, "bytes": len(body),
+                        "path": same_clip["path"]}, True
             duplicate = self.existing_hash(actual)
             if duplicate:
-                return {"clip_id": duplicate["clip_id"], "sha256": actual, "path": duplicate["path"]}, True
+                return {"clip_id": duplicate["clip_id"], "sha256": actual,
+                        "bytes": duplicate.get("bytes", len(body)), "path": duplicate["path"]}, True
             disk_free = shutil.disk_usage(self.root).free
             if self.used_bytes() - reserved_bytes + len(body) > self.quota_bytes or disk_free - len(body) < self.min_free_bytes:
                 raise OSError("storage quota exceeded")
@@ -119,6 +143,7 @@ class Store:
                 out.flush()
                 os.fsync(out.fileno())
             os.replace(temp, target)
+            sync_directory(target.parent)
             row = dict(metadata)
             row.update({"sha256": actual, "bytes": len(body), "path": str(relative),
                         "duration_seconds": duration, "received_at": utc_now(),
@@ -127,6 +152,7 @@ class Store:
                 out.write(json.dumps(row, ensure_ascii=False) + "\n")
                 out.flush()
                 os.fsync(out.fileno())
+            sync_directory(self.root)
             self.write_session_manifest(row["device_id"], row["session_id"], [*list(self.iter_rows() or []), row])
             return {"clip_id": clip_id, "sha256": actual, "path": str(relative)}, False
 
@@ -242,7 +268,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             row = next((x for x in self.store.iter_rows() or [] if x.get("clip_id") == clip_id), None)
             part = self.store.root / ".uploads" / f"{clip_id}.part"
-            self.send_json(200, {"complete": bool(row), "next_offset": row.get("bytes", 0) if row else (part.stat().st_size if part.exists() else 0)})
+            self.send_json(200, {
+                "complete": bool(row),
+                "next_offset": row.get("bytes", 0) if row else (part.stat().st_size if part.exists() else 0),
+                "bytes": row.get("bytes") if row else None,
+                "sha256": row.get("sha256") if row else None,
+            })
             return
         if parsed.path == "/v1/segments":
             rows = list(self.store.iter_rows() or [])

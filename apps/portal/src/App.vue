@@ -30,6 +30,7 @@ type NativeWakeWordBridge = {
   labelClip: (clipId: string, label: string, occurrencesJson: string) => boolean;
   deleteClip: (clipId: string) => boolean;
   getUploadConfig: () => string;
+  getUploadStatus: () => string;
   configureUpload: (baseUrl: string, token: string) => string;
   uploadPending: () => boolean;
   pauseResearchForAssistant: () => void;
@@ -411,8 +412,8 @@ const apiBase = cleanBaseUrl(import.meta.env.VITE_API_BASE_URL || '');
 const defaultWsBase =
   import.meta.env.VITE_VOICE_WS_URL || voiceUrlFromApiBase(apiBase);
 
-const email = ref('admin@energrid.local');
-const password = ref('admin123');
+const email = ref('guve4e@gmail.com');
+const password = ref('');
 const loginError = ref('');
 const accessToken = ref(localStorage.getItem(tokenKey) || '');
 const user = ref<LoginResponse['user'] | null>(
