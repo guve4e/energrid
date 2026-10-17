@@ -42,6 +42,7 @@ class SampleRecordingService : Service() {
         createChannel()
         uploadQueue = SegmentUploadQueue(applicationContext)
         SegmentUploadScheduler.schedule(applicationContext)
+        registerTimeChangeReceiver()
         controller = WakeWordController(applicationContext, object : WakeWordController.Listener {
             override fun onStatus(status: String) = Unit
             override fun onWakeWordDetected() = Unit
@@ -62,7 +63,6 @@ class SampleRecordingService : Service() {
             override fun onSegmentSaved(segment: SavedSegment) {
                 sendSegmentStatus(segment)
                 SegmentUploadScheduler.schedule(applicationContext)
-        registerTimeChangeReceiver()
                 uploadQueue.enqueuePending()
             }
         })
