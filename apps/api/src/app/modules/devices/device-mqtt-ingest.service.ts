@@ -17,6 +17,7 @@ import { DeviceRegistryService } from './device-registry.service';
 import { OperationalLogService } from './operational-log.service';
 import { DeviceObservationService } from './device-observation.service';
 import { DeviceMqttMessageRouter } from './mqtt/device-mqtt-message-router';
+import { ApprovedMqttObservationRuntime } from './mqtt/approved-mqtt-observation.runtime';
 import type { DeviceCapabilityKind } from './device-registry.types';
 import { TelemetryIngestService } from '../telemetry/telemetry-ingest.service';
 import {
@@ -72,11 +73,14 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
     private readonly operationalLog: OperationalLogService,
     private readonly observation: DeviceObservationService,
     @Optional() private readonly telemetry?: TelemetryIngestService,
+    @Optional()
+    private readonly approvedObservations?: ApprovedMqttObservationRuntime,
   ) {
     this.messageRouter = new DeviceMqttMessageRouter(
       registry,
       observation,
       telemetry,
+      approvedObservations?.route,
     );
   }
 

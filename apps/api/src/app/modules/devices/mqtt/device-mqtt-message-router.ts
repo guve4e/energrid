@@ -1,4 +1,7 @@
 import { DeviceRegistryService } from '../device-registry.service';
+import type {
+  ApprovedMqttObservationRoute,
+} from './approved-mqtt-observation.route';
 import { DeviceObservationService } from '../device-observation.service';
 import { EnergridMqttAdapter } from '../adapters/inbound/energrid-mqtt.adapter';
 import { LegacyFrameworkMqttAdapter } from '../adapters/inbound/legacy/legacy-framework-mqtt.adapter';
@@ -22,6 +25,7 @@ export class DeviceMqttMessageRouter {
     private readonly registry: DeviceRegistryService,
     private readonly observation: DeviceObservationService,
     private readonly telemetry?: TelemetryIngestService,
+    private readonly approvedObservations?: ApprovedMqttObservationRoute,
   ) {
     this.adapters = [
       this.legacyTemperature,
@@ -34,7 +38,10 @@ export class DeviceMqttMessageRouter {
   subscriptions(prefix: string): string[] {
     return [
       ...new Set(
-        this.adapters.flatMap((adapter) => adapter.subscriptions(prefix)),
+        [
+          ...this.adapters.flatMap((adapter) => adapter.subscriptions(prefix)),
+          ...(this.approvedObservations?.subscriptions() ?? []),
+        ],
       ),
     ];
   }
@@ -50,6 +57,14 @@ export class DeviceMqttMessageRouter {
   route(
     message: DeviceMqttMessage,
   ): (DeviceMqttAdapterResult & { persisted: Promise<void> }) | null {
+    if (this.approvedObservations?.matches(message.topic)) {
+      return {
+        reason: 'configured approved observation',
+        effects: [],
+        persisted: this.approvedObservations.process(message),
+      };
+    }
+
     for (const adapter of this.adapters) {
       const result = adapter.handle(message);
 

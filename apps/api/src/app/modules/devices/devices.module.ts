@@ -13,11 +13,13 @@ import { DeviceInvestigationService } from './device-investigation.service'
 import { DeviceInstallationStore } from './device-installation.store'
 import { DeviceDiscoveryMemoryStore } from './device-discovery-memory.store'
 import { TelemetryModule } from '../telemetry/telemetry.module'
+import { ApprovedMqttObservationRuntime } from './mqtt/approved-mqtt-observation.runtime'
 
 @Module({
   imports: [TelemetryModule],
   providers: [
     DeviceRegistryService,
+    ApprovedMqttObservationRuntime,
     DeviceMqttIngestService,
     DeviceHttpPollService,
     DeviceLanDiscoveryService,
