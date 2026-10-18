@@ -29,7 +29,7 @@ export class ApprovedMqttObservationRoute {
   constructor(
     private readonly registry: Pick<
       DeviceRegistryService,
-      'getDevices' | 'ingestDeviceTelemetry'
+      'getDevices' | 'projectApprovedObservation'
     >,
     private readonly store: DeviceObservationStateStore,
     configs: readonly ApprovedMqttObservationConfig[],
@@ -142,7 +142,7 @@ export class ApprovedMqttObservationRoute {
 
     // The durable state transition has completed.
     // Now project the accepted state into the existing registry.
-    this.registry.ingestDeviceTelemetry({
+    this.registry.projectApprovedObservation({
       deviceId: binding.deviceId,
       values,
       observedAt: receivedAt,

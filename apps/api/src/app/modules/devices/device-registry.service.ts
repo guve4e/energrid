@@ -104,6 +104,19 @@ interface ApprovedDeviceConfig {
 
 @Injectable()
 export class DeviceRegistryService implements OnModuleInit {
+
+  /**
+   * Accepted observations projected from the durable Observation Engine.
+   * This is a runtime projection, not the authoritative persistent store.
+   */
+  private readonly authoritativeObservationByDeviceId = new Map<
+    string,
+    {
+      values: Record<string, number | boolean | string | null>;
+      observedAt: string;
+    }
+  >();
+
   private readonly controlBindings = new Map<
     string,
     DeviceControlBinding | null
@@ -1229,6 +1242,53 @@ export class DeviceRegistryService implements OnModuleInit {
     return matchingDevice?.id || null;
   }
 
+  /**
+   * Project an already-authorized and durably accepted observation.
+   *
+   * Callers must verify the approved installation and persist through
+   * the Observation Engine before invoking this method.
+   *
+   * Never expose this method directly to untrusted MQTT payloads.
+   */
+  projectApprovedObservation(payload: {
+    deviceId: string;
+    values: Record<string, number | boolean | string | null>;
+    observedAt: string;
+  }): void {
+    const id = safeId(payload.deviceId);
+    if (!id) return;
+
+    const previous = this.authoritativeObservationByDeviceId.get(id);
+    const values = {
+      ...(previous?.values || {}),
+      ...payload.values,
+    };
+
+    this.authoritativeObservationByDeviceId.set(id, {
+      values,
+      observedAt: payload.observedAt,
+    });
+
+    const live = this.liveStateByDeviceId.get(id);
+
+    this.liveStateByDeviceId.set(id, {
+      values: {
+        ...(live?.values || {}),
+        ...values,
+      },
+      observedAt: payload.observedAt,
+      source: 'approved-observation',
+      status: live?.status || 'online',
+    });
+
+    this.observeCommandTelemetry(
+      id,
+      payload.values,
+      payload.observedAt,
+      null,
+    );
+  }
+
   ingestDeviceTelemetry(payload: unknown): void {
     if (!payload || typeof payload !== 'object') return;
 
@@ -1248,22 +1308,46 @@ export class DeviceRegistryService implements OnModuleInit {
     const id = safeId(raw.id || raw.deviceId || raw.key);
     if (!id) return;
 
-    const values = raw.state?.values || raw.values || {};
+    const incomingValues = raw.state?.values || raw.values || {};
+    const authoritative =
+      this.authoritativeObservationByDeviceId.get(id);
+
+    const unownedValues = authoritative
+      ? Object.fromEntries(
+          Object.entries(incomingValues).filter(
+            ([field]) =>
+              !Object.prototype.hasOwnProperty.call(
+                authoritative.values,
+                field,
+              ),
+          ),
+        )
+      : incomingValues;
+
+    const values = authoritative
+      ? {
+          ...(this.liveStateByDeviceId.get(id)?.values || {}),
+          ...unownedValues,
+          ...authoritative.values,
+        }
+      : incomingValues;
+
     const observedAt =
       raw.observedAt || raw.state?.observedAt || new Date().toISOString();
 
     this.liveStateByDeviceId.set(id, {
       values,
-      observedAt,
-      source:
-        raw.state?.source || raw.origin || raw.protocol || 'mqtt-telemetry',
+      observedAt: authoritative?.observedAt || observedAt,
+      source: authoritative
+        ? 'approved-observation'
+        : raw.state?.source || raw.origin || raw.protocol || 'mqtt-telemetry',
       status: normalizeOnlineStatus(
         raw.state?.status || raw.status || 'online',
       ),
     });
     this.observeCommandTelemetry(
       id,
-      values,
+      unownedValues,
       observedAt,
       raw.evidence?.commandId || null,
       raw.evidence?.reason,
@@ -1544,7 +1628,10 @@ export class DeviceRegistryService implements OnModuleInit {
     this.refreshDeviceCommand(device.id);
     const liveState = this.liveStateByDeviceId.get(device.id);
     const command = this.commandByDeviceId.get(device.id);
-    if (!liveState && !command) return device;
+    const authoritative =
+      this.authoritativeObservationByDeviceId.get(device.id);
+
+    if (!liveState && !command && !authoritative) return device;
 
     return {
       ...device,
@@ -1554,7 +1641,14 @@ export class DeviceRegistryService implements OnModuleInit {
         values: {
           ...device.state.values,
           ...(liveState?.values || {}),
+          ...(authoritative?.values || {}),
         },
+        ...(authoritative
+          ? {
+              observedAt: authoritative.observedAt,
+              source: 'approved-observation',
+            }
+          : {}),
         ...(command ? { command: commandForState(command) } : {}),
       },
     };

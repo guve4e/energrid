@@ -80,7 +80,7 @@ describe('Approved ESP8266 MQTT observation integration', () => {
             ]
           : [],
       ),
-      ingestDeviceTelemetry: projection,
+      projectApprovedObservation: projection,
     } as unknown as DeviceRegistryService;
 
     const route = new ApprovedMqttObservationRoute(
