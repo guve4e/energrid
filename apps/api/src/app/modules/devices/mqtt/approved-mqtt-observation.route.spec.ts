@@ -148,7 +148,6 @@ describe('Approved ESP8266 MQTT observation integration', () => {
           temperature: 25,
           humidity: 41.4,
         },
-        origin: 'approved-observation',
       }),
     );
 

@@ -28,7 +28,7 @@ export class ApprovedMqttObservationRuntime
   private readonly store?: DeviceObservationStateStore;
 
   constructor(
-    registry: DeviceRegistryService,
+    private readonly registry: DeviceRegistryService,
     installations: DeviceInstallationStore,
   ) {
     const raw = process.env.HOME_OBSERVATION_BINDINGS_JSON?.trim();
@@ -65,6 +65,13 @@ export class ApprovedMqttObservationRuntime
       configs,
       installations,
     );
+  }
+
+  async recover(): Promise<void> {
+    if (!this.route) return;
+
+    await this.registry.ensureInstallationsLoaded();
+    await this.route.recover();
   }
 
   async onModuleDestroy(): Promise<void> {

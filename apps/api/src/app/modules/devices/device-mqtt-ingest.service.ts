@@ -18,6 +18,7 @@ import { OperationalLogService } from './operational-log.service';
 import { DeviceObservationService } from './device-observation.service';
 import { DeviceMqttMessageRouter } from './mqtt/device-mqtt-message-router';
 import { ApprovedMqttObservationRuntime } from './mqtt/approved-mqtt-observation.runtime';
+import { MqttEvidenceCaptureService } from './mqtt/mqtt-evidence-capture.service';
 import type { DeviceCapabilityKind } from './device-registry.types';
 import { TelemetryIngestService } from '../telemetry/telemetry-ingest.service';
 import {
@@ -75,6 +76,8 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
     @Optional() private readonly telemetry?: TelemetryIngestService,
     @Optional()
     private readonly approvedObservations?: ApprovedMqttObservationRuntime,
+    @Optional()
+    private readonly evidenceCapture?: MqttEvidenceCaptureService,
   ) {
     this.messageRouter = new DeviceMqttMessageRouter(
       registry,
@@ -84,7 +87,11 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
-  onModuleInit(): void {
+  async onModuleInit(): Promise<void> {
+    // Do not subscribe before durable observation recovery.
+    // A recovery failure must prevent MQTT startup.
+    await this.approvedObservations?.recover();
+
     if (!mqttIngestEnabled()) return;
 
     const prefix = mqttPrefix();
@@ -93,7 +100,10 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
     const legacyDeviceTopics = this.messageRouter.legacyDeviceTopics();
     const debugTopics = mqttDebugTopics(
       prefix,
-      this.messageRouter.subscriptions(prefix),
+      [
+        ...this.messageRouter.subscriptions(prefix),
+        ...(this.evidenceCapture?.subscriptions() ?? []),
+      ],
     );
     if (this.telemetry?.status().enabled) {
       this.durableSubscriber = new DurableMqttSubscriber(
@@ -193,7 +203,10 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
     const legacyDeviceTopics = this.messageRouter.legacyDeviceTopics();
     const subscriptions = mqttDebugTopics(
       prefix,
-      this.messageRouter.subscriptions(prefix),
+      [
+        ...this.messageRouter.subscriptions(prefix),
+        ...(this.evidenceCapture?.subscriptions() ?? []),
+      ],
     );
 
     return {
@@ -323,6 +336,19 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
         });
       }
       return Promise.resolve();
+    }
+
+    if (this.evidenceCapture?.matches(topic)) {
+      void this.evidenceCapture
+        .capture(topic, payloadText)
+        .catch((error: unknown) => {
+          const reason =
+            error instanceof Error ? error.message : 'unknown error';
+
+          this.logger.warn(
+            `[MQTT EVIDENCE] capture failed topic=${topic}: ${reason}`,
+          );
+        });
     }
 
     const routed = this.messageRouter.route({

@@ -15,6 +15,7 @@ describe('Authoritative observation registry projection', () => {
     internal.liveApprovedDeviceConfigs = new Map();
     internal.liveDiscoveredDeviceConfigs = new Map();
     internal.authoritativeObservationByDeviceId = new Map();
+    internal.authoritativeFieldOwnershipByDeviceId = new Map();
 
     // Prevent unrelated command-reconciliation dependencies
     // from running in this focused test.

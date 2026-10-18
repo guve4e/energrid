@@ -17,6 +17,7 @@ import {
 import { ApiExcludeController } from '@nestjs/swagger'
 import { map } from 'rxjs'
 import { DeviceAiInvestigationService } from '../llm/device-ai-investigation.service'
+import { MqttEvidenceCaptureService } from '../devices/mqtt/mqtt-evidence-capture.service'
 import { DeviceControlService } from '../devices/device-control.service'
 import { DeviceDiagnosticsService } from '../devices/device-diagnostics.service'
 import { DeviceDiscoveryMemoryStore } from '../devices/device-discovery-memory.store'
@@ -43,6 +44,7 @@ export class PortalController {
     private readonly deviceRegistry: DeviceRegistryService,
     private readonly diagnostics: DeviceDiagnosticsService,
     private readonly deviceAi: DeviceAiInvestigationService,
+    private readonly mqttEvidence: MqttEvidenceCaptureService,
     private readonly discoveryMemory: DeviceDiscoveryMemoryStore,
   ) {}
 
@@ -104,6 +106,54 @@ export class PortalController {
     )
   }
 
+  @Post('network/:deviceId/profile-investigations')
+  async investigateNetworkMqttProfile(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+
+    return this.deviceAi.investigateStoredMqttProfile(
+      { tenantId: tenant.id, siteId: site.id },
+      deviceId,
+    )
+  }
+
+  @Get('network/:deviceId/profile-investigations')
+  async listNetworkMqttProfiles(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+
+    return this.deviceAi.listMqttProfileInvestigations(
+      { tenantId: tenant.id, siteId: site.id },
+      deviceId,
+      50,
+    )
+  }
+
+  @Get('network/:deviceId/profile-investigations/:investigationId')
+  async getNetworkMqttProfile(
+    @Param('deviceId') deviceId: string,
+    @Param('investigationId') investigationId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+
+    return this.deviceAi.getMqttProfileInvestigation(
+      { tenantId: tenant.id, siteId: site.id },
+      deviceId,
+      investigationId,
+    )
+  }
+
   @Get('network/:deviceId/investigations')
   async listNetworkDeviceInvestigations(
     @Param('deviceId') deviceId: string,
@@ -121,6 +171,21 @@ export class PortalController {
   ) {
     assertPortalControlToken(request)
     return this.deviceAi.getHistoryRecord(deviceId, investigationId)
+  }
+
+  @Get('mqtt/evidence/:deviceId/status')
+  async getKitchenMqttEvidenceStatus(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+
+    return this.mqttEvidence.getCaptureStatus(
+      { tenantId: tenant.id, siteId: site.id },
+      deviceId,
+    )
   }
 
   @Get('bus/mqtt')

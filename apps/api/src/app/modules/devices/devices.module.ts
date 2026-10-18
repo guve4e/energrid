@@ -14,6 +14,7 @@ import { DeviceInstallationStore } from './device-installation.store'
 import { DeviceDiscoveryMemoryStore } from './device-discovery-memory.store'
 import { TelemetryModule } from '../telemetry/telemetry.module'
 import { ApprovedMqttObservationRuntime } from './mqtt/approved-mqtt-observation.runtime'
+import { MqttEvidenceCaptureService } from './mqtt/mqtt-evidence-capture.service'
 
 @Module({
   imports: [TelemetryModule],
@@ -21,6 +22,7 @@ import { ApprovedMqttObservationRuntime } from './mqtt/approved-mqtt-observation
     DeviceRegistryService,
     ApprovedMqttObservationRuntime,
     DeviceMqttIngestService,
+    MqttEvidenceCaptureService,
     DeviceHttpPollService,
     DeviceLanDiscoveryService,
     DeviceDiscoveryMemoryStore,
@@ -36,6 +38,7 @@ import { ApprovedMqttObservationRuntime } from './mqtt/approved-mqtt-observation
   exports: [
     DeviceRegistryService,
     DeviceMqttIngestService,
+    MqttEvidenceCaptureService,
     DeviceLanDiscoveryService,
     DeviceDiscoveryMemoryStore,
     DeviceControlService,

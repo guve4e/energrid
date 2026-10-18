@@ -304,6 +304,31 @@ type VoiceConfig = {
 type PortalDevice = NonNullable<PortalState['devices']>[number];
 type NetworkDevice = NonNullable<PortalState['networkDevices']>[number];
 
+
+function deviceHasSsh(device: NetworkDevice): boolean {
+  return device.observations?.some(
+    observation =>
+      observation.source === 'tcp' &&
+      observation.attribute === 'port.22.open' &&
+      observation.value === true
+  ) === true;
+}
+
+function sshCommand(device: NetworkDevice): string {
+  return `ssh ${device.ipAddress}`;
+}
+
+async function copySshCommand(device: NetworkDevice): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(sshCommand(device));
+    appendLog(`[discovery] copied SSH command for ${device.id}`);
+  } catch {
+    window.prompt('Copy SSH command:', sshCommand(device));
+  }
+}
+
+
+
 type KnownNetworkDevice = {
   schemaVersion: 1;
   identity: string;
@@ -985,6 +1010,45 @@ type AiInvestigationResult = {
   };
 };
 
+type MqttProfileHistoryRecord = {
+  schemaVersion: 1;
+  kind: 'mqtt-observation-profile';
+  id: string;
+  deviceId: string;
+  createdAt: string;
+  result: {
+    provider: string;
+    model: string;
+    proposal: {
+      status: 'proposed';
+      requiresApproval: true;
+      selector: string;
+      fields: Record<
+        string,
+        { rawKey: string; type: 'number' | 'boolean' | 'string' }
+      >;
+      supportingEvidenceIds: string[];
+    };
+    replay: {
+      status: 'passed' | 'failed';
+      profileStatus: 'proposed';
+      installationAuthorized: false;
+      testedSamples: number;
+      acceptedSamples: number;
+      rejectedSamples: number;
+      observedFields: Record<string, number | boolean | string>;
+      steps: Array<{
+        evidenceId: string;
+        passed: boolean;
+        reason: string;
+        updatedKeys: string[];
+        ignoredKeys: string[];
+        rejectedFields: string[];
+      }>;
+    };
+  };
+};
+
 type AiHistoryRecord = {
   schemaVersion: 1;
   id: string;
@@ -1032,6 +1096,7 @@ function openAiHistoryRecord(record: AiHistoryRecord): void {
   selectedAiDeviceId.value = record.deviceId;
   selectedAiHistoryId.value = record.id;
   aiReports.value[record.deviceId] = record.result;
+  void loadMqttProfileHistory(record.deviceId);
   void revealDeviceIntelligence();
 }
 
@@ -1049,10 +1114,20 @@ async function revealDeviceIntelligence(): Promise<void> {
   });
 }
 
+function openDeviceIntelligenceOnly(deviceId: string): void {
+  selectedAiDeviceId.value = deviceId;
+  selectedAiHistoryId.value = null;
+
+  void loadAiHistory(deviceId);
+  void loadMqttProfileHistory(deviceId);
+  void revealDeviceIntelligence();
+}
+
 async function investigateNetworkDeviceWithAi(device: NetworkDevice) {
   selectedAiDeviceId.value = device.id;
   selectedAiHistoryId.value = null;
   void loadAiHistory(device.id);
+  void loadMqttProfileHistory(device.id);
   void revealDeviceIntelligence();
 
   if (aiInvestigating.value[device.id]) return;
@@ -1097,6 +1172,208 @@ async function investigateNetworkDeviceWithAi(device: NetworkDevice) {
       error instanceof Error ? error.message : 'Investigation failed';
   } finally {
     aiInvestigating.value[device.id] = false;
+  }
+}
+
+// MQTT profile investigations are separate from LAN identification.
+const mqttProfileHistory =
+  ref<Record<string, MqttProfileHistoryRecord[]>>({});
+const mqttProfileSelected =
+  ref<Record<string, MqttProfileHistoryRecord>>({});
+const mqttProfileLoading = ref<Record<string, boolean>>({});
+const mqttProfileRunning = ref<Record<string, boolean>>({});
+const mqttProfileErrors = ref<Record<string, string>>({});
+
+const selectedMqttProfile = computed(() =>
+  selectedAiDeviceId.value
+    ? mqttProfileSelected.value[selectedAiDeviceId.value] ?? null
+    : null,
+);
+
+type MqttCaptureStatus = {
+  enabled: boolean;
+  deviceId: string;
+  topics: string[];
+  samplesInWindow: number;
+  latestCapturedAt: string | null;
+};
+
+const kitchenCaptureStatus = ref<MqttCaptureStatus | null>(null);
+const kitchenCaptureError = ref<string | null>(null);
+const kitchenCaptureLoading = ref(false);
+
+async function loadKitchenCaptureStatus(): Promise<void> {
+  if (kitchenCaptureLoading.value) return;
+
+  kitchenCaptureLoading.value = true;
+  kitchenCaptureError.value = null;
+
+  try {
+    const response = await fetch(
+      `${apiBase}/portal/mqtt/evidence/temp-kitchen/status`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken.value}`,
+        },
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error(`Evidence status failed (${response.status})`);
+    }
+
+    kitchenCaptureStatus.value =
+      (await response.json()) as MqttCaptureStatus;
+  } catch (error) {
+    kitchenCaptureError.value =
+      error instanceof Error ? error.message : 'Status unavailable';
+  } finally {
+    kitchenCaptureLoading.value = false;
+  }
+}
+
+async function loadMqttProfileHistory(deviceId: string): Promise<void> {
+  if (mqttProfileLoading.value[deviceId]) return;
+
+  mqttProfileLoading.value[deviceId] = true;
+  delete mqttProfileErrors.value[deviceId];
+
+  try {
+    const response = await fetch(
+      `${apiBase}/portal/network/${encodeURIComponent(deviceId)}/profile-investigations`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken.value}`,
+        },
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error(
+        `MQTT profile history unavailable (${response.status})`,
+      );
+    }
+
+    const records: unknown = await response.json();
+
+    if (!Array.isArray(records)) {
+      throw new Error('Invalid MQTT profile history response');
+    }
+
+    mqttProfileHistory.value[deviceId] =
+      records as MqttProfileHistoryRecord[];
+  } catch (error) {
+    mqttProfileErrors.value[deviceId] =
+      error instanceof Error ? error.message : 'History unavailable';
+  } finally {
+    mqttProfileLoading.value[deviceId] = false;
+  }
+}
+
+function previewMqttProfile(deviceId: string): void {
+  // Synthetic frontend-only fixture.
+  // No MQTT, AI, database writes or installation privileges.
+  mqttProfileSelected.value[deviceId] = {
+    schemaVersion: 1,
+    kind: 'mqtt-observation-profile',
+    id: `synthetic-preview-${deviceId}`,
+    deviceId,
+    createdAt: new Date().toISOString(),
+    result: {
+      provider: 'offline-preview',
+      model: 'synthetic-fixture-no-llm',
+      proposal: {
+        status: 'proposed',
+        requiresApproval: true,
+        selector: 'demo/esp8266/temperature',
+        fields: {
+          temperature: {
+            rawKey: 'temperature',
+            type: 'number',
+          },
+          humidity: {
+            rawKey: 'humidity',
+            type: 'number',
+          },
+        },
+        supportingEvidenceIds: ['demo-sample-1'],
+      },
+      replay: {
+        status: 'passed',
+        profileStatus: 'proposed',
+        installationAuthorized: false,
+        testedSamples: 2,
+        acceptedSamples: 2,
+        rejectedSamples: 0,
+        observedFields: {
+          temperature: 25.3,
+          humidity: 40.3,
+        },
+        steps: [
+          {
+            evidenceId: 'demo-sample-1',
+            passed: true,
+            reason: 'accepted',
+            updatedKeys: ['temperature', 'humidity'],
+            ignoredKeys: [],
+            rejectedFields: [],
+          },
+          {
+            evidenceId: 'demo-sample-2',
+            passed: true,
+            reason: 'accepted',
+            updatedKeys: ['temperature'],
+            ignoredKeys: [],
+            rejectedFields: [],
+          },
+        ],
+      },
+    },
+  };
+}
+
+async function investigateMqttProfile(deviceId: string): Promise<void> {
+  if (mqttProfileRunning.value[deviceId]) return;
+
+  mqttProfileRunning.value[deviceId] = true;
+  delete mqttProfileErrors.value[deviceId];
+
+  try {
+    const response = await fetch(
+      `${apiBase}/portal/network/${encodeURIComponent(deviceId)}/profile-investigations`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken.value}`,
+        },
+      },
+    );
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const message = body.message;
+
+      throw new Error(
+        typeof message === 'string'
+          ? message
+          : Array.isArray(message)
+            ? message.join(', ')
+            : `Profile investigation failed (${response.status})`,
+      );
+    }
+
+    const record =
+      (await response.json()) as MqttProfileHistoryRecord;
+
+    mqttProfileSelected.value[deviceId] = record;
+    await loadMqttProfileHistory(deviceId);
+  } catch (error) {
+    mqttProfileErrors.value[deviceId] =
+      error instanceof Error
+        ? error.message
+        : 'MQTT profile investigation failed';
+  } finally {
+    mqttProfileRunning.value[deviceId] = false;
   }
 }
 
@@ -4133,6 +4410,28 @@ onBeforeUnmount(() => {
                         >
                           {{ aiInvestigating[device.id] ? 'Investigating…' : 'Investigate with AI' }}
                         </button>
+                        <button
+                          type="button"
+                          class="secondary"
+                          @click="openDeviceIntelligenceOnly(device.id)"
+                        >Review Intelligence</button>
+
+                        <template v-if="deviceHasSsh(device)">
+                          <a
+                            class="ghost-link"
+                            :href="`ssh://${device.ipAddress}`"
+                            title="Open SSH using your system's registered SSH handler"
+                          >
+                            SSH ↗
+                          </a>
+                          <button
+                            type="button"
+                            class="secondary"
+                            @click="copySshCommand(device)"
+                          >
+                            Copy SSH
+                          </button>
+                        </template>
 
                         <button v-if="device.components?.length || deviceCards.some(candidate => candidate.metadata?.physicalId === device.id)" type="button" class="primary" @click="reviewNetworkDevice(device)">Review channels</button>
                         <span v-else>{{ device.vendor === 'Shelly' ? 'Channels unavailable' : 'Adapter needed' }}</span>
@@ -4396,6 +4695,247 @@ onBeforeUnmount(() => {
                   </small>
                 </button>
               </div>
+            </section>
+
+
+            <!-- Read-only MQTT profile investigation review -->
+            <section
+              class="device-ai-history"
+              style="margin-top: 20px"
+              aria-label="MQTT profile investigations"
+            >
+              <div class="section-row">
+                <div>
+                  <h4>Proposed MQTT profiles</h4>
+                  <p class="section-help">
+                    Captured evidence · AI proposal · Deterministic replay
+                  </p>
+                </div>
+
+                <div style="display: flex; gap: 8px; flex-wrap: wrap">
+                  <button
+                    type="button"
+                    class="secondary"
+                    :disabled="!!mqttProfileLoading[selectedAiDeviceId]"
+                    @click="loadMqttProfileHistory(selectedAiDeviceId)"
+                  >
+                    Refresh
+                  </button>
+
+                                    <button
+                    type="button"
+                    class="secondary"
+                    @click="previewMqttProfile(selectedAiDeviceId)"
+                  >
+                    Preview replay
+                  </button>
+
+<button
+                    type="button"
+                    :disabled="!!mqttProfileRunning[selectedAiDeviceId]"
+                    @click="investigateMqttProfile(selectedAiDeviceId)"
+                  >
+                    {{
+                      mqttProfileRunning[selectedAiDeviceId]
+                        ? 'Investigating...'
+                        : 'Investigate MQTT evidence'
+                    }}
+                  </button>
+                </div>
+              </div>
+
+              <p class="section-help">
+                Read-only investigation. Captured MQTT evidence must
+                already exist. No device commands or installations.
+              </p>
+
+              <div class="device-ai-card-detail" style="margin: 12px 0">
+                <strong>Kitchen ESP8266 — real MQTT evidence</strong>
+                <p class="section-help">
+                  Independent of the selected LAN device.
+                  Topic: <code>devices/temp-kitchen/data</code>
+                </p>
+                <button
+                  type="button"
+                  class="secondary"
+                  :disabled="kitchenCaptureLoading"
+                  @click="loadKitchenCaptureStatus()"
+                >
+                  {{ kitchenCaptureLoading ? 'Checking...' : 'Check kitchen evidence' }}
+                </button>
+                <p v-if="kitchenCaptureError" role="alert" class="error">
+                  {{ kitchenCaptureError }}
+                </p>
+                <p v-if="kitchenCaptureStatus" class="section-help">
+                  Capture:
+                  {{ kitchenCaptureStatus.enabled ? 'Enabled' : 'Disabled' }}
+                  · Stored samples returned:
+                  {{ kitchenCaptureStatus.samplesInWindow }} (maximum 8)
+                  · Latest capture:
+                  {{ kitchenCaptureStatus.latestCapturedAt || 'None' }}
+                </p>
+              </div>
+
+              <p
+                v-if="mqttProfileLoading[selectedAiDeviceId]"
+                class="section-help"
+                role="status"
+              >
+                Loading saved MQTT profiles...
+              </p>
+
+              <p
+                v-if="mqttProfileErrors[selectedAiDeviceId]"
+                class="error"
+                role="alert"
+              >
+                {{ mqttProfileErrors[selectedAiDeviceId] }}
+              </p>
+
+              <p
+                v-if="
+                  !mqttProfileLoading[selectedAiDeviceId] &&
+                  !mqttProfileErrors[selectedAiDeviceId] &&
+                  !mqttProfileHistory[selectedAiDeviceId]?.length
+                "
+                class="section-help"
+              >
+                No saved MQTT profile investigations yet.
+              </p>
+
+              <div
+                v-if="mqttProfileHistory[selectedAiDeviceId]?.length"
+                class="device-ai-history-list"
+              >
+                <button
+                  v-for="record in mqttProfileHistory[selectedAiDeviceId]"
+                  :key="record.id"
+                  type="button"
+                  class="device-ai-history-item"
+                  :class="{
+                    'is-selected': selectedMqttProfile?.id === record.id,
+                  }"
+                  @click="mqttProfileSelected[selectedAiDeviceId] = record"
+                >
+                  <strong>
+                    {{ new Date(record.createdAt).toLocaleString() }}
+                  </strong>
+                  <span>
+                    {{ record.result.provider }} /
+                    {{ record.result.model }}
+                  </span>
+                  <small>
+                    Replay: {{ record.result.replay.status }}
+                    · {{ record.result.replay.testedSamples }} samples
+                    · Not installed
+                  </small>
+                </button>
+              </div>
+
+              <article
+                v-if="selectedMqttProfile"
+                class="device-ai-card"
+                style="margin-top: 16px"
+              >
+                <p
+                  v-if="selectedMqttProfile.result.provider === 'offline-preview'"
+                  class="section-help"
+                  role="status"
+                >
+                  SYNTHETIC PREVIEW — Not captured, not AI-generated,
+                  not saved to investigation history.
+                </p>
+
+
+                <div class="device-ai-card-heading">
+                  <strong>Observation profile proposal</strong>
+                  <span class="device-ai-approval">
+                    Proposed · Not installed
+                  </span>
+                </div>
+
+                <p>
+                  <strong>MQTT topic:</strong>
+                  <code>
+                    {{ selectedMqttProfile.result.proposal.selector }}
+                  </code>
+                </p>
+
+                <div class="device-ai-card-detail">
+                  <strong>Proposed field mappings</strong>
+                  <ul>
+                    <li
+                      v-for="(mapping, field) in selectedMqttProfile.result.proposal.fields"
+                      :key="field"
+                    >
+                      <code>{{ field }}</code>
+                      ←
+                      <code>{{ mapping.rawKey }}</code>
+                      ({{ mapping.type }})
+                    </li>
+                  </ul>
+                </div>
+
+                <div class="device-ai-card-detail">
+                  <strong>Deterministic replay</strong>
+                  <p>
+                    Result:
+                    <strong>
+                      {{ selectedMqttProfile.result.replay.status }}
+                    </strong>
+                    ·
+                    {{ selectedMqttProfile.result.replay.acceptedSamples }}
+                    accepted /
+                    {{ selectedMqttProfile.result.replay.testedSamples }}
+                    tested
+                    ·
+                    {{ selectedMqttProfile.result.replay.rejectedSamples }}
+                    rejected
+                  </p>
+
+                  <strong>Replayed field values</strong>
+                  <ul>
+                    <li
+                      v-for="(value, field) in selectedMqttProfile.result.replay.observedFields"
+                      :key="field"
+                    >
+                      <code>{{ field }}</code>: {{ value }}
+                    </li>
+                  </ul>
+                </div>
+
+                <details>
+                  <summary>Replay decisions and evidence</summary>
+                  <ul>
+                    <li
+                      v-for="step in selectedMqttProfile.result.replay.steps"
+                      :key="step.evidenceId"
+                    >
+                      <code>{{ step.evidenceId }}</code>
+                      · {{ step.passed ? 'Passed' : 'Failed' }}
+                      · {{ step.reason }}
+                      <span v-if="step.rejectedFields.length">
+                        · Rejected fields:
+                        {{ step.rejectedFields.join(', ') }}
+                      </span>
+                    </li>
+                  </ul>
+
+                  <p class="section-help">
+                    Supporting evidence references:
+                    {{
+                      selectedMqttProfile.result.proposal
+                        .supportingEvidenceIds.join(', ')
+                    }}
+                  </p>
+                </details>
+
+                <p class="section-help">
+                  Replay validates behavior against captured samples,
+                  not physical sensor identity or measurement accuracy.
+                  This profile has not been approved or installed.
+                </p>
+              </article>
             </section>
 
             <div

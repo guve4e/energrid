@@ -117,6 +117,9 @@ export class DeviceRegistryService implements OnModuleInit {
     }
   >();
 
+  private readonly authoritativeFieldOwnershipByDeviceId =
+    new Map<string, Set<string>>();
+
   private readonly controlBindings = new Map<
     string,
     DeviceControlBinding | null
@@ -176,7 +179,26 @@ export class DeviceRegistryService implements OnModuleInit {
       this.controlBindings.set(id, parseDeviceControlBinding(binding));
   }
 
+  private installationsReady?: Promise<void>;
+
   async onModuleInit(): Promise<void> {
+    await this.ensureInstallationsLoaded();
+  }
+
+  ensureInstallationsLoaded(): Promise<void> {
+    if (!this.installationStore) return Promise.resolve();
+
+    if (!this.installationsReady) {
+      this.installationsReady = this.loadInstallations().catch((error) => {
+        this.installationsReady = undefined;
+        throw error;
+      });
+    }
+
+    return this.installationsReady;
+  }
+
+  private async loadInstallations(): Promise<void> {
     if (!this.installationStore) return;
     const siteId = configuredSite().siteId;
     for (const record of await this.installationStore.list(siteId)) {
@@ -1250,6 +1272,76 @@ export class DeviceRegistryService implements OnModuleInit {
    *
    * Never expose this method directly to untrusted MQTT payloads.
    */
+  /**
+   * Claim fields from verified, trusted observation configuration.
+   * Does not create readings or change connectivity.
+   */
+  claimApprovedObservationFields(
+    deviceId: string,
+    fields: readonly string[],
+  ): void {
+    const id = safeId(deviceId);
+    if (!id) return;
+
+    const owned =
+      this.authoritativeFieldOwnershipByDeviceId.get(id) ??
+      new Set<string>();
+
+    for (const field of fields) {
+      if (typeof field === 'string' && field.trim()) {
+        owned.add(field);
+      }
+    }
+
+    if (owned.size) {
+      this.authoritativeFieldOwnershipByDeviceId.set(id, owned);
+    }
+  }
+
+  /**
+   * Restore historical state without claiming device connectivity
+   * or triggering command reconciliation.
+   */
+  restoreApprovedObservation(payload: {
+    deviceId: string;
+    values: Record<string, number | boolean | string | null>;
+    observedAt: string;
+  }): void {
+    const id = safeId(payload.deviceId);
+    if (!id || !Object.keys(payload.values).length) return;
+
+    const previous =
+      this.authoritativeObservationByDeviceId.get(id);
+
+    const values = {
+      ...(previous?.values || {}),
+      ...payload.values,
+    };
+
+    const observedAt =
+      previous &&
+      Date.parse(previous.observedAt) > Date.parse(payload.observedAt)
+        ? previous.observedAt
+        : payload.observedAt;
+
+    this.authoritativeObservationByDeviceId.set(id, {
+      values,
+      observedAt,
+    });
+
+    const live = this.liveStateByDeviceId.get(id);
+
+    this.liveStateByDeviceId.set(id, {
+      values: {
+        ...(live?.values || {}),
+        ...values,
+      },
+      observedAt,
+      source: 'approved-observation',
+      status: live?.status || 'unknown',
+    });
+  }
+
   projectApprovedObservation(payload: {
     deviceId: string;
     values: Record<string, number | boolean | string | null>;
@@ -1257,6 +1349,11 @@ export class DeviceRegistryService implements OnModuleInit {
   }): void {
     const id = safeId(payload.deviceId);
     if (!id) return;
+
+    this.claimApprovedObservationFields(
+      id,
+      Object.keys(payload.values),
+    );
 
     const previous = this.authoritativeObservationByDeviceId.get(id);
     const values = {
@@ -1309,26 +1406,33 @@ export class DeviceRegistryService implements OnModuleInit {
     if (!id) return;
 
     const incomingValues = raw.state?.values || raw.values || {};
+
+    const owned =
+      this.authoritativeFieldOwnershipByDeviceId.get(id);
+
     const authoritative =
       this.authoritativeObservationByDeviceId.get(id);
 
-    const unownedValues = authoritative
-      ? Object.fromEntries(
-          Object.entries(incomingValues).filter(
-            ([field]) =>
-              !Object.prototype.hasOwnProperty.call(
-                authoritative.values,
-                field,
-              ),
-          ),
-        )
-      : incomingValues;
+    const keepUnowned = (
+      input: Record<string, number | boolean | string | null>,
+    ) =>
+      owned
+        ? Object.fromEntries(
+            Object.entries(input).filter(
+              ([field]) => !owned.has(field),
+            ),
+          )
+        : input;
 
-    const values = authoritative
+    const unownedValues = keepUnowned(incomingValues);
+
+    const values = owned
       ? {
-          ...(this.liveStateByDeviceId.get(id)?.values || {}),
+          ...keepUnowned(
+            this.liveStateByDeviceId.get(id)?.values || {},
+          ),
           ...unownedValues,
-          ...authoritative.values,
+          ...(authoritative?.values || {}),
         }
       : incomingValues;
 
@@ -1631,7 +1735,23 @@ export class DeviceRegistryService implements OnModuleInit {
     const authoritative =
       this.authoritativeObservationByDeviceId.get(device.id);
 
-    if (!liveState && !command && !authoritative) return device;
+    const owned =
+      this.authoritativeFieldOwnershipByDeviceId.get(device.id);
+
+    if (!liveState && !command && !authoritative && !owned?.size) {
+      return device;
+    }
+
+    const keepUnowned = (
+      values: Record<string, number | boolean | string | null>,
+    ) =>
+      owned
+        ? Object.fromEntries(
+            Object.entries(values).filter(
+              ([field]) => !owned.has(field),
+            ),
+          )
+        : values;
 
     return {
       ...device,
@@ -1639,8 +1759,8 @@ export class DeviceRegistryService implements OnModuleInit {
         ...device.state,
         ...(liveState || {}),
         values: {
-          ...device.state.values,
-          ...(liveState?.values || {}),
+          ...keepUnowned(device.state.values),
+          ...keepUnowned(liveState?.values || {}),
           ...(authoritative?.values || {}),
         },
         ...(authoritative

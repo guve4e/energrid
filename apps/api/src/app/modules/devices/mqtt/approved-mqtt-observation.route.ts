@@ -29,7 +29,10 @@ export class ApprovedMqttObservationRoute {
   constructor(
     private readonly registry: Pick<
       DeviceRegistryService,
-      'getDevices' | 'projectApprovedObservation'
+      'getDevices'
+      | 'projectApprovedObservation'
+      | 'claimApprovedObservationFields'
+      | 'restoreApprovedObservation'
     >,
     private readonly store: DeviceObservationStateStore,
     configs: readonly ApprovedMqttObservationConfig[],
@@ -68,6 +71,92 @@ export class ApprovedMqttObservationRoute {
 
   matches(topic: string): boolean {
     return this.routes.has(topic);
+  }
+
+  /**
+   * Restore authorized fields from durable observation state.
+   * A historical measurement does not establish connectivity.
+   */
+  async recover(): Promise<void> {
+    for (const { scope, binding, policy } of this.routes.values()) {
+      const approved = this.registry.getDevices().some(
+        (device) =>
+          device.id === binding.deviceId &&
+          device.tenantId === scope.tenantId &&
+          device.siteId === scope.siteId &&
+          device.kind === 'physical' &&
+          device.trustStatus === 'approved',
+      );
+
+      if (!approved) continue;
+
+      const installation = await this.installations.get(
+        scope.siteId,
+        binding.deviceId,
+      );
+
+      if (
+        !installation ||
+        installation.schemaVersion !== 1 ||
+        installation.device.id !== binding.deviceId ||
+        installation.device.tenantId !== scope.tenantId ||
+        installation.device.siteId !== scope.siteId ||
+        installation.device.trustStatus !== 'approved'
+      ) {
+        continue;
+      }
+
+      const ownedFields = Object.keys(binding.fields).filter(
+        (field) =>
+          policy.allowedSourcesByField?.[field]?.includes(
+            binding.sourceId,
+          ),
+      );
+
+      if (!ownedFields.length) continue;
+
+      this.registry.claimApprovedObservationFields(
+        binding.deviceId,
+        ownedFields,
+      );
+
+      const state = await this.store.getState(
+        scope,
+        binding.deviceId,
+      );
+
+      if (!state) continue;
+
+      const fields = Object.entries(state.fields).filter(
+        ([field, observation]) =>
+          ownedFields.includes(field) &&
+          observation.sourceId === binding.sourceId &&
+          Number.isFinite(Date.parse(observation.receivedAt)),
+      );
+
+      if (!fields.length) continue;
+
+      const values = Object.fromEntries(
+        fields.map(([field, observation]) => [
+          field,
+          observation.value,
+        ]),
+      );
+
+      const observedAt = fields
+        .map(([, observation]) => observation.receivedAt)
+        .reduce((latest, current) =>
+          Date.parse(current) > Date.parse(latest)
+            ? current
+            : latest,
+        );
+
+      this.registry.restoreApprovedObservation({
+        deviceId: binding.deviceId,
+        values,
+        observedAt,
+      });
+    }
   }
 
   async process(message: DeviceMqttMessage): Promise<void> {
@@ -146,9 +235,6 @@ export class ApprovedMqttObservationRoute {
       deviceId: binding.deviceId,
       values,
       observedAt: receivedAt,
-      origin: 'approved-observation',
-      protocol: 'mqtt',
-      status: 'online',
     });
   }
 }
