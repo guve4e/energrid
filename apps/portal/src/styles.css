@@ -4751,3 +4751,93 @@ pre {
 .device-ai-history-item small {
   opacity: 0.75;
 }
+
+
+/* Discovery Inbox organization */
+.discovery-zone-groups {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.discovery-accordion {
+  border: 1px solid var(--border, rgba(128,128,128,.25));
+  border-radius: 12px;
+  margin-top: 12px;
+  overflow: hidden;
+}
+
+.discovery-accordion > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 16px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.discovery-accordion > summary span {
+  font-size: .85rem;
+  font-weight: 400;
+  opacity: .75;
+}
+
+.discovery-accordion[open] > summary {
+  border-bottom: 1px solid var(--border, rgba(128,128,128,.25));
+}
+
+.discovery-accordion > .network-table-wrap {
+  margin: 0;
+}
+
+.discovery-onboarding-accordion > .discovery-list,
+.discovery-onboarding-accordion > .discovery-empty {
+  margin: 16px;
+}
+
+.discovery-scan-progress,
+.discovery-scan-feedback {
+  margin: 16px 0;
+  padding: 14px 16px;
+  border: 1px solid rgba(128,128,128,.25);
+  border-radius: 12px;
+}
+
+.discovery-scan-progress-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.discovery-scan-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 5px;
+  background: rgba(128,128,128,.2);
+}
+
+.discovery-scan-indicator {
+  width: 35%;
+  height: 100%;
+  border-radius: inherit;
+  background: currentColor;
+  animation: discovery-scan-move 1.7s ease-in-out infinite alternate;
+}
+
+.discovery-scan-progress small {
+  display: block;
+  margin-top: 10px;
+  opacity: .75;
+}
+
+@keyframes discovery-scan-move {
+  from { transform: translateX(0); }
+  to { transform: translateX(185%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .discovery-scan-indicator { animation: none; }
+}

@@ -421,6 +421,10 @@ const state = ref<PortalState | null>(null);
 const loadingState = ref(false);
 const stateError = ref('');
 const scanningNetwork = ref(false);
+const scanStartedAt = ref(0);
+const scanElapsedSeconds = ref(0);
+const scanFeedback = ref('');
+let scanTimer: ReturnType<typeof setInterval> | undefined;
 const discoveryMemory = ref<DiscoveryMemoryResponse | null>(null);
 const discoveryMemoryLoading = ref(false);
 const discoveryMemoryError = ref('');
@@ -1597,6 +1601,15 @@ function logDiscoveryDecision(device: PortalDevice, action: string) {
 async function scanNetwork() {
   if (scanningNetwork.value) return;
   scanningNetwork.value = true;
+  scanStartedAt.value = Date.now();
+  scanElapsedSeconds.value = 0;
+  scanFeedback.value = '';
+  if (scanTimer) clearInterval(scanTimer);
+  scanTimer = setInterval(() => {
+    scanElapsedSeconds.value = Math.floor(
+      (Date.now() - scanStartedAt.value) / 1000
+    );
+  }, 1000);
   stateError.value = '';
   try {
     appendLog('[discovery] scanning local network');
@@ -1615,6 +1628,9 @@ async function scanNetwork() {
         networkDevices: result.devices,
       };
     }
+    scanFeedback.value =
+      `Scan complete · ${result.devices.length} devices found · ` +
+      `${result.zones?.length ?? networkZones.value.length} networks`;
     appendLog(
       `[discovery] scan complete; ${result.devices.length} devices visible`,
     );
@@ -1623,8 +1639,14 @@ async function scanNetwork() {
   } catch (error) {
     stateError.value =
       error instanceof Error ? error.message : 'Network scan unavailable';
+    scanFeedback.value = `Scan failed: ${stateError.value}`;
     appendLog(`[discovery] scan failed: ${stateError.value}`);
   } finally {
+    scanElapsedSeconds.value = Math.floor(
+      (Date.now() - scanStartedAt.value) / 1000
+    );
+    if (scanTimer) clearInterval(scanTimer);
+    scanTimer = undefined;
     scanningNetwork.value = false;
   }
 }
@@ -3921,6 +3943,21 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
+          <div v-if="scanningNetwork" class="discovery-scan-progress" role="status" aria-live="polite">
+            <div class="discovery-scan-progress-heading">
+              <strong>Scanning configured networks…</strong>
+              <span>{{ scanElapsedSeconds }}s elapsed</span>
+            </div>
+            <div class="discovery-scan-track">
+              <div class="discovery-scan-indicator"></div>
+            </div>
+            <small>Collecting network evidence. The scan may take longer across routed networks.</small>
+          </div>
+          <p v-else-if="scanFeedback" class="discovery-scan-feedback" role="status">
+            {{ scanFeedback }}
+            <span>· {{ scanElapsedSeconds }}s</span>
+          </p>
+
           <div class="network-scan">
             <div class="scan-origin">
               <div>
@@ -4026,7 +4063,18 @@ onBeforeUnmount(() => {
                 the configured networks.</span
               >
             </div>
-            <div v-else class="network-table-wrap">
+            <div v-else class="discovery-zone-groups">
+              <details
+                v-for="zone in networkZones.filter(z => visibleNetworkDevices.some(d => d.networkZoneId === z.id))"
+                :key="zone.id"
+                class="discovery-accordion"
+                open
+              >
+                <summary>
+                  <strong>{{ zone.name }}</strong>
+                  <span>{{ visibleNetworkDevices.filter(d => d.networkZoneId === zone.id).length }} devices · {{ zone.cidr }}</span>
+                </summary>
+                <div class="network-table-wrap">
               <table class="network-table">
                 <thead>
                   <tr>
@@ -4039,7 +4087,7 @@ onBeforeUnmount(() => {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="device in visibleNetworkDevices" :key="device.id">
+                  <tr v-for="device in visibleNetworkDevices.filter(d => d.networkZoneId === zone.id)" :key="device.id">
                     <td data-label="Device">
                       <strong>{{
                         device.vendor || device.hostname || 'Network device'
@@ -4109,6 +4157,8 @@ onBeforeUnmount(() => {
                   </tr>
                 </tbody>
               </table>
+                </div>
+              </details>
             </div>
 
             <section class="discovery-memory-section">
@@ -4593,10 +4643,11 @@ onBeforeUnmount(() => {
             </div>
           </section>
 
-          <div class="section-row discovery-section-title">
-            <h3>Pending Energrid onboarding</h3>
-            <span>{{ discoveredDevices.length }} pending</span>
-          </div>
+          <details class="discovery-accordion discovery-onboarding-accordion">
+            <summary>
+              <strong>Pending Energrid onboarding</strong>
+              <span>{{ discoveredDevices.length }} pending</span>
+            </summary>
 
           <div class="discovery-empty" v-if="discoveredDevices.length === 0">
             <strong>No pending devices</strong>
@@ -4681,6 +4732,8 @@ onBeforeUnmount(() => {
               </div>
             </article>
           </div>
+
+          </details>
 
           <div class="section-row discovery-section-title">
             <h3>Approved from onboarding</h3>
