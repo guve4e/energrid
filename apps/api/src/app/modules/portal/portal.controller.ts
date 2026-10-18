@@ -16,8 +16,10 @@ import {
 } from '@nestjs/common'
 import { ApiExcludeController } from '@nestjs/swagger'
 import { map } from 'rxjs'
+import { DeviceAiInvestigationService } from '../llm/device-ai-investigation.service'
 import { DeviceControlService } from '../devices/device-control.service'
 import { DeviceDiagnosticsService } from '../devices/device-diagnostics.service'
+import { DeviceDiscoveryMemoryStore } from '../devices/device-discovery-memory.store'
 import { DeviceLanDiscoveryService } from '../devices/device-lan-discovery.service'
 import { DeviceMqttIngestService } from '../devices/device-mqtt-ingest.service'
 import { DeviceRegistryService } from '../devices/device-registry.service'
@@ -40,6 +42,8 @@ export class PortalController {
     private readonly mqttIngest: DeviceMqttIngestService,
     private readonly deviceRegistry: DeviceRegistryService,
     private readonly diagnostics: DeviceDiagnosticsService,
+    private readonly deviceAi: DeviceAiInvestigationService,
+    private readonly discoveryMemory: DeviceDiscoveryMemoryStore,
   ) {}
 
   @Get()
@@ -63,6 +67,60 @@ export class PortalController {
         this.deviceRegistry.registerDiscoveredDevice(candidate)
     }
     return scan
+  }
+
+  @Get('network/memory')
+  async getNetworkDiscoveryMemory(@Req() request: DeviceProxyRequest) {
+    assertPortalControlToken(request)
+
+    const [devices, summary] = await Promise.all([
+      this.discoveryMemory.list(),
+      this.discoveryMemory.summary(),
+    ])
+
+    return { summary, devices }
+  }
+
+  @Get('network/memory/summary')
+  async getNetworkDiscoveryMemorySummary(
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+    return this.discoveryMemory.summary()
+  }
+
+  @Post('network/:deviceId/investigate')
+  async investigateNetworkDeviceWithAi(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+
+    const state = await this.stateService.getState()
+
+    return this.deviceAi.investigate(
+      deviceId,
+      state.networkDevices,
+    )
+  }
+
+  @Get('network/:deviceId/investigations')
+  async listNetworkDeviceInvestigations(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+    return this.deviceAi.listHistory(deviceId, 50)
+  }
+
+  @Get('network/:deviceId/investigations/:investigationId')
+  async getNetworkDeviceInvestigation(
+    @Param('deviceId') deviceId: string,
+    @Param('investigationId') investigationId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+    return this.deviceAi.getHistoryRecord(deviceId, investigationId)
   }
 
   @Get('bus/mqtt')

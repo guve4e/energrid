@@ -303,6 +303,25 @@ type VoiceConfig = {
 
 type PortalDevice = NonNullable<PortalState['devices']>[number];
 type NetworkDevice = NonNullable<PortalState['networkDevices']>[number];
+
+type KnownNetworkDevice = {
+  schemaVersion: 1;
+  identity: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  lastScanId: string;
+  device: NetworkDevice;
+};
+
+type DiscoveryMemoryResponse = {
+  summary: {
+    lastScanId: string | null;
+    known: number;
+    observedInLatestScan: number;
+    notObservedInLatestScan: number;
+  };
+  devices: KnownNetworkDevice[];
+};
 type PortalSystem = NonNullable<PortalState['systems']>[number];
 type MqttDebugMessage = NonNullable<
   PortalState['bus']
@@ -402,6 +421,10 @@ const state = ref<PortalState | null>(null);
 const loadingState = ref(false);
 const stateError = ref('');
 const scanningNetwork = ref(false);
+const discoveryMemory = ref<DiscoveryMemoryResponse | null>(null);
+const discoveryMemoryLoading = ref(false);
+const discoveryMemoryError = ref('');
+const discoveryMemoryExpanded = ref(false);
 const discoveryDecisionBusy = ref<Record<string, string>>({});
 const findingHttpPageByDeviceId = ref<Record<string, boolean>>({});
 const discoveryView = ref<'capable' | 'all'>('all');
@@ -904,17 +927,298 @@ const deviceSourceStats = computed(() => {
   ];
 });
 const networkZones = computed(() => state.value?.networkZones || []);
+
+type AiEvidenceRecord = {
+  id: string;
+  source: string;
+  attribute: string;
+  value: string | number | boolean;
+  observedAt: string;
+  confidence: string;
+};
+
+type AiHypothesis = {
+  id: string;
+  claim: string;
+  confidence: number;
+  supportingEvidenceIds: string[];
+  contradictingEvidenceIds: string[];
+  missingEvidence: string[];
+};
+
+type AiInvestigationProposal = {
+  id: string;
+  action: string;
+  reason: string;
+  requiredEvidenceIds: string[];
+  requiresApproval: true;
+  status: 'proposed';
+};
+
+type AiInvestigationResult = {
+  deviceId: string;
+  provider: string;
+  model: string;
+  assessment?: {
+    schemaVersion: 1;
+    deviceId: string;
+    snapshotId: string;
+    hypotheses: AiHypothesis[];
+    proposals: AiInvestigationProposal[];
+  };
+  evidenceSnapshot?: {
+    id: string;
+    schemaVersion: 1;
+    deviceId: string;
+    createdAt: string;
+    evidence: AiEvidenceRecord[];
+  };
+  report: {
+    summary: string;
+    findings: string[];
+    unknowns: string[];
+    nextSteps: string[];
+  };
+};
+
+type AiHistoryRecord = {
+  schemaVersion: 1;
+  id: string;
+  deviceId: string;
+  createdAt: string;
+  result: AiInvestigationResult;
+};
+
+const aiHistory = ref<Record<string, AiHistoryRecord[]>>({});
+const aiHistoryLoading = ref<Record<string, boolean>>({});
+const aiHistoryErrors = ref<Record<string, string>>({});
+const selectedAiHistoryId = ref<string | null>(null);
+
+async function loadAiHistory(deviceId: string): Promise<void> {
+  if (aiHistoryLoading.value[deviceId]) return;
+
+  aiHistoryLoading.value[deviceId] = true;
+  delete aiHistoryErrors.value[deviceId];
+
+  try {
+    const response = await fetch(
+      `${apiBase}/portal/network/${encodeURIComponent(deviceId)}/investigations`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken.value}`,
+        },
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error(`History request failed (${response.status})`);
+    }
+
+    aiHistory.value[deviceId] =
+      (await response.json()) as AiHistoryRecord[];
+  } catch (error) {
+    aiHistoryErrors.value[deviceId] =
+      error instanceof Error ? error.message : 'History unavailable';
+  } finally {
+    aiHistoryLoading.value[deviceId] = false;
+  }
+}
+
+function openAiHistoryRecord(record: AiHistoryRecord): void {
+  selectedAiDeviceId.value = record.deviceId;
+  selectedAiHistoryId.value = record.id;
+  aiReports.value[record.deviceId] = record.result;
+  void revealDeviceIntelligence();
+}
+
+const aiReports = ref<Record<string, AiInvestigationResult>>({});
+const aiErrors = ref<Record<string, string>>({});
+const aiInvestigating = ref<Record<string, boolean>>({});
+
+const deviceIntelligencePanel = ref<HTMLElement | null>(null);
+
+async function revealDeviceIntelligence(): Promise<void> {
+  await nextTick();
+  deviceIntelligencePanel.value?.scrollIntoView({
+    behavior: 'smooth',
+    block: 'start',
+  });
+}
+
+async function investigateNetworkDeviceWithAi(device: NetworkDevice) {
+  selectedAiDeviceId.value = device.id;
+  selectedAiHistoryId.value = null;
+  void loadAiHistory(device.id);
+  void revealDeviceIntelligence();
+
+  if (aiInvestigating.value[device.id]) return;
+
+  aiInvestigating.value[device.id] = true;
+  delete aiErrors.value[device.id];
+  delete aiReports.value[device.id];
+
+  try {
+    const response = await fetch(
+      `${apiBase}/portal/network/${encodeURIComponent(device.id)}/investigate`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken.value}`,
+        },
+      },
+    );
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const message = body.message;
+      throw new Error(
+        typeof message === 'string'
+          ? message
+          : Array.isArray(message)
+            ? message.join(', ')
+            : `Investigation failed (${response.status})`,
+      );
+    }
+
+    aiReports.value[device.id] =
+      (await response.json()) as AiInvestigationResult;
+
+    void loadAiHistory(device.id);
+
+    if (selectedAiDeviceId.value === device.id) {
+      void revealDeviceIntelligence();
+    }
+  } catch (error) {
+    aiErrors.value[device.id] =
+      error instanceof Error ? error.message : 'Investigation failed';
+  } finally {
+    aiInvestigating.value[device.id] = false;
+  }
+}
+
+const deviceIntelligenceSearch = ref('');
+const selectedAiDeviceId = ref<string | null>(null);
+
+const selectedAiDevice = computed(() =>
+  networkDevices.value.find(
+    (device) => device.id === selectedAiDeviceId.value,
+  ) || null,
+);
+
+const selectedAiReport = computed(() =>
+  selectedAiDeviceId.value
+    ? aiReports.value[selectedAiDeviceId.value]
+    : null,
+);
+
+function aiEvidenceLabel(
+  result: AiInvestigationResult,
+  evidenceId: string,
+): string {
+  const evidence = result.evidenceSnapshot?.evidence.find(
+    (item) => item.id === evidenceId,
+  );
+
+  if (!evidence) return `Unresolved evidence: ${evidenceId}`;
+
+  return `${evidence.attribute} = ${String(evidence.value)} (${evidence.source})`;
+}
+
+function aiConfidenceLabel(confidence: number): string {
+  return `${Math.round(confidence * 100)}% model estimate`;
+}
+
+const selectedAiError = computed(() =>
+  selectedAiDeviceId.value
+    ? aiErrors.value[selectedAiDeviceId.value]
+    : null,
+);
+
 const networkDevices = computed(() => state.value?.networkDevices || []);
+
+const historicalNetworkDevices = computed(() => {
+  const memory = discoveryMemory.value;
+  if (!memory) return [];
+
+  return memory.devices.map((record) => ({
+    ...record,
+    observedInLatestScan:
+      memory.summary.lastScanId !== null &&
+      record.lastScanId === memory.summary.lastScanId,
+  }));
+});
+
+function discoveryMemoryDate(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleString();
+}
+
+async function loadDiscoveryMemory() {
+  if (!accessToken.value) {
+    discoveryMemory.value = null;
+    return;
+  }
+
+  discoveryMemoryLoading.value = true;
+  discoveryMemoryError.value = '';
+
+  try {
+    const response = await fetch(`${apiBase}/portal/network/memory`, {
+      headers: { Authorization: `Bearer ${accessToken.value}` },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Discovery Memory unavailable (${response.status})`);
+    }
+
+    discoveryMemory.value =
+      (await response.json()) as DiscoveryMemoryResponse;
+  } catch (error) {
+    discoveryMemoryError.value =
+      error instanceof Error ? error.message : 'Discovery Memory unavailable';
+  } finally {
+    discoveryMemoryLoading.value = false;
+  }
+}
 const energridCapableNetworkDevices = computed(() =>
   networkDevices.value.filter((device) =>
     isEnergridCapableNetworkDevice(device),
   ),
 );
-const visibleNetworkDevices = computed(() =>
-  discoveryView.value === 'all'
+const visibleNetworkDevices = computed(() => {
+  const query = deviceIntelligenceSearch.value.trim().toLowerCase();
+
+  // Search the complete scan, even when the Shelly filter is active.
+  // This makes it possible to find an unknown host immediately.
+  const base = query
     ? networkDevices.value
-    : energridCapableNetworkDevices.value,
-);
+    : discoveryView.value === 'all'
+      ? networkDevices.value
+      : energridCapableNetworkDevices.value;
+
+  if (!query) return base;
+
+  return base.filter((device) =>
+    [
+      device.id,
+      device.ipAddress,
+      device.hostname,
+      device.macAddress,
+      device.vendor,
+      device.model,
+      device.protocol,
+      device.app,
+      device.reason,
+      device.networkZoneName,
+    ]
+      .filter(Boolean)
+      .some((value) =>
+        String(value).toLowerCase().includes(query),
+      ),
+  );
+});
 const networkDeviceSummary = computed(() => ({
   total: networkDevices.value.length,
   capable: energridCapableNetworkDevices.value.length,
@@ -1315,6 +1619,7 @@ async function scanNetwork() {
       `[discovery] scan complete; ${result.devices.length} devices visible`,
     );
     await loadState();
+    await loadDiscoveryMemory();
   } catch (error) {
     stateError.value =
       error instanceof Error ? error.message : 'Network scan unavailable';
@@ -2018,6 +2323,9 @@ async function loadState() {
     }
     if (!response.ok) throw new Error('State unavailable');
     state.value = (await response.json()) as PortalState;
+    if (activePage.value === 'discovery') {
+      await loadDiscoveryMemory();
+    }
     if (activePage.value === 'bus') {
       await loadMqttBus();
       startMqttBusStream();
@@ -3637,6 +3945,22 @@ onBeforeUnmount(() => {
                 >
               </div>
               <div class="discovery-toolbar">
+                <input
+                  v-model="deviceIntelligenceSearch"
+                  type="search"
+                  aria-label="Search network devices"
+                  placeholder="Search IP, hostname, MAC, vendor..."
+                  style="min-width: 230px; max-width: 350px"
+                />
+                <button
+                  v-if="deviceIntelligenceSearch"
+                  type="button"
+                  class="secondary"
+                  @click="deviceIntelligenceSearch = ''"
+                >
+                  Clear
+                </button>
+
                 <span
                   >{{ visibleNetworkDevices.length }} shown ·
                   {{ networkDevices.length }} found</span
@@ -3692,7 +4016,11 @@ onBeforeUnmount(() => {
               class="discovery-empty compact"
               v-else-if="visibleNetworkDevices.length === 0"
             >
-              <strong>No Energrid-capable devices in this view</strong>
+              <strong>
+                {{ deviceIntelligenceSearch
+                  ? 'No devices match your search'
+                  : 'No Energrid-capable devices in this view' }}
+              </strong>
               <span
                 >Switch to all devices to see every host the site brain found on
                 the configured networks.</span
@@ -3748,6 +4076,16 @@ onBeforeUnmount(() => {
                     </td>
                     <td data-label="Actions">
                       <div class="network-actions">
+
+                        <button
+                          type="button"
+                          class="secondary"
+                          :disabled="aiInvestigating[device.id]"
+                          @click="investigateNetworkDeviceWithAi(device)"
+                        >
+                          {{ aiInvestigating[device.id] ? 'Investigating…' : 'Investigate with AI' }}
+                        </button>
+
                         <button v-if="device.components?.length || deviceCards.some(candidate => candidate.metadata?.physicalId === device.id)" type="button" class="primary" @click="reviewNetworkDevice(device)">Review channels</button>
                         <span v-else>{{ device.vendor === 'Shelly' ? 'Channels unavailable' : 'Adapter needed' }}</span>
                         <a
@@ -3772,7 +4110,488 @@ onBeforeUnmount(() => {
                 </tbody>
               </table>
             </div>
+
+            <section class="discovery-memory-section">
+              <div class="section-row">
+                <div>
+                  <h3>Discovery Memory</h3>
+                  <span class="section-help">
+                    Persistent network history. Not observed does not mean offline.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  class="secondary"
+                  :disabled="discoveryMemoryLoading"
+                  @click="loadDiscoveryMemory"
+                >
+                  {{ discoveryMemoryLoading ? 'Loading...' : 'Refresh memory' }}
+                </button>
+              </div>
+
+              <p v-if="discoveryMemoryError" role="alert">
+                {{ discoveryMemoryError }}
+              </p>
+
+              <div v-if="discoveryMemory" class="network-stat-grid">
+                <div>
+                  <span>Known</span>
+                  <strong>{{ discoveryMemory.summary.known }}</strong>
+                  <small>Remembered across scans</small>
+                </div>
+                <div>
+                  <span>Observed this scan</span>
+                  <strong>{{ discoveryMemory.summary.observedInLatestScan }}</strong>
+                  <small>Latest completed scan</small>
+                </div>
+                <div>
+                  <span>Not observed</span>
+                  <strong>{{ discoveryMemory.summary.notObservedInLatestScan }}</strong>
+                  <small>Not necessarily offline</small>
+                </div>
+              </div>
+
+              <div v-if="discoveryMemory" class="section-row">
+                <span class="section-help">
+                  {{ historicalNetworkDevices.length }} historical records
+                </span>
+                <button
+                  type="button"
+                  class="secondary"
+                  :aria-expanded="discoveryMemoryExpanded"
+                  @click="discoveryMemoryExpanded = !discoveryMemoryExpanded"
+                >
+                  {{ discoveryMemoryExpanded ? 'Hide history' : 'Show history' }}
+                </button>
+              </div>
+
+              <div
+                v-if="discoveryMemory && discoveryMemoryExpanded"
+                class="network-table-wrap"
+              >
+                <table class="network-table">
+                  <thead>
+                    <tr>
+                      <th>Device</th>
+                      <th>Last known address</th>
+                      <th>Model</th>
+                      <th>First seen</th>
+                      <th>Last seen</th>
+                      <th>Observation</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="record in historicalNetworkDevices"
+                      :key="record.identity"
+                    >
+                      <td data-label="Device">
+                        <strong>
+                          {{ record.device.vendor || record.device.hostname || 'Network device' }}
+                        </strong>
+                        <span>{{ record.device.id }}</span>
+                      </td>
+                      <td data-label="Last known address">
+                        <strong>{{ record.device.ipAddress }}</strong>
+                        <span>{{ record.device.macAddress || 'MAC unknown' }}</span>
+                      </td>
+                      <td data-label="Model">
+                        {{ record.device.model || record.device.protocol || 'Unknown' }}
+                      </td>
+                      <td data-label="First seen">
+                        {{ discoveryMemoryDate(record.firstSeenAt) }}
+                      </td>
+                      <td data-label="Last seen">
+                        {{ discoveryMemoryDate(record.lastSeenAt) }}
+                      </td>
+                      <td data-label="Observation">
+                        <span>
+                          {{
+                            record.observedInLatestScan
+                              ? 'Observed in latest scan'
+                              : 'Not observed in latest scan'
+                          }}
+                        </span>
+                      </td>
+                    </tr>
+                    <tr v-if="historicalNetworkDevices.length === 0">
+                      <td colspan="6">
+                        No devices remembered yet. Run a network scan.
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
           </div>
+
+          <section
+            v-if="selectedAiDeviceId"
+            class="panel"
+            ref="deviceIntelligencePanel"
+            aria-label="Device Intelligence investigation"
+            style="margin-top: 24px; padding: 24px"
+          >
+            <div class="section-row">
+              <div>
+                <p class="eyebrow">Device Intelligence</p>
+                <h3>
+                  {{ selectedAiDevice?.hostname ||
+                     selectedAiDevice?.ipAddress ||
+                     selectedAiDeviceId }}
+                </h3>
+                <span class="section-help">
+                  {{ selectedAiDevice?.ipAddress || selectedAiDeviceId }}
+                  · Evidence-based AI investigation
+                </span>
+              </div>
+
+              <button
+                type="button"
+                class="secondary"
+                @click="selectedAiDeviceId = null"
+              >
+                Close
+              </button>
+            </div>
+
+            <p
+              v-if="aiInvestigating[selectedAiDeviceId]"
+              role="status"
+            >
+              Investigating device evidence...
+            </p>
+
+            <p
+              v-if="selectedAiError"
+              role="alert"
+              class="error"
+            >
+              {{ selectedAiError }}
+            </p>
+
+            <section class="device-ai-history">
+              <div class="section-row">
+                <div>
+                  <h4>Investigation history</h4>
+                  <p class="section-help">
+                    Saved locally · Reopen without AI inference
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  class="secondary"
+                  :disabled="!!aiHistoryLoading[selectedAiDeviceId]"
+                  @click="loadAiHistory(selectedAiDeviceId)"
+                >
+                  Refresh history
+                </button>
+              </div>
+
+              <p
+                v-if="aiHistoryLoading[selectedAiDeviceId]"
+                role="status"
+                class="section-help"
+              >
+                Loading saved investigations...
+              </p>
+
+              <p
+                v-if="aiHistoryErrors[selectedAiDeviceId]"
+                role="alert"
+                class="error"
+              >
+                {{ aiHistoryErrors[selectedAiDeviceId] }}
+              </p>
+
+              <p
+                v-if="
+                  !aiHistoryLoading[selectedAiDeviceId] &&
+                  !aiHistoryErrors[selectedAiDeviceId] &&
+                  !(aiHistory[selectedAiDeviceId]?.length)
+                "
+                class="section-help"
+              >
+                No saved investigations yet.
+              </p>
+
+              <div
+                v-if="aiHistory[selectedAiDeviceId]?.length"
+                class="device-ai-history-list"
+              >
+                <button
+                  v-for="record in aiHistory[selectedAiDeviceId]"
+                  :key="record.id"
+                  type="button"
+                  class="device-ai-history-item"
+                  :class="{ 'is-selected': selectedAiHistoryId === record.id }"
+                  @click="openAiHistoryRecord(record)"
+                >
+                  <strong>
+                    {{ new Date(record.createdAt).toLocaleString() }}
+                  </strong>
+
+                  <span>
+                    {{ record.result.provider }} /
+                    {{ record.result.model }}
+                  </span>
+
+                  <small>
+                    {{ record.result.evidenceSnapshot?.evidence.length ?? 0 }}
+                    evidence records
+                    ·
+                    {{ record.result.assessment?.hypotheses.length ?? 0 }}
+                    hypotheses
+                  </small>
+                </button>
+              </div>
+            </section>
+
+            <div
+              v-if="selectedAiReport"
+              class="device-ai-report"
+            >
+              <p>{{ selectedAiReport.report.summary }}</p>
+
+              <div class="device-ai-report-grid">
+                <section>
+                  <h4>Observed findings</h4>
+                  <ul>
+                    <li
+                      v-for="(finding, index) in selectedAiReport.report.findings"
+                      :key="index"
+                    >
+                      {{ finding }}
+                    </li>
+                  </ul>
+                </section>
+
+                <section>
+                  <h4>Unknowns and evidence gaps</h4>
+                  <ul>
+                    <li
+                      v-for="(unknown, index) in selectedAiReport.report.unknowns"
+                      :key="index"
+                    >
+                      {{ unknown }}
+                    </li>
+                  </ul>
+                </section>
+
+                <section>
+                  <h4>Suggested investigations</h4>
+                  <ul>
+                    <li
+                      v-for="(step, index) in selectedAiReport.report.nextSteps"
+                      :key="index"
+                    >
+                      {{ step }}
+                    </li>
+                  </ul>
+                </section>
+              </div>
+
+              <!-- Evidence snapshot -->
+              <section
+                v-if="selectedAiReport.evidenceSnapshot"
+                class="device-ai-evidence"
+              >
+                <div class="section-row">
+                  <div>
+                    <h4>Evidence snapshot</h4>
+                    <p class="section-help">
+                      {{ selectedAiReport.evidenceSnapshot.id }}
+                      · {{ selectedAiReport.evidenceSnapshot.evidence.length }} records
+                    </p>
+                  </div>
+                </div>
+
+                <p
+                  v-if="!selectedAiReport.evidenceSnapshot.evidence.length"
+                  class="section-help"
+                >
+                  No structured observations available.
+                </p>
+
+                <div v-else class="device-ai-evidence-list">
+                  <article
+                    v-for="item in selectedAiReport.evidenceSnapshot.evidence"
+                    :key="item.id"
+                    class="device-ai-evidence-item"
+                  >
+                    <div class="device-ai-evidence-heading">
+                      <strong>{{ item.attribute }}</strong>
+                      <span>{{ item.source }}</span>
+                    </div>
+
+                    <div class="device-ai-evidence-value">
+                      {{ String(item.value) }}
+                    </div>
+
+                    <div class="device-ai-evidence-meta">
+                      <code>{{ item.id }}</code>
+                      <span>{{ item.confidence }}</span>
+                      <time :datetime="item.observedAt">
+                        {{ new Date(item.observedAt).toLocaleString() }}
+                      </time>
+                    </div>
+                  </article>
+                </div>
+              </section>
+
+              <!-- Evidence-backed hypotheses -->
+              <section
+                v-if="selectedAiReport.assessment"
+                class="device-ai-hypotheses"
+              >
+                <h4>
+                  Hypotheses
+                  ({{ selectedAiReport.assessment.hypotheses.length }})
+                </h4>
+
+                <p
+                  v-if="!selectedAiReport.assessment.hypotheses.length"
+                  class="section-help"
+                >
+                  No hypotheses were generated from the available evidence.
+                </p>
+
+                <div v-else class="device-ai-card-list">
+                  <article
+                    v-for="hypothesis in selectedAiReport.assessment.hypotheses"
+                    :key="hypothesis.id"
+                    class="device-ai-card"
+                  >
+                    <div class="device-ai-card-heading">
+                      <strong>{{ hypothesis.claim }}</strong>
+                      <span class="device-ai-confidence">
+                        {{ aiConfidenceLabel(hypothesis.confidence) }}
+                      </span>
+                    </div>
+
+                    <div class="device-ai-card-detail">
+                      <strong>Supporting evidence</strong>
+                      <ul v-if="hypothesis.supportingEvidenceIds.length">
+                        <li
+                          v-for="id in hypothesis.supportingEvidenceIds"
+                          :key="id"
+                        >
+                          {{ aiEvidenceLabel(selectedAiReport, id) }}
+                          <code>{{ id }}</code>
+                        </li>
+                      </ul>
+                      <p v-else class="section-help">
+                        No supporting evidence referenced.
+                      </p>
+                    </div>
+
+                    <div
+                      v-if="hypothesis.contradictingEvidenceIds.length"
+                      class="device-ai-card-detail"
+                    >
+                      <strong>Contradicting evidence</strong>
+                      <ul>
+                        <li
+                          v-for="id in hypothesis.contradictingEvidenceIds"
+                          :key="id"
+                        >
+                          {{ aiEvidenceLabel(selectedAiReport, id) }}
+                          <code>{{ id }}</code>
+                        </li>
+                      </ul>
+                    </div>
+
+                    <div
+                      v-if="hypothesis.missingEvidence.length"
+                      class="device-ai-card-detail"
+                    >
+                      <strong>Missing evidence</strong>
+                      <ul>
+                        <li
+                          v-for="(gap, index) in hypothesis.missingEvidence"
+                          :key="index"
+                        >
+                          {{ gap }}
+                        </li>
+                      </ul>
+                    </div>
+                  </article>
+                </div>
+              </section>
+
+              <!-- Human-approval-required proposals -->
+              <section
+                v-if="selectedAiReport.assessment"
+                class="device-ai-proposals"
+              >
+                <h4>
+                  Investigation proposals
+                  ({{ selectedAiReport.assessment.proposals.length }})
+                </h4>
+
+                <p
+                  v-if="!selectedAiReport.assessment.proposals.length"
+                  class="section-help"
+                >
+                  No additional investigations proposed.
+                </p>
+
+                <div v-else class="device-ai-card-list">
+                  <article
+                    v-for="proposal in selectedAiReport.assessment.proposals"
+                    :key="proposal.id"
+                    class="device-ai-card"
+                  >
+                    <div class="device-ai-card-heading">
+                      <strong>
+                        {{ proposal.action.replaceAll('_', ' ') }}
+                      </strong>
+                      <span class="device-ai-approval">
+                        Requires approval
+                      </span>
+                    </div>
+
+                    <p>{{ proposal.reason }}</p>
+
+                    <div
+                      v-if="proposal.requiredEvidenceIds.length"
+                      class="device-ai-card-detail"
+                    >
+                      <strong>Evidence references</strong>
+                      <ul>
+                        <li
+                          v-for="id in proposal.requiredEvidenceIds"
+                          :key="id"
+                        >
+                          {{ aiEvidenceLabel(selectedAiReport, id) }}
+                          <code>{{ id }}</code>
+                        </li>
+                      </ul>
+                    </div>
+
+                    <p class="section-help">
+                      Proposed only · No action authorized or executed
+                    </p>
+                  </article>
+                </div>
+              </section>
+
+              <p
+                v-if="!selectedAiReport.assessment"
+                class="section-help"
+              >
+                Structured assessment unavailable for this investigation.
+              </p>
+
+              <p class="section-help">
+                {{ selectedAiReport.provider }} /
+                {{ selectedAiReport.model }}
+                · AI suggestions are not verified device facts.
+                No device commands were executed.
+              </p>
+            </div>
+          </section>
 
           <div class="section-row discovery-section-title">
             <h3>Pending Energrid onboarding</h3>

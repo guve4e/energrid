@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common'
+import { DeviceDiscoveryMemoryStore } from './device-discovery-memory.store'
 import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { networkInterfaces } from 'node:os'
@@ -34,6 +35,10 @@ export class DeviceLanDiscoveryService {
   private lastScan: NetworkDiscoveredDevice[] = []
   private lastZones: NetworkDiscoveryZone[] = []
 
+  constructor(
+    private readonly discoveryMemory: DeviceDiscoveryMemoryStore,
+  ) {}
+
   getLastScan(): NetworkDiscoveredDevice[] {
     return this.lastScan
   }
@@ -50,12 +55,14 @@ export class DeviceLanDiscoveryService {
     const scannedAt = new Date().toISOString()
     const zones = configuredNetworkZones()
     const reachableDevices = await activeScanZones(zones)
+    const tcpDevices = await tcpDiscoverZones(zones, reachableDevices)
     const arpDevices = await readNeighborTable()
     const routerClients = await readRouterClientCandidates()
     const candidates = mergeNeighborCandidates([
       ...arpDevices,
       ...routerClients,
       ...reachableDevices,
+      ...tcpDevices,
       ...zones.flatMap((zone) =>
         zone.seedIps.map((ipAddress) => ({
           ipAddress,
@@ -72,6 +79,7 @@ export class DeviceLanDiscoveryService {
 
     this.lastZones = zones
     this.lastScan = dedupeNetworkDevices(devices)
+    await this.discoveryMemory.recordScan(scannedAt, this.lastScan)
     this.logger.log(`[LAN DISCOVERY] zones=${zones.length} devices=${this.lastScan.length}`)
 
     return {
@@ -571,6 +579,67 @@ async function activeScanZones(
   })
 
   return reachable
+}
+
+const tcpDiscoveryPorts = [80, 443, 22, 8080, 8443]
+
+async function tcpDiscoverZones(
+  zones: NetworkDiscoveryZone[],
+  icmpDevices: NetworkCandidate[],
+): Promise<NetworkCandidate[]> {
+  if (process.env.HOME_LAN_ACTIVE_SCAN_ENABLED === 'false') return []
+
+  const alreadyReachable = new Set(
+    icmpDevices.map((device) => device.ipAddress),
+  )
+
+  const targets = [
+    ...new Set(zones.flatMap((zone) => [
+      ...zone.seedIps,
+      ...(zone.cidr ? ipsInCidr(zone.cidr) : []),
+    ])),
+  ].filter((ipAddress) => !alreadyReachable.has(ipAddress))
+
+  const found: NetworkCandidate[] = []
+
+  await runPool(targets, 24, async (ipAddress) => {
+    for (const port of tcpDiscoveryPorts) {
+      if (await tcpDiscoveryPortOpen(ipAddress, port)) {
+        found.push({
+          ipAddress,
+          status: 'online',
+          confidence: 0.65,
+          reason: `Host accepted a TCP connection on port ${port}.`,
+        })
+        return
+      }
+    }
+  })
+
+  return found
+}
+
+function tcpDiscoveryPortOpen(
+  ipAddress: string,
+  port: number,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = new Socket()
+    let settled = false
+
+    const finish = (open: boolean) => {
+      if (settled) return
+      settled = true
+      socket.destroy()
+      resolve(open)
+    }
+
+    socket.setTimeout(500)
+    socket.once('connect', () => finish(true))
+    socket.once('timeout', () => finish(false))
+    socket.once('error', () => finish(false))
+    socket.connect(port, ipAddress)
+  })
 }
 
 async function pingHost(ipAddress: string): Promise<boolean> {

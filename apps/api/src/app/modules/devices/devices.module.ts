@@ -11,6 +11,7 @@ import { DeviceObservationService } from './device-observation.service'
 import { DeviceMatchService } from './device-match.service'
 import { DeviceInvestigationService } from './device-investigation.service'
 import { DeviceInstallationStore } from './device-installation.store'
+import { DeviceDiscoveryMemoryStore } from './device-discovery-memory.store'
 import { TelemetryModule } from '../telemetry/telemetry.module'
 
 @Module({
@@ -20,6 +21,7 @@ import { TelemetryModule } from '../telemetry/telemetry.module'
     DeviceMqttIngestService,
     DeviceHttpPollService,
     DeviceLanDiscoveryService,
+    DeviceDiscoveryMemoryStore,
     DeviceControlService,
     DeviceDiagnosticsService,
     OperationalLogService,
@@ -33,6 +35,7 @@ import { TelemetryModule } from '../telemetry/telemetry.module'
     DeviceRegistryService,
     DeviceMqttIngestService,
     DeviceLanDiscoveryService,
+    DeviceDiscoveryMemoryStore,
     DeviceControlService,
     DeviceDiagnosticsService,
     OperationalLogService,
