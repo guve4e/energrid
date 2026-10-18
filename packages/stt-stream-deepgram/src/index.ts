@@ -55,6 +55,7 @@ export function createDeepgramStreamingSttProvider(): IStreamingSttProvider {
   const dg = createClient(process.env.DEEPGRAM_API_KEY)
 
   return {
+    id: 'deepgram',
     async createSession(input): Promise<StreamingSttSession> {
       const connection = dg.listen.live({
         model: 'nova-3',

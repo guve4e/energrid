@@ -3,6 +3,7 @@ const fs = require('fs')
 const path = require('path')
 const { spawn } = require('child_process')
 const WebSocket = require('ws')
+require('dotenv/config')
 
 const DEFAULT_WS_URL = process.env.VOICE_WS_URL || 'ws://localhost:3000/voice'
 const DEFAULT_CHUNK_SAMPLES = Number(process.env.PCM_CHUNK_SAMPLES || 4096)
@@ -230,7 +231,12 @@ function playAudio(filePath) {
 function createReplayState() {
   return {
     sessionStarted: false,
+    authenticated: false,
     sttFinal: '',
+    inputStartedAt: 0,
+    audioReleasedAt: 0,
+    firstPartialAt: 0,
+    sttFinalAt: 0,
     assistantFinal: '',
     audioChunkCount: 0,
     audioBytes: 0,
@@ -257,6 +263,11 @@ function createMessageLogger(args, outputBaseName, state) {
     }
 
     switch (event.type) {
+      case 'authenticated':
+        state.authenticated = true
+        console.log('[recv] authenticated')
+        return
+
       case 'session_start':
         state.sessionStarted = true
         console.log(
@@ -265,10 +276,12 @@ function createMessageLogger(args, outputBaseName, state) {
         return
 
       case 'stt_partial':
+        state.firstPartialAt ||= Date.now()
         console.log(`[recv] stt_partial ${event.full || event.text || ''}`)
         return
 
       case 'stt_final':
+        state.sttFinalAt = Date.now()
         state.sttFinal = event.full || event.text || ''
         console.log(`[recv] stt_final ${state.sttFinal}`)
         return
@@ -389,6 +402,32 @@ async function main() {
     ws.once('error', reject)
   })
 
+  const token = process.env.PORTAL_CONTROL_TOKEN ||
+    (process.env.NODE_ENV === 'production' ? '' : 'dev-token-admin')
+  if (!token) throw new Error('Set PORTAL_CONTROL_TOKEN in the API environment before replaying audio.')
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => finish(new Error('Voice authentication timed out.')), 5000)
+    const onMessage = (raw) => {
+      let event
+      try {
+        event = JSON.parse(raw.toString())
+      } catch {
+        return
+      }
+      if (event.type === 'authenticated') finish()
+      else if (event.type === 'error') finish(new Error(event.message || 'Voice authentication failed.'))
+    }
+    const finish = (error) => {
+      clearTimeout(timeout)
+      ws.off('message', onMessage)
+      if (error) reject(error)
+      else resolve()
+    }
+    ws.on('message', onMessage)
+    ws.send(JSON.stringify({ type: 'authenticate', token }))
+  })
+
+  state.inputStartedAt = Date.now()
   for (const chunk of chunks) {
     ws.send(chunk)
 
@@ -397,6 +436,7 @@ async function main() {
     }
   }
 
+  state.audioReleasedAt = Date.now()
   ws.send(JSON.stringify({ type: 'end_of_turn' }))
   console.log('[replay] end_of_turn sent')
 
@@ -500,6 +540,15 @@ function printSummary(state) {
   console.log(
     `[summary] ${status} stt="${state.sttFinal}" audioChunks=${state.audioChunkCount} audioBytes=${state.audioBytes}${plan}${fastPath}`,
   )
+  if (state.inputStartedAt) {
+    const firstPartial = state.firstPartialAt
+      ? `${state.firstPartialAt - state.inputStartedAt}ms from audio start`
+      : 'none'
+    const finalAfterRelease = state.sttFinalAt && state.audioReleasedAt
+      ? `${state.sttFinalAt - state.audioReleasedAt}ms after release`
+      : 'none'
+    console.log(`[timing] first_partial=${firstPartial} final=${finalAfterRelease}`)
+  }
 }
 
 main().catch((error) => {

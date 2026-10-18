@@ -96,7 +96,7 @@ export class VoiceRunStoreService {
   }
 
   private enabled(): boolean {
-    return process.env.VOICE_RUNS_ENABLED !== 'false'
+    return process.env.VOICE_RUNS_ENABLED === 'true'
   }
 
   private filePath(): string {

@@ -45,6 +45,7 @@ describe('HomeAutomationService', () => {
 
     process.env = { ...originalEnv };
     delete process.env.HOME_DEVICE_CONTROL_BINDINGS_JSON;
+    delete process.env.HOME_ASSISTANT_ENABLED_DEVICE_IDS;
     delete process.env.HOME_AVAILABLE_DEVICES;
     delete process.env.HOME_KITCHEN_LIGHT_MQTT_TOPIC;
     delete process.env.HOME_KITCHEN_LIGHT_SHELLY_RPC_DEVICES;
@@ -107,6 +108,8 @@ describe('HomeAutomationService', () => {
     process.env.HOME_MQTT_HOST = '192.168.1.6';
     process.env.HOME_KITCHEN_LIGHT_SHELLY_RPC_DEVICES =
       'kitchen.light.wall.led:shellyplus1-cc7b5c0ea5f8:0,kitchen.light.island.led:shellyplus1-78ee4ccf5cf0:0,kitchen.light.cans:shellyplus1-78ee4ccf4268:0';
+    process.env.HOME_ASSISTANT_ENABLED_DEVICE_IDS =
+      'kitchen.light.wall.led,kitchen.light.island.led,kitchen.light.cans';
 
     const service = createService();
 
@@ -175,6 +178,7 @@ describe('HomeAutomationService', () => {
       devices: [
         {
           deviceId: 'bath.light.led',
+          assistantEnabled: true,
           origin: 'shelly',
           physicalId: 'shellyplus1-bathroom',
           channel: 0,
@@ -218,6 +222,47 @@ describe('HomeAutomationService', () => {
         params: { id: 0, on: true },
       }),
     );
+  });
+
+  it('rechecks assistant permission before executing an already prepared action', async () => {
+    process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({ devices: [{
+      id: 'office.desk_lamp',
+      displayName: 'Desk lamp',
+      zoneName: 'Office',
+      protocol: 'mqtt',
+      driver: 'generic-mqtt-switch',
+      target: 'office/desk_lamp',
+      capabilities: ['light'],
+      configured: true,
+      assistantEnabled: false,
+    }] });
+    process.env.HOME_DEVICE_CONTROL_BINDINGS_JSON = JSON.stringify({
+      'office.desk_lamp': {
+        kind: 'generic-mqtt',
+        enabled: true,
+        topic: 'office/desk_lamp/set',
+      },
+    });
+    const service = createService();
+
+    const results = await service.executePlan({
+      intent: 'turn_on_lights',
+      requiresConfirmation: false,
+      spokenReply: 'Confirm the requested action.',
+      actions: [{
+        type: 'light.turn_on',
+        deviceId: 'office.desk_lamp',
+        risk: 'safe',
+        reason: 'test',
+      }],
+    });
+
+    expect(results[0]).toEqual(expect.objectContaining({
+      status: 'skipped',
+      adapter: 'none',
+      message: 'Assistant permission or a ready device route is no longer available.',
+    }));
+    expect(execFileMock).not.toHaveBeenCalled();
   });
 
   it('reads kitchen temperature from an MQTT sensor payload', async () => {

@@ -45,6 +45,9 @@
       "@energrid/domain-automation": [
         "libs/domain-automation/src/index.ts"
       ],
+      "@energrid/domain-voice": [
+        "libs/domain-voice/src/index.ts"
+      ],
       "@energrid/automation-core": [
         "libs/automation-core/src/index.ts"
       ]

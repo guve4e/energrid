@@ -1,5 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common'
-import OpenAI from 'openai'
+import { Inject, Injectable, Logger } from '@nestjs/common'
+import type { SpeechSynthesisProvider } from '@energrid/domain-voice'
+import { SPEECH_SYNTHESIS_PROVIDER } from './speech-provider.tokens'
 
 export interface SynthesizedVoiceAudio {
   format: 'wav'
@@ -10,9 +11,10 @@ export interface SynthesizedVoiceAudio {
 export class VoiceSynthesisService {
   private readonly logger = new Logger(VoiceSynthesisService.name)
 
-  private readonly openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-  })
+  constructor(
+    @Inject(SPEECH_SYNTHESIS_PROVIDER)
+    private readonly provider: SpeechSynthesisProvider,
+  ) {}
 
   async synthesize(text: string): Promise<SynthesizedVoiceAudio> {
     const normalizedText = this.normalizeText(text)
@@ -25,18 +27,14 @@ export class VoiceSynthesisService {
       `Synthesizing assistant audio for text length=${normalizedText.length}`,
     )
 
-    const response = await this.openai.audio.speech.create({
-      model: 'gpt-4o-mini-tts',
-      voice: 'alloy',
-      response_format: 'wav',
-      input: normalizedText,
+    const response = await this.provider.synthesize({
+      text: normalizedText,
+      language: process.env.VOICE_TTS_LANGUAGE || 'bg',
     })
 
-    const arrayBuffer = await response.arrayBuffer()
-
     return {
-      format: 'wav',
-      audioBuffer: Buffer.from(arrayBuffer),
+      format: response.format,
+      audioBuffer: Buffer.from(response.audio),
     }
   }
 

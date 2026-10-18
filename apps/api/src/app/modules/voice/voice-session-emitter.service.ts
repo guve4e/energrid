@@ -138,6 +138,48 @@ export class VoiceSessionEmitterService {
     })
   }
 
+  emitActionConfirmationRequired(
+    session: ActiveVoiceSession,
+    approvalId: string,
+    expiresAt: number,
+    plan: HomeIntentPlan,
+  ): void {
+    this.sendToClient(session, {
+      type: 'action_confirmation_required',
+      sessionId: session.id,
+      approvalId,
+      expiresAt,
+      actions: plan.actions
+        .filter((action) => action.type !== 'status.report')
+        .map(({ type, deviceId, room, value, risk }) => ({
+          type,
+          deviceId: deviceId ?? null,
+          room: room ?? null,
+          value: value ?? null,
+          risk,
+        })),
+    })
+  }
+
+  emitActionConfirmationResult(
+    session: ActiveVoiceSession | undefined,
+    status: 'completed' | 'cancelled' | 'expired' | 'unavailable' | 'failed',
+    results?: HomeActionExecutionResult[],
+  ): void {
+    if (!session) return
+    this.sendToClient(session, {
+      type: 'action_confirmation_result',
+      sessionId: session.id,
+      status,
+      results: results?.map(({ action, status: resultStatus, adapter, message }) => ({
+        action: { type: action.type, deviceId: action.deviceId ?? null },
+        status: resultStatus,
+        adapter,
+        message,
+      })) ?? [],
+    })
+  }
+
   emitTurnEnd(session: ActiveVoiceSession): void {
     session.turnEndEmittedAt = Date.now()
 

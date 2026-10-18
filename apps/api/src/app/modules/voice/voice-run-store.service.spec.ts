@@ -27,7 +27,8 @@ describe('VoiceRunStoreService', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('persists a completed turn and returns newest runs first', () => {
+  it('persists runs only when explicitly enabled and returns newest first', () => {
+    process.env.VOICE_RUNS_ENABLED = 'true'
     const store = new VoiceRunStoreService()
 
     const first = makeSession('session-1', 1000, 'Включи лампите в банята.')
@@ -46,13 +47,14 @@ describe('VoiceRunStoreService', () => {
     expect(store.listRecent(10)[0]).toEqual(
       expect.objectContaining({
         transcript: 'Колко е топло в кухнята?',
-        intent: 'temperature_status',
+        intent: 'status_check',
         runtime: expect.objectContaining({ sttProvider: 'openai' }),
       }),
     )
   })
 
   it('ignores invalid json lines when reading the run file', () => {
+    process.env.VOICE_RUNS_ENABLED = 'true'
     const store = new VoiceRunStoreService()
     const session = makeSession('session-1', 1000, 'test')
     session.turnEndEmittedAt = 2000
@@ -70,6 +72,13 @@ describe('VoiceRunStoreService', () => {
     expect(store.recordTurn(makeSession('session-1', 1000, 'test'), {})).toBeNull()
     expect(store.listRecent()).toEqual([])
   })
+
+  it('does not persist transcripts by default', () => {
+    const store = new VoiceRunStoreService()
+
+    expect(store.recordTurn(makeSession('session-default', 1000, 'private'), {})).toBeNull()
+    expect(store.listRecent()).toEqual([])
+  })
 })
 
 function makeSession(
@@ -83,17 +92,19 @@ function makeSession(
     client: {} as ActiveVoiceSession['client'],
     sttSession: {} as ActiveVoiceSession['sttSession'],
     chunkCount: 3,
+    bufferedAudioBytes: 0,
     audioChunks: [],
     partialTranscript: '',
     finalTranscript: transcript,
     assistantReply: 'ok',
     homeIntentClassification: {
-      intent: transcript.includes('топло') ? 'temperature_status' : 'turn_on_lights',
+      intent: transcript.includes('топло') ? 'status_check' : 'turn_on_lights',
       confidence: 0.9,
       reason: 'test',
     },
     homeIntentPlan: null,
     homeActionExecutionResults: [],
+    pendingActionApproval: null,
     errorMessages: [],
     startedAt,
     firstChunkAt: startedAt,

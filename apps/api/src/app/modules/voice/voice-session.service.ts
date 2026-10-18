@@ -24,6 +24,7 @@ export class VoiceSessionService {
   private readonly speechGatePeakDb = Number(
     process.env.VOICE_SPEECH_GATE_PEAK_DB || -45,
   )
+  private readonly maxAudioBytes = maximumVoiceAudioBytes()
 
   constructor(
     private readonly sttService: VoiceSttService,
@@ -43,10 +44,15 @@ export class VoiceSessionService {
 
   async pushAudio(client: WebSocket, buf: Buffer): Promise<void> {
     const session = this.getSession(client)
-    if (!session || session.turnEnded) return
+    if (!session || session.turnEnded || session.sttFailed) return
 
-    this.storeIncomingAudioChunk(session, buf)
-    await session.sttSession.pushAudio(buf)
+    if (!this.storeIncomingAudioChunk(session, buf) || !session.streamingStt) return
+
+    if (!session.sttStreamingStarted && !this.analyzePcm16Audio(buf).speechGatePassed) return
+    session.sttStreamingStarted = true
+    const next = session.sttPushQueue.then(() => this.pushPendingSttAudio(session))
+    session.sttPushQueue = next
+    await next
   }
 
   async endTurn(client: WebSocket): Promise<void> {
@@ -72,6 +78,42 @@ export class VoiceSessionService {
     this.sessions.delete(client)
   }
 
+  async confirmPendingAction(client: WebSocket, approvalId: unknown): Promise<void> {
+    const session = this.getSession(client)
+    const pending = session?.pendingActionApproval
+    if (!session || !pending || typeof approvalId !== 'string' || pending.id !== approvalId) {
+      this.emitter.emitActionConfirmationResult(session, 'unavailable')
+      return
+    }
+
+    this.clearPendingActionApproval(session)
+    if (pending.expiresAt <= Date.now()) {
+      this.emitter.emitActionConfirmationResult(session, 'expired')
+      return
+    }
+
+    try {
+      const results = await this.homeAutomation.executePlan(pending.plan)
+      session.homeActionExecutionResults = results
+      this.emitter.emitHomeActionExecution(session, results)
+      this.emitter.emitActionConfirmationResult(session, 'completed', results)
+    } catch {
+      this.emitter.emitActionConfirmationResult(session, 'failed')
+    }
+  }
+
+  cancelPendingAction(client: WebSocket, approvalId: unknown): void {
+    const session = this.getSession(client)
+    const pending = session?.pendingActionApproval
+    if (!session || !pending || typeof approvalId !== 'string' || pending.id !== approvalId) {
+      this.emitter.emitActionConfirmationResult(session, 'unavailable')
+      return
+    }
+
+    this.clearPendingActionApproval(session)
+    this.emitter.emitActionConfirmationResult(session, 'cancelled')
+  }
+
   private async createSession(client: WebSocket): Promise<ActiveVoiceSession> {
     const id = randomUUID()
     const conversationId = randomUUID()
@@ -93,8 +135,14 @@ export class VoiceSessionService {
       conversationId,
       client,
       sttSession,
+      streamingStt: this.sttService.isStreamingMode(),
+      sttStreamingStarted: false,
+      sttPushedChunkCount: 0,
+      sttFailed: false,
+      sttPushQueue: Promise.resolve(),
 
       chunkCount: 0,
+      bufferedAudioBytes: 0,
       audioChunks: [],
       partialTranscript: '',
       finalTranscript: '',
@@ -102,6 +150,7 @@ export class VoiceSessionService {
       homeIntentClassification: null,
       homeIntentPlan: null,
       homeActionExecutionResults: [],
+      pendingActionApproval: null,
       errorMessages: [],
 
       startedAt: Date.now(),
@@ -150,13 +199,15 @@ export class VoiceSessionService {
     const message =
       error instanceof Error ? error.message : 'Unhandled STT event error'
     session.errorMessages.push(message)
+    session.sttFailed = true
 
     this.logger.error(
       `[VOICE EVENT ERROR] ${session.id} ${message}`,
       error instanceof Error ? error.stack : undefined,
     )
 
-    this.emitter.emitError(session, message)
+    this.emitter.emitError(session, 'Voice processing failed. Please try again.')
+    void this.closeSttSession(session)
   }
 
   private isTurnAlreadyClosed(session: ActiveVoiceSession): boolean {
@@ -198,10 +249,32 @@ export class VoiceSessionService {
         return
       }
 
+      if (session.sttFailed) {
+        this.emitter.emitTurnEnd(session)
+        this.trace.recordCompletedTurn(session)
+        return
+      }
+
       session.sttInputEndedAt = Date.now()
+      await session.sttPushQueue
+      if (session.sttFailed) {
+        this.emitter.emitTurnEnd(session)
+        this.trace.recordCompletedTurn(session)
+        return
+      }
+      await this.pushPendingSttAudio(session)
+      if (session.sttFailed) {
+        this.emitter.emitTurnEnd(session)
+        this.trace.recordCompletedTurn(session)
+        return
+      }
       await session.sttSession.endInput()
     } catch (error) {
-      this.logger.warn(`STT endInput error: ${String(error)}`)
+      const message = error instanceof Error ? error.message : String(error)
+      this.logger.warn(`STT endInput error: ${message}`)
+      this.emitter.emitError(session, 'Speech recognition could not finish this turn.')
+      this.emitter.emitTurnEnd(session)
+      this.trace.recordCompletedTurn(session)
     }
   }
 
@@ -216,9 +289,19 @@ export class VoiceSessionService {
   private storeIncomingAudioChunk(
     session: ActiveVoiceSession,
     buf: Buffer,
-  ): void {
+  ): boolean {
+    if (session.bufferedAudioBytes + buf.length > this.maxAudioBytes) {
+      this.emitter.emitError(
+        session,
+        'Voice turn exceeded the maximum audio size. Please try a shorter request.',
+      )
+      session.client.close(1009, 'Voice turn too large')
+      return false
+    }
+
     session.chunkCount++
     session.audioChunks.push(Buffer.from(buf))
+    session.bufferedAudioBytes += buf.length
     session.firstChunkAt ??= Date.now()
     session.lastChunkAt = Date.now()
 
@@ -229,6 +312,27 @@ export class VoiceSessionService {
     }
 
     this.emitter.emitChunkDebug(session, buf.length)
+    return true
+  }
+
+  private async pushPendingSttAudio(session: ActiveVoiceSession): Promise<void> {
+    while (
+      !session.sttFailed &&
+      session.sttPushedChunkCount < session.audioChunks.length
+    ) {
+      const chunk = session.audioChunks[session.sttPushedChunkCount]
+      try {
+        await session.sttSession.pushAudio(chunk)
+        session.sttPushedChunkCount++
+      } catch (error) {
+        if (!session.sttFailed) {
+          session.sttFailed = true
+          this.handleVoiceEventError(session, error)
+        }
+        await this.closeSttSession(session)
+        return
+      }
+    }
   }
 
   private isMeaningfulTranscript(text: string): boolean {
@@ -352,6 +456,7 @@ export class VoiceSessionService {
     }
 
     this.clearPendingFinalTimer(session)
+    this.clearPendingActionApproval(session)
 
     session.pendingFinalTimer = setTimeout(() => {
       void this.finalizePendingTranscript(session)
@@ -372,7 +477,7 @@ export class VoiceSessionService {
         return
 
       case 'stt_error':
-        await this.handleSttError(session, event.message)
+        await this.handleSttError(session, event.message, event.diagnostic)
         return
 
       default:
@@ -387,7 +492,7 @@ export class VoiceSessionService {
     if (session.assistantStarted) return
 
     session.partialTranscript += text
-    this.logger.log(`[STT PARTIAL] ${session.id} ${text}`)
+    this.logger.log(`[STT PARTIAL] ${session.id} chars=${text.length}`)
     this.emitter.emitSttPartial(session, text)
   }
 
@@ -421,7 +526,10 @@ export class VoiceSessionService {
   private async handleSttError(
     session: ActiveVoiceSession,
     message: string,
+    diagnostic?: Extract<StreamingSttEvent, { type: 'stt_error' }>['diagnostic'],
   ): Promise<void> {
+    if (session.sttFailed) return
+
     const isBufferTooSmall =
       typeof message === 'string' && message.includes('buffer too small')
 
@@ -445,9 +553,21 @@ export class VoiceSessionService {
       return
     }
 
+    session.sttFailed = true
     this.logger.error(`[STT ERROR] ${session.id} ${message}`)
-    this.trace.appendSttErrorTrace(session, message)
-    this.emitter.emitError(session, message)
+    const safeDiagnostic = sanitizeSttDiagnostic(diagnostic)
+    const diagnosticText = formatSttDiagnostic(safeDiagnostic)
+    if (diagnosticText) {
+      this.logger.error(`[STT PROVIDER DIAGNOSTIC] ${session.id} ${diagnosticText}`)
+    }
+    this.trace.appendSttErrorTrace(session, message, safeDiagnostic)
+    this.emitter.emitError(session, 'Speech recognition failed. Please try again.')
+    await this.closeSttSession(session)
+    if (session.clientTurnEnded && !hasMeaningfulPendingTranscript) {
+      session.finalized = true
+      this.emitter.emitTurnEnd(session)
+      this.trace.recordCompletedTurn(session)
+    }
   }
 
   private async finalizePendingTranscript(
@@ -483,7 +603,9 @@ export class VoiceSessionService {
       )
 
       this.trace.appendAssistantErrorTrace(session, message)
-      this.emitter.emitError(session, message)
+      this.emitter.emitError(session, 'The assistant could not complete this turn.')
+      this.emitter.emitTurnEnd(session)
+      this.trace.recordCompletedTurn(session)
     }
   }
 
@@ -502,7 +624,7 @@ export class VoiceSessionService {
 
     if (!this.isMeaningfulTranscript(transcript)) {
       this.logger.warn(
-        `[STT FINAL DROPPED AFTER SETTLE] ${session.id} ${JSON.stringify(transcript)}`,
+        `[STT FINAL DROPPED AFTER SETTLE] ${session.id} chars=${transcript.length}`,
       )
 
       this.trace.appendDroppedFinalTrace(session, transcript)
@@ -523,7 +645,9 @@ export class VoiceSessionService {
     session.finalTranscript = transcript
     session.sttFinalAt = Date.now()
 
-    this.logger.log(`[STT FINAL] ${session.id} ${session.finalTranscript}`)
+    this.logger.log(
+      `[STT FINAL] ${session.id} chars=${session.finalTranscript.length}`,
+    )
     this.trace.appendSttFinalTrace(session)
   }
 
@@ -575,7 +699,7 @@ export class VoiceSessionService {
     session.assistantReply = replyText
     session.assistantFinalAt = Date.now()
 
-    this.logger.log(`[ASSISTANT] ${session.id} ${replyText}`)
+    this.logger.log(`[ASSISTANT] ${session.id} replyChars=${replyText.length}`)
     this.trace.appendAssistantFinalTrace(session)
     this.trace.logTurnMetrics(session)
     this.emitter.emitAssistantFinal(session)
@@ -608,7 +732,10 @@ export class VoiceSessionService {
 
     this.emitter.emitHomeActionPlan(session, classification, plan)
 
-    const executionResults = plan.requiresConfirmation
+    const containsDeviceAction = plan.actions.some(
+      (action) => action.type !== 'status.report',
+    )
+    const executionResults = plan.requiresConfirmation || containsDeviceAction
       ? []
       : await this.homeAutomation.executePlan(plan)
     session.homeActionExecutionResults = executionResults
@@ -617,10 +744,9 @@ export class VoiceSessionService {
       this.emitter.emitHomeActionExecution(session, executionResults)
     }
 
-    const replyTextWithExecution = this.withExecutionSummary(
-      plan.spokenReply,
-      executionResults,
-    )
+    const replyTextWithExecution = containsDeviceAction
+      ? this.requestActionApproval(session, plan)
+      : this.withExecutionSummary(plan.spokenReply, executionResults)
 
     const replyText = await this.replyStreamer.streamStaticReply(
       {
@@ -670,6 +796,29 @@ export class VoiceSessionService {
     return true
   }
 
+  private requestActionApproval(
+    session: ActiveVoiceSession,
+    plan: NonNullable<ActiveVoiceSession['homeIntentPlan']>,
+  ): string {
+    this.clearPendingActionApproval(session)
+    const id = randomUUID()
+    const expiresAt = Date.now() + actionApprovalWindowMs()
+    const timer = setTimeout(() => {
+      if (session.pendingActionApproval?.id !== id) return
+      this.clearPendingActionApproval(session)
+      this.emitter.emitActionConfirmationResult(session, 'expired')
+    }, expiresAt - Date.now())
+    session.pendingActionApproval = { id, plan, expiresAt, timer }
+    this.emitter.emitActionConfirmationRequired(session, id, expiresAt, plan)
+    return 'Разбрах заявката. Прегледайте точното действие на екрана и натиснете „Потвърди“, за да го изпълня. Потвърждението изтича след кратко време.'
+  }
+
+  private clearPendingActionApproval(session: ActiveVoiceSession): void {
+    if (!session.pendingActionApproval) return
+    clearTimeout(session.pendingActionApproval.timer)
+    session.pendingActionApproval = null
+  }
+
   private withExecutionSummary(
     spokenReply: string,
     executionResults: Awaited<ReturnType<HomeAutomationService['executePlan']>>,
@@ -681,13 +830,27 @@ export class VoiceSessionService {
       return `${spokenReply} Но имаше проблем при изпълнението: ${failed[0].message}`
     }
 
-    const executed = executionResults.filter((result) => result.status === 'success')
-    if (executed.length > 0) return spokenReply
+    const pending = executionResults.filter(
+      (result) => result.status === 'pending',
+    )
+    if (pending.length > 0) {
+      return `${spokenReply} Командата е изпратена, но все още чакам потвърждение от устройството.`
+    }
+
+    const simulated = executionResults.filter(
+      (result) => result.adapter === 'simulated',
+    )
+    if (simulated.length > 0) {
+      return `${spokenReply} Това беше изпълнено само в симулация.`
+    }
 
     const skipped = executionResults.find((result) => result.status === 'skipped')
     if (skipped) {
-      return `${spokenReply} Засега това е симулация: ${skipped.message}`
+      return `${spokenReply} Част от плана не беше изпълнена: ${skipped.message}`
     }
+
+    const executed = executionResults.filter((result) => result.status === 'success')
+    if (executed.length > 0) return spokenReply
 
     return spokenReply
   }
@@ -703,4 +866,42 @@ export class VoiceSessionService {
       session.assistantFirstAudioAt = Date.now()
     }
   }
+}
+
+function maximumVoiceAudioBytes(): number {
+  const configured = Number(process.env.VOICE_MAX_AUDIO_BYTES)
+  if (!Number.isFinite(configured)) return 1_536_000
+  return Math.max(32_000, Math.min(5_000_000, Math.floor(configured)))
+}
+
+function actionApprovalWindowMs(): number {
+  const configured = Number(process.env.VOICE_ACTION_APPROVAL_MS)
+  if (!Number.isFinite(configured)) return 15_000
+  return Math.max(5_000, Math.min(60_000, Math.floor(configured)))
+}
+
+function formatSttDiagnostic(
+  diagnostic?: Extract<StreamingSttEvent, { type: 'stt_error' }>['diagnostic'],
+): string {
+  if (!diagnostic) return ''
+  return Object.entries(diagnostic)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(' ')
+}
+
+function sanitizeSttDiagnostic(
+  diagnostic?: Extract<StreamingSttEvent, { type: 'stt_error' }>['diagnostic'],
+): Extract<StreamingSttEvent, { type: 'stt_error' }>['diagnostic'] {
+  if (!diagnostic) return undefined
+  const safe: NonNullable<Extract<StreamingSttEvent, { type: 'stt_error' }>['diagnostic']> = {}
+  for (const key of ['providerEvent', 'providerCode', 'providerType', 'providerParam'] as const) {
+    const value = diagnostic[key]
+    if (typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,80}$/.test(value)) {
+      safe[key] = value
+    }
+  }
+  if (typeof diagnostic.closeCode === 'number' && Number.isInteger(diagnostic.closeCode)) {
+    safe.closeCode = diagnostic.closeCode
+  }
+  return Object.keys(safe).length ? safe : undefined
 }

@@ -3,6 +3,8 @@ import * as fs from 'node:fs'
 const TRACE_FILE = '/tmp/voice-turn-trace.jsonl'
 
 export function appendVoiceTrace(event: Record<string, unknown>): void {
+  if (process.env.VOICE_TRACE_ENABLED !== 'true') return
+
   try {
     if (process.env.VOICE_TRACE_VERBOSE === 'true') {
       console.log('[voice-trace] writing', TRACE_FILE)

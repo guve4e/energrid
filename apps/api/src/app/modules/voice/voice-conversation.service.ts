@@ -1,6 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common'
+import { Inject, Injectable, Logger } from '@nestjs/common'
 import { appendVoiceTrace } from './utils/voice-trace.util'
-import OpenAI from 'openai'
+import type { ConversationMessage, ConversationModelProvider } from '@energrid/domain-voice'
+import { CONVERSATION_MODEL_PROVIDER } from './speech-provider.tokens'
 import {
   VoiceConversationInput,
   VoiceConversationResult,
@@ -26,12 +27,13 @@ export class VoiceConversationService {
   private readonly logger = new Logger(VoiceConversationService.name)
   private readonly verbose = process.env.VOICE_VERBOSE_LOGS === 'true'
 
-  private readonly openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-  })
-
   private readonly history = new Map<string, ChatTurn[]>()
   private readonly maxTurnsPerConversation = 12
+
+  constructor(
+    @Inject(CONVERSATION_MODEL_PROVIDER)
+    private readonly model: ConversationModelProvider,
+  ) {}
 
   async handleFinalTranscript(
     input: VoiceConversationInput,
@@ -48,8 +50,8 @@ export class VoiceConversationService {
 
     const trimmedTurns = this.appendUserTurn(input.conversationId, input.transcript)
 
-    if (!process.env.OPENAI_API_KEY) {
-      return this.handleMissingApiKey(input, callbacks)
+    if (!this.model.isConfigured()) {
+      return this.handleUnconfiguredModel(input, callbacks)
     }
 
     const inputMessages = this.buildInputMessages(trimmedTurns)
@@ -66,22 +68,19 @@ export class VoiceConversationService {
     let replyText = ''
     const requestStartedAt = Date.now()
 
-    const stream = await this.openai.responses.create({
-      model: 'gpt-4o-mini',
-      input: inputMessages,
-      stream: true,
-    })
+    const stream = this.model.streamResponse({ messages: inputMessages })
     const streamCreatedAt = Date.now()
     let firstDeltaAt: number | undefined
+    let completed = false
 
     await callbacks?.onMetrics?.({
       requestStartedAt,
       streamCreatedAt,
     })
 
-    for await (const event of stream as AsyncIterable<any>) {
-      if (event.type === 'response.output_text.delta') {
-        const delta = event.delta || ''
+    for await (const event of stream) {
+      if (event.type === 'text_delta') {
+        const delta = event.text
         if (!delta) continue
 
         firstDeltaAt ??= Date.now()
@@ -94,10 +93,13 @@ export class VoiceConversationService {
         continue
       }
 
-      if (event.type === 'response.completed') {
+      if (event.type === 'completed') {
+        completed = true
         break
       }
     }
+
+    if (!completed) throw new Error('Conversation model stream ended before completion')
 
     replyText = replyText.trim() || 'Съжалявам, не успях да отговоря.'
 
@@ -138,35 +140,25 @@ export class VoiceConversationService {
     this.history.set(conversationId, turns.slice(-this.maxTurnsPerConversation))
   }
 
-  private buildInputMessages(turns: ChatTurn[]) {
+  private buildInputMessages(turns: ChatTurn[]): ConversationMessage[] {
     return [
       {
         role: 'system' as const,
-        content: [
-          {
-            type: 'input_text' as const,
-            text:
-              'You are a Bulgarian voice assistant. ' +
-              'Always answer in natural Bulgarian. ' +
-              'Be concise, helpful, and conversational. ' +
-              'Do not use markdown, bullets, or labels. ' +
-              'Keep continuity with the recent conversation context.',
-          },
-        ],
+        text:
+          'You are a Bulgarian voice assistant. ' +
+          'Always answer in natural Bulgarian. ' +
+          'Be concise, helpful, and conversational. ' +
+          'Do not use markdown, bullets, or labels. ' +
+          'Keep continuity with the recent conversation context.',
       },
       ...turns.map((turn) => ({
         role: turn.role,
-        content: [
-          {
-            type: 'input_text' as const,
-            text: turn.text,
-          },
-        ],
+        text: turn.text,
       })),
     ]
   }
 
-  private async handleMissingApiKey(
+  private async handleUnconfiguredModel(
     input: VoiceConversationInput,
     callbacks?: VoiceConversationStreamCallbacks,
   ): Promise<VoiceConversationResult> {
@@ -198,7 +190,7 @@ export class VoiceConversationService {
 
     if (this.verbose) {
       this.logger.log(
-        `[CONVERSATION] session=${input.sessionId} conversation=${input.conversationId} user="${input.transcript}"`,
+        `[CONVERSATION] session=${input.sessionId} conversation=${input.conversationId} transcriptChars=${input.transcript.length}`,
       )
     }
   }
@@ -231,7 +223,7 @@ export class VoiceConversationService {
 
     if (this.verbose) {
       this.logger.log(
-        `[CONVERSATION REPLY] session=${input.sessionId} conversation=${input.conversationId} assistant="${replyText}"`,
+        `[CONVERSATION REPLY] session=${input.sessionId} conversation=${input.conversationId} replyChars=${replyText.length}`,
       )
     }
   }

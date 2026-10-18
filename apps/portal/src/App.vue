@@ -6,6 +6,14 @@ import EnergyDashboard from './components/energy/EnergyDashboard.vue';
 import DeviceControlSetup from './components/devices/DeviceControlSetup.vue';
 import DeviceSwitchControl from './components/devices/DeviceSwitchControl.vue';
 import DeviceConnectionDiagnostics from './components/devices/DeviceConnectionDiagnostics.vue';
+import DeviceCommissioning from './components/devices/DeviceCommissioning.vue';
+import {
+  microphoneRequestError,
+  microphoneSetupError,
+  stopMicrophoneStream,
+} from './voice-microphone';
+import { closeCompletedTurnSocket } from './voice-turn-socket';
+import { diagnoseVoicePerformance } from './voice-performance-diagnosis';
 import { filterInventoryDevices, inventoryConnectionStatus, isExampleDevice, needsControlSetup } from './components/devices/device-inventory';
 import { matchNetworkDevice } from './components/devices/device-network';
 import { canSwitchDevice, controlRouteLabel } from './components/devices/device-control';
@@ -87,6 +95,9 @@ type PortalState = {
     zoneId: string;
     zoneName: string;
     trustStatus: 'discovered' | 'approved' | 'blocked';
+    assistantEnabled?: boolean;
+    settingsUrl?: string;
+    commissioning?: { physicalOutcome: 'not_confirmed' | 'confirmed'; confirmedAt: string | null };
     capabilities: Array<{
       kind: string;
       actions: string[];
@@ -369,9 +380,11 @@ function voiceUrlFromApiBase(baseUrl: string) {
 const apiBase = cleanBaseUrl(import.meta.env.VITE_API_BASE_URL || '');
 const defaultWsBase =
   import.meta.env.VITE_VOICE_WS_URL || voiceUrlFromApiBase(apiBase);
+const isLocalLivePreview =
+  import.meta.env.VITE_BACKEND_LABEL === 'local-live';
 
-const email = ref('admin@energrid.local');
-const password = ref('admin123');
+const email = ref('');
+const password = ref('');
 const loginError = ref('');
 const accessToken = ref(localStorage.getItem(tokenKey) || '');
 const user = ref<LoginResponse['user'] | null>(
@@ -400,9 +413,22 @@ const expandedMqttTopics = ref<Set<string>>(new Set());
 
 const wsUrl = ref(defaultWsBase);
 const voiceStatus = ref('idle');
+const voiceSetupError = ref('');
 const transcript = ref('');
 const assistant = ref('');
 const plan = ref('');
+const pendingVoiceAction = ref<{
+  approvalId: string;
+  expiresAt: number;
+  actions: Array<{
+    type: string;
+    deviceId: string | null;
+    room: string | null;
+    value: string | number | null;
+    risk: string;
+  }>;
+} | null>(null);
+const voiceActionOutcome = ref('');
 const eventLog = ref<string[]>([]);
 const metrics = ref<VoiceMetrics | null>(null);
 const voiceRuns = ref<VoiceRunRecord[]>([]);
@@ -412,7 +438,9 @@ const connected = ref(false);
 const recording = ref(false);
 const theme = ref(localStorage.getItem(themeKey) || 'dark');
 const endpointMode = ref(
-  localStorage.getItem(endpointModeKey) || 'same-origin',
+  isLocalLivePreview
+    ? 'same-origin'
+    : localStorage.getItem(endpointModeKey) || 'same-origin',
 );
 const userMenuOpen = ref(false);
 const notificationsOpen = ref(false);
@@ -617,8 +645,10 @@ const starterSystems: PortalSystem[] = [
 ];
 
 let ws: WebSocket | null = null;
+let voiceAuthenticated = false;
 let audioContext: AudioContext | null = null;
 let mediaStream: MediaStream | null = null;
+let recordingAttempt = 0;
 let source: MediaStreamAudioSourceNode | null = null;
 let processor: ScriptProcessorNode | null = null;
 let pcmQueue: number[] = [];
@@ -703,6 +733,12 @@ const logSources = computed(() =>
 const serverLabel = computed(
   () => import.meta.env.VITE_BACKEND_LABEL || apiBase || 'same-origin',
 );
+const voiceLinkStatus = computed(() => {
+  if (connected.value) return { label: 'connected', tone: 'green' };
+  if (['idle', 'turn complete'].includes(voiceStatus.value))
+    return { label: 'standby', tone: 'blue' };
+  return { label: 'offline', tone: 'amber' };
+});
 const canUseLanDirect = computed(() => location.protocol === 'http:');
 const effectiveRouteLabel = computed(() => {
   if (endpointMode.value === 'lan')
@@ -766,17 +802,7 @@ const clientDiagnostics = computed(() => {
   ];
 });
 const bottleneckMessage = computed(() => {
-  const m = metrics.value;
-  if (!m) return 'No completed turn yet.';
-  if (m.speechGatePassed && !transcript.value && !m.sttMs) {
-    return 'Audio reached the server and passed the speech gate, but STT did not return a transcript before turn end.';
-  }
-  if (m.sttMs && m.sttMs > 8000) return 'STT is the bottleneck on this turn.';
-  if (m.firstAudioMs && m.firstAudioMs > 5000)
-    return 'Speech output is the bottleneck on this turn.';
-  if (!m.speechGatePassed)
-    return 'The speech gate blocked this turn before STT.';
-  return 'No obvious bottleneck detected.';
+  return diagnoseVoicePerformance(metrics.value, transcript.value, voiceSetupError.value);
 });
 const deviceCards = computed(() => state.value?.devices || []);
 const approvedDevices = computed(() =>
@@ -1841,6 +1867,7 @@ function approvedDeviceNetworkMatch(device: PortalDevice) {
 }
 
 function approvedDeviceSettingsUrl(device: PortalDevice) {
+  if (device.settingsUrl) return device.settingsUrl;
   const scanned = approvedDeviceNetworkMatch(device)?.settingsUrl;
   if (scanned) return scanned;
   if (typeof device.metadata?.httpBaseUrl === 'string') return device.metadata.httpBaseUrl;
@@ -2093,7 +2120,9 @@ async function loadVoiceRuns() {
   voiceRunsError.value = '';
 
   try {
-    const response = await fetch(`${apiBase}/voice/runs?limit=8`);
+    const response = await fetch(`${apiBase}/voice/runs?limit=8`, {
+      headers: { Authorization: `Bearer ${accessToken.value}` },
+    });
     if (!response.ok) throw new Error('Voice runs unavailable');
     const body = (await response.json()) as { runs?: VoiceRunRecord[] };
     voiceRuns.value = body.runs || [];
@@ -2154,57 +2183,88 @@ function logDetails(entry: OperationalLogEntry) {
 }
 
 function connectVoice() {
-  if (ws?.readyState === WebSocket.OPEN) return Promise.resolve();
-  if (ws?.readyState === WebSocket.CONNECTING) {
-    return new Promise<void>((resolve, reject) => {
-      ws?.addEventListener('open', () => resolve(), { once: true });
-      ws?.addEventListener(
-        'error',
-        () => reject(new Error('Voice socket failed')),
-        { once: true },
-      );
-    });
-  }
+  if (ws?.readyState === WebSocket.OPEN && voiceAuthenticated)
+    return Promise.resolve();
+  if (ws?.readyState === WebSocket.OPEN || ws?.readyState === WebSocket.CONNECTING)
+    return waitForVoiceAuthentication(ws);
 
   wsUrl.value = effectiveWsUrl.value;
   clientTrace.value.connectStartAt = performance.now();
   appendLog(`[voice] connecting ${wsUrl.value}`);
-  ws = new WebSocket(wsUrl.value);
-  ws.binaryType = 'arraybuffer';
-  attachVoiceListeners(ws);
+  const socket = new WebSocket(wsUrl.value);
+  ws = socket;
+  voiceAuthenticated = false;
+  socket.binaryType = 'arraybuffer';
+  attachVoiceListeners(socket);
   voiceStatus.value = 'connecting';
 
-  return new Promise<void>((resolve, reject) => {
-    ws?.addEventListener(
-      'open',
-      () => {
-        connected.value = true;
-        voiceStatus.value = 'connected';
-        clientTrace.value.connectedAt = performance.now();
-        appendLog(
-          `[voice] connected in ${delta(clientTrace.value.connectStartAt, clientTrace.value.connectedAt)}`,
-        );
-        resolve();
-      },
-      { once: true },
-    );
+  socket.addEventListener(
+    'open',
+    () => {
+      voiceStatus.value = 'authenticating';
+      socket.send(
+        JSON.stringify({ type: 'authenticate', token: accessToken.value }),
+      );
+    },
+    { once: true },
+  );
+  socket.addEventListener(
+    'error',
+    () => {
+      voiceStatus.value = 'socket error';
+      appendLog('[voice] socket error');
+    },
+    { once: true },
+  );
+  return waitForVoiceAuthentication(socket);
+}
 
-    ws?.addEventListener(
-      'error',
-      () => {
-        voiceStatus.value = 'socket error';
-        appendLog('[voice] socket error');
-        reject(new Error('Voice socket failed'));
-      },
-      { once: true },
-    );
+function waitForVoiceAuthentication(socket: WebSocket): Promise<void> {
+  if (voiceAuthenticated) return Promise.resolve();
+
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timeout);
+      socket.removeEventListener('message', onMessage);
+      socket.removeEventListener('close', onClose);
+    };
+    const onMessage = (message: MessageEvent) => {
+      try {
+        const event = JSON.parse(message.data);
+        if (event.type === 'authenticated') {
+          cleanup();
+          resolve();
+        } else if (event.type === 'error') {
+          cleanup();
+          reject(new Error(event.message || 'Voice authorization failed'));
+        }
+      } catch {
+        cleanup();
+        reject(new Error('Invalid voice server message'));
+      }
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error('Voice authorization failed'));
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      socket.close();
+      reject(new Error('Voice authorization timed out'));
+    }, 15000);
+
+    socket.addEventListener('message', onMessage);
+    socket.addEventListener('close', onClose, { once: true });
   });
 }
 
 function attachVoiceListeners(socket: WebSocket) {
   socket.addEventListener('close', () => {
+    if (ws !== socket) return;
     connected.value = false;
-    voiceStatus.value = 'closed';
+    voiceAuthenticated = false;
+    if (voiceStatus.value !== 'turn complete') voiceStatus.value = 'closed';
+    pendingVoiceAction.value = null;
     ws = null;
     appendLog('[voice] closed');
   });
@@ -2215,7 +2275,23 @@ function attachVoiceListeners(socket: WebSocket) {
   });
 
   socket.addEventListener('message', (message) => {
-    const event = JSON.parse(message.data);
+    let event: Record<string, any>;
+    try {
+      event = JSON.parse(message.data);
+    } catch {
+      appendLog('[voice] ignored malformed server message');
+      return;
+    }
+    if (event.type === 'authenticated') {
+      voiceAuthenticated = true;
+      connected.value = true;
+      voiceStatus.value = 'connected';
+      clientTrace.value.connectedAt = performance.now();
+      appendLog(
+        `[voice] authenticated in ${delta(clientTrace.value.connectStartAt, clientTrace.value.connectedAt)}`,
+      );
+      return;
+    }
     const now = performance.now();
     if (clientTrace.value.releaseAt && !clientTrace.value.firstServerEventAt) {
       clientTrace.value.firstServerEventAt = now;
@@ -2231,6 +2307,20 @@ function attachVoiceListeners(socket: WebSocket) {
       assistant.value = event.full || '';
     }
     if (event.type === 'assistant_final') assistant.value = event.text || '';
+    if (event.type === 'action_confirmation_required') {
+      pendingVoiceAction.value = {
+        approvalId: event.approvalId,
+        expiresAt: event.expiresAt,
+        actions: Array.isArray(event.actions) ? event.actions : [],
+      };
+      voiceActionOutcome.value = '';
+      voiceStatus.value = 'awaiting action confirmation';
+    }
+    if (event.type === 'action_confirmation_result') {
+      pendingVoiceAction.value = null;
+      voiceActionOutcome.value = confirmationOutcome(event.status, event.results);
+      voiceStatus.value = event.status === 'completed' ? 'action resolved' : event.status;
+    }
     if (event.type === 'home_action_plan')
       plan.value = JSON.stringify(event.plan, null, 2);
     if (event.type === 'assistant_audio_chunk') {
@@ -2242,6 +2332,12 @@ function attachVoiceListeners(socket: WebSocket) {
       voiceStatus.value = 'turn complete';
       appendLog(`[diagnostic] ${bottleneckMessage.value}`);
       setTimeout(() => void loadVoiceRuns(), 250);
+      if (closeCompletedTurnSocket(socket, ws)) {
+        ws = null;
+        connected.value = false;
+        voiceAuthenticated = false;
+        appendLog('[voice] turn session closed; ready for the next request');
+      }
     }
     if (event.type === 'error') voiceStatus.value = `error: ${event.message}`;
   });
@@ -2252,6 +2348,53 @@ function disconnectVoice() {
   ws?.close();
   ws = null;
   connected.value = false;
+  voiceAuthenticated = false;
+  pendingVoiceAction.value = null;
+}
+
+function confirmVoiceAction() {
+  const pending = pendingVoiceAction.value;
+  if (!pending || pending.expiresAt <= Date.now() || !voiceAuthenticated) return;
+  ws?.send(JSON.stringify({ type: 'confirm_action', approvalId: pending.approvalId }));
+  voiceStatus.value = 'executing confirmed action';
+}
+
+function cancelVoiceAction() {
+  const pending = pendingVoiceAction.value;
+  if (!pending || !voiceAuthenticated) return;
+  ws?.send(JSON.stringify({ type: 'cancel_action', approvalId: pending.approvalId }));
+}
+
+function voiceActionLabel(action: NonNullable<typeof pendingVoiceAction.value>['actions'][number]) {
+  const names: Record<string, string> = {
+    'light.turn_on': 'Turn on light',
+    'light.turn_off': 'Turn off light',
+    'thermostat.set_target': 'Set thermostat target',
+    'mode.set': 'Change home mode',
+    'alarm.disarm': 'Disarm alarm',
+  };
+  const target = action.deviceId || action.room;
+  const value = action.value == null ? '' : ` to ${action.value}`;
+  return `${names[action.type] || action.type}${target ? `: ${target}` : ''}${value}`;
+}
+
+function confirmationOutcome(status: string, results: Array<{ status: string; message: string }> = []) {
+  if (status === 'completed') {
+    const failed = results.find((result) => result.status === 'failed');
+    if (failed) return `Action failed: ${failed.message}`;
+    const skipped = results.find((result) => result.status === 'skipped');
+    if (skipped) return `Not completed: ${skipped.message}`;
+    if (results.some((result) => result.status === 'pending')) return 'Command sent; waiting for device acknowledgement.';
+    if (results.length && results.every((result) => result.status === 'success')) return 'Device confirmed the action.';
+    return 'The plan completed without a device action.';
+  }
+  const messages: Record<string, string> = {
+    cancelled: 'Action cancelled.',
+    expired: 'Confirmation expired. Nothing was switched.',
+    unavailable: 'This confirmation is no longer available. Nothing was switched.',
+    failed: 'The action could not be completed. Check device diagnostics.',
+  };
+  return messages[status] || 'Action status unavailable.';
 }
 
 function redactAudio(event: Record<string, any>) {
@@ -2300,12 +2443,65 @@ async function startRecording(event?: PointerEvent) {
   if (event?.currentTarget instanceof HTMLElement) {
     event.currentTarget.setPointerCapture(event.pointerId);
   }
+  const attempt = ++recordingAttempt;
+  voiceSetupError.value = microphoneSetupError(
+    window.isSecureContext,
+    typeof navigator.mediaDevices?.getUserMedia === 'function',
+  ) || '';
+  if (voiceSetupError.value) {
+    voiceStatus.value = 'microphone unavailable';
+    appendLog(`[audio] ${voiceSetupError.value}`);
+    return;
+  }
+
+  let stream: MediaStream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+    mediaStream = stream;
+  } catch (error) {
+    voiceSetupError.value = microphoneRequestError(error);
+    voiceStatus.value = 'microphone unavailable';
+    appendLog(`[audio] ${voiceSetupError.value}`);
+    return;
+  }
+  if (attempt !== recordingAttempt) {
+    stopMicrophoneStream(stream);
+    if (mediaStream === stream) mediaStream = null;
+    return;
+  }
+
   try {
     await connectVoice();
   } catch {
+    stopMicrophoneStream(stream);
+    if (mediaStream === stream) mediaStream = null;
+    voiceSetupError.value =
+      'The voice service could not be reached. Check that the API is running and that Domain is routed to it, then try again.';
+    voiceStatus.value = 'connection unavailable';
+    appendLog('[voice] connection failed; microphone released');
     return;
   }
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (attempt !== recordingAttempt) {
+    stopMicrophoneStream(stream);
+    if (mediaStream === stream) mediaStream = null;
+    return;
+  }
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    stopMicrophoneStream(stream);
+    if (mediaStream === stream) mediaStream = null;
+    voiceSetupError.value =
+      'The voice connection closed before recording could start. Check the API route and try again.';
+    voiceStatus.value = 'connection unavailable';
+    appendLog('[voice] connection closed before recording; microphone released');
+    return;
+  }
   resetTurn();
   pcmQueue = [];
   recording.value = true;
@@ -2313,17 +2509,8 @@ async function startRecording(event?: PointerEvent) {
   clientTrace.value.recordStartAt = performance.now();
   appendLog('[audio] recording started');
 
-  mediaStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      channelCount: 1,
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    },
-  });
-
   audioContext = new AudioContext();
-  source = audioContext.createMediaStreamSource(mediaStream);
+  source = audioContext.createMediaStreamSource(stream);
   processor = audioContext.createScriptProcessor(4096, 1, 1);
   processor.onaudioprocess = (event) => {
     if (
@@ -2350,6 +2537,7 @@ async function stopRecording(event?: PointerEvent) {
   ) {
     event.currentTarget.releasePointerCapture(event.pointerId);
   }
+  recordingAttempt += 1;
   if (!recording.value) return;
   recording.value = false;
   voiceStatus.value = 'sending';
@@ -2753,8 +2941,8 @@ onBeforeUnmount(() => {
 
           <div class="assistant-status-row">
             <span
-              ><span class="dot green"></span
-              >{{ connected ? 'connected' : 'offline' }}</span
+              ><span :class="['dot', voiceLinkStatus.tone]"></span
+              >{{ voiceLinkStatus.label }}</span
             >
             <span>API {{ serverLabel }}</span>
             <span>Route {{ effectiveRouteLabel }}</span>
@@ -2791,6 +2979,9 @@ onBeforeUnmount(() => {
               >Open LAN portal</a
             >
           </div>
+          <p v-if="voiceSetupError" class="route-note" role="alert">
+            {{ voiceSetupError }}
+          </p>
           <p
             v-if="endpointMode === 'lan' && !canUseLanDirect"
             class="route-note"
@@ -2803,6 +2994,7 @@ onBeforeUnmount(() => {
             <button
               class="primary talk-button"
               :class="{ recording }"
+              :disabled="Boolean(pendingVoiceAction)"
               @pointerdown="startRecording"
               @pointerup="stopRecording"
               @pointercancel="stopRecording"
@@ -2811,7 +3003,9 @@ onBeforeUnmount(() => {
               <span>{{
                 recording
                   ? 'Release to send'
-                  : voiceStatus === 'connecting'
+                  : pendingVoiceAction
+                    ? 'Confirm or cancel first'
+                    : ['connecting', 'authenticating'].includes(voiceStatus)
                     ? 'Connecting'
                     : 'Hold to talk'
               }}</span>
@@ -2833,6 +3027,24 @@ onBeforeUnmount(() => {
               </p>
             </div>
           </div>
+
+          <section v-if="pendingVoiceAction" class="voice-action-approval" aria-live="assertive">
+            <div>
+              <p class="eyebrow">Confirmation required</p>
+              <h3>Review before anything changes</h3>
+              <ul>
+                <li v-for="(action, index) in pendingVoiceAction.actions" :key="`${action.type}:${action.deviceId}:${index}`">
+                  {{ voiceActionLabel(action) }}
+                </li>
+              </ul>
+              <p class="approval-expiry">Expires {{ new Date(pendingVoiceAction.expiresAt).toLocaleTimeString() }}. No change happens unless you confirm.</p>
+            </div>
+            <div class="approval-actions">
+              <button class="secondary" type="button" @click="cancelVoiceAction">Cancel</button>
+              <button class="primary" type="button" @click="confirmVoiceAction">Confirm action</button>
+            </div>
+          </section>
+          <p v-if="voiceActionOutcome" class="voice-action-outcome" role="status">{{ voiceActionOutcome }}</p>
 
           <div class="diagnostics">
             <section>
@@ -3182,6 +3394,14 @@ onBeforeUnmount(() => {
               </div>
               <DeviceConnectionDiagnostics :key="selectedDevice.id" :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" />
               <DeviceControlSetup :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" :network-devices="networkDevices" :finding-address="scanningNetwork" :address-search-error="stateError" @find-address="scanNetwork" @saved="loadState" />
+              <DeviceCommissioning
+                v-if="selectedDevice.trustStatus === 'approved'"
+                :device="selectedDevice"
+                :api-base="apiBase"
+                :access-token="accessToken"
+                :settings-url-suggestion="approvedDeviceNetworkMatch(selectedDevice)?.settingsUrl"
+                @saved="loadState"
+              />
             </div>
 
             <dl class="device-facts detail-facts">

@@ -24,6 +24,13 @@ export interface HomeContext {
   occupiedRooms: string[]
   alarmArmed: boolean
   requestedText?: string
+
+  assistantDevices?: Array<{
+    id: string
+    name: string
+    room: string
+    aliases?: string[]
+  }>
 }
 
 export interface PlannedHomeAction {
@@ -182,6 +189,10 @@ export function classifyHomeIntent(text: string): ClassifyHomeIntentResult {
     return unknownClassification()
   }
 
+  if (containsNegation(normalized)) {
+    return unknownClassification()
+  }
+
   for (const pattern of intentPatterns) {
     const matchedPhrase = pattern.phrases.find((phrase) =>
       normalized.includes(normalizeIntentText(phrase)),
@@ -196,7 +207,24 @@ export function classifyHomeIntent(text: string): ClassifyHomeIntentResult {
     }
   }
 
+  if (/\b(turn on|switch on|enable)\b/.test(normalized) && /\b(light|lamp)\b/.test(normalized)) {
+    return { intent: 'turn_on_lights', confidence: 0.88, matchedPhrase: null }
+  }
+  if (/(включи|пусни|светни|запали)/.test(normalized) && /(ламп|осветлен|светлин)/.test(normalized)) {
+    return { intent: 'turn_on_lights', confidence: 0.88, matchedPhrase: null }
+  }
+  if (/\b(turn off|switch off|disable)\b/.test(normalized) && /\b(light|lamp)\b/.test(normalized)) {
+    return { intent: 'turn_off_lights', confidence: 0.88, matchedPhrase: null }
+  }
+  if (/(изключи|спри|угаси)/.test(normalized) && /(ламп|осветлен|светлин)/.test(normalized)) {
+    return { intent: 'turn_off_lights', confidence: 0.88, matchedPhrase: null }
+  }
+
   return unknownClassification()
+}
+
+function containsNegation(text: string): boolean {
+  return /(^|\s)(не|недей|don'?t|don t|do not|never|not)(\s|$)/i.test(text)
 }
 
 export function planHomeIntent(input: PlanHomeIntentInput): HomeIntentPlan {
@@ -355,8 +383,20 @@ function planTurnOnLights(context: HomeContext): HomeIntentPlan {
 
   if (target) {
     addLightIfAvailable(actions, context, target.deviceId, target.room)
+  } else if ((context.assistantDevices || []).length > 1) {
+    return {
+      intent: 'turn_on_lights',
+      actions,
+      requiresConfirmation: false,
+      spokenReply: 'Коя лампа? Кажи името на устройството или стаята.',
+    }
   } else {
-    addLightIfAvailable(actions, context, 'kitchen_light', 'кухня')
+    const available = context.assistantDevices || []
+    if (available.length === 1) {
+      addLightIfAvailable(actions, context, available[0].id, available[0].room)
+    } else {
+      addLightIfAvailable(actions, context, 'kitchen_light', 'кухня')
+    }
   }
 
   return {
@@ -374,7 +414,10 @@ function planTurnOffLights(context: HomeContext): HomeIntentPlan {
   const target = chooseRequestedLight(context)
   const targetDeviceIds = target
     ? [target.deviceId]
-    : context.availableDevices.filter((deviceId) => deviceId.endsWith('_light'))
+    : [
+        ...context.availableDevices.filter((deviceId) => deviceId.endsWith('_light')),
+        ...(context.assistantDevices || []).map((device) => device.id),
+      ].filter((deviceId, index, all) => all.indexOf(deviceId) === index)
 
   const actions = targetDeviceIds.map<PlannedHomeAction>((deviceId) => ({
       type: 'light.turn_off',
@@ -447,8 +490,22 @@ function addLightIfAvailable(
 function chooseRequestedLight(
   context: HomeContext,
 ): { deviceId: string; room: string } | null {
+  const normalizedText = normalizeIntentText(context.requestedText || '')
+  const named = (context.assistantDevices || []).find((device) =>
+    [device.name, ...(device.aliases || [])].some((label) => {
+      const normalizedLabel = normalizeIntentText(label)
+      return normalizedLabel.length > 1 && normalizedText.includes(normalizedLabel)
+    }),
+  )
+  if (named) return { deviceId: named.id, room: named.room }
+
   const room = requestedRoomFromText(context.requestedText || '')
-  if (!room) return null
+  if (!room) {
+    const onlyDevice = context.assistantDevices?.length === 1
+      ? context.assistantDevices[0]
+      : null
+    return onlyDevice ? { deviceId: onlyDevice.id, room: onlyDevice.room } : null
+  }
 
   for (const candidate of lightCandidatesForRoom(room.key)) {
     if (context.availableDevices.includes(candidate)) {
@@ -462,7 +519,15 @@ function chooseRequestedLight(
       (deviceId.includes('light') || deviceId.includes('lamp')),
   )
 
-  return matchingDevice ? { deviceId: matchingDevice, room: room.bg } : null
+  if (matchingDevice) return { deviceId: matchingDevice, room: room.bg }
+
+  const roomDevices = (context.assistantDevices || []).filter((device) =>
+    normalizeIntentText(device.room).includes(normalizeIntentText(room.bg)) ||
+    room.key === normalizeIntentText(device.room),
+  )
+  return roomDevices.length === 1
+    ? { deviceId: roomDevices[0].id, room: roomDevices[0].room }
+    : null
 }
 
 function requestedRoomFromText(

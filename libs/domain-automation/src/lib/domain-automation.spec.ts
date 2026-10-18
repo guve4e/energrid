@@ -120,6 +120,51 @@ describe('planHomeIntent', () => {
     ])
   })
 
+  it('matches an explicitly enabled device by its configured name and room', () => {
+    const text = 'Включи лампата над бюрото'
+    const classification = classifyHomeIntent(text)
+    const plan = planHomeIntent({
+      intent: classification.intent,
+      context: {
+        ...baseContext,
+        availableDevices: ['shellyplus1-desk:switch:0'],
+        assistantDevices: [{
+          id: 'shellyplus1-desk:switch:0',
+          name: 'Desk lamp',
+          room: 'Office',
+          aliases: ['лампата над бюрото'],
+        }],
+        requestedText: text,
+      },
+    })
+
+    expect(classification.intent).toBe('turn_on_lights')
+    expect(plan.actions).toEqual([
+      expect.objectContaining({
+        type: 'light.turn_on',
+        deviceId: 'shellyplus1-desk:switch:0',
+        room: 'Office',
+      }),
+    ])
+  })
+
+  it('asks which light when several assistant-enabled devices could match', () => {
+    const plan = planHomeIntent({
+      intent: 'turn_on_lights',
+      context: {
+        ...baseContext,
+        assistantDevices: [
+          { id: 'office.lamp', name: 'Desk lamp', room: 'Office' },
+          { id: 'bedroom.lamp', name: 'Bedside lamp', room: 'Bedroom' },
+        ],
+        requestedText: 'turn on the lamp',
+      },
+    })
+
+    expect(plan.actions).toEqual([])
+    expect(plan.spokenReply).toContain('Коя лампа?')
+  })
+
   it('moves the thermostat one degree warmer for comfort_warmer', () => {
     const plan = planHomeIntent({
       intent: 'comfort_warmer',
@@ -188,5 +233,13 @@ describe('classifyHomeIntent', () => {
         matchedPhrase: 'включи лампите',
       }),
     )
+  })
+
+  it.each([
+    ['Не включи лампите.', 'turn_on_lights'],
+    ["Don't turn on the lights.", 'turn_on_lights'],
+    ['Do not turn off the lights.', 'turn_off_lights'],
+  ])('fails closed for negated commands: %s', (text) => {
+    expect(classifyHomeIntent(text).intent).toBe('unknown')
   })
 })

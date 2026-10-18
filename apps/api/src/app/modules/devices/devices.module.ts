@@ -10,6 +10,7 @@ import { DeviceHealthService } from './device-health.service'
 import { DeviceObservationService } from './device-observation.service'
 import { DeviceMatchService } from './device-match.service'
 import { DeviceInvestigationService } from './device-investigation.service'
+import { DeviceInstallationStore } from './device-installation.store'
 import { TelemetryModule } from '../telemetry/telemetry.module'
 
 @Module({
@@ -25,7 +26,8 @@ import { TelemetryModule } from '../telemetry/telemetry.module'
     DeviceObservationService,
     DeviceMatchService,
     DeviceHealthService,
-    DeviceInvestigationService
+    DeviceInvestigationService,
+    DeviceInstallationStore
   ],
   exports: [
     DeviceRegistryService,
@@ -37,7 +39,8 @@ import { TelemetryModule } from '../telemetry/telemetry.module'
     DeviceObservationService,
     DeviceMatchService,
     DeviceHealthService,
-    DeviceInvestigationService
+    DeviceInvestigationService,
+    DeviceInstallationStore
   ],
 })
 export class DevicesModule {}

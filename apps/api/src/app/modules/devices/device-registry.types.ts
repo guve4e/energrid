@@ -132,8 +132,14 @@ export interface RegisteredDevice {
   state: RegisteredDeviceState;
   responseProfile: DeviceResponseProfile;
   policy: DevicePolicyProfile;
+  assistantEnabled?: boolean;
+  settingsUrl?: string;
   discovery?: DeviceDiscoveryInfo;
   memberDeviceIds?: string[];
+  commissioning?: {
+    physicalOutcome: 'not_confirmed' | 'confirmed';
+    confirmedAt: string | null;
+  };
   metadata?: Record<string, string | number | boolean>;
 }
 

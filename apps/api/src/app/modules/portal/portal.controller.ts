@@ -1,10 +1,12 @@
 import {
   All,
+  BadRequestException,
   Body,
   Controller,
   Get,
   Header,
   Param,
+  Patch,
   Post,
   Req,
   Res,
@@ -47,7 +49,8 @@ export class PortalController {
   }
 
   @Get('state')
-  getState() {
+  getState(@Req() request: DeviceProxyRequest) {
+    assertPortalControlToken(request)
     return this.stateService.getState()
   }
 
@@ -89,23 +92,62 @@ export class PortalController {
   }
 
   @Post('devices/:deviceId/actions')
-  executeDeviceAction(
+  async executeDeviceAction(
     @Param('deviceId') deviceId: string,
     @Body() body: { action?: string },
     @Req() request: DeviceProxyRequest,
   ) {
     assertPortalControlToken(request)
-    return this.deviceControl.execute(deviceId, body?.action)
+    await this.deviceRegistry.persistInstallationEvent(deviceId, 'command', {
+      action: body?.action || '',
+      stage: 'requested',
+      status: 'requested',
+    })
+    let result: Awaited<ReturnType<DeviceControlService['execute']>>
+    try {
+      result = await this.deviceControl.execute(deviceId, body?.action)
+    } catch (error) {
+      await this.deviceRegistry.persistInstallationEvent(deviceId, 'command', {
+        action: body?.action || '',
+        stage: 'result',
+        status: 'failed',
+        failureType: error instanceof Error ? error.name : 'UnknownError',
+        message: 'The command did not complete successfully.',
+      })
+      throw error
+    }
+    await this.deviceRegistry.persistInstallationEvent(deviceId, 'command', {
+      action: result.action,
+      stage: 'result',
+      status: result.status,
+      adapter: result.adapter,
+      commandId: result.command?.id || '',
+      message: result.message,
+    })
+    return result
   }
 
   @Post('devices/:deviceId/control')
-  configureDeviceControl(
+  async configureDeviceControl(
     @Param('deviceId') deviceId: string,
     @Body() body: { binding?: unknown },
     @Req() request: DeviceProxyRequest,
   ) {
     assertPortalControlToken(request)
-    return { device: this.deviceControl.configure(deviceId, body?.binding ?? null), persistence: 'runtime' }
+    const previousBinding = this.deviceRegistry.getDevices()
+      .find((item) => item.id === deviceId)?.control?.binding || null
+    const device = this.deviceControl.configure(deviceId, body?.binding ?? null)
+    try {
+      await this.deviceRegistry.persistInstallation(device)
+    } catch (error) {
+      this.deviceControl.configure(deviceId, previousBinding)
+      throw error
+    }
+    await this.deviceRegistry.persistInstallationEvent(deviceId, 'control_configured', {
+      route: device.control?.binding?.kind || 'none',
+      enabled: device.control?.binding?.enabled || false,
+    })
+    return { device, persistence: 'local' }
   }
 
   @Post('devices/:deviceId/diagnostics')
@@ -118,7 +160,7 @@ export class PortalController {
   }
 
   @Post('discovery/:deviceId/approve')
-  approveDiscoveredDevice(
+  async approveDiscoveredDevice(
     @Param('deviceId') deviceId: string,
     @Req() request: DeviceProxyRequest,
   ) {
@@ -127,7 +169,71 @@ export class PortalController {
     if (!device) {
       throw new NotFoundException(`Discovered device ${deviceId} was not found.`)
     }
+    await this.deviceRegistry.persistInstallation(device, true)
     return { status: 'approved', device }
+  }
+
+  @Post('devices/:deviceId/commissioning/confirm-physical-outcome')
+  async confirmPhysicalOutcome(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+    const device = this.deviceRegistry.getDevices().find((item) => item.id === deviceId)
+    if (!device || device.trustStatus !== 'approved')
+      throw new NotFoundException(`Approved device ${deviceId} was not found.`)
+    let updated
+    try {
+      updated = await this.deviceRegistry.confirmPhysicalOutcome(deviceId)
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'Physical result could not be confirmed.')
+    }
+    return { status: 'confirmed', device: updated }
+  }
+
+  @Patch('devices/:deviceId/commissioning')
+  async updateCommissioningDetails(
+    @Param('deviceId') deviceId: string,
+    @Body() body: { displayName?: string; zoneName?: string; assistantEnabled?: boolean; settingsUrl?: string | null },
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+    const displayName = typeof body?.displayName === 'string' ? body.displayName.trim() : ''
+    const zoneName = typeof body?.zoneName === 'string' ? body.zoneName.trim() : ''
+    if (!displayName || displayName.length > 100 || !zoneName || zoneName.length > 80)
+      throw new BadRequestException('Enter a device name and room name within the allowed length.')
+    let device
+    try {
+      device = await this.deviceRegistry.updateInstallationDetails(
+        deviceId,
+        displayName,
+        zoneName,
+        typeof body.assistantEnabled === 'boolean' ? body.assistantEnabled : undefined,
+        typeof body.settingsUrl === 'string' || body.settingsUrl === null ? body.settingsUrl : undefined,
+      )
+      await this.deviceRegistry.persistInstallationEvent(deviceId, 'installation_details_saved', {
+        displayName,
+        zoneName,
+        assistantEnabled: device.assistantEnabled === true,
+        settingsAddressConfigured: typeof body.settingsUrl === 'string' && !!body.settingsUrl.trim(),
+        update: 'installation_details',
+      })
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'Installation details could not be saved.')
+    }
+    return { device, persistence: 'local' }
+  }
+
+  @Get('devices/:deviceId/commissioning/events')
+  async getCommissioningEvents(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+    const device = this.deviceRegistry.getDevices().find((item) => item.id === deviceId)
+    if (!device || device.trustStatus !== 'approved')
+      throw new NotFoundException(`Approved device ${deviceId} was not found.`)
+    return { deviceId, events: await this.deviceRegistry.getInstallationEvents(deviceId) }
   }
 
   @Post('discovery/:deviceId/block')
@@ -165,14 +271,13 @@ export class PortalController {
 }
 
 export function assertPortalControlToken(request: DeviceProxyRequest): void {
-  const expected = process.env.PORTAL_CONTROL_TOKEN || 'dev-token-admin'
+  const expected = process.env.PORTAL_CONTROL_TOKEN ||
+    (process.env.NODE_ENV === 'production' ? '' : 'dev-token-admin')
   const authorization = request.headers.authorization
   const headerToken = Array.isArray(authorization)
     ? authorization[0]
     : authorization
-  const queryToken = new URL(request.url || '', 'http://localhost').searchParams.get('token')
-
-  if (headerToken !== `Bearer ${expected}` && queryToken !== expected) {
+  if (!expected || headerToken !== `Bearer ${expected}`) {
     throw new UnauthorizedException('Device control requires portal authorization.')
   }
 }
@@ -228,11 +333,11 @@ function portalHtml(): string {
       <h1>Energrid Portal</h1>
       <div class="field">
         <label for="email">Email</label>
-        <input id="email" autocomplete="username" value="admin@energrid.local" />
+        <input id="email" autocomplete="username" />
       </div>
       <div class="field">
         <label for="password">Password</label>
-        <input id="password" autocomplete="current-password" type="password" value="admin123" />
+        <input id="password" autocomplete="current-password" type="password" />
       </div>
       <button id="loginBtn">Sign In</button>
       <div id="loginError" class="error"></div>
@@ -323,6 +428,7 @@ function portalHtml(): string {
     let processor = null
     let pcmQueue = []
     let recording = false
+    let voiceAuthenticated = false
 
     const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
     els.wsUrl.value = wsProtocol + '//' + location.host + '/voice'
@@ -399,13 +505,17 @@ function portalHtml(): string {
       ws.binaryType = 'arraybuffer'
       setVoiceState('connecting')
       ws.addEventListener('open', () => {
-        setVoiceState('connected')
+        setVoiceState('authenticating')
         els.connectBtn.disabled = true
         els.disconnectBtn.disabled = false
-        els.recordBtn.disabled = false
+        ws.send(JSON.stringify({
+          type: 'authenticate',
+          token: localStorage.getItem(tokenKey) || '',
+        }))
       })
       ws.addEventListener('close', () => {
         setVoiceState('closed')
+        voiceAuthenticated = false
         els.connectBtn.disabled = false
         els.disconnectBtn.disabled = true
         els.recordBtn.disabled = true
@@ -415,6 +525,11 @@ function portalHtml(): string {
       ws.addEventListener('message', (message) => {
         const event = JSON.parse(message.data)
         logEvent(redactAudio(event))
+        if (event.type === 'authenticated') {
+          voiceAuthenticated = true
+          setVoiceState('connected')
+          els.recordBtn.disabled = false
+        }
         if (event.type === 'stt_final') els.transcript.textContent = event.full || event.text || ''
         if (event.type === 'assistant_text_delta') els.assistant.textContent = event.full || ''
         if (event.type === 'assistant_final') els.assistant.textContent = event.text || ''
@@ -438,7 +553,7 @@ function portalHtml(): string {
     }
 
     async function startRecording() {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return
+      if (!voiceAuthenticated || !ws || ws.readyState !== WebSocket.OPEN) return
       resetTurnUi()
       pcmQueue = []
       recording = true

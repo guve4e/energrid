@@ -24,6 +24,9 @@ window.createVoiceController = function createVoiceController({
     onMisfire: handleVadMisfire,
   })
 
+  let voiceToken = ''
+  let pendingCapturedAudio = null
+
   function init() {
     ui.setConversationId(state.conversationId)
     setState('idle')
@@ -255,11 +258,10 @@ window.createVoiceController = function createVoiceController({
   }
 
   function handleSocketOpen(audioFloat32) {
-    ui.log('[voice] connected')
-    setState('streaming_turn')
-
-    sendCapturedSpeech(audioFloat32)
-    sendEndOfTurn()
+    pendingCapturedAudio = audioFloat32
+    ui.log('[voice] connected; authenticating')
+    wsClient.sendJson({ type: 'authenticate', token: voiceToken })
+    setState('authenticating_turn')
   }
 
   function sendCapturedSpeech(audioFloat32) {
@@ -348,6 +350,14 @@ window.createVoiceController = function createVoiceController({
       if (state.currentTurn) {
         state.currentTurn.conversationId = state.conversationId
       }
+    }
+
+    if (pendingCapturedAudio) {
+      const audio = pendingCapturedAudio
+      pendingCapturedAudio = null
+      setState('streaming_turn')
+      sendCapturedSpeech(audio)
+      sendEndOfTurn()
     }
   }
 
@@ -520,6 +530,12 @@ window.createVoiceController = function createVoiceController({
   async function startSession() {
     if (state.listeningArmed) return
 
+    voiceToken = window.prompt('Enter the Energrid portal control token') || ''
+    if (!voiceToken) {
+      ui.log('voice session not started: authorization token is required')
+      return
+    }
+
     try {
       await vadClient.start()
       state.listeningArmed = true
@@ -540,6 +556,8 @@ window.createVoiceController = function createVoiceController({
     await vadClient.pause()
     cleanupTurnSocket()
     player.clear()
+    voiceToken = ''
+    pendingCapturedAudio = null
 
     setState('idle')
     ui.log('session stopped')

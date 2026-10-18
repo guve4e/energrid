@@ -1,10 +1,80 @@
-# Voice Local STT
+# Voice Processing
 
-The voice API can transcribe each VAD-bounded user turn with either OpenAI
-transcription or a local faster-whisper model.
+The current voice API captures a VAD-bounded turn, applies a server-side audio
+gate, and transcribes it with OpenAI batch transcription or local faster-whisper
+by default. An opt-in OpenAI Realtime streaming transcription path is also
+available for incremental transcription.
 
-OpenAI is the default. Local Whisper is opt-in, so the app remains usable while
-the custom model is still being trained.
+Speech application services depend on provider ports in `domain-voice`. The API
+module selects OpenAI batch STT or local Whisper at composition time, and keeps
+the optional streaming provider behind a separate port. OpenAI TTS uses the same
+adapter boundary; session logic does not depend on a provider SDK.
+
+OpenAI batch transcription is the default. Local Whisper is opt-in, so the app
+remains usable while the custom model is still being trained. Streaming STT is
+also opt-in and uses OpenAI Realtime; it sends audio to OpenAI while the user is
+speaking and may incur API usage charges.
+
+## Streaming STT
+
+Buffered turn-based transcription remains the default. To opt into streaming:
+
+```sh
+VOICE_STT_MODE=streaming \
+VOICE_STT_STREAM_PROVIDER=openai \
+VOICE_AUDIO_SAMPLE_RATE_HZ=16000 \
+pnpm nx serve api
+```
+
+The browser currently sends mono PCM16 at 16 kHz. The OpenAI adapter resamples
+it incrementally to the 24 kHz PCM16 format required by Realtime transcription,
+then sends audio as it arrives after the server-side speech gate opens. Final
+transcription still waits for the end-of-turn signal. The OpenAI API key is read
+from the API process environment; do not put it in browser configuration.
+
+`OPENAI_STT_STREAM_MODEL` defaults to `gpt-live-transcribe`. The adapter uses
+the GA Realtime WebSocket endpoint without the retired beta header and selects
+transcription intent in the WebSocket handshake; the selected model stays in
+the session configuration. It sends the model-specific language configuration
+(`languages` for `gpt-live-transcribe`). You can still override the model with
+a compatible transcription model. `OPENAI_STT_STREAM_CONNECT_TIMEOUT_MS`
+defaults to 10 seconds. Startup waits for OpenAI's session acknowledgement
+before audio is sent; rejected configurations are logged with sanitized
+provider event/code/field details. The `/voice/config` endpoint reports the
+active mode and selected model/provider.
+
+## Access And Privacy
+
+WebSocket clients must send an initial JSON message containing the configured
+`PORTAL_CONTROL_TOKEN` before the server creates a voice session:
+
+```json
+{"type":"authenticate","token":"<PORTAL_CONTROL_TOKEN>"}
+```
+
+Use TLS/WSS outside localhost. Voice debug sockets are disabled unless
+`VOICE_DEBUG_ENABLED=true` and require the same token. Voice run persistence and
+file tracing are opt-in (`VOICE_RUNS_ENABLED=true` and
+`VOICE_TRACE_ENABLED=true`). Persisted transcripts contain household data, so
+enable them only for deliberate diagnostics and apply an explicit retention
+policy.
+
+Provider calls have bounded 30-second defaults. `VOICE_STT_TIMEOUT_MS`,
+`VOICE_TTS_TIMEOUT_MS`, and `LOCAL_WHISPER_TIMEOUT_MS` can tune them from 1 to
+120 seconds. SDK retries are disabled for STT/TTS calls to avoid hidden repeat
+requests and unpredictable turn latency. OpenAI remains the default cloud
+provider; local Whisper does not send audio to OpenAI unless the explicit
+`LOCAL_WHISPER_FALLBACK_TO_OPENAI=true` option is enabled.
+
+Voice-driven device actions are shown in the portal and require a deliberate
+**Confirm action** click. The server keeps the generated plan on the authenticated
+socket, issues a one-time approval ID, and expires it after
+`VOICE_ACTION_APPROVAL_MS` (15 seconds by default, bounded to 5–60 seconds). The
+browser cannot submit or alter the device plan. Cancel, expiry, disconnect, and
+replay do not execute the action. Other voice clients without the confirmation
+UI remain fail-closed.
+The audio turn size defaults to 1.536 MB (about 48 seconds of mono 16 kHz
+PCM16); `VOICE_MAX_AUDIO_BYTES` may tune it within the server-enforced bounds.
 
 ## OpenAI STT
 
@@ -65,10 +135,10 @@ Useful knobs:
 
 ## Latency Shape
 
-The browser still captures a short utterance with VAD and sends that finished
-turn to the API. The conversational speedup comes from removing the network
-round-trip for STT and from streaming the assistant response/TTS chunks as soon
-as enough reply text is speakable.
+The browser captures a short utterance with VAD. In buffered mode it sends the
+finished turn for transcription; in streaming mode it sends gated PCM chunks as
+the user speaks. The conversational speedup also comes from streaming assistant
+response/TTS chunks as soon as enough reply text is speakable.
 
 ## Local Benchmark
 

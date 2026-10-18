@@ -32,6 +32,7 @@ class DevStreamingSttSession implements StreamingSttSession {
 
 export function createDevStreamingSttProvider(): IStreamingSttProvider {
   return {
+    id: 'dev',
     async createSession(): Promise<StreamingSttSession> {
       return new DevStreamingSttSession()
     },

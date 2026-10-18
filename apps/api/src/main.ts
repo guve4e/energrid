@@ -16,6 +16,7 @@ function setupSwagger(app: Awaited<ReturnType<typeof NestFactory.create>>) {
         '',
         'Voice WebSocket protocol:',
         '- connect to ws://<host>:<port>/voice',
+        '- send { "type": "authenticate", "token": "<PORTAL_CONTROL_TOKEN>" } first',
         '- send 16kHz mono PCM16 binary audio chunks',
         '- send { "type": "end_of_turn" } after VAD detects silence',
         '- receive JSON events: session_start, stt_partial, stt_final, assistant_text_delta, assistant_audio_chunk, assistant_final, turn_end, error',

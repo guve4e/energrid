@@ -11,8 +11,14 @@ export interface ActiveVoiceSession {
   conversationId: string
   client: WebSocket
   sttSession: StreamingSttSession
+  streamingStt: boolean
+  sttStreamingStarted: boolean
+  sttPushedChunkCount: number
+  sttFailed: boolean
+  sttPushQueue: Promise<void>
 
   chunkCount: number
+  bufferedAudioBytes: number
   audioChunks: Buffer[]
   partialTranscript: string
   finalTranscript: string
@@ -20,6 +26,12 @@ export interface ActiveVoiceSession {
   homeIntentClassification: ClassifyHomeIntentResult | null
   homeIntentPlan: HomeIntentPlan | null
   homeActionExecutionResults: HomeActionExecutionResult[]
+  pendingActionApproval: {
+    id: string
+    plan: HomeIntentPlan
+    expiresAt: number
+    timer: NodeJS.Timeout
+  } | null
   errorMessages: string[]
 
   startedAt: number

@@ -39,6 +39,8 @@ export class VoiceClientController {
       <div id="secureWarning" class="warn" hidden>Microphone access usually needs HTTPS, or localhost. If this page is opened over plain HTTP from another machine, the browser may block the mic.</div>
       <label for="wsUrl">Voice WebSocket</label>
       <input id="wsUrl" autocomplete="off" />
+      <label for="controlToken">Portal control token</label>
+      <input id="controlToken" type="password" autocomplete="current-password" />
       <button id="connectBtn">Connect</button>
       <button id="recordBtn" disabled>Hold To Talk</button>
       <button id="disconnectBtn" class="secondary" disabled>Disconnect</button>
@@ -74,6 +76,7 @@ export class VoiceClientController {
     const FLUSH_SAMPLES = 4096
 
     const wsUrlInput = document.getElementById('wsUrl')
+    const controlTokenInput = document.getElementById('controlToken')
     const connectBtn = document.getElementById('connectBtn')
     const disconnectBtn = document.getElementById('disconnectBtn')
     const recordBtn = document.getElementById('recordBtn')
@@ -121,10 +124,10 @@ export class VoiceClientController {
       setStatus('connecting')
 
       ws.addEventListener('open', () => {
-        setStatus('connected')
+        setStatus('authenticating')
         connectBtn.disabled = true
         disconnectBtn.disabled = false
-        recordBtn.disabled = false
+        ws.send(JSON.stringify({ type: 'authenticate', token: controlTokenInput.value }))
       })
 
       ws.addEventListener('close', () => {
@@ -132,6 +135,7 @@ export class VoiceClientController {
         connectBtn.disabled = false
         disconnectBtn.disabled = true
         recordBtn.disabled = true
+        controlTokenInput.value = ''
         ws = null
       })
 
@@ -139,6 +143,11 @@ export class VoiceClientController {
       ws.addEventListener('message', (message) => {
         const event = JSON.parse(message.data)
         logEvent(redactAudio(event))
+
+        if (event.type === 'authenticated') {
+          setStatus('connected')
+          recordBtn.disabled = false
+        }
 
         if (event.type === 'stt_final') transcriptEl.textContent = event.full || event.text || ''
         if (event.type === 'assistant_text_delta') assistantEl.textContent = event.full || ''

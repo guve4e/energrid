@@ -14,6 +14,7 @@ describe('DeviceRegistryService', () => {
   beforeEach(() => {
     process.env = { ...originalEnv };
     delete process.env.HOME_DEVICE_CONTROL_BINDINGS_JSON;
+    delete process.env.HOME_ASSISTANT_ENABLED_DEVICE_IDS;
     delete process.env.HOME_KITCHEN_LIGHT_SHELLY_RPC_DEVICES;
     delete process.env.HOME_KITCHEN_LIGHT_MQTT_TOPIC;
     delete process.env.HOME_KITCHEN_TEMP_MQTT_TOPIC;
@@ -138,6 +139,47 @@ describe('DeviceRegistryService', () => {
     expect(snapshot.summary.discovered).toBe(1);
   });
 
+  it('requires explicit assistant permission and a ready route before exposing a physical light to voice', () => {
+    process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({ devices: [{
+      id: 'office.desk_lamp',
+      displayName: 'Desk lamp',
+      zoneName: 'Office',
+      protocol: 'mqtt',
+      driver: 'shelly-rpc',
+      target: 'shellyplus1-desk',
+      capabilities: ['switch'],
+      configured: true,
+      assistantEnabled: false,
+      metadata: { physicalId: 'shellyplus1-desk', channel: 0 },
+    }] });
+    process.env.HOME_DEVICE_CONTROL_BINDINGS_JSON = JSON.stringify({
+      'office.desk_lamp': {
+        kind: 'shelly-mqtt',
+        enabled: true,
+        physicalId: 'shellyplus1-desk',
+        channel: 0,
+        topic: 'shelly/rpc',
+      },
+    });
+
+    expect(new DeviceRegistryService().getAvailableDeviceIds()).not.toContain('office.desk_lamp');
+
+    process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({ devices: [{
+      id: 'office.desk_lamp',
+      displayName: 'Desk lamp',
+      zoneName: 'Office',
+      protocol: 'mqtt',
+      driver: 'shelly-rpc',
+      target: 'shellyplus1-desk',
+      capabilities: ['switch'],
+      configured: true,
+      assistantEnabled: true,
+      metadata: { physicalId: 'shellyplus1-desk', channel: 0 },
+    }] });
+    const enabled = new DeviceRegistryService();
+    expect(enabled.getAvailableDeviceIds()).toContain('office.desk_lamp');
+  });
+
   it('approves and blocks discovered devices from onboarding', () => {
     process.env.HOME_DISCOVERED_DEVICES_JSON = JSON.stringify([
       {
@@ -185,6 +227,72 @@ describe('DeviceRegistryService', () => {
       snapshot.devices.find((device) => device.id === 'shelly-ignore-channel'),
     ).toBeUndefined();
     expect(snapshot.summary.discovered).toBe(0);
+  });
+
+  it('restores an approved installation and its assigned room after a restart', async () => {
+    process.env.HOME_DISCOVERED_DEVICES_JSON = JSON.stringify([{
+      id: 'shellyplus1-installed:switch:0',
+      displayName: 'Shelly switch',
+      protocol: 'mqtt',
+      transport: 'mqtt',
+      driver: 'shelly-discovered',
+      target: 'shellyplus1-installed',
+      capabilities: ['switch'],
+      confidence: 0.9,
+      reason: 'Unit test fixture',
+    }]);
+    const records = new Map<string, any>();
+    const store = {
+      list: jest.fn(async () => [...records.values()]),
+      save: jest.fn(async (record) => { records.set(record.device.id, record); }),
+      append: jest.fn().mockResolvedValue(undefined),
+      events: jest.fn().mockResolvedValue([]),
+    };
+    const first = new DeviceRegistryService(undefined, store as any);
+    const approved = first.approveDiscoveredDevice('shellyplus1-installed:switch:0');
+    expect(approved?.trustStatus).toBe('approved');
+    const named = await first.updateInstallationDetails(
+      approved!.id,
+      'Hall relay',
+      'Hall',
+      true,
+      'http://192.168.1.21',
+    );
+    await first.persistInstallation(named, true);
+
+    const restarted = new DeviceRegistryService(undefined, store as any);
+    await restarted.onModuleInit();
+    expect(restarted.getDevices()).toContainEqual(expect.objectContaining({
+      id: approved!.id,
+      trustStatus: 'approved',
+      displayName: 'Hall relay',
+      zoneName: 'Hall',
+      assistantEnabled: true,
+      settingsUrl: 'http://192.168.1.21',
+      commissioning: { physicalOutcome: 'not_confirmed', confirmedAt: null },
+    }));
+    expect(store.append).toHaveBeenCalledWith(expect.objectContaining({ kind: 'approved' }));
+  });
+
+  it('keeps Unicode room names addressable in the normalized zone ID', async () => {
+    process.env.HOME_DISCOVERED_DEVICES_JSON = JSON.stringify([{
+      id: 'shellyplus1-bulgarian:switch:0',
+      displayName: 'Relay',
+      protocol: 'mqtt',
+      driver: 'shelly-discovered',
+      target: 'shellyplus1-bulgarian',
+      capabilities: ['switch'],
+    }]);
+    const store = {
+      list: jest.fn().mockResolvedValue([]),
+      save: jest.fn().mockResolvedValue(undefined),
+      append: jest.fn().mockResolvedValue(undefined),
+      events: jest.fn().mockResolvedValue([]),
+    };
+    const registry = new DeviceRegistryService(undefined, store as any);
+    const approved = registry.approveDiscoveredDevice('shellyplus1-bulgarian:switch:0')!;
+    await expect(registry.updateInstallationDetails(approved.id, 'Реле', 'Детска стая'))
+      .resolves.toEqual(expect.objectContaining({ zoneId: 'детска-стая' }));
   });
 
   it('tracks a pending command until matching telemetry acknowledges it', () => {

@@ -14,6 +14,19 @@ import { VoiceProtocolController } from './voice-protocol.controller'
 import { VoiceClientController } from './voice-client.controller'
 import { HomeAutomationService } from './home-automation.service'
 import { DevicesModule } from '../devices/devices.module'
+import { LocalWhisperSttProvider } from './local-whisper-stt.provider'
+import {
+  OpenAiBatchSttProvider,
+  OpenAiSpeechSynthesisProvider,
+} from './openai-speech.providers'
+import { OpenAiConversationModelProvider } from './openai-conversation-model.provider'
+import { createOpenAIStreamingSttProvider } from '@energrid/stt-stream-openai'
+import {
+  CONVERSATION_MODEL_PROVIDER,
+  SPEECH_SYNTHESIS_PROVIDER,
+  SPEECH_TO_TEXT_PROVIDERS,
+  STREAMING_STT_PROVIDERS,
+} from './speech-provider.tokens'
 
 @Module({
   imports: [DevicesModule],
@@ -23,6 +36,30 @@ import { DevicesModule } from '../devices/devices.module'
     DebugGateway,
     DebugEventsService,
     VoiceSttService,
+    LocalWhisperSttProvider,
+    OpenAiBatchSttProvider,
+    OpenAiSpeechSynthesisProvider,
+    OpenAiConversationModelProvider,
+    {
+      provide: SPEECH_TO_TEXT_PROVIDERS,
+      useFactory: (
+        openai: OpenAiBatchSttProvider,
+        local: LocalWhisperSttProvider,
+      ) => [openai, local],
+      inject: [OpenAiBatchSttProvider, LocalWhisperSttProvider],
+    },
+    {
+      provide: STREAMING_STT_PROVIDERS,
+      useFactory: () => [createOpenAIStreamingSttProvider()],
+    },
+    {
+      provide: SPEECH_SYNTHESIS_PROVIDER,
+      useExisting: OpenAiSpeechSynthesisProvider,
+    },
+    {
+      provide: CONVERSATION_MODEL_PROVIDER,
+      useExisting: OpenAiConversationModelProvider,
+    },
     VoiceSessionService,
     VoiceConversationService,
     VoiceSynthesisService,

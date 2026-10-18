@@ -3,6 +3,7 @@ import { DebugEventsService } from './debug-events.service'
 import { appendVoiceTrace } from './utils/voice-trace.util'
 import type { ActiveVoiceSession } from './voice-session.types'
 import { VoiceRunStoreService } from './voice-run-store.service'
+import type { StreamingSttEvent } from '@energrid/stt-stream-core'
 
 @Injectable()
 export class VoiceSessionTraceService {
@@ -27,7 +28,7 @@ export class VoiceSessionTraceService {
 
   logSessionEnd(session: ActiveVoiceSession): void {
     this.logger.log(
-      `[SESSION END] ${session.id} conversation=${session.conversationId} transcript="${session.finalTranscript}"`,
+      `[SESSION END] ${session.id} conversation=${session.conversationId} transcriptChars=${session.finalTranscript.length}`,
     )
   }
 
@@ -271,12 +272,14 @@ export class VoiceSessionTraceService {
   appendSttErrorTrace(
     session: ActiveVoiceSession,
     message: string,
+    diagnostic?: Extract<StreamingSttEvent, { type: 'stt_error' }>['diagnostic'],
   ): void {
     appendVoiceTrace({
       type: 'stt_error',
       sessionId: session.id,
       conversationId: session.conversationId,
       message,
+      ...(diagnostic ? { diagnostic } : {}),
     })
   }
 

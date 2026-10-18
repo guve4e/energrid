@@ -18,25 +18,36 @@ describe('portal control configuration authorization', () => {
   });
   function setup() {
     const configure = jest.fn().mockReturnValue({ id: 'relay' });
-    const execute = jest.fn();
+    const execute = jest.fn().mockResolvedValue({
+      action: 'turn_on', status: 'acked', adapter: 'shelly-rpc',
+      command: { id: 'command-1' }, message: 'reported on',
+    });
     const check = jest.fn();
     const scanNow = jest
       .fn()
       .mockResolvedValue({ devices: [], zones: [], scannedAt: 'now' });
     const registerDiscoveredDevice = jest.fn();
+    const persistInstallation = jest.fn().mockResolvedValue(undefined);
+    const persistInstallationEvent = jest.fn().mockResolvedValue(undefined);
+    const getDevices = jest.fn().mockReturnValue([]);
+    const getState = jest.fn().mockReturnValue({ site: { id: 'site-home' } });
     return {
       configure,
       execute,
       check,
       scanNow,
       registerDiscoveredDevice,
+      persistInstallation,
+      persistInstallationEvent,
+      getDevices,
+      getState,
       controller: new PortalController(
-        {} as PortalStateService,
+        { getState } as unknown as PortalStateService,
         { scanNow } as unknown as DeviceLanDiscoveryService,
         {} as PortalDeviceProxyService,
         { configure, execute } as unknown as DeviceControlService,
         {} as DeviceMqttIngestService,
-        { registerDiscoveredDevice } as unknown as DeviceRegistryService,
+        { registerDiscoveredDevice, persistInstallation, persistInstallationEvent, getDevices } as unknown as DeviceRegistryService,
         { check } as unknown as DeviceDiagnosticsService,
       ),
     };
@@ -57,6 +68,14 @@ describe('portal control configuration authorization', () => {
     ).rejects.toThrow(UnauthorizedException);
     expect(scanNow).not.toHaveBeenCalled();
     expect(registerDiscoveredDevice).not.toHaveBeenCalled();
+  });
+  it('requires a bearer token to read portal state and rejects query-string tokens', () => {
+    const { controller, getState } = setup();
+    expect(() => controller.getState({ method: 'GET', url: '/', headers: {} })).toThrow(UnauthorizedException);
+    expect(() => controller.getState({ method: 'GET', url: '/?token=unit-only', headers: {} })).toThrow(UnauthorizedException);
+    expect(getState).not.toHaveBeenCalled();
+    expect(controller.getState({ method: 'GET', url: '/', headers: { authorization: 'Bearer unit-only' } }))
+      .toEqual({ site: { id: 'site-home' } });
   });
   it('registers reported channels for review without approving, configuring, or switching', async () => {
     const {
@@ -91,20 +110,21 @@ describe('portal control configuration authorization', () => {
     expect(configure).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
   });
-  it('rejects unauthenticated configuration without touching the device service', () => {
+  it('rejects unauthenticated configuration without touching the device service', async () => {
     const { controller, configure, execute } = setup();
-    expect(() =>
+    await expect(
       controller.configureDeviceControl(
         'relay',
         { binding: null },
         { method: 'POST', url: '/', headers: {} },
       ),
-    ).toThrow(UnauthorizedException);
+    ).rejects.toThrow(UnauthorizedException);
     expect(configure).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
   });
-  it('configures only the requested route and reports runtime persistence, never switching', () => {
-    const { controller, configure, execute } = setup();
+  it('configures only the requested route and reports local persistence, never switching', async () => {
+    const { controller, configure, execute, persistInstallation, persistInstallationEvent } = setup();
+    configure.mockReturnValue({ id: 'relay', control: { binding: { kind: 'shelly-mqtt', enabled: false } } });
     const binding = {
       kind: 'shelly-mqtt',
       enabled: false,
@@ -112,7 +132,7 @@ describe('portal control configuration authorization', () => {
       channel: 1,
       topic: 'device/rpc',
     };
-    expect(
+    await expect(
       controller.configureDeviceControl(
         'relay',
         { binding },
@@ -122,8 +142,34 @@ describe('portal control configuration authorization', () => {
           headers: { authorization: 'Bearer unit-only' },
         },
       ),
-    ).toEqual({ device: { id: 'relay' }, persistence: 'runtime' });
+    ).resolves.toEqual({ device: expect.objectContaining({ id: 'relay' }), persistence: 'local' });
     expect(configure).toHaveBeenCalledWith('relay', binding);
+    expect(persistInstallation).toHaveBeenCalled();
+    expect(persistInstallationEvent).toHaveBeenCalledWith('relay', 'control_configured', expect.any(Object));
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('records command evidence after the control service returns', async () => {
+    const { controller, execute, persistInstallationEvent } = setup();
+    await controller.executeDeviceAction('relay', { action: 'turn_on' }, {
+      method: 'POST', url: '/', headers: { authorization: 'Bearer unit-only' },
+    });
+    expect(execute).toHaveBeenCalledWith('relay', 'turn_on');
+    expect(persistInstallationEvent.mock.calls).toEqual([
+      ['relay', 'command', expect.objectContaining({ action: 'turn_on', stage: 'requested' })],
+      ['relay', 'command', expect.objectContaining({
+        action: 'turn_on', stage: 'result', status: 'acked', commandId: 'command-1',
+      })],
+    ]);
+  });
+  it('records a failed result when control rejects a command', async () => {
+    const { controller, execute, persistInstallationEvent } = setup();
+    execute.mockRejectedValue(new Error('route is unavailable'));
+    await expect(controller.executeDeviceAction('relay', { action: 'turn_on' }, {
+      method: 'POST', url: '/', headers: { authorization: 'Bearer unit-only' },
+    })).rejects.toThrow('route is unavailable');
+    expect(persistInstallationEvent).toHaveBeenLastCalledWith('relay', 'command', expect.objectContaining({
+      stage: 'result', status: 'failed', failureType: 'Error',
+    }));
   });
 });

@@ -6,6 +6,7 @@
   "tags": [],
   "targets": {
     "build": {
+      "cache": false,
       "executor": "nx:run-commands",
       "options": {
         "command": "webpack-cli build",

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional, OnModuleInit } from '@nestjs/common';
 import {
   deviceControlState,
   parseDeviceControlBinding,
@@ -18,6 +18,8 @@ import type {
 } from './device-registry.types';
 import { OperationalLogService } from './operational-log.service';
 import { DeviceExecutionInvestigator } from './investigation/device-execution-investigator';
+import { DeviceInstallationStore } from './device-installation.store';
+import type { DeviceInstallationRecord } from './device-installation.store';
 
 export interface DiscoveredDeviceConfig {
   id?: string;
@@ -80,6 +82,8 @@ interface ApprovedDeviceConfig {
   target?: string;
   bridge?: string;
   configured?: boolean;
+  assistantEnabled?: boolean;
+  settingsUrl?: string;
   status?: string;
   capabilities?: DeviceCapabilityKind[];
   groups?: string[];
@@ -99,7 +103,7 @@ interface ApprovedDeviceConfig {
 }
 
 @Injectable()
-export class DeviceRegistryService {
+export class DeviceRegistryService implements OnModuleInit {
   private readonly controlBindings = new Map<
     string,
     DeviceControlBinding | null
@@ -140,8 +144,12 @@ export class DeviceRegistryService {
   >();
 
   private readonly latestCommandIdByDeviceId = new Map<string, string>();
+  private readonly persistedInstallations = new Map<string, DeviceInstallationRecord>();
 
-  constructor(private readonly operationalLog?: OperationalLogService) {
+  constructor(
+    private readonly operationalLog?: OperationalLogService,
+    @Optional() private readonly installationStore?: DeviceInstallationStore,
+  ) {
     const configured: unknown = JSON.parse(
       process.env.HOME_DEVICE_CONTROL_BINDINGS_JSON || '{}',
     );
@@ -153,6 +161,40 @@ export class DeviceRegistryService {
       throw new Error('HOME_DEVICE_CONTROL_BINDINGS_JSON must be an object.');
     for (const [id, binding] of Object.entries(configured))
       this.controlBindings.set(id, parseDeviceControlBinding(binding));
+  }
+
+  async onModuleInit(): Promise<void> {
+    if (!this.installationStore) return;
+    const siteId = configuredSite().siteId;
+    for (const record of await this.installationStore.list(siteId)) {
+      const device = record.device;
+      this.persistedInstallations.set(device.id, record);
+      this.liveApprovedDeviceConfigs.set(device.id, {
+        id: device.id,
+        displayName: device.displayName,
+        tenantId: device.tenantId,
+        siteId: device.siteId,
+        siteName: device.siteName,
+        gatewayId: device.gatewayId,
+        kind: device.kind,
+        zoneId: device.zoneId,
+        zoneName: device.zoneName,
+        protocol: device.adapter.protocol,
+        transport: device.adapter.transport,
+        driver: device.adapter.driver,
+        target: device.adapter.target,
+        bridge: device.adapter.bridge,
+        configured: device.adapter.configured,
+        capabilities: device.capabilities.map((capability) => capability.kind),
+        assistantEnabled: device.assistantEnabled === true,
+        settingsUrl: device.settingsUrl,
+        metadata: device.metadata,
+        values: {},
+        state: { values: {}, observedAt: null, source: 'device-store', status: 'unknown' },
+      });
+      if (device.control?.binding)
+        this.controlBindings.set(device.id, parseDeviceControlBinding(device.control.binding));
+    }
   }
 
   getSnapshot(): DeviceRegistrySnapshot {
@@ -233,6 +275,9 @@ export class DeviceRegistryService {
       zoneId: 'kitchen',
       zoneName: 'Kitchen',
       trustStatus: 'approved',
+      assistantEnabled: shellyDevices.length === 0
+        ? true
+        : shellyDevices.every((device) => assistantEnabledDeviceIds().has(device.key)),
       capabilities: [
         {
           kind: 'light',
@@ -277,6 +322,7 @@ export class DeviceRegistryService {
       zoneId: 'kitchen',
       zoneName: 'Kitchen',
       trustStatus: 'approved',
+      assistantEnabled: assistantEnabledDeviceIds().has(device.key),
       capabilities: [
         {
           kind: 'switch',
@@ -389,6 +435,14 @@ export class DeviceRegistryService {
 
     const result = devices.map((device) => ({
       ...this.withLiveState(device),
+      ...(this.persistedInstallations.has(device.id)
+        ? {
+            commissioning: {
+              physicalOutcome: this.persistedInstallations.get(device.id)!.physicalOutcome.status,
+              confirmedAt: this.persistedInstallations.get(device.id)!.physicalOutcome.confirmedAt,
+            },
+          }
+        : {}),
       control: deviceControlState(
         device,
         this.controlBindings.get(device.id) || null,
@@ -468,9 +522,137 @@ export class DeviceRegistryService {
     return this.getDevices().find((item) => item.id === deviceId)!;
   }
 
+  async persistInstallation(
+    device: RegisteredDevice,
+    initialApproval = false,
+  ): Promise<void> {
+    if (!this.installationStore)
+      throw new Error('Local device storage is unavailable.');
+    const existing = this.persistedInstallations.get(device.id);
+    const record: DeviceInstallationRecord = {
+      schemaVersion: 1,
+      device,
+      physicalOutcome: existing?.physicalOutcome || {
+        status: 'not_confirmed',
+        confirmedAt: null,
+        confirmedBy: null,
+      },
+      updatedAt: new Date().toISOString(),
+    };
+    await this.installationStore.save(record);
+    this.persistedInstallations.set(device.id, record);
+    if (initialApproval)
+      await this.persistInstallationEvent(device.id, 'approved', {
+        physicalId: String(device.metadata?.physicalId || device.adapter.target || ''),
+      });
+  }
+
+  async persistInstallationEvent(
+    deviceId: string,
+    kind: 'approved' | 'control_configured' | 'installation_details_saved' | 'command' | 'physical_outcome_confirmed',
+    evidence: Record<string, string | number | boolean | null>,
+  ): Promise<void> {
+    if (!this.installationStore)
+      throw new Error('Local device storage is unavailable.');
+    await this.installationStore.append({
+      id: `${new Date().toISOString()}-${Math.random().toString(36).slice(2, 10)}`,
+      deviceId,
+      kind,
+      occurredAt: new Date().toISOString(),
+      actor: 'portal-installer',
+      evidence,
+    });
+  }
+
+  async confirmPhysicalOutcome(deviceId: string): Promise<RegisteredDevice> {
+    const existing = this.persistedInstallations.get(deviceId);
+    if (!existing) throw new Error('Persist this device installation before confirmation.');
+    const current = this.getDevices().find((device) => device.id === deviceId);
+    if (current?.state.command?.status !== 'acked')
+      throw new Error('Run a device test and wait for matching reported state before confirming the physical result.');
+    const confirmedAt = new Date().toISOString();
+    const updated: DeviceInstallationRecord = {
+      ...existing,
+      physicalOutcome: {
+        status: 'confirmed',
+        confirmedAt,
+        confirmedBy: 'portal-installer',
+      },
+      updatedAt: confirmedAt,
+    };
+    await this.installationStore!.save(updated);
+    this.persistedInstallations.set(deviceId, updated);
+    await this.persistInstallationEvent(deviceId, 'physical_outcome_confirmed', {
+      confirmedAt,
+    });
+    return this.getDevices().find((device) => device.id === deviceId)!;
+  }
+
+  async updateInstallationDetails(
+    deviceId: string,
+    displayName: string,
+    zoneName: string,
+    assistantEnabled?: boolean,
+    settingsUrl?: string | null,
+  ): Promise<RegisteredDevice> {
+    const device = this.getDevices().find((item) => item.id === deviceId);
+    if (!device || device.trustStatus !== 'approved')
+      throw new Error('Approve this device before editing its installation details.');
+    if (settingsUrl != null && !safeSettingsUrl(settingsUrl))
+      throw new Error('Device settings must be an absolute HTTP or HTTPS URL without embedded credentials.');
+    const config = this.liveApprovedDeviceConfigs.get(deviceId) || {
+      id: device.id,
+      tenantId: device.tenantId,
+      siteId: device.siteId,
+      siteName: device.siteName,
+      gatewayId: device.gatewayId,
+      kind: device.kind,
+      protocol: device.adapter.protocol,
+      transport: device.adapter.transport,
+      driver: device.adapter.driver,
+      target: device.adapter.target,
+      bridge: device.adapter.bridge,
+      capabilities: device.capabilities.map((capability) => capability.kind),
+      assistantEnabled: device.assistantEnabled === true,
+      settingsUrl: device.settingsUrl,
+      metadata: device.metadata,
+    };
+    const zoneId = zoneName.toLowerCase().trim()
+      .replace(/[^\p{L}\p{N}]+/gu, '-')
+      .replace(/^-+|-+$/g, '') || 'unassigned';
+    const nextConfig = {
+      ...config,
+      displayName,
+      zoneName,
+      zoneId,
+      assistantEnabled: assistantEnabled ?? device.assistantEnabled === true,
+      settingsUrl: settingsUrl === undefined
+        ? device.settingsUrl
+        : settingsUrl ? safeSettingsUrl(settingsUrl) : undefined,
+    };
+    this.liveApprovedDeviceConfigs.set(deviceId, nextConfig);
+    const updated = this.getDevices().find((item) => item.id === deviceId)!;
+    try {
+      await this.persistInstallation(updated);
+      return updated;
+    } catch (error) {
+      this.liveApprovedDeviceConfigs.set(deviceId, config);
+      throw error;
+    }
+  }
+
+  getInstallationEvents(deviceId: string) {
+    return this.installationStore?.events(deviceId) || Promise.resolve([]);
+  }
+
   getAvailableDeviceIds(): string[] {
-    return this.getDevices()
+    const devices = this.getDevices();
+    const byId = new Map(devices.map((device) => [device.id, device]));
+    return devices
       .filter((device) => device.trustStatus === 'approved')
+      .filter((device) =>
+        canAssistantUseDevice(device, byId),
+      )
       .filter(
         (device) =>
           !device.capabilities.some((c) => c.actions.includes('turn_on')) ||
@@ -1825,11 +2007,42 @@ function devicePriority(device: RegisteredDevice): number {
   if (device.adapter.configured) score += 50;
 
   if (device.kind === 'logical') score += 20;
+  if (device.assistantEnabled) score += 10;
+  if (device.settingsUrl) score += 5;
 
   if (device.adapter.id === 'mqtt-discovered') score -= 200;
   if (device.adapter.driver === 'mqtt-unknown') score -= 200;
 
   return score;
+}
+
+function assistantEnabledDeviceIds(): Set<string> {
+  return new Set(
+    (process.env.HOME_ASSISTANT_ENABLED_DEVICE_IDS || '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean),
+  );
+}
+
+function canAssistantUseDevice(
+  device: RegisteredDevice,
+  byId: Map<string, RegisteredDevice>,
+  seen = new Set<string>(),
+): boolean {
+  if (seen.has(device.id)) return false;
+  const actions = device.capabilities.flatMap((capability) => capability.actions);
+  const readOnly = actions.length > 0 && actions.every((action) => action === 'read');
+  if (readOnly) return true;
+  if (device.assistantEnabled !== true) return false;
+  if (device.memberDeviceIds?.length) {
+    const next = new Set(seen).add(device.id);
+    return device.memberDeviceIds.every((id) => {
+      const member = byId.get(id);
+      return !!member && canAssistantUseDevice(member, byId, next);
+    });
+  }
+  return true;
 }
 
 function configuredSite() {
@@ -1999,6 +2212,8 @@ function normalizeApprovedDevice(item: unknown): RegisteredDevice | null {
     zoneId: safeId(raw.zoneId || zoneName.toLowerCase()) || 'unassigned',
     zoneName,
     trustStatus: 'approved',
+    assistantEnabled: raw.assistantEnabled === true || protocol === 'simulated',
+    settingsUrl: safeSettingsUrl(raw.settingsUrl),
     capabilities,
     adapter: {
       id: raw.driver || inferDriver(raw, protocol),
@@ -2046,6 +2261,18 @@ function normalizeApprovedDevice(item: unknown): RegisteredDevice | null {
   };
 }
 
+function safeSettingsUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  try {
+    const url = new URL(value.trim());
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password)
+      return undefined;
+    return url.toString().replace(/\/$/, '');
+  } catch {
+    return undefined;
+  }
+}
+
 function logicalGroupsFromImportedDevices(
   devices: RegisteredDevice[],
 ): RegisteredDevice[] {
@@ -2085,6 +2312,7 @@ function logicalGroupsFromImportedDevices(
         zoneId: safeId(zoneName.toLowerCase()) || 'site',
         zoneName,
         trustStatus: 'approved',
+        assistantEnabled: members.every((member) => member.assistantEnabled === true),
         capabilities: [
           {
             kind: isLightGroup ? 'light' : 'switch',

@@ -422,8 +422,8 @@
 
     ws = new WebSocket('ws://localhost:3000/voice')
 
-    ws.onopen = async () => {
-      log('[voice] connected')
+    async function startAudioCapture() {
+      log('[voice] authenticated')
 
       mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -463,9 +463,25 @@
       log('streaming pcm16 @ 16k...')
     }
 
+    ws.onopen = () => {
+      const token = window.prompt('Enter the Energrid portal control token') || ''
+      if (!token) {
+        closeSocketIfOpen()
+        setState('idle')
+        return
+      }
+      log('[voice] connected; authenticating')
+      ws.send(JSON.stringify({ type: 'authenticate', token }))
+    }
+
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data)
       log(`[voice] recv: ${data.type}`)
+
+      if (data.type === 'authenticated') {
+        void startAudioCapture()
+        return
+      }
 
       if (data.type === 'session_start') {
         currentSessionId = data.sessionId || ''

@@ -11,6 +11,13 @@ export type SttFinalEvent = {
 export type SttErrorEvent = {
   type: 'stt_error'
   message: string
+  diagnostic?: {
+    providerEvent?: string
+    providerCode?: string
+    providerType?: string
+    providerParam?: string
+    closeCode?: number
+  }
 }
 
 export type StreamingSttEvent =
@@ -26,9 +33,12 @@ export interface StreamingSttSession {
 }
 
 export interface IStreamingSttProvider {
+  readonly id: string
   createSession(input: {
     mimeType: string
     sampleRate?: number
     language?: string
   }): Promise<StreamingSttSession>
 }
+
+export { Pcm16LinearResampler } from './pcm16-resampler'

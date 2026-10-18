@@ -1,45 +1,55 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common'
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'child_process'
-import { promises as fs } from 'fs'
-import { tmpdir } from 'os'
-import { join } from 'path'
-import { promisify } from 'util'
-import { createInterface, type Interface } from 'readline'
-import OpenAI from 'openai'
-import { toFile } from 'openai/uploads'
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common'
+import type { SpeechToTextProvider } from '@energrid/domain-voice'
+import type { IStreamingSttProvider } from '@energrid/stt-stream-core'
 import type {
   StreamingSttEvent,
   StreamingSttSession,
 } from '@energrid/stt-stream-core'
-
-const execFileAsync = promisify(execFile)
-
-interface PendingWhisperRequest {
-  resolve: (text: string) => void
-  reject: (error: Error) => void
-  timeout: NodeJS.Timeout
-  startedAt: number
-}
+import { SPEECH_TO_TEXT_PROVIDERS, STREAMING_STT_PROVIDERS } from './speech-provider.tokens'
 
 @Injectable()
-export class VoiceSttService implements OnModuleDestroy {
+export class VoiceSttService {
   private readonly logger = new Logger(VoiceSttService.name)
-  private localWhisperWorker: ChildProcessWithoutNullStreams | null = null
-  private localWhisperWorkerLines: Interface | null = null
-  private localWhisperPending = new Map<string, PendingWhisperRequest>()
 
-  private readonly openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-  })
-
-  onModuleDestroy(): void {
-    this.stopLocalWhisperWorker()
-  }
+  constructor(
+    @Inject(SPEECH_TO_TEXT_PROVIDERS)
+    private readonly providers: SpeechToTextProvider[],
+    @Optional()
+    @Inject(STREAMING_STT_PROVIDERS)
+    private readonly streamingProviders: IStreamingSttProvider[] = [],
+  ) {}
 
   async createSession(
     onEvent: (event: StreamingSttEvent) => Promise<void>,
   ): Promise<StreamingSttSession> {
     this.logger.log('VoiceSttService.createSession called')
+
+    if (process.env.VOICE_STT_MODE === 'streaming') {
+      const configuredProvider = process.env.VOICE_STT_STREAM_PROVIDER || 'openai'
+      const provider = this.streamingProviders.find(
+        (candidate) => candidate.id === configuredProvider,
+      )
+      if (!provider) {
+        throw new Error(`Streaming speech provider is unavailable: ${configuredProvider}`)
+      }
+
+      let session: StreamingSttSession
+      try {
+        session = await provider.createSession({
+          mimeType: 'audio/pcm',
+          sampleRate: Number(process.env.VOICE_AUDIO_SAMPLE_RATE_HZ) || 16_000,
+          language: process.env.VOICE_STT_LANGUAGE || 'bg',
+        })
+      } catch (error) {
+        const diagnostic = formatStartupDiagnostic(error)
+        this.logger.error(
+          `[STT STARTUP ERROR] provider=${provider.id} reason=${errorName(error)}${diagnostic ? ` ${diagnostic}` : ''}`,
+        )
+        throw new Error('Could not start streaming speech recognition.')
+      }
+      session.onEvent((event) => { void onEvent(event) })
+      return session
+    }
 
     const audioChunks: Buffer[] = []
     let ended = false
@@ -103,303 +113,91 @@ export class VoiceSttService implements OnModuleDestroy {
     return session
   }
 
+  isStreamingMode(): boolean {
+    return process.env.VOICE_STT_MODE === 'streaming'
+  }
+
   async transcribeBufferedAudio(audio: Buffer): Promise<string> {
     if (!audio.length) return ''
-
     const startedAt = Date.now()
-    const provider = this.getProvider()
-
-    if (provider === 'local-whisper') {
-      const text = await this.transcribeWithLocalWhisper(audio)
-      this.logger.log(
-        `[STT PROVIDER] provider=local-whisper bytes=${audio.length} durationMs=${Date.now() - startedAt} textChars=${text.length}`,
-      )
-
-      if (text || !this.shouldFallbackToOpenAI()) {
-        return text
+    const selected = this.selectProvider()
+    let text: string
+    try {
+      text = await selected.transcribe(this.request(audio))
+    } catch (error) {
+      this.logger.warn(`Speech provider failed id=${selected.id} reason=${errorName(error)}`)
+      if (selected.id === 'local-whisper' && this.fallbackEnabled()) {
+        return this.transcribeFallback(audio, startedAt)
       }
-
-      this.logger.warn('Local Whisper returned no text; falling back to OpenAI STT')
+      throw new Error('Speech recognition provider failed.')
     }
 
-    const text = await this.transcribeWithOpenAI(audio)
-    this.logger.log(
-      `[STT PROVIDER] provider=${provider === 'local-whisper' ? 'openai_fallback' : 'openai'} bytes=${audio.length} durationMs=${Date.now() - startedAt} textChars=${text.length}`,
-    )
-
-    return text
-  }
-
-  private getProvider(): 'openai' | 'local-whisper' {
-    const provider = process.env.VOICE_STT_PROVIDER || process.env.STT_PROVIDER
-
-    if (provider === 'local-whisper' || provider === 'faster-whisper') {
-      return 'local-whisper'
+    if (!text.trim() && selected.id === 'local-whisper' && this.fallbackEnabled()) {
+      this.logger.warn('Local speech provider returned no text; trying configured fallback.')
+      return this.transcribeFallback(audio, startedAt)
     }
 
-    return 'openai'
+    this.logResult(selected.id, audio.length, text.length, startedAt)
+    return text.trim()
   }
 
-  private shouldFallbackToOpenAI(): boolean {
+  private selectProvider(): SpeechToTextProvider {
+    const configured = process.env.VOICE_STT_PROVIDER || process.env.STT_PROVIDER || 'openai'
+    const providerId = configured === 'faster-whisper' ? 'local-whisper' : configured
+    const provider = this.providers.find((candidate) => candidate.id === providerId)
+    if (!provider) throw new Error(`Unsupported speech recognition provider: ${configured}`)
+    return provider
+  }
+
+  private async transcribeFallback(audio: Buffer, startedAt: number): Promise<string> {
+    const provider = this.providers.find((candidate) => candidate.id === 'openai')
+    if (!provider) throw new Error('Configured speech recognition fallback is unavailable.')
+    try {
+      const text = await provider.transcribe(this.request(audio))
+      this.logResult('openai_fallback', audio.length, text.length, startedAt)
+      return text.trim()
+    } catch (error) {
+      this.logger.error(`Speech fallback failed id=openai reason=${errorName(error)}`)
+      throw new Error('Speech recognition providers are unavailable.')
+    }
+  }
+
+  private request(audio: Buffer) {
+    return {
+      audio,
+      encoding: 'pcm_s16le' as const,
+      sampleRateHz: 16000,
+      channels: 1 as const,
+      language: process.env.VOICE_STT_LANGUAGE || 'bg',
+    }
+  }
+
+  private fallbackEnabled(): boolean {
     return process.env.LOCAL_WHISPER_FALLBACK_TO_OPENAI === 'true'
   }
 
-  private async transcribeWithOpenAI(audio: Buffer): Promise<string> {
-    try {
-      const wav = this.pcm16ToWav(audio, 16000, 1)
-
-      const file = await toFile(wav, 'turn.wav', {
-        type: 'audio/wav',
-      })
-
-      const result = await this.openai.audio.transcriptions.create({
-        file,
-        model: process.env.BATCH_STT_MODEL || 'gpt-4o-transcribe',
-        language: 'bg',
-      })
-
-      const text = (result.text || '').trim()
-
-      this.logger.log(`[BATCH STT] ${text}`)
-
-      return text
-    } catch (err: any) {
-      this.logger.error(
-        `Batch STT failed: message=${err?.message || 'unknown'} code=${err?.code || '-'} cause=${err?.cause?.message || '-'}`,
-      )
-      return ''
-    }
-  }
-
-  private async transcribeWithLocalWhisper(audio: Buffer): Promise<string> {
-    const wav = this.pcm16ToWav(audio, 16000, 1)
-    const wavPath = join(
-      tmpdir(),
-      `energrid-voice-${Date.now()}-${Math.random().toString(16).slice(2)}.wav`,
-    )
-
-    try {
-      await fs.writeFile(wavPath, wav)
-
-      const text = this.shouldUseLocalWhisperWorker()
-        ? await this.transcribeWithLocalWhisperWorker(wavPath)
-        : await this.transcribeWithLocalWhisperOnce(wavPath)
-
-      this.logger.log(`[LOCAL WHISPER STT] ${text}`)
-
-      return text
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'unknown'
-      this.logger.error(`Local Whisper STT failed: ${message}`)
-      return ''
-    } finally {
-      await fs.unlink(wavPath).catch(() => undefined)
-    }
-  }
-
-  private shouldUseLocalWhisperWorker(): boolean {
-    return process.env.LOCAL_WHISPER_WORKER !== 'false'
-  }
-
-  private async transcribeWithLocalWhisperOnce(wavPath: string): Promise<string> {
-    const scriptPath =
-      process.env.LOCAL_WHISPER_SCRIPT ||
-      join(__dirname, 'assets', 'local-whisper-transcribe.py')
-
-    const python = process.env.LOCAL_WHISPER_PYTHON || 'python3'
-    const timeoutMs = Number(process.env.LOCAL_WHISPER_TIMEOUT_MS || 30000)
-
-    const { stdout, stderr } = await execFileAsync(
-      python,
-      [scriptPath, wavPath],
-      {
-        env: process.env,
-        timeout: timeoutMs,
-        maxBuffer: 1024 * 1024,
-      },
-    )
-
-    if (stderr.trim()) {
-      this.logger.debug(`[LOCAL WHISPER STDERR] ${stderr.trim()}`)
-    }
-
-    return stdout.trim()
-  }
-
-  private transcribeWithLocalWhisperWorker(wavPath: string): Promise<string> {
-    const worker = this.ensureLocalWhisperWorker()
-    const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`
-    const timeoutMs = Number(process.env.LOCAL_WHISPER_TIMEOUT_MS || 30000)
-
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.localWhisperPending.delete(requestId)
-        reject(new Error(`Local Whisper worker timed out after ${timeoutMs}ms`))
-      }, timeoutMs)
-
-      this.localWhisperPending.set(requestId, {
-        resolve,
-        reject,
-        timeout,
-        startedAt: Date.now(),
-      })
-
-      const payload = JSON.stringify({ id: requestId, audioPath: wavPath })
-
-      try {
-        worker.stdin.write(`${payload}\n`, 'utf8')
-      } catch (error) {
-        clearTimeout(timeout)
-        this.localWhisperPending.delete(requestId)
-        reject(error instanceof Error ? error : new Error(String(error)))
-      }
-    })
-  }
-
-  private ensureLocalWhisperWorker(): ChildProcessWithoutNullStreams {
-    if (this.localWhisperWorker && !this.localWhisperWorker.killed) {
-      return this.localWhisperWorker
-    }
-
-    const python = process.env.LOCAL_WHISPER_PYTHON || 'python3'
-    const scriptPath =
-      process.env.LOCAL_WHISPER_WORKER_SCRIPT ||
-      join(__dirname, 'assets', 'local-whisper-worker.py')
-
+  private logResult(provider: string, bytes: number, textChars: number, startedAt: number): void {
     this.logger.log(
-      `[LOCAL WHISPER WORKER] starting python=${python} script=${scriptPath}`,
+      `[STT PROVIDER] provider=${provider} bytes=${bytes} durationMs=${Date.now() - startedAt} textChars=${textChars}`,
     )
-
-    const worker = spawn(python, [scriptPath], {
-      env: process.env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
-
-    this.localWhisperWorker = worker
-    this.localWhisperWorkerLines = createInterface({
-      input: worker.stdout,
-      crlfDelay: Infinity,
-    })
-
-    this.localWhisperWorkerLines.on('line', (line) => {
-      this.handleLocalWhisperWorkerLine(line)
-    })
-
-    worker.stderr.on('data', (chunk) => {
-      const text = chunk.toString('utf8').trim()
-      if (text) this.logger.log(`[LOCAL WHISPER WORKER] ${text}`)
-    })
-
-    worker.on('error', (error) => {
-      this.logger.error(`Local Whisper worker failed: ${error.message}`)
-      this.rejectLocalWhisperPending(error)
-      this.localWhisperWorker = null
-    })
-
-    worker.on('exit', (code, signal) => {
-      this.logger.warn(
-        `[LOCAL WHISPER WORKER] exited code=${code ?? '-'} signal=${signal ?? '-'}`,
-      )
-      this.rejectLocalWhisperPending(
-        new Error(`Local Whisper worker exited code=${code ?? '-'} signal=${signal ?? '-'}`),
-      )
-      this.localWhisperWorkerLines?.close()
-      this.localWhisperWorkerLines = null
-      this.localWhisperWorker = null
-    })
-
-    return worker
   }
+}
 
-  private handleLocalWhisperWorkerLine(line: string): void {
-    let message: {
-      id?: string
-      text?: string
-      error?: string
-      durationMs?: number
-      type?: string
-    }
+function errorName(error: unknown): string {
+  return error instanceof Error ? error.name : 'UnknownError'
+}
 
-    try {
-      message = JSON.parse(line)
-    } catch {
-      this.logger.warn(`[LOCAL WHISPER WORKER] non-json stdout: ${line}`)
-      return
-    }
+function formatStartupDiagnostic(error: unknown): string {
+  if (!error || typeof error !== 'object' || !('diagnostic' in error)) return ''
+  const diagnostic = error.diagnostic
+  if (!diagnostic || typeof diagnostic !== 'object') return ''
 
-    if (message.type === 'ready') {
-      this.logger.log(
-        `[LOCAL WHISPER WORKER] ready model=${message.text || '-'} durationMs=${message.durationMs ?? '-'}`,
-      )
-      return
-    }
-
-    if (!message.id) {
-      this.logger.warn(`[LOCAL WHISPER WORKER] missing request id: ${line}`)
-      return
-    }
-
-    const pending = this.localWhisperPending.get(message.id)
-    if (!pending) return
-
-    clearTimeout(pending.timeout)
-    this.localWhisperPending.delete(message.id)
-
-    if (message.error) {
-      pending.reject(new Error(message.error))
-      return
-    }
-
-    this.logger.log(
-      `[LOCAL WHISPER WORKER] request=${message.id} durationMs=${message.durationMs ?? Date.now() - pending.startedAt}`,
+  return Object.entries(diagnostic)
+    .filter(([key, value]) =>
+      ['providerEvent', 'providerCode', 'providerType', 'providerParam'].includes(key)
+        ? typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,80}$/.test(value)
+        : key === 'closeCode' && typeof value === 'number' && Number.isInteger(value),
     )
-    pending.resolve((message.text || '').trim())
-  }
-
-  private rejectLocalWhisperPending(error: Error): void {
-    for (const [id, pending] of this.localWhisperPending.entries()) {
-      clearTimeout(pending.timeout)
-      pending.reject(error)
-      this.localWhisperPending.delete(id)
-    }
-  }
-
-  private stopLocalWhisperWorker(): void {
-    this.rejectLocalWhisperPending(new Error('Local Whisper worker stopped'))
-    this.localWhisperWorkerLines?.close()
-    this.localWhisperWorkerLines = null
-    this.localWhisperWorker?.kill()
-    this.localWhisperWorker = null
-  }
-
-  private pcm16ToWav(
-    pcm16: Buffer,
-    sampleRate = 16000,
-    channels = 1,
-  ): Buffer {
-    const bitsPerSample = 16
-    const byteRate = sampleRate * channels * (bitsPerSample / 8)
-    const blockAlign = channels * (bitsPerSample / 8)
-    const dataSize = pcm16.length
-    const buffer = Buffer.alloc(44 + dataSize)
-
-    buffer.write('RIFF', 0)
-    buffer.writeUInt32LE(36 + dataSize, 4)
-    buffer.write('WAVE', 8)
-
-    buffer.write('fmt ', 12)
-    buffer.writeUInt32LE(16, 16)
-    buffer.writeUInt16LE(1, 20)
-    buffer.writeUInt16LE(channels, 22)
-    buffer.writeUInt32LE(sampleRate, 24)
-    buffer.writeUInt32LE(byteRate, 28)
-    buffer.writeUInt16LE(blockAlign, 32)
-    buffer.writeUInt16LE(bitsPerSample, 34)
-
-    buffer.write('data', 36)
-    buffer.writeUInt32LE(dataSize, 40)
-    pcm16.copy(buffer, 44)
-
-    return buffer
-  }
+    .map(([key, value]) => `${key}=${value}`)
+    .join(' ')
 }

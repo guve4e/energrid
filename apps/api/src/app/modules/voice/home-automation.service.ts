@@ -38,6 +38,7 @@ export class HomeAutomationService {
       comfortTempC: numberFromEnv('HOME_FAKE_COMFORT_TEMP_C', 22),
       homeMode: 'home',
       availableDevices: this.getAvailableDevices(),
+      assistantDevices: this.getAssistantDevices(),
       occupiedRooms: [],
       alarmArmed: process.env.HOME_FAKE_ALARM_ARMED === 'true',
     };
@@ -100,13 +101,31 @@ export class HomeAutomationService {
   private getAvailableDevices(): string[] {
     const configured = process.env.HOME_AVAILABLE_DEVICES;
     if (configured) {
+      const permitted = new Set(this.deviceRegistry.getAvailableDeviceIds());
       return configured
         .split(',')
         .map((item) => item.trim())
-        .filter(Boolean);
+        .filter((id) => !!id && permitted.has(id));
     }
 
     return this.deviceRegistry.getAvailableDeviceIds();
+  }
+
+  private getAssistantDevices(): NonNullable<HomeContext['assistantDevices']> {
+    const availableIds = new Set(this.getAvailableDevices());
+    return this.deviceRegistry.getDevices()
+      .filter((device) => availableIds.has(device.id))
+      .filter((device) => device.capabilities.some((capability) =>
+        capability.actions.includes('turn_on') && capability.actions.includes('turn_off'),
+      ))
+      .map((device) => ({
+        id: device.id,
+        name: device.displayName,
+        room: device.zoneName,
+        aliases: typeof device.metadata?.aliases === 'string'
+          ? device.metadata.aliases.split(',').map((alias) => alias.trim()).filter(Boolean)
+          : [],
+      }));
   }
 
   private async executeAction(
@@ -147,6 +166,15 @@ export class HomeAutomationService {
         status: 'skipped',
         adapter: 'none',
         message: `No device selected for ${action.type}.`,
+      };
+    }
+
+    if (!this.deviceRegistry.getAvailableDeviceIds().includes(action.deviceId)) {
+      return {
+        action,
+        status: 'skipped',
+        adapter: 'none',
+        message: 'Assistant permission or a ready device route is no longer available.',
       };
     }
 

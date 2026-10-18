@@ -9,12 +9,12 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('login')
-  @ApiOperation({ summary: 'Log in with the development admin account' })
+  @ApiOperation({ summary: 'Log in with the configured portal administrator account' })
   @ApiOkResponse({
-    description: 'Returns a development access token and user profile.',
+    description: 'Returns the configured portal control token and user profile.',
     schema: {
       example: {
-        accessToken: 'dev-token-admin',
+        accessToken: '<PORTAL_CONTROL_TOKEN>',
         user: {
           id: '1',
           email: 'admin@energrid.local',
