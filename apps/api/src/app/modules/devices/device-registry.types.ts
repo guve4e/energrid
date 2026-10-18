@@ -217,7 +217,22 @@ export interface DeviceRegistrySnapshot {
   };
 }
 
+export interface NetworkDeviceEndpoint {
+  ipAddress: string;
+  networkZoneId: string;
+  networkZoneName: string;
+  macAddress?: string;
+}
+
+export interface NetworkObservation {
+  source: 'icmp' | 'dns' | 'tcp';
+  attribute: string;
+  value: string | number | boolean;
+  observedAt: string;
+}
+
 export interface NetworkDiscoveredDevice {
+  endpoints?: NetworkDeviceEndpoint[];
   id: string;
   ipAddress: string;
   networkZoneId: string;
@@ -235,6 +250,7 @@ export interface NetworkDiscoveredDevice {
   components?: Array<{ component: string; channel: number }>;
   discoveredAt: string;
   reason: string;
+  observations?: NetworkObservation[];
 }
 
 export interface NetworkDiscoveryZone {

@@ -94,3 +94,18 @@ And join the Nx community:
 - [Follow us on X](https://twitter.com/nxdevtools) or [LinkedIn](https://www.linkedin.com/company/nrwl)
 - [Our Youtube channel](https://www.youtube.com/@nxdevtools)
 - [Our blog](https://nx.dev/blog?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
+
+## Network discovery
+
+Energrid discovers devices from the backend/site brain, not the browser.
+An installation can contain multiple configured IPv4 networks.
+
+Discovery combines successful ICMP probes, ARP/neighbor information,
+configured seed addresses, and optional router client information.
+
+Successful ICMP responses establish reachability, not device identity
+or permission to control the device. Failed ICMP probes do not establish
+that a device is offline.
+
+For configuration and routed-network examples, see
+`docs/site-gateway-bootstrap.md`.

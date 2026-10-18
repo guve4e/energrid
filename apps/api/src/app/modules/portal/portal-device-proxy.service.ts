@@ -129,18 +129,27 @@ export class PortalDeviceProxyService {
   private resolveDevice(deviceId: string): NetworkDiscoveredDevice {
     const decodedDeviceId = decodeURIComponent(deviceId)
     const device = this.lanDiscovery.getLastScan().find((item) =>
-      item.id === decodedDeviceId || item.ipAddress === decodedDeviceId,
+      item.id === decodedDeviceId ||
+      item.ipAddress === decodedDeviceId ||
+      item.endpoints?.some((endpoint) => endpoint.ipAddress === decodedDeviceId),
     )
 
     if (!device) {
       throw new HttpException('Device is not in the latest local discovery scan.', HttpStatus.NOT_FOUND)
     }
 
-    if (!isPrivateLanIp(device.ipAddress)) {
+    const selectedEndpoint = device.endpoints?.find(
+      (endpoint) => endpoint.ipAddress === decodedDeviceId,
+    )
+    const resolved = selectedEndpoint
+      ? { ...device, ipAddress: selectedEndpoint.ipAddress }
+      : device
+
+    if (!isPrivateLanIp(resolved.ipAddress)) {
       throw new HttpException('Device proxy only allows private LAN addresses.', HttpStatus.FORBIDDEN)
     }
 
-    return device
+    return resolved
   }
 }
 

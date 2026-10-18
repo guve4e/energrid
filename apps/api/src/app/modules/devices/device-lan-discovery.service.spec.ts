@@ -1,5 +1,7 @@
 import {
+  buildNetworkObservations,
   candidateBelongsToConfiguredZone,
+  icmpReachabilityCandidate,
   ipInCidr,
   ipsInCidr,
   parseArpOutput,
@@ -182,5 +184,82 @@ describe('network discovery zones', () => {
     ])
     expect(ipsInCidr('192.168.0.0/16')).toEqual([])
     expect(ipsInCidr('not-a-cidr')).toEqual([])
+  })
+})
+
+
+describe('ICMP reachability evidence', () => {
+  it('retains a reachable host across routed networks', () => {
+    const candidate = icmpReachabilityCandidate('192.168.1.138', true)
+
+    expect(candidate).toEqual({
+      ipAddress: '192.168.1.138',
+      status: 'online',
+      confidence: 0.6,
+      reason: 'Host responded to an active ICMP probe.',
+    })
+  })
+
+  it('does not report a host online when ICMP fails', () => {
+    expect(icmpReachabilityCandidate('192.168.1.99', false)).toBeNull()
+  })
+})
+
+
+describe('buildNetworkObservations', () => {
+  const observedAt = '2026-10-18T10:00:00.000Z'
+
+  it('records ICMP, DNS, and TCP evidence independently', () => {
+    expect(buildNetworkObservations(
+      {
+        status: 'online',
+        reason: 'Host responded to an active ICMP probe.',
+      },
+      {
+        hostname: 'exo',
+        services: ['ssh'],
+      },
+      observedAt,
+    )).toEqual([
+      {
+        source: 'icmp',
+        attribute: 'reachable',
+        value: true,
+        observedAt,
+      },
+      {
+        source: 'dns',
+        attribute: 'hostname',
+        value: 'exo',
+        observedAt,
+      },
+      {
+        source: 'tcp',
+        attribute: 'port.22.open',
+        value: true,
+        observedAt,
+      },
+    ])
+  })
+
+  it('does not infer ICMP reachability from router status', () => {
+    expect(buildNetworkObservations(
+      {
+        status: 'online',
+        reason: 'Router reported a connected client.',
+      },
+      {
+        services: [],
+      },
+      observedAt,
+    )).toEqual([])
+  })
+
+  it('does not infer a closed port from an absent TCP observation', () => {
+    expect(buildNetworkObservations(
+      { status: 'unknown' },
+      { services: [] },
+      observedAt,
+    )).toEqual([])
   })
 })

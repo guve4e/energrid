@@ -407,3 +407,36 @@ When API ingest is enabled and the fake publisher is running, `/portal/state`
 will reflect the live registry and telemetry. The portal device page will show
 native protocols such as `http`, `zigbee`, and `modbus`, plus their transport
 when they are bridged through MQTT.
+
+### Routed-network discovery
+
+Energrid supports scanning multiple configured site networks, including
+networks reached through a router. Local ARP entries alone cannot identify
+hosts across routed subnet boundaries.
+
+For example, a development Mac on Eero can scan the HouseNet network
+when routing and firewall rules permit:
+
+```sh
+HOME_LAN_SCAN_SUBNETS="192.168.1.0/24,192.168.7.0/24"
+HOME_LAN_ACTIVE_SCAN_ENABLED=true
+```
+
+In this example:
+
+- HouseNet: `192.168.1.0/24` (primary network)
+- Eero: `192.168.7.0/24` (secondary network)
+- Development backend: Mac on Eero
+- Production backend: Raspberry Pi 5 on HouseNet
+
+The site network configuration is independent of the network to which
+the backend host is directly connected.
+
+`HOME_NETWORK_ZONES_JSON` takes precedence over
+`HOME_LAN_SCAN_SUBNETS` when both are configured.
+
+Successful ICMP responses become network discovery candidates.
+They do not automatically identify, approve, or authorize devices.
+
+Devices that ignore ICMP may still be discovered through router client
+information, seed addresses, or supported device-specific probes.

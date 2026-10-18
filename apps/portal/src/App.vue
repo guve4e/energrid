@@ -168,6 +168,12 @@ type PortalState = {
     components?: Array<{ component: string; channel: number }>;
     discoveredAt: string;
     reason: string;
+    observations?: Array<{
+      source: 'icmp' | 'dns' | 'tcp';
+      attribute: string;
+      value: string | number | boolean;
+      observedAt: string;
+    }>;
   }>;
   deviceSummary?: {
     total: number;

@@ -2,6 +2,8 @@ import { Injectable, Logger } from '@nestjs/common'
 import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { networkInterfaces } from 'node:os'
+import { reverse } from 'node:dns/promises'
+import { Socket } from 'node:net'
 import { promisify } from 'node:util'
 import { privateShellyBaseUrl } from '@energrid/domain-devices'
 import type {
@@ -10,7 +12,7 @@ import type {
 } from './device-registry.types'
 
 const execFileAsync = promisify(execFile)
-const activeScanConcurrency = 64
+const activeScanConcurrency = 24
 
 type NetworkCandidate = {
   ipAddress: string
@@ -47,12 +49,13 @@ export class DeviceLanDiscoveryService {
   }> {
     const scannedAt = new Date().toISOString()
     const zones = configuredNetworkZones()
-    await activeScanZones(zones)
+    const reachableDevices = await activeScanZones(zones)
     const arpDevices = await readNeighborTable()
     const routerClients = await readRouterClientCandidates()
     const candidates = mergeNeighborCandidates([
       ...arpDevices,
       ...routerClients,
+      ...reachableDevices,
       ...zones.flatMap((zone) =>
         zone.seedIps.map((ipAddress) => ({
           ipAddress,
@@ -285,6 +288,34 @@ function normalizeNetworkZone(item: unknown, index: number): NetworkDiscoveryZon
   }
 }
 
+function isBroadcastInZones(
+  ipAddress: string,
+  zones: NetworkDiscoveryZone[],
+): boolean {
+  return zones.some((zone) => {
+    if (!zone.cidr) return false
+    const [network, prefixText] = zone.cidr.split('/')
+    const prefix = Number(prefixText)
+    if (!Number.isInteger(prefix) || prefix < 0 || prefix > 30) return false
+
+    const toNumber = (value: string): number | null => {
+      const octets = value.split('.').map(Number)
+      if (octets.length !== 4 || octets.some((part) =>
+        !Number.isInteger(part) || part < 0 || part > 255
+      )) return null
+      return octets.reduce((result, part) => ((result << 8) | part) >>> 0, 0)
+    }
+
+    const networkNumber = toNumber(network)
+    const ipNumber = toNumber(ipAddress)
+    if (networkNumber === null || ipNumber === null) return false
+
+    const mask = (0xffffffff << (32 - prefix)) >>> 0
+    const broadcast = ((networkNumber & mask) | (~mask >>> 0)) >>> 0
+    return ipNumber === broadcast
+  })
+}
+
 function isUsefulLanIp(ipAddress: string): boolean {
   return !/^127\./.test(ipAddress) &&
     !/^169\.254\./.test(ipAddress) &&
@@ -299,10 +330,41 @@ function mergeNeighborCandidates(
   const byIp = new Map<string, NetworkCandidate>()
 
   for (const candidate of candidates) {
-    byIp.set(candidate.ipAddress, {
-      ...byIp.get(candidate.ipAddress),
-      ...candidate,
-    })
+    if (!isUsefulLanIp(candidate.ipAddress)) continue
+    const previous = byIp.get(candidate.ipAddress)
+
+    if (!previous) {
+      byIp.set(candidate.ipAddress, candidate)
+      continue
+    }
+
+    const merged: NetworkCandidate = {
+      ...previous,
+      ...Object.fromEntries(
+        Object.entries(candidate).filter(([, value]) => value !== undefined),
+      ),
+    }
+
+    // Positive reachability evidence takes precedence over unknown status.
+    if (previous.status === 'online' || candidate.status === 'online') {
+      merged.status = 'online'
+    }
+
+    // Preserve the stronger confidence value.
+    merged.confidence = Math.max(
+      previous.confidence ?? 0,
+      candidate.confidence ?? 0,
+    )
+
+    // Keep descriptive router evidence when ICMP only confirms reachability.
+    if (
+      candidate.reason === 'Host responded to an active ICMP probe.' &&
+      previous.reason
+    ) {
+      merged.reason = previous.reason
+    }
+
+    byIp.set(candidate.ipAddress, merged)
   }
 
   return [...byIp.values()]
@@ -330,6 +392,18 @@ async function enrichNetworkDevice(
     model: candidate.model,
     reason: candidate.reason || 'Visible in the local network neighbour table.',
   }
+
+  const evidence = await collectGenericHostEvidence(candidate.ipAddress)
+
+  if (evidence.hostname && !base.hostname) {
+    base.hostname = evidence.hostname
+  }
+
+  base.observations = buildNetworkObservations(
+    candidate,
+    evidence,
+    discoveredAt,
+  )
 
   const shelly = await probeShelly(candidate.ipAddress)
   if (!shelly) return base
@@ -385,6 +459,8 @@ export function candidateBelongsToConfiguredZone(
   candidate: Pick<NetworkCandidate, 'ipAddress' | 'networkZoneId'>,
   zones: NetworkDiscoveryZone[],
 ): boolean {
+  if (!isUsefulLanIp(candidate.ipAddress)) return false
+  if (isBroadcastInZones(candidate.ipAddress, zones)) return false
   if (zones.length === 0) return true
   return zones.some((zone) => candidateMatchesZone(candidate, zone))
 }
@@ -456,8 +532,24 @@ export function ipsInCidr(cidr: string, maxHosts = configuredActiveScanMaxHosts(
     .filter((ipAddress) => isUsefulLanIp(ipAddress))
 }
 
-async function activeScanZones(zones: NetworkDiscoveryZone[]): Promise<void> {
-  if (process.env.HOME_LAN_ACTIVE_SCAN_ENABLED === 'false') return
+export function icmpReachabilityCandidate(
+  ipAddress: string,
+  responded: boolean,
+): NetworkCandidate | null {
+  if (!responded) return null
+
+  return {
+    ipAddress,
+    status: 'online',
+    confidence: 0.6,
+    reason: 'Host responded to an active ICMP probe.',
+  }
+}
+
+async function activeScanZones(
+  zones: NetworkDiscoveryZone[],
+): Promise<NetworkCandidate[]> {
+  if (process.env.HOME_LAN_ACTIVE_SCAN_ENABLED === 'false') return []
 
   const targets = [
     ...new Set(zones.flatMap((zone) => [
@@ -466,21 +558,36 @@ async function activeScanZones(zones: NetworkDiscoveryZone[]): Promise<void> {
     ])),
   ]
 
-  if (targets.length === 0) return
+  if (targets.length === 0) return []
 
-  await runPool(targets, activeScanConcurrency, pingHost)
+  const reachable: NetworkCandidate[] = []
+
+  await runPool(targets, activeScanConcurrency, async (ipAddress) => {
+    const candidate = icmpReachabilityCandidate(
+      ipAddress,
+      await pingHost(ipAddress),
+    )
+    if (candidate) reachable.push(candidate)
+  })
+
+  return reachable
 }
 
-async function pingHost(ipAddress: string): Promise<void> {
+async function pingHost(ipAddress: string): Promise<boolean> {
   const args = process.platform === 'darwin'
-    ? ['-c', '1', '-W', '450', ipAddress]
+    ? ['-c', '1', '-W', '1000', ipAddress]
     : ['-c', '1', '-W', '1', ipAddress]
 
-  try {
-    await execFileAsync('ping', args, { timeout: 1200 })
-  } catch {
-    // Many IoT devices ignore ICMP; the attempt can still populate ARP.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await execFileAsync('ping', args, { timeout: 2000 })
+      return true
+    } catch {
+      // A single missed ICMP response is not proof that a host is offline.
+    }
   }
+
+  return false
 }
 
 async function runPool<T>(
@@ -679,14 +786,55 @@ function vendorFromCandidate(candidate: { macAddress?: string; hostname?: string
   return undefined
 }
 
-function dedupeNetworkDevices(devices: NetworkDiscoveredDevice[]): NetworkDiscoveredDevice[] {
+export function dedupeNetworkDevices(
+  devices: NetworkDiscoveredDevice[],
+): NetworkDiscoveredDevice[] {
   const byKey = new Map<string, NetworkDiscoveredDevice>()
 
   for (const device of devices) {
-    byKey.set(device.macAddress || device.ipAddress, device)
+    const key = device.vendor === 'Shelly' && device.id.startsWith('shelly')
+      ? `shelly:${device.id}`
+      : `endpoint:${device.macAddress || device.ipAddress}`
+
+    const endpoint = {
+      ipAddress: device.ipAddress,
+      networkZoneId: device.networkZoneId,
+      networkZoneName: device.networkZoneName,
+      macAddress: device.macAddress,
+    }
+
+    const previous = byKey.get(key)
+
+    if (!previous) {
+      byKey.set(key, {
+        ...device,
+        endpoints: [endpoint],
+      })
+      continue
+    }
+
+    const endpoints = [...(previous.endpoints || [])]
+    if (!endpoints.some((item) => item.ipAddress === endpoint.ipAddress)) {
+      endpoints.push(endpoint)
+    }
+
+    const preferred = [previous, device].sort((a, b) => {
+      const confidence = b.confidence - a.confidence
+      if (confidence !== 0) return confidence
+      return a.ipAddress.localeCompare(b.ipAddress)
+    })[0]
+
+    byKey.set(key, {
+      ...preferred,
+      endpoints: endpoints.sort((a, b) =>
+        a.ipAddress.localeCompare(b.ipAddress)
+      ),
+    })
   }
 
-  return [...byKey.values()].sort((a, b) => a.ipAddress.localeCompare(b.ipAddress))
+  return [...byKey.values()].sort((a, b) =>
+    a.ipAddress.localeCompare(b.ipAddress)
+  )
 }
 
 function stringValue(value: unknown): string | undefined {
@@ -703,4 +851,103 @@ function parseOnlineStatus(value: unknown): NetworkDiscoveredDevice['status'] {
   if (['online', 'reachable', 'active', 'connected'].includes(text)) return 'online'
   if (['offline', 'inactive', 'disconnected'].includes(text)) return 'offline'
   return 'unknown'
+}
+
+
+type GenericHostEvidence = {
+  hostname?: string
+  services: string[]
+}
+
+export function buildNetworkObservations(
+  candidate: Pick<NetworkCandidate, 'status' | 'reason' | 'hostname'>,
+  evidence: GenericHostEvidence,
+  observedAt: string,
+): NonNullable<NetworkDiscoveredDevice['observations']> {
+  const observations: NonNullable<NetworkDiscoveredDevice['observations']> = []
+
+  if (
+    candidate.status === 'online' &&
+    candidate.reason === 'Host responded to an active ICMP probe.'
+  ) {
+    observations.push({
+      source: 'icmp',
+      attribute: 'reachable',
+      value: true,
+      observedAt,
+    })
+  }
+
+  if (evidence.hostname) {
+    observations.push({
+      source: 'dns',
+      attribute: 'hostname',
+      value: evidence.hostname,
+      observedAt,
+    })
+  }
+
+  for (const service of evidence.services) {
+    const port = service === 'ssh' ? 22 : service === 'http' ? 80 : 443
+
+    observations.push({
+      source: 'tcp',
+      attribute: `port.${port}.open`,
+      value: true,
+      observedAt,
+    })
+  }
+
+  return observations
+}
+
+async function collectGenericHostEvidence(
+  ipAddress: string,
+): Promise<GenericHostEvidence> {
+  const hostnamePromise = Promise.race([
+    reverse(ipAddress)
+      .then((names) => names[0]?.replace(/\\.$/, ''))
+      .catch(() => undefined),
+    new Promise<undefined>((resolve) =>
+      setTimeout(() => resolve(undefined), 1000),
+    ),
+  ])
+
+  const ports = [
+    { port: 22, name: 'ssh' },
+    { port: 80, name: 'http' },
+    { port: 443, name: 'https' },
+  ]
+
+  const results = await Promise.all(
+    ports.map(async ({ port, name }) => ({
+      name,
+      open: await tcpPortOpen(ipAddress, port),
+    })),
+  )
+
+  return {
+    hostname: await hostnamePromise,
+    services: results.filter((result) => result.open).map((result) => result.name),
+  }
+}
+
+function tcpPortOpen(ipAddress: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = new Socket()
+    let settled = false
+
+    const finish = (open: boolean) => {
+      if (settled) return
+      settled = true
+      socket.destroy()
+      resolve(open)
+    }
+
+    socket.setTimeout(1500)
+    socket.once('connect', () => finish(true))
+    socket.once('timeout', () => finish(false))
+    socket.once('error', () => finish(false))
+    socket.connect(port, ipAddress)
+  })
 }
