@@ -46,6 +46,12 @@ export function shellyLanCandidates(
         component,
         channel,
         httpBaseUrl: baseUrl,
+        ipAddress: device.ipAddress,
+        ...(device.macAddress ? { macAddress: device.macAddress } : {}),
+        ...(device.hostname ? { hostname: device.hostname } : {}),
+        ...(device.gatewayId ? { gatewayId: device.gatewayId } : {}),
+        networkScope: `${device.gatewayId || 'gateway-unknown'}:${device.networkZoneId}`,
+        networkObservedAt: device.discoveredAt,
       },
     });
   }

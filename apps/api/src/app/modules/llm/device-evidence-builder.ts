@@ -17,10 +17,13 @@ export interface NetworkEvidenceInput {
   protocol?: string
   app?: string
   status?: string
+  observedAt?: string
+  scope?: { tenantId: string; siteId: string; networkId: string }
   observations?: Array<{
     source?: string
     attribute?: string
     value?: unknown
+    observedAt?: string
   }>
 }
 
@@ -50,11 +53,14 @@ export function buildNetworkEvidenceSnapshot(
   }
 
   const evidence: DeviceEvidence[] = []
+  const itemObservedAt = device.observedAt || observedAt
 
   function add(
     source: EvidenceSource,
     attribute: string,
     value: EvidenceValue,
+    confidence: DeviceEvidence['confidence'] = 'reported',
+    itemAt = itemObservedAt,
   ): void {
     const safeValue =
       typeof value === 'string'
@@ -62,12 +68,14 @@ export function buildNetworkEvidenceSnapshot(
         : value
 
     evidence.push({
-      id: evidenceId(device.id, source, attribute, safeValue),
+      id: evidenceId(device.id, source, attribute, safeValue, device.scope),
       source,
       attribute,
       value: safeValue,
-      observedAt,
-      confidence: 'reported',
+      observedAt: itemAt,
+      confidence,
+      ...(device.scope ? { scope: device.scope } : {}),
+      verification: confidence === 'observed' ? 'scan_observed' : 'device_reported',
     })
   }
 
@@ -156,6 +164,15 @@ export function buildNetworkEvidenceSnapshot(
       source as EvidenceSource,
       observation.attribute,
       value,
+      source === 'network_scan' &&
+        (observation.attribute === 'reachable' ||
+          observation.attribute === 'service_port' ||
+          allowedPortObservation.test(observation.attribute))
+        ? 'observed'
+        : 'reported',
+      observation.observedAt && !Number.isNaN(Date.parse(observation.observedAt))
+        ? observation.observedAt
+        : itemObservedAt,
     )
   }
 
@@ -164,5 +181,6 @@ export function buildNetworkEvidenceSnapshot(
     deviceId: device.id,
     createdAt: observedAt,
     evidence,
+    ...(device.scope ? { scope: device.scope } : {}),
   }
 }

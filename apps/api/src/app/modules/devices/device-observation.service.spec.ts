@@ -7,7 +7,7 @@ describe('DeviceObservationService', () => {
 
     service.observe({
       deviceId: 'shelly-kitchen-wall',
-      observedAt: '2026-08-07T12:00:00.000Z',
+      receivedAt: '2026-08-07T12:00:00.000Z',
       source: 'shelly-mqtt',
       values: {
         on: true,
@@ -32,7 +32,7 @@ describe('DeviceObservationService', () => {
 
     service.observe({
       deviceId: 'shelly-kitchen-wall',
-      observedAt: '2026-08-07T12:00:00.000Z',
+      receivedAt: '2026-08-07T12:00:00.000Z',
       source: 'shelly-mqtt',
       values: {
         on: false,
@@ -41,7 +41,7 @@ describe('DeviceObservationService', () => {
 
     service.observe({
       deviceId: 'shelly-kitchen-wall',
-      observedAt: '2026-08-07T12:05:00.000Z',
+      receivedAt: '2026-08-07T12:05:00.000Z',
       source: 'shelly-mqtt',
       values: {
         on: true,
@@ -68,7 +68,7 @@ describe('DeviceObservationService', () => {
 
     service.observe({
       deviceId: 'pump',
-      observedAt: '2026-08-07T12:00:00.000Z',
+      receivedAt: '2026-08-07T12:00:00.000Z',
       source: 'mqtt',
       values: {
         power: 100,
@@ -78,7 +78,7 @@ describe('DeviceObservationService', () => {
 
     service.observe({
       deviceId: 'temperature',
-      observedAt: '2026-08-07T12:01:00.000Z',
+      receivedAt: '2026-08-07T12:01:00.000Z',
       source: 'mqtt',
       values: {
         temperature: 22,

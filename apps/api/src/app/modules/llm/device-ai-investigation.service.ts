@@ -5,6 +5,7 @@ import {
   NotFoundException,
   Optional,
 } from '@nestjs/common'
+import { randomUUID } from 'node:crypto'
 import { LlmGatewayService } from './llm-gateway.service'
 import {
   replayObservationProfileProposal,
@@ -28,6 +29,7 @@ import {
   validateAssessment,
   DeviceIntelligenceAssessment,
   DeviceEvidenceSnapshot,
+  DeviceEvidence,
 } from './device-evidence'
 
 
@@ -39,6 +41,9 @@ export interface DeviceAiReport {
 }
 
 export interface DeviceAiInvestigationResult {
+  investigationId?: string
+  parentInvestigationId?: string
+  actionResult?: { action: string; outcome: string; reasonCode: string; statusCode?: number }
   deviceId: string
   provider: string
   model: string
@@ -145,7 +150,11 @@ function parseAssessment(
   return assessment
 }
 
-import { DeviceInvestigationHistoryStore } from './device-investigation-history.store'
+import {
+  DeviceInvestigationHistoryStore,
+  type DeviceInvestigationScope,
+} from './device-investigation-history.store'
+import { OperationalLogService } from '../devices/operational-log.service'
 
 @Injectable()
 export class DeviceAiInvestigationService {
@@ -155,22 +164,28 @@ export class DeviceAiInvestigationService {
     private readonly history?: DeviceInvestigationHistoryStore,
     @Optional()
     private readonly mqttEvidence?: MqttEvidenceCaptureService,
+    @Optional()
+    private readonly operationalLog?: OperationalLogService,
   ) {}
 
-  async listHistory(deviceId: string, limit = 50) {
-    if (!this.history) {
-      throw new Error('Investigation history store unavailable')
-    }
-
-    return this.history.list(deviceId, limit)
+  getProviderAvailability() {
+    return this.llm.availability()
   }
 
-  async getHistoryRecord(deviceId: string, investigationId: string) {
+  async listHistory(scope: DeviceInvestigationScope, deviceId: string, limit = 50) {
     if (!this.history) {
       throw new Error('Investigation history store unavailable')
     }
 
-    const record = await this.history.get(investigationId)
+    return this.history.listScoped(scope, deviceId, limit)
+  }
+
+  async getHistoryRecord(scope: DeviceInvestigationScope, deviceId: string, investigationId: string) {
+    if (!this.history) {
+      throw new Error('Investigation history store unavailable')
+    }
+
+    const record = await this.history.getScoped(scope, investigationId)
 
     if (!record || record.deviceId !== deviceId) {
       throw new NotFoundException('Investigation not found')
@@ -192,6 +207,7 @@ export class DeviceAiInvestigationService {
   async investigateStoredMqttProfile(
     scope: MqttCaptureScope,
     deviceId: string,
+    cloudDataConsent = false,
   ) {
     if (!this.history) {
       throw new Error('Investigation history store unavailable')
@@ -201,6 +217,7 @@ export class DeviceAiInvestigationService {
       await this.proposeObservationProfileFromStoredEvidence(
         scope,
         deviceId,
+        cloudDataConsent,
       )
 
     return this.history.saveProfile(scope, result)
@@ -245,6 +262,7 @@ export class DeviceAiInvestigationService {
   async proposeObservationProfileFromStoredEvidence(
     scope: MqttCaptureScope,
     deviceId: string,
+    cloudDataConsent = false,
   ) {
     if (!this.mqttEvidence) {
       throw new NotFoundException('MQTT evidence capture unavailable')
@@ -266,6 +284,7 @@ export class DeviceAiInvestigationService {
       await this.proposeObservationProfileFromCapturedEvidence(
         snapshot,
         samples,
+        cloudDataConsent,
       )
 
     return {
@@ -281,6 +300,7 @@ export class DeviceAiInvestigationService {
   async proposeObservationProfileFromCapturedEvidence(
     snapshot: DeviceEvidenceSnapshot,
     samples: readonly CapturedMqttSample[],
+    cloudDataConsent = false,
   ): Promise<{
     provider: string
     model: string
@@ -354,7 +374,7 @@ export class DeviceAiInvestigationService {
         samples,
       }),
       maxOutputTokens: 1400,
-    })
+    }, { cloudDataConsent })
 
     let candidate: unknown
 
@@ -388,9 +408,15 @@ export class DeviceAiInvestigationService {
   }
 
   async investigate(
+    scope: DeviceInvestigationScope,
     deviceId: string,
     networkDevices: unknown,
+    cloudDataConsent = false,
+    additionalEvidence: DeviceEvidence[] = [],
+    parentInvestigationId?: string,
+    actionResult?: DeviceAiInvestigationResult['actionResult'],
   ): Promise<DeviceAiInvestigationResult> {
+    const correlationId = parentInvestigationId || randomUUID()
     if (!Array.isArray(networkDevices)) {
       throw new NotFoundException('Network discovery evidence is unavailable')
     }
@@ -408,8 +434,15 @@ export class DeviceAiInvestigationService {
 
     // Build evidence exclusively from the server-side device record.
     // Never accept client-supplied evidence or arbitrary scanner metadata.
+    const networkScope = {
+      tenantId: scope.tenantId,
+      siteId: scope.siteId,
+      networkId: scope.networkId,
+    }
     const snapshot = buildNetworkEvidenceSnapshot({
       id: boundedString(device.id),
+      observedAt: boundedString(device.discoveredAt) || new Date().toISOString(),
+      scope: networkScope,
       ipAddress: boundedString(device.ipAddress),
       hostname: boundedString(device.hostname),
       macAddress: boundedString(device.macAddress),
@@ -422,6 +455,7 @@ export class DeviceAiInvestigationService {
         ? device.observations
         : [],
     })
+    snapshot.evidence.push(...additionalEvidence)
 
     const evidence = {
       snapshotId: snapshotId(snapshot),
@@ -430,7 +464,11 @@ export class DeviceAiInvestigationService {
       observations: snapshot.evidence,
     }
 
-    const response = await this.llm.generate({
+    this.recordInvestigationEvent(correlationId, deviceId, 'device.investigation.analysis', 'started')
+    let response
+    try {
+      response = await this.llm.generate({
+      correlationId,
       systemPrompt: [
         'You are Energrid Device Intelligence.',
         'Analyze network discovery evidence conservatively.',
@@ -458,10 +496,22 @@ export class DeviceAiInvestigationService {
       ].join('\n'),
       userPrompt: JSON.stringify({ deviceEvidence: evidence }),
       maxOutputTokens: 1600,
+    }, { cloudDataConsent })
+    } catch (error) {
+      this.recordInvestigationEvent(correlationId, deviceId, 'device.investigation.analysis', 'failed', {
+        reasonCode: 'provider_unavailable_or_request_failed',
+      })
+      throw error
+    }
+    this.recordInvestigationEvent(correlationId, deviceId, 'device.investigation.analysis', 'completed', {
+      provider: response.provider,
+      model: response.model.slice(0, 80),
     })
 
     const result: DeviceAiInvestigationResult = {
       deviceId,
+      ...(parentInvestigationId ? { parentInvestigationId } : {}),
+      ...(actionResult ? { actionResult } : {}),
       provider: response.provider,
       model: response.model,
       report: parseReport(response.text),
@@ -473,9 +523,36 @@ export class DeviceAiInvestigationService {
     }
 
     if (this.history) {
-      await this.history.save(result)
+      const saved = await this.history.saveScoped(
+        networkScope,
+        `${networkScope.networkId}:${deviceId}`,
+        result,
+        parentInvestigationId ? undefined : correlationId,
+      )
+      this.recordInvestigationEvent(correlationId, deviceId, 'device.investigation.history', 'persisted', {
+        recordId: saved.id,
+      })
+      return saved.result
     }
 
-    return result
+    return { ...result, investigationId: correlationId }
+  }
+
+  private recordInvestigationEvent(
+    correlationId: string,
+    deviceId: string,
+    event: string,
+    outcome: string,
+    details: Record<string, string | number | boolean | null> = {},
+  ): void {
+    this.operationalLog?.record({
+      level: outcome === 'failed' ? 'warn' : 'info',
+      source: 'portal',
+      event,
+      message: `Device investigation ${outcome}.`,
+      deviceId,
+      correlationId,
+      details: { outcome, ...details },
+    })
   }
 }

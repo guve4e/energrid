@@ -59,7 +59,9 @@ function setup(devices: RegisteredDevice[]) {
     markDeviceCommandTransportFailed: jest.fn(),
     markDeviceCommandFailed: jest.fn(() => ({ id: 'cmd', status: 'failed' })),
     ingestDeviceTelemetry: jest.fn(),
-  } as unknown as DeviceRegistryService);
+  } as unknown as DeviceRegistryService, {
+    find: async () => ({ status: 'enrolled' }),
+  } as any);
 }
 beforeEach(() => {
   process.env = {};
@@ -69,6 +71,19 @@ afterAll(() => {
   process.env = env;
 });
 describe('control dispatch safety', () => {
+  it('does not send commands for a stale registry entry after retirement', async () => {
+    const registry = {
+      getDevices: () => [base],
+    } as unknown as DeviceRegistryService;
+    const service = new DeviceControlService(registry, {
+      find: async () => ({ status: 'retired' }),
+    } as any);
+
+    await expect(service.execute('relay', 'turn_on'))
+      .rejects.toThrow('not actively enrolled');
+    expect(jest.mocked(execFile)).not.toHaveBeenCalled();
+  });
+
   it('reports a fully confirmed HTTP group as HTTP, not MQTT', async () => {
     const device: RegisteredDevice = {
       ...base,

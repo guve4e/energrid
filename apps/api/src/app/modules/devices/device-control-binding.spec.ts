@@ -1,8 +1,13 @@
 import { execFile } from 'node:child_process';
 import { ForbiddenException } from '@nestjs/common';
 import { DeviceRegistryService } from './device-registry.service';
+import { DeviceObservationService } from './device-observation.service';
+import { DeviceMqttMessageRouter } from './mqtt/device-mqtt-message-router';
 import { DeviceControlService } from './device-control.service';
-import { ShellyMqttAdapter } from './adapters/inbound/shelly/shelly-mqtt.adapter';
+
+const activeEnrollment = { find: async () => ({ status: 'enrolled' }) } as any;
+const controlService = (registry: DeviceRegistryService) =>
+  new DeviceControlService(registry, activeEnrollment);
 
 jest.mock('node:child_process', () => ({
   execFile: jest.fn((_c, _a, _o, cb) => {
@@ -19,9 +24,17 @@ const binding = {
   channel: 1,
   topic: 'shelly/kitchen/rpc',
 };
-function discover() {
+async function discover() {
   const registry = new DeviceRegistryService();
-  new ShellyMqttAdapter(registry).handle({
+  const router = new DeviceMqttMessageRouter(
+    registry,
+    new DeviceObservationService(),
+    undefined,
+    undefined,
+    undefined,
+    activeEnrollment,
+  );
+  await router.route({
     topic: 'shelly/kitchen/events/rpc',
     payloadText: '{}',
     payload: {
@@ -41,7 +54,7 @@ afterAll(() => {
 
 describe('discovery, approval and control are separate', () => {
   it('retains exact hardware, channel and observed prefix without enabling switching', async () => {
-    const registry = discover();
+    const registry = await discover();
     const approved = registry.approveDiscoveredDevice(id)!;
     expect(approved.metadata).toEqual(
       expect.objectContaining({
@@ -53,7 +66,7 @@ describe('discovery, approval and control are separate', () => {
     );
     expect(approved.control?.status).toBe('needs-setup');
     expect(
-      await new DeviceControlService(registry).execute(id, 'turn_on'),
+      await controlService(registry).execute(id, 'turn_on'),
     ).toEqual(
       expect.objectContaining({ status: 'failed', affectedDeviceIds: [] }),
     );
@@ -67,9 +80,9 @@ describe('discovery, approval and control are separate', () => {
   });
   it('publishes only to the explicit route and exact relay, ignoring the old global fallback', async () => {
     process.env.HOME_SHELLY_RPC_TOPIC = 'wrong/global/rpc';
-    const registry = discover();
+    const registry = await discover();
     registry.approveDiscoveredDevice(id);
-    const service = new DeviceControlService(registry);
+    const service = controlService(registry);
     expect(
       service.configure(id, { ...binding, enabled: false }).control?.status,
     ).toBe('disabled');
@@ -89,8 +102,8 @@ describe('discovery, approval and control are separate', () => {
     );
   });
   it('rejects approval bypass, wrong channels and wrong hardware without any I/O', async () => {
-    const registry = discover();
-    const service = new DeviceControlService(registry);
+    const registry = await discover();
+    const service = controlService(registry);
     expect(() => service.configure(id, binding)).toThrow('Approve');
     await expect(service.execute(id, 'turn_on')).rejects.toBeInstanceOf(
       ForbiddenException,
@@ -105,10 +118,10 @@ describe('discovery, approval and control are separate', () => {
       expect(() => service.configure(id, value)).toThrow();
     expect(execFile).not.toHaveBeenCalled();
   });
-  it('keeps readings on MQTT when HTTP is selected and supports disabling/removing control', () => {
-    const registry = discover();
+  it('keeps readings on MQTT when HTTP is selected and supports disabling/removing control', async () => {
+    const registry = await discover();
     registry.approveDiscoveredDevice(id);
-    const service = new DeviceControlService(registry);
+    const service = controlService(registry);
     const configured = service.configure(id, {
       ...binding,
       kind: 'shelly-http',
@@ -125,23 +138,23 @@ describe('discovery, approval and control are separate', () => {
     const meter = `${physicalId}:em1:1`;
     registry.approveDiscoveredDevice(meter);
     expect(() =>
-      new DeviceControlService(registry).configure(meter, binding),
+      controlService(registry).configure(meter, binding),
     ).toThrow('capability');
     expect(
       registry.getDevices().find((d) => d.id === meter)?.control?.status,
     ).toBe('read-only');
   });
-  it('accepts explicit operator bindings on restart, but never imports routes from a registry announcement', () => {
+  it('accepts explicit operator bindings on restart, but never imports routes from a registry announcement', async () => {
     process.env.HOME_DEVICE_CONTROL_BINDINGS_JSON = JSON.stringify({
       [id]: binding,
     });
-    const registry = discover();
+    const registry = await discover();
     registry.approveDiscoveredDevice(id);
     expect(
       registry.getDevices().find((d) => d.id === id)?.control?.status,
     ).toBe('ready');
     process.env.HOME_DEVICE_CONTROL_BINDINGS_JSON = '{}';
-    const clean = discover();
+    const clean = await discover();
     clean.approveDiscoveredDevice(id);
     clean.ingestRegistryPayload({
       devices: [
@@ -160,14 +173,14 @@ describe('discovery, approval and control are separate', () => {
       'needs-setup',
     );
   });
-  it('fails closed for malformed operator bindings and missing HTTP secrets', () => {
+  it('fails closed for malformed operator bindings and missing HTTP secrets', async () => {
     process.env.HOME_DEVICE_CONTROL_BINDINGS_JSON = '[]';
     expect(() => new DeviceRegistryService()).toThrow();
     delete process.env.HOME_DEVICE_CONTROL_BINDINGS_JSON;
-    const registry = discover();
+    const registry = await discover();
     registry.approveDiscoveredDevice(id);
     expect(() =>
-      new DeviceControlService(registry).configure(id, {
+      controlService(registry).configure(id, {
         ...binding,
         kind: 'shelly-http',
         baseUrl: 'http://192.168.7.15',
@@ -179,9 +192,9 @@ describe('discovery, approval and control are separate', () => {
   it.each([true, false])(
     'reports HTTP confirmation accurately, state read-back available: %s',
     async (confirmed) => {
-      const registry = discover();
+      const registry = await discover();
       registry.approveDiscoveredDevice(id);
-      const service = new DeviceControlService(registry);
+      const service = controlService(registry);
       service.configure(id, {
         ...binding,
         kind: 'shelly-http',
@@ -207,7 +220,7 @@ describe('discovery, approval and control are separate', () => {
     process.env.HOME_KITCHEN_LIGHT_SHELLY_RPC_DEVICES =
       'first:shelly-first:0,second:shelly-second:1';
     const registry = new DeviceRegistryService();
-    const service = new DeviceControlService(registry);
+    const service = controlService(registry);
     service.configure('first', {
       kind: 'shelly-mqtt',
       enabled: true,
@@ -238,9 +251,9 @@ describe('discovery, approval and control are separate', () => {
   });
 
   it('does not expose transport credentials on publication failure or fall back to another route', async () => {
-    const registry = discover();
+    const registry = await discover();
     registry.approveDiscoveredDevice(id);
-    const service = new DeviceControlService(registry);
+    const service = controlService(registry);
     service.configure(id, binding);
     jest.mocked(execFile).mockImplementation((_c, _a, _o, cb) => {
       cb(new Error('command --password private-secret'), {
@@ -268,7 +281,7 @@ describe('discovery, approval and control are separate', () => {
         capabilities: ['switch'],
       },
     ]);
-    const service = new DeviceControlService(new DeviceRegistryService());
+    const service = controlService(new DeviceRegistryService());
     expect(() => service.configure('foreign', binding)).toThrow('site');
     await expect(service.execute('foreign', 'turn_on')).rejects.toBeInstanceOf(
       ForbiddenException,

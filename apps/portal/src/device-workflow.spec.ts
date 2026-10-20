@@ -75,9 +75,14 @@ function data(devices: unknown[] = []) {
     gateways: [],
     sites: [],
     networkDevices: [] as unknown[],
-    networkZones: [],
+    networkZones: [] as Array<{ id: string; name: string; cidr: string; seedIps: string[] }>,
     executionTraces: [],
   };
+}
+function enrollmentsFor(state: ReturnType<typeof data>) {
+  return state.devices.flatMap((value: any) => value.trustStatus === 'approved' ? [{
+    tenantId: value.tenantId, siteId: value.siteId, deviceId: value.id, status: 'enrolled',
+  }] : []);
 }
 function button(text: string) {
   return page!.findAll('button').find((b) => b.text() === text)!;
@@ -89,13 +94,178 @@ async function render(path: string, fetch: unknown) {
   await flushPromises();
 }
 describe('device onboarding page workflow with mocked services', () => {
-  it('keeps repeated search, combined filters, empty results and approval-tab changes interactive without reloading', async () => {
+  it('shows backend network identity evidence and an explicit missing-evidence reason in Pending Enrollment', async () => {
+    const physicalId = 'shellyproem50-8c4f00dbd258';
+    const shellyCandidate = {
+      ...relay,
+      id: `${physicalId}:em1:0`,
+      displayName: `${physicalId} em1:0`,
+      adapter: { ...relay.adapter, protocol: 'mqtt', target: `${physicalId}/rpc` },
+      metadata: { physicalId, component: 'em1:0', channel: 0 },
+      discovery: { source: 'mqtt', confidence: 0.8, reason: 'Shelly MQTT telemetry' },
+    };
+    const secondShellyCandidate = {
+      ...shellyCandidate,
+      id: `${physicalId}:em1:1`,
+      displayName: `${physicalId} em1:1`,
+      metadata: { physicalId, component: 'em1:1', channel: 1 },
+    };
+    const espCandidate = {
+      ...relay,
+      id: 'temp-kitchen',
+      displayName: 'Kitchen temperature sensor',
+      adapter: { ...relay.adapter, protocol: 'mqtt', target: 'devices/temp-kitchen/status' },
+      metadata: { mqttEvidenceCandidate: true },
+      discovery: { source: 'mqtt', confidence: 0.55, reason: 'Captured MQTT status evidence' },
+    };
+    const state = {
+      ...data([shellyCandidate, secondShellyCandidate, espCandidate]),
+      pendingDeviceIdentities: {
+        [shellyCandidate.id]: {
+          logicalCandidateId: shellyCandidate.id, physicalDeviceId: 'inventory-physical-1',
+          physicalHardwareId: physicalId, componentId: 'em1:0', ipAddress: '192.168.1.204',
+          macAddress: '8c:4f:00:db:d2:58', hostname: 'shelly-proem', gatewayId: 'gateway-home',
+          networkId: 'iot', discoverySource: 'mqtt', protocol: 'mqtt', endpoint: `${physicalId}/rpc`,
+          evidenceSource: 'mqtt_protocol_message + lan_http_rpc', lastObservedAt: '2026-10-20T09:00:00.000Z',
+          verificationStatus: 'protocol_observed', status: 'correlated',
+          reason: 'Exact Shelly protocol hardware ID and component match current LAN HTTP/RPC evidence. This is protocol correlation, not independent hardware authentication.',
+        },
+        [secondShellyCandidate.id]: {
+          logicalCandidateId: secondShellyCandidate.id, physicalDeviceId: 'inventory-physical-1',
+          physicalHardwareId: physicalId, componentId: 'em1:1', ipAddress: '192.168.1.204',
+          macAddress: '8c:4f:00:db:d2:58', hostname: 'shelly-proem', gatewayId: 'gateway-home',
+          networkId: 'iot', discoverySource: 'mqtt', protocol: 'mqtt', endpoint: `${physicalId}/rpc`,
+          evidenceSource: 'mqtt_protocol_message + lan_http_rpc', lastObservedAt: '2026-10-20T09:00:00.000Z',
+          lastObservedIpAddress: '192.168.1.204', lastObservedMacAddress: '8c:4f:00:db:d2:58',
+          lastObservedHostname: 'shelly-proem', lastObservedGatewayId: 'gateway-home',
+          lastObservedNetworkId: 'iot', verificationStatus: 'protocol_observed', status: 'correlated',
+          reason: 'Exact Shelly protocol hardware ID and component match current LAN HTTP/RPC evidence. This is protocol correlation, not independent hardware authentication.',
+        },
+        [espCandidate.id]: {
+          logicalCandidateId: espCandidate.id, physicalDeviceId: null, physicalHardwareId: null,
+          componentId: null, ipAddress: null, macAddress: null, hostname: null, gatewayId: null,
+          networkId: null, discoverySource: 'mqtt', protocol: 'mqtt', endpoint: 'devices/temp-kitchen/status',
+          evidenceSource: 'MQTT status/evidence', lastObservedAt: '2026-10-20T09:00:00.000Z',
+          verificationStatus: 'not_identified', status: 'not_identified',
+          reason: 'MQTT evidence identifies a logical source but contains no stable hardware identifier.',
+        },
+      },
+    };
+    const fetch = vi.fn(async (url: string) => {
+      if (url === '/portal/network/scan') return { ok: true, json: async () => ({ devices: [], zones: [] }) };
+      if (url === '/portal/network/memory') return { ok: true, json: async () => ({ devices: [], summary: { known: 0, observedInLatestScan: 0, notObservedInLatestScan: 0, lastScanId: null } }) };
+      if (url.includes('/devices/enrollments')) return { ok: true, json: async () => ({ enrollments: [] }) };
+      return { ok: true, json: async () => url === '/portal/state' ? structuredClone(state) : { runs: [] } };
+    });
+
+    await render('/discovery/', fetch);
+
+    expect(page!.text()).toContain('Recently confirmed');
+    expect(page!.text()).toContain('192.168.1.204');
+    expect(page!.text()).toContain('8c:4f:00:db:d2:58');
+    expect(page!.text()).toContain('em1:0');
+    expect(page!.text()).toContain('Kitchen temperature sensor');
+    expect(page!.text()).toContain('MQTT source — network address not established');
+    const shellyCard = page!.findAll('.pending-device-card').find(card => card.text().includes(physicalId))!;
+    await shellyCard.find('.pending-review-button').trigger('click');
+    await flushPromises();
+    expect(shellyCard.text()).toContain('not independent hardware authentication');
+    const channelRows = shellyCard.findAll('.pending-channel-detail');
+    expect(channelRows).toHaveLength(2);
+    await channelRows[1].findAll('button').find(candidateButton => candidateButton.text() === 'Approve')!.trigger('click');
+    await flushPromises();
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/portal/discovery/') && String(url).includes('%3Aem1%3A1/approve'))).toBe(true);
+  });
+
+  it('shows persisted LAN identity as last observed and avoids an automatic scan when history exists', async () => {
+    const physicalId = 'shellyproem50-8c4f00dbd258';
+    const shellyCandidate = {
+      ...relay,
+      id: `${physicalId}:em1:1`,
+      displayName: `${physicalId} em1:1`,
+      adapter: { ...relay.adapter, protocol: 'mqtt', target: `${physicalId}/rpc` },
+      metadata: { physicalId, component: 'em1:1', channel: 1 },
+      discovery: { source: 'mqtt', confidence: 0.8, reason: 'Shelly MQTT telemetry' },
+    };
+    const state = {
+      ...data([shellyCandidate]),
+      pendingDeviceIdentities: {
+        [shellyCandidate.id]: {
+          logicalCandidateId: shellyCandidate.id,
+          physicalDeviceId: 'inventory-physical-1', physicalHardwareId: physicalId,
+          componentId: 'em1:1', ipAddress: null, macAddress: null, hostname: null,
+          gatewayId: null, networkId: null, discoverySource: 'mqtt', protocol: 'mqtt',
+          endpoint: `${physicalId}/rpc`, evidenceSource: 'mqtt_protocol_message + persisted_lan_discovery_memory',
+          lastObservedAt: '2026-10-20T09:00:00.000Z',
+          lastObservedIpAddress: '192.168.1.204', lastObservedMacAddress: '8c:4f:00:db:d2:58',
+          lastObservedHostname: 'shelly-proem', lastObservedGatewayId: 'gateway-home',
+          lastObservedNetworkId: 'IoT', verificationStatus: 'protocol_observed',
+          status: 'protocol_observed',
+          reason: 'Exact Shelly protocol hardware ID and component match persisted LAN HTTP/RPC evidence. These are historical last-observed network details; run a new LAN scan to confirm the current address.',
+        },
+      },
+    };
+    const fetch = vi.fn(async (url: string) => {
+      if (url.includes('/devices/enrollments')) return { ok: true, json: async () => ({ enrollments: [] }) };
+      if (url === '/portal/network/memory') return {
+        ok: true,
+        json: async () => ({ devices: [{ device: network }], summary: { known: 1, observedInLatestScan: 0, notObservedInLatestScan: 1, lastScanId: '2026-10-20T09:30:00.000Z' } }),
+      };
+      return { ok: true, json: async () => url === '/portal/state' ? structuredClone(state) : { runs: [] } };
+    });
+
+    await render('/discovery/', fetch);
+
+    const card = page!.find('.pending-device-card');
+    expect(card.text()).toContain('Last observed');
+    expect(card.text()).toContain('192.168.1.204');
+    expect(card.text()).toContain('Historical · not recently confirmed');
+    await card.find('.pending-review-button').trigger('click');
+    await flushPromises();
+    expect(card.text()).toContain('historical last-observed network details');
+    expect(fetch.mock.calls.filter(([url]) => url === '/portal/network/scan')).toHaveLength(0);
+  });
+
+  it('shows an unlinked LAN endpoint IP without attaching it to the MQTT kitchen candidate', async () => {
+    const kitchen = {
+      ...relay,
+      id: 'temp-kitchen', displayName: 'Kitchen temperature sensor',
+      adapter: { ...relay.adapter, protocol: 'mqtt', target: 'devices/temp-kitchen/data' },
+      metadata: { mqttEvidenceCandidate: true },
+      capabilities: [{ kind: 'temperature', actions: ['read'] }, { kind: 'humidity', actions: ['read'] }],
+      discovery: { source: 'mqtt', confidence: 0.55, reason: 'Captured MQTT status evidence' },
+    };
+    const lanEndpoint = {
+      ...network, id: 'ESP-3254B7', ipAddress: '192.168.1.133', hostname: 'esp-3254b7',
+      macAddress: '3c:71:bf:32:54:b7', vendor: undefined, model: undefined,
+      networkZoneId: 'upstream-lan', networkZoneName: 'Upstream LAN', reason: 'ICMP response; HTTP 404',
+    };
+    const state = {
+      ...data([kitchen]), networkDevices: [lanEndpoint],
+      networkZones: [{ id: 'upstream-lan', name: 'Upstream LAN', cidr: '192.168.1.0/24', seedIps: [] }],
+    };
+    const fetch = vi.fn(async (url: string) => {
+      if (url.includes('/devices/enrollments')) return { ok: true, json: async () => ({ enrollments: [] }) };
+      if (url === '/portal/network/memory') return { ok: true, json: async () => ({ devices: [], summary: { known: 0, observedInLatestScan: 0, notObservedInLatestScan: 0, lastScanId: null } }) };
+      return { ok: true, json: async () => url === '/portal/state' ? structuredClone(state) : { runs: [] } };
+    });
+
+    await render('/discovery/', fetch);
+
+    expect(page!.find('.network-discovery-card').text()).toContain('192.168.1.133');
+    expect(page!.find('.network-discovery-card').text()).toContain('Upstream LAN');
+    const pending = page!.find('.pending-device-card');
+    expect(pending.text()).toContain('MQTT source — network address not established');
+    expect(pending.text()).not.toContain('192.168.1.133');
+  });
+
+  it('keeps search and combined inventory filters interactive without reloading', async () => {
     const kitchen = { ...relay, trustStatus: 'approved', control: { status: 'needs-setup', binding: null, reason: '' } };
     const meter = { ...kitchen, id: 'meter', displayName: 'Utility meter', zoneId: 'utility', zoneName: 'Utility', capabilities: [{ kind: 'power', actions: ['read'] }], control: { status: 'read-only', binding: null, reason: '' } };
     const example = { ...kitchen, id: 'example', displayName: 'Example relay', metadata: { simulated: true } };
     const pending = { ...relay, id: 'pending', displayName: 'Pending relay' };
     const state = data([kitchen, meter, example, pending]);
-    const fetch = vi.fn(async (url: string) => ({ ok: true, json: async () => url === '/portal/state' ? structuredClone(state) : { runs: [] } }));
+    const fetch = vi.fn(async (url: string) => ({ ok: true, json: async () => url.endsWith('/portal/state') ? structuredClone(state) : url.includes('/devices/enrollments') ? { enrollments: enrollmentsFor(state) } : { runs: [] } }));
     await render('/devices/', fetch);
     const initialRequests = fetch.mock.calls.length;
     const search = page!.get('[aria-label="Search devices"]');
@@ -121,13 +291,9 @@ describe('device onboarding page workflow with mocked services', () => {
     await button('Clear filters').trigger('click');
     await page!.get('[aria-label="Filter by status"]').setValue('needs_setup');
     expect(count()).toBe('1 shown');
-    await button('Pending 1').trigger('click');
-    expect(count()).toBe('0 shown');
     await button('Clear filters').trigger('click');
-    expect(count()).toBe('1 shown');
-    expect(button('Pending 1').attributes('aria-pressed')).toBe('true');
-    expect(page!.get('tbody').text()).toContain('Pending relay');
-    await button('Approved 3').trigger('click');
+    expect(count()).toBe('2 shown');
+    expect(page!.get('tbody').text()).not.toContain('Pending relay');
     await page!.get('[aria-label="Filter by source"]').setValue('examples');
     expect(count()).toBe('1 shown');
     expect(page!.get('tbody').text()).toContain('Example relay');
@@ -139,7 +305,7 @@ describe('device onboarding page workflow with mocked services', () => {
   it('keeps search and an edited setup draft when state is refreshed', async () => {
     const approved = { ...relay, trustStatus: 'approved', control: { status: 'needs-setup', binding: null, reason: '' } };
     const state = data([approved]);
-    const fetch = vi.fn(async (url: string) => ({ ok: true, json: async () => url === '/portal/state' ? structuredClone(state) : { runs: [] } }));
+    const fetch = vi.fn(async (url: string) => ({ ok: true, json: async () => url.endsWith('/portal/state') ? structuredClone(state) : url.includes('/devices/enrollments') ? { enrollments: enrollmentsFor(state) } : { runs: [] } }));
     await render('/devices/', fetch);
     await page!.get('[aria-label="Search devices"]').setValue('Kitchen');
     await button('Kitchen Shelly').trigger('click');
@@ -168,7 +334,7 @@ describe('device onboarding page workflow with mocked services', () => {
         state.networkDevices = [network];
         return { ok: true, json: async () => ({ devices: [network], zones: [] }) };
       }
-      return { ok: true, json: async () => url === '/portal/state' ? structuredClone(state) : { runs: [] } };
+      return { ok: true, json: async () => url.endsWith('/portal/state') ? structuredClone(state) : url.includes('/devices/enrollments') ? { enrollments: enrollmentsFor(state) } : { runs: [] } };
     });
     await render('/devices/', fetch);
     await button('Kitchen Shelly').trigger('click');
@@ -185,8 +351,9 @@ describe('device onboarding page workflow with mocked services', () => {
     expect(fetch.mock.calls.some(([url]) => /\/(control|actions|approve)$/.test(url))).toBe(false);
   });
   it('shows all detected devices, reviews a channel, then keeps approval and switching separate', async () => {
-    const state = data();
+    const state = { ...data(), networkZones: [{ id: 'lan', name: 'LAN', cidr: '192.168.7.0/24', seedIps: [] }] };
     const fetch = vi.fn(async (url: string, options?: RequestInit) => {
+      if (url === '/portal/network/memory') return { ok: true, json: async () => ({ devices: [], summary: { known: 0, observedInLatestScan: 0, notObservedInLatestScan: 0, lastScanId: null } }) };
       if (url === '/portal/network/scan') {
         state.networkDevices = [
           network,
@@ -201,7 +368,7 @@ describe('device onboarding page workflow with mocked services', () => {
         state.devices = [relay];
         return {
           ok: true,
-          json: async () => ({ devices: state.networkDevices, zones: [] }),
+          json: async () => ({ devices: state.networkDevices, zones: state.networkZones }),
         };
       }
       if (url.endsWith('/approve')) {
@@ -233,6 +400,7 @@ describe('device onboarding page workflow with mocked services', () => {
         ];
         return { ok: true, json: async () => ({ persistence: 'runtime' }) };
       }
+      if (url.includes('/devices/enrollments')) return { ok: true, json: async () => ({ enrollments: enrollmentsFor(state) }) };
       return {
         ok: true,
           json: async () => (url === '/portal/state' ? structuredClone(state) : { runs: [] }),
@@ -242,6 +410,7 @@ describe('device onboarding page workflow with mocked services', () => {
     expect(button('All devices').attributes('aria-pressed')).toBe('true');
     expect(page!.text()).toContain('Ring');
     expect(page!.text()).toContain('Adapter needed');
+    await page!.get('.network-device-more').get('summary').trigger('click');
     await button('Review channels').trigger('click');
     await flushPromises();
     expect(page!.find('aside[aria-label="Device details"]').exists()).toBe(
@@ -291,6 +460,8 @@ describe('device onboarding page workflow with mocked services', () => {
             ? { status: 'failed', message: 'Broker unavailable' }
             : url === '/portal/state'
               ? state
+              : url.includes('/devices/enrollments')
+                ? { enrollments: enrollmentsFor(state) }
               : { runs: [] },
       })),
     );
@@ -318,7 +489,7 @@ describe('device onboarding page workflow with mocked services', () => {
       '/devices/',
       vi.fn(async (url: string) => ({
         ok: true,
-        json: async () => (url === '/portal/state' ? state : { runs: [] }),
+        json: async () => url === '/portal/state' ? state : url.includes('/devices/enrollments') ? { enrollments: enrollmentsFor(state) } : { runs: [] },
       })),
     );
     expect(page!.findAll('tbody tr')).toHaveLength(1);

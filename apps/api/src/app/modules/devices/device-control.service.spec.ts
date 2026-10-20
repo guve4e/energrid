@@ -12,6 +12,9 @@ jest.mock('node:child_process', () => ({
 describe('DeviceControlService', () => {
   const originalEnv = process.env;
   const execFileMock = jest.mocked(execFile);
+  const activeEnrollment = {
+    find: async () => ({ status: 'enrolled' }),
+  } as any;
 
   beforeEach(() => {
     execFileMock.mockClear();
@@ -58,7 +61,7 @@ describe('DeviceControlService', () => {
       },
     ]);
 
-    const service = new DeviceControlService(new DeviceRegistryService());
+    const service = new DeviceControlService(new DeviceRegistryService(), activeEnrollment);
 
     const result = await service.execute('kitchen.island.light', 'turn_on');
 
@@ -119,7 +122,7 @@ describe('DeviceControlService', () => {
       },
     ]);
 
-    const service = new DeviceControlService(new DeviceRegistryService());
+    const service = new DeviceControlService(new DeviceRegistryService(), activeEnrollment);
 
     await expect(
       service.execute('panel.mainline.energy', 'turn_off'),
@@ -145,7 +148,7 @@ describe('DeviceControlService', () => {
     ]);
 
     const registry = new DeviceRegistryService();
-    const service = new DeviceControlService(registry);
+    const service = new DeviceControlService(registry, activeEnrollment);
 
     execFileMock.mockImplementation((_command, _args, _options, callback) => {
       const device = registry

@@ -61,6 +61,7 @@ describe('Approved ESP8266 MQTT observation integration', () => {
 
   let approved = true;
   let installed = true;
+  let enrollmentStatus: 'enrolled' | 'suspended' | 'retired' = 'enrolled';
   let projection: jest.Mock;
 
   function configureRouter(): void {
@@ -102,6 +103,7 @@ describe('Approved ESP8266 MQTT observation integration', () => {
             : null,
         ),
       } as any,
+      { find: jest.fn(async () => ({ status: enrollmentStatus })) } as any,
     );
 
     router = new DeviceMqttMessageRouter(
@@ -120,6 +122,7 @@ describe('Approved ESP8266 MQTT observation integration', () => {
     store = new DeviceObservationStateStore(directory);
     approved = true;
     installed = true;
+    enrollmentStatus = 'enrolled';
     configureRouter();
   });
 
@@ -129,7 +132,7 @@ describe('Approved ESP8266 MQTT observation integration', () => {
   });
 
   it('persists 25°C and 41.4% before projecting to the registry', async () => {
-    const routed = router.route(message);
+    const routed = await router.route(message);
 
     expect(routed).not.toBeNull();
     expect(routed?.reason).toBe('configured approved observation');
@@ -160,7 +163,7 @@ describe('Approved ESP8266 MQTT observation integration', () => {
   it('does not admit an unapproved device', async () => {
     approved = false;
 
-    await router.route(message)!.persisted;
+    await (await router.route(message))!.persisted;
 
     expect(
       await store.getState(scope, 'temp-kitchen'),
@@ -169,11 +172,22 @@ describe('Approved ESP8266 MQTT observation integration', () => {
     expect(projection).not.toHaveBeenCalled();
   });
 
+  it('rejects a stale approved registry device after durable retirement', async () => {
+    enrollmentStatus = 'retired';
+    const result = await router.route(message);
+    expect(result?.observationAdmission).toEqual({
+      outcome: 'rejected',
+      reasonCode: 'device_not_enrolled',
+    });
+    expect(await store.getState(scope, 'temp-kitchen')).toBeNull();
+    expect(projection).not.toHaveBeenCalled();
+  });
+
   it('rejects registry approval without a persisted installation', async () => {
     approved = true;
     installed = false;
 
-    await router.route(message)!.persisted;
+    await (await router.route(message))!.persisted;
 
     expect(
       await store.getState(scope, 'temp-kitchen'),
@@ -183,7 +197,7 @@ describe('Approved ESP8266 MQTT observation integration', () => {
   });
 
   it('restores the accepted state after restarting storage', async () => {
-    await router.route(message)!.persisted;
+    await (await router.route(message))!.persisted;
 
     await store.close();
 
@@ -199,14 +213,14 @@ describe('Approved ESP8266 MQTT observation integration', () => {
     await store.close();
 
     await expect(
-      router.route(message)!.persisted,
+      router.route(message),
     ).rejects.toThrow();
 
     expect(projection).not.toHaveBeenCalled();
   });
 
-  it('preserves normal routing for topics without configured profiles', () => {
-    const result = router.route({
+  it('preserves normal routing for topics without configured profiles', async () => {
+    const result = await router.route({
       topic: 'devices/unconfigured-sensor/data',
       payload: { temperature: 20 },
       payloadText: '{"temperature":20}',

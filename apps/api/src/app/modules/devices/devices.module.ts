@@ -2,7 +2,10 @@ import { Module } from '@nestjs/common'
 import { DeviceControlService } from './device-control.service'
 import { DeviceDiagnosticsService } from './device-diagnostics.service'
 import { DeviceHttpPollService } from './device-http-poll.service'
-import { DeviceLanDiscoveryService } from './device-lan-discovery.service'
+import {
+  DeviceLanDiscoveryService,
+  DeviceLanNetworkEvidenceCollector,
+} from './device-lan-discovery.service'
 import { DeviceMqttIngestService } from './device-mqtt-ingest.service'
 import { DeviceRegistryService } from './device-registry.service'
 import { OperationalLogService } from './operational-log.service'
@@ -15,15 +18,19 @@ import { DeviceDiscoveryMemoryStore } from './device-discovery-memory.store'
 import { TelemetryModule } from '../telemetry/telemetry.module'
 import { ApprovedMqttObservationRuntime } from './mqtt/approved-mqtt-observation.runtime'
 import { MqttEvidenceCaptureService } from './mqtt/mqtt-evidence-capture.service'
+import { MqttEvidenceDiscoveryService } from './mqtt/mqtt-evidence-discovery.service'
+import { DeviceEnrollmentModule } from './enrollment/device-enrollment.module'
 
 @Module({
-  imports: [TelemetryModule],
+  imports: [TelemetryModule, DeviceEnrollmentModule],
   providers: [
     DeviceRegistryService,
     ApprovedMqttObservationRuntime,
     DeviceMqttIngestService,
     MqttEvidenceCaptureService,
+    MqttEvidenceDiscoveryService,
     DeviceHttpPollService,
+    DeviceLanNetworkEvidenceCollector,
     DeviceLanDiscoveryService,
     DeviceDiscoveryMemoryStore,
     DeviceControlService,

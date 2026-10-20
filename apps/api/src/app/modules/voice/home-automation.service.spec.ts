@@ -32,7 +32,9 @@ describe('HomeAutomationService', () => {
     }
     return new HomeAutomationService(
       registry,
-      new DeviceControlService(registry),
+      new DeviceControlService(registry, {
+        find: async () => ({ status: 'enrolled' }),
+      } as any),
     );
   }
 

@@ -21,8 +21,10 @@ import type {
   RegisteredDevice,
   SiteSystem,
 } from '../devices/device-registry.types';
+import type { PendingDeviceIdentityProjection } from './pending-device-identity.projection';
 
 export interface PortalState {
+  pendingDeviceIdentities?: Record<string, PendingDeviceIdentityProjection>;
   tenant: {
     id: string;
     name: string;

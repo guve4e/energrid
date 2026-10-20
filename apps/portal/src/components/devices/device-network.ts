@@ -57,6 +57,44 @@ export function matchNetworkDevice<T extends NetworkIdentity>(
   );
 }
 
+/**
+ * Presentation-only enrollment identity match.
+ *
+ * Requires a complete MAC address on both sides.
+ * Does not use IP addresses, hostnames, MQTT topics or model names.
+ * Never grants enrollment, observation authority or control permissions.
+ */
+export function hasVerifiedEnrolledNetworkIdentity(
+  networkDevice: NetworkIdentity,
+  enrolledDevices: readonly ControlSetupDevice[],
+): boolean {
+  const networkMac = networkDevice.macAddress
+    ? mac(networkDevice.macAddress)
+    : null;
+
+  if (!networkMac) return false;
+
+  return enrolledDevices.some(device => {
+    const identities = [
+      device.metadata?.physicalId,
+      device.metadata?.hardwareId,
+      device.metadata?.dst,
+      device.id,
+    ];
+
+    return identities.some(value => {
+      if (typeof value !== 'string') return false;
+
+      const physicalIdentity = value.replace(
+        /:(switch|em1):\\d+$/i,
+        '',
+      );
+
+      return mac(physicalIdentity) === networkMac;
+    });
+  });
+}
+
 export function discoveredShellyAddress(
   device: ControlSetupDevice,
   network: NetworkIdentity[],

@@ -1,3 +1,5 @@
+import type { PhysicalDeviceDiscovery } from '../enrollment/physical-device-inventory.repository';
+
 export interface DeviceMqttMessage {
   topic: string;
   payload: unknown;
@@ -5,6 +7,10 @@ export interface DeviceMqttMessage {
 }
 
 export type DeviceMqttEffect =
+  | {
+      kind: 'discovery';
+      payload: unknown;
+    }
   | {
       kind: 'registry';
       payload: unknown;
@@ -21,6 +27,7 @@ export type DeviceMqttEffect =
 export interface DeviceMqttAdapterResult {
   reason: string;
   effects: DeviceMqttEffect[];
+  physicalDiscoveries?: Array<Omit<PhysicalDeviceDiscovery, 'scope'>>;
 }
 
 export interface DeviceMqttMessageAdapter {

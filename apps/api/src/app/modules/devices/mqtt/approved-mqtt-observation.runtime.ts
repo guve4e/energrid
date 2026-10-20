@@ -11,6 +11,9 @@ import {
   ApprovedMqttObservationRoute,
   type ApprovedMqttObservationConfig,
 } from './approved-mqtt-observation.route';
+import { Inject } from '@nestjs/common';
+import { DEVICE_ENROLLMENT_SERVICE } from '../enrollment/device-enrollment.module';
+import type { DeviceEnrollmentService } from '../enrollment/device-enrollment.service';
 
 /**
  * Runtime owner of explicitly configured MQTT observation profiles.
@@ -30,6 +33,8 @@ export class ApprovedMqttObservationRuntime
   constructor(
     private readonly registry: DeviceRegistryService,
     installations: DeviceInstallationStore,
+    @Inject(DEVICE_ENROLLMENT_SERVICE)
+    enrollment: DeviceEnrollmentService,
   ) {
     const raw = process.env.HOME_OBSERVATION_BINDINGS_JSON?.trim();
 
@@ -64,6 +69,7 @@ export class ApprovedMqttObservationRuntime
       this.store,
       configs,
       installations,
+      enrollment,
     );
   }
 

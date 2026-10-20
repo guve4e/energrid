@@ -8,12 +8,25 @@ import type { DeviceInstallationStore } from '../device-installation.store';
 import type { ObservationScope } from '../device-observation-state.store';
 import { DeviceObservationStateStore } from '../device-observation-state.store';
 import type { DeviceMqttMessage } from './device-mqtt-message-adapter';
+import type { DeviceEnrollmentService } from '../enrollment/device-enrollment.service';
 
 export interface ApprovedMqttObservationConfig {
   scope: ObservationScope;
   binding: ApprovedObservationBinding;
   policy: ObservationAuthorityPolicy;
 }
+
+export type ApprovedMqttObservationResult =
+  | { outcome: 'admitted' }
+  | {
+      outcome: 'rejected'
+      reasonCode:
+        | 'route_not_configured'
+        | 'device_not_approved'
+        | 'device_not_enrolled'
+        | 'installation_missing_or_mismatched'
+        | 'observation_policy_rejected'
+    }
 
 /**
  * An explicitly configured route for already-approved devices.
@@ -37,6 +50,7 @@ export class ApprovedMqttObservationRoute {
     private readonly store: DeviceObservationStateStore,
     configs: readonly ApprovedMqttObservationConfig[],
     private readonly installations: Pick<DeviceInstallationStore, 'get'>,
+    private readonly enrollment?: Pick<DeviceEnrollmentService, 'find'>,
   ) {
     for (const config of configs) {
       const { binding, policy, scope } = config;
@@ -79,6 +93,13 @@ export class ApprovedMqttObservationRoute {
    */
   async recover(): Promise<void> {
     for (const { scope, binding, policy } of this.routes.values()) {
+      if (this.enrollment) {
+        const enrollment = await this.enrollment.find({
+          ...scope,
+          deviceId: binding.deviceId,
+        });
+        if (!enrollment || enrollment.status !== 'enrolled') continue;
+      }
       const approved = this.registry.getDevices().some(
         (device) =>
           device.id === binding.deviceId &&
@@ -159,9 +180,23 @@ export class ApprovedMqttObservationRoute {
     }
   }
 
-  async process(message: DeviceMqttMessage): Promise<void> {
+  async process(
+    message: DeviceMqttMessage,
+  ): Promise<ApprovedMqttObservationResult> {
     const config = this.routes.get(message.topic);
-    if (!config) return;
+    if (!config) {
+      return { outcome: 'rejected', reasonCode: 'route_not_configured' };
+    }
+
+    if (this.enrollment) {
+      const enrollment = await this.enrollment.find({
+        ...config.scope,
+        deviceId: config.binding.deviceId,
+      });
+      if (!enrollment || enrollment.status !== 'enrolled') {
+        return { outcome: 'rejected', reasonCode: 'device_not_enrolled' };
+      }
+    }
 
     const { scope, binding, policy } = config;
 
@@ -179,7 +214,7 @@ export class ApprovedMqttObservationRoute {
     if (!device) {
       // Do not mutate authoritative state or create a device
       // from a message with no approved installation.
-      return;
+      return { outcome: 'rejected', reasonCode: 'device_not_approved' };
     }
 
     // Registry state alone is not proof of approval.
@@ -197,7 +232,10 @@ export class ApprovedMqttObservationRoute {
       installation.device.siteId !== scope.siteId ||
       installation.device.trustStatus !== 'approved'
     ) {
-      return;
+      return {
+        outcome: 'rejected',
+        reasonCode: 'installation_missing_or_mismatched',
+      };
     }
 
     // Reception time is assigned by Energrid.
@@ -219,7 +257,10 @@ export class ApprovedMqttObservationRoute {
     );
 
     if (!result.accepted || !result.state) {
-      return;
+      return {
+        outcome: 'rejected',
+        reasonCode: 'observation_policy_rejected',
+      };
     }
 
     const values = Object.fromEntries(
@@ -236,5 +277,6 @@ export class ApprovedMqttObservationRoute {
       values,
       observedAt: receivedAt,
     });
+    return { outcome: 'admitted' };
   }
 }

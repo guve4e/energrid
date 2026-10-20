@@ -5,6 +5,7 @@ describe('VoiceProtocolController', () => {
 
   beforeEach(() => {
     process.env = { ...original, NODE_ENV: 'production', PORTAL_CONTROL_TOKEN: 'voice-api-token' }
+    delete process.env.OPENAI_STT_STREAM_MODEL
   })
 
   afterAll(() => {
@@ -34,7 +35,7 @@ describe('VoiceProtocolController', () => {
     expect(controller.getConfig()).toMatchObject({
       sttMode: 'buffered',
       streamingSttProvider: 'openai',
-      streamingSttModel: 'gpt-4o-mini-transcribe',
+      streamingSttModel: 'gpt-live-transcribe',
       voiceAudioSampleRateHz: 16_000,
       streamingSttConnectTimeoutMs: 10_000,
     })

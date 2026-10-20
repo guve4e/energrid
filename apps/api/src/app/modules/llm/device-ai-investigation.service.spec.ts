@@ -27,10 +27,11 @@ describe('DeviceAiInvestigationService', () => {
       ],
     },
   ]
+  const scope = { tenantId: 'tenant-a', siteId: 'site-a', networkId: 'gateway-a:lan-a' }
 
   it('rejects unknown devices without calling the LLM', async () => {
     await expect(
-      service.investigate('missing', devices),
+      service.investigate(scope, 'missing', devices),
     ).rejects.toBeInstanceOf(NotFoundException)
 
     expect(generate).not.toHaveBeenCalled()
@@ -50,7 +51,7 @@ describe('DeviceAiInvestigationService', () => {
       }),
     })
 
-    const result = await service.investigate('host-1', devices)
+    const result = await service.investigate(scope, 'host-1', devices)
 
     expect(result.report.findings).toEqual([
       'TCP port 22 is open.',
@@ -87,7 +88,7 @@ describe('DeviceAiInvestigationService', () => {
     })
 
     await expect(
-      service.investigate('host-1', devices),
+      service.investigate(scope, 'host-1', devices),
     ).rejects.toBeInstanceOf(BadGatewayException)
   })
 
@@ -99,7 +100,7 @@ describe('DeviceAiInvestigationService', () => {
     })
 
     await expect(
-      service.investigate('host-1', devices),
+      service.investigate(scope, 'host-1', devices),
     ).rejects.toBeInstanceOf(BadGatewayException)
   })
 })

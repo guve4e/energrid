@@ -15,6 +15,7 @@ type CommissioningDevice = {
   trustStatus: string;
   assistantEnabled?: boolean;
   settingsUrl?: string;
+  adapter?: { protocol?: string };
   commissioning?: { physicalOutcome: 'not_confirmed' | 'confirmed'; confirmedAt: string | null };
   state: { command?: { status: string } };
 };
@@ -35,6 +36,12 @@ const error = ref('');
 const message = ref('');
 const events = ref<CommissioningEvent[]>([]);
 const eventsError = ref('');
+const showWebSettings = computed(() =>
+  props.device.adapter?.protocol?.startsWith('http') === true ||
+  !!props.device.settingsUrl ||
+  !!props.settingsUrlSuggestion,
+);
+
 const confirmed = computed(
   () => props.device.commissioning?.physicalOutcome === 'confirmed',
 );
@@ -173,9 +180,9 @@ function eventDetail(evidence: Record<string, unknown>) {
         Room
         <input v-model="room" maxlength="80" :disabled="busy || device.trustStatus !== 'approved'" required />
       </label>
-      <label>
-        Device settings address
-        <input v-model="settingsUrl" type="url" maxlength="500" :disabled="busy || device.trustStatus !== 'approved'" placeholder="http://192.168.1.20" />
+      <label v-if="showWebSettings">
+        Web settings address (optional)
+        <input v-model="settingsUrl" type="url" maxlength="500" :disabled="busy || device.trustStatus !== 'approved'" placeholder="Enter a verified HTTP(S) settings URL" />
       </label>
       <label class="permission">
         <input v-model="assistantEnabled" type="checkbox" :disabled="busy || device.trustStatus !== 'approved'" />

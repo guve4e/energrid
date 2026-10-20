@@ -107,7 +107,12 @@ describe('DeviceCommissioning', () => {
     const fetch = vi.fn();
     vi.stubGlobal('fetch', fetch);
     const page = mount(DeviceCommissioning, {
-      props: { device: baseDevice, apiBase: '', accessToken: 'unit-token' },
+      props: {
+        device: baseDevice,
+        apiBase: '',
+        accessToken: 'unit-token',
+        settingsUrlSuggestion: 'http://192.168.1.20',
+      },
     });
     await page.find('input[type="url"]').setValue('javascript:alert(1)');
     await page.get('form').trigger('submit');

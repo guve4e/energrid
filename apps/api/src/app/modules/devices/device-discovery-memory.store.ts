@@ -2,7 +2,10 @@ import { Inject, Injectable, OnModuleDestroy, Optional } from '@nestjs/common';
 import { ClassicLevel } from 'classic-level';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { NetworkDiscoveredDevice } from './device-registry.types';
+import type {
+  NetworkDeviceEndpoint,
+  NetworkDiscoveredDevice,
+} from './device-registry.types';
 
 export const DEVICE_DISCOVERY_MEMORY_DIRECTORY = Symbol(
   'DEVICE_DISCOVERY_MEMORY_DIRECTORY',
@@ -24,18 +27,253 @@ export interface DiscoveryMemorySummary {
   notObservedInLatestScan: number;
 }
 
-function identityOf(device: NetworkDiscoveredDevice): string {
+export function normalizeNetworkHostname(value: string): string {
+  return value.trim().replace(/\.$/, '').toLowerCase();
+}
+
+export function networkEndpointIdentity(
+  device: Pick<NetworkDiscoveredDevice, 'networkZoneId' | 'ipAddress'>,
+): string {
+  return `endpoint:${device.networkZoneId}:${device.ipAddress}`;
+}
+
+export function dedupeNetworkEndpoints(
+  devices: NetworkDiscoveredDevice[],
+): NetworkDiscoveredDevice[] {
+  const byEndpoint = new Map<string, NetworkDiscoveredDevice[]>();
+
+  for (const device of devices) {
+    const identity = networkEndpointIdentity(device);
+    const group = byEndpoint.get(identity) || [];
+    group.push(device);
+    byEndpoint.set(identity, group);
+  }
+
+  return [...byEndpoint.values()].map(mergeEndpointEvidence).sort((a, b) =>
+    a.networkZoneId.localeCompare(b.networkZoneId) ||
+    a.ipAddress.localeCompare(b.ipAddress),
+  );
+}
+
+function mergeEndpointEvidence(
+  devices: NetworkDiscoveredDevice[],
+): NetworkDiscoveredDevice {
+  const latestObservedAt = devices.reduce(
+    (latest, device) => device.discoveredAt > latest ? device.discoveredAt : latest,
+    devices[0].discoveredAt,
+  );
+  const currentDevices = devices.filter(device => device.discoveredAt === latestObservedAt);
+  const currentMacAddresses = [...new Set(currentDevices
+    .flatMap(device => [device.macAddress, ...(device.identityConflict?.macAddresses || [])])
+    .map(mac => mac?.trim().toLowerCase())
+    .filter((mac): mac is string => !!mac && mac !== 'ff:ff:ff:ff:ff:ff'))]
+    .sort();
+
+  if (currentMacAddresses.length > 1) {
+    return conflictEndpointEvidence(currentDevices, currentMacAddresses);
+  }
+
+  const currentMac = currentMacAddresses[0];
+  const currentMacDevice = currentDevices.find(
+    device => device.macAddress?.trim().toLowerCase() === currentMac,
+  );
+  const currentHostname = normalizeNetworkHostname(currentMacDevice?.hostname || '');
+  const identityDevices = currentMac
+    ? devices.filter(device =>
+        device.macAddress?.trim().toLowerCase() === currentMac ||
+        (!hasUsefulMac(device.macAddress) && currentHostname &&
+          normalizeNetworkHostname(device.hostname || '') === currentHostname),
+      )
+    : currentDevices;
+  const preferred = [...identityDevices].sort((a, b) =>
+    b.discoveredAt.localeCompare(a.discoveredAt) ||
+    b.confidence - a.confidence ||
+    Number(hasUsefulMac(b.macAddress)) - Number(hasUsefulMac(a.macAddress)) ||
+    (normalizeNetworkHostname(b.hostname || '')
+      .localeCompare(normalizeNetworkHostname(a.hostname || ''))),
+  )[0];
+  const macAddresses = [...new Set(identityDevices
+    .flatMap(device => [
+      device.macAddress,
+      ...(device.identityConflict?.macAddresses || []),
+    ])
+    .map(mac => mac?.trim().toLowerCase())
+    .filter((mac): mac is string => !!mac && mac !== 'ff:ff:ff:ff:ff:ff'))]
+    .sort();
+  const endpoints = new Map<string, NetworkDeviceEndpoint>();
+
+  for (const device of identityDevices) {
+    for (const endpoint of device.endpoints || [{
+      ipAddress: device.ipAddress,
+      networkZoneId: device.networkZoneId,
+      networkZoneName: device.networkZoneName,
+      ...(device.gatewayId ? { gatewayId: device.gatewayId } : {}),
+      ...(device.macAddress ? { macAddress: device.macAddress } : {}),
+    }]) {
+      const identity = `${endpoint.networkZoneId}:${endpoint.ipAddress}:${endpoint.macAddress?.toLowerCase() || ''}`;
+      endpoints.set(identity, endpoint);
+    }
+  }
+
+  const observations = new Map<string, NonNullable<NetworkDiscoveredDevice['observations']>[number]>();
+  for (const device of identityDevices) {
+    for (const observation of device.observations || []) {
+      const identity = `${observation.source}:${observation.attribute}:${String(observation.value)}:${observation.observedAt}`;
+      observations.set(identity, observation);
+    }
+  }
+
+  const components = new Map<string, NonNullable<NetworkDiscoveredDevice['components']>[number]>();
+  for (const device of identityDevices) {
+    for (const component of device.components || []) components.set(component.component, component);
+  }
+
+  const { identityConflict: _oldConflict, ...base } = preferred;
+  return {
+    ...base,
+    ...(macAddresses.length > 1 ? {
+      identityConflict: {
+        reason: 'multiple_macs_for_endpoint' as const,
+        macAddresses,
+      },
+    } : {}),
+    endpoints: [...endpoints.values()].sort((a, b) =>
+      a.ipAddress.localeCompare(b.ipAddress) ||
+      (a.macAddress || '').localeCompare(b.macAddress || ''),
+    ),
+    observations: [...observations.values()].sort((a, b) =>
+      a.observedAt.localeCompare(b.observedAt) ||
+      a.source.localeCompare(b.source) ||
+      a.attribute.localeCompare(b.attribute),
+    ),
+    components: components.size ? [...components.values()].sort((a, b) => a.component.localeCompare(b.component)) : preferred.components,
+  };
+}
+
+function conflictEndpointEvidence(
+  devices: NetworkDiscoveredDevice[],
+  macAddresses: string[],
+): NetworkDiscoveredDevice {
+  const endpoint = devices[0];
+  const discoveredAt = devices.reduce(
+    (latest, device) => device.discoveredAt > latest ? device.discoveredAt : latest,
+    endpoint.discoveredAt,
+  );
+  const endpoints = new Map<string, NetworkDeviceEndpoint>();
+
+  for (const device of devices) {
+    for (const observedEndpoint of device.endpoints || [{
+      ipAddress: device.ipAddress,
+      networkZoneId: device.networkZoneId,
+      networkZoneName: device.networkZoneName,
+      ...(device.gatewayId ? { gatewayId: device.gatewayId } : {}),
+      ...(device.macAddress ? { macAddress: device.macAddress } : {}),
+    }]) {
+      const identity = `${observedEndpoint.networkZoneId}:${observedEndpoint.ipAddress}:${observedEndpoint.macAddress?.toLowerCase() || ''}`;
+      endpoints.set(identity, observedEndpoint);
+    }
+  }
+
+  return {
+    id: networkEndpointIdentity(endpoint),
+    ipAddress: endpoint.ipAddress,
+    networkZoneId: endpoint.networkZoneId,
+    networkZoneName: endpoint.networkZoneName,
+    protocol: 'unknown',
+    confidence: 0,
+    status: 'unknown',
+    discoveredAt,
+    reason: 'Conflicting MAC identities were observed at this endpoint.',
+    identityConflict: { reason: 'multiple_macs_for_endpoint', macAddresses },
+    endpoints: [...endpoints.values()].sort((a, b) =>
+      a.ipAddress.localeCompare(b.ipAddress) ||
+      (a.macAddress || '').localeCompare(b.macAddress || ''),
+    ),
+  };
+}
+
+function mergeNetworkHistory(
+  previous: NetworkDiscoveredDevice,
+  current: NetworkDiscoveredDevice,
+): NetworkDiscoveredDevice {
+  const latest = previous.discoveredAt.localeCompare(current.discoveredAt) > 0
+    ? previous
+    : current;
+  const endpoints = new Map<string, NetworkDeviceEndpoint>();
+
+  for (const device of [previous, current]) {
+    for (const endpoint of device.endpoints || [{
+      ipAddress: device.ipAddress,
+      networkZoneId: device.networkZoneId,
+      networkZoneName: device.networkZoneName,
+      ...(device.gatewayId ? { gatewayId: device.gatewayId } : {}),
+      ...(device.macAddress ? { macAddress: device.macAddress } : {}),
+    }]) {
+      endpoints.set(`${endpoint.networkZoneId}:${endpoint.ipAddress}:${endpoint.macAddress?.toLowerCase() || ''}`, endpoint);
+    }
+  }
+
+  const merged = mergeEndpointEvidence([previous, current]);
+  return {
+    ...latest,
+    endpoints: [...endpoints.values()].sort((a, b) => a.ipAddress.localeCompare(b.ipAddress)),
+    observations: merged.observations,
+    ...(merged.identityConflict ? { identityConflict: merged.identityConflict } : {}),
+  };
+}
+
+function hasUsefulMac(value?: string): boolean {
+  const mac = value?.trim().toLowerCase();
+  return !!mac && mac !== 'ff:ff:ff:ff:ff:ff';
+}
+
+function dedupeKnownRecords(records: KnownNetworkDevice[]): KnownNetworkDevice[] {
+  const groups = new Map<string, KnownNetworkDevice[]>();
+  for (const record of records) {
+    const identity = networkEndpointIdentity(record.device);
+    const group = groups.get(identity) || [];
+    group.push(record);
+    groups.set(identity, group);
+  }
+
+  return [...groups.values()].map(group => {
+    const newest = [...group].sort((a, b) =>
+      b.lastSeenAt.localeCompare(a.lastSeenAt) ||
+      b.device.discoveredAt.localeCompare(a.device.discoveredAt) ||
+      b.device.confidence - a.device.confidence ||
+      a.device.id.localeCompare(b.device.id),
+    )[0];
+    const currentScanMacs = [...new Set(group
+      .filter(record => record.lastScanId === newest.lastScanId)
+      .flatMap(record => [record.device.macAddress, ...(record.device.identityConflict?.macAddresses || [])])
+      .map(mac => mac?.trim().toLowerCase())
+      .filter((mac): mac is string => !!mac && mac !== 'ff:ff:ff:ff:ff:ff'))]
+      .sort();
+    const hasCurrentMacConflict = currentScanMacs.length > 1;
+    const currentScanRecords = group.filter(record => record.lastScanId === newest.lastScanId);
+    const device = hasCurrentMacConflict
+      ? conflictEndpointEvidence(currentScanRecords.map(record => record.device), currentScanMacs)
+      : newest.device;
+    return {
+      ...newest,
+      identity: hasCurrentMacConflict ? networkEndpointIdentity(device) : newest.identity,
+      device,
+    };
+  }).sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt));
+}
+
+export function networkDiscoveryIdentity(device: NetworkDiscoveredDevice): string {
   const mac = device.macAddress?.trim().toLowerCase();
 
   if (mac && mac !== 'ff:ff:ff:ff:ff:ff') {
-    return `mac:${mac}`;
+    return `mac:${device.networkZoneId}:${mac}`;
   }
 
   if (device.vendor === 'Shelly' && device.id.toLowerCase().startsWith('shelly')) {
-    return `shelly:${device.id.toLowerCase()}`;
+    return `shelly:${device.networkZoneId}:${device.id.toLowerCase()}`;
   }
 
-  return `endpoint:${device.networkZoneId}:${device.ipAddress}`;
+  return networkEndpointIdentity(device);
 }
 
 function key(identity: string): string {
@@ -97,15 +335,12 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
     scanId: string,
     devices: NetworkDiscoveredDevice[],
   ): Promise<void> {
-    const operations: Array<{
-      type: 'put';
-      key: string;
-      value: unknown;
-    }> = [];
-
+    const recordsByKey = new Map<string, KnownNetworkDevice>();
     for (const device of devices) {
-      const identity = identityOf(device);
-      const previousValue = await this.getOptional(key(identity));
+      const identity = networkDiscoveryIdentity(device);
+      const databaseKey = key(identity);
+      const pending = recordsByKey.get(databaseKey);
+      const previousValue = pending || await this.getOptional(databaseKey);
       const previous = isKnownDevice(previousValue)
         ? previousValue
         : null;
@@ -116,15 +351,23 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
         firstSeenAt: previous?.firstSeenAt || scanId,
         lastSeenAt: scanId,
         lastScanId: scanId,
-        device: structuredClone(device),
+        device: structuredClone(previous
+          ? mergeNetworkHistory(previous.device, device)
+          : device),
       };
 
-      operations.push({
-        type: 'put',
-        key: key(identity),
-        value: record,
-      });
+      recordsByKey.set(databaseKey, record);
     }
+
+    const operations: Array<{
+      type: 'put';
+      key: string;
+      value: unknown;
+    }> = [...recordsByKey].map(([databaseKey, record]) => ({
+      type: 'put',
+      key: databaseKey,
+      value: record,
+    }));
 
     operations.push({
       type: 'put',
@@ -136,6 +379,10 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
   }
 
   async list(): Promise<KnownNetworkDevice[]> {
+    return dedupeKnownRecords(await this.listIdentityEvidence());
+  }
+
+  async listIdentityEvidence(): Promise<KnownNetworkDevice[]> {
     const records: KnownNetworkDevice[] = [];
 
     for await (const [, value] of this.db.iterator({
@@ -145,9 +392,7 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
       if (isKnownDevice(value)) records.push(value);
     }
 
-    return records.sort((a, b) =>
-      b.lastSeenAt.localeCompare(a.lastSeenAt)
-    );
+    return records.sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt));
   }
 
   async summary(): Promise<DiscoveryMemorySummary> {

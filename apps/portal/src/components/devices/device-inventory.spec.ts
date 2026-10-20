@@ -7,7 +7,7 @@ import {
   type InventoryDevice,
   type InventoryFilters,
 } from './device-inventory';
-import { matchNetworkDevice } from './device-network';
+import { matchNetworkDevice, hasVerifiedEnrolledNetworkIdentity } from './device-network';
 
 const relay: InventoryDevice = {
   id: 'shellyplus1-aabbccddeeff:switch:1',
@@ -74,6 +74,18 @@ describe('inventory filtering', () => {
         status: 'controllable',
       }),
     ).toEqual([]);
+  });
+  it('shows a retired device as a pending discovery candidate and keeps it out of active inventory', () => {
+    const retiredCandidate = {
+      ...pending,
+      id: 'temp-kitchen',
+      metadata: { previouslyEnrolledRetired: true },
+    };
+    expect(filterInventoryDevices([retiredCandidate], {
+      ...filters,
+      approval: 'discovered',
+    })).toEqual([retiredCandidate]);
+    expect(filterInventoryDevices([retiredCandidate], filters)).toEqual([]);
   });
   it('separates explicit examples and simulations from site devices', () => {
     expect(isExampleDevice(example)).toBe(true);
@@ -198,5 +210,62 @@ describe('gateway device matching', () => {
       )?.id,
     ).toBe(network[0].id);
     expect(matchNetworkDevice(relay, [])).toBeNull();
+  });
+});
+
+describe('verified network enrollment identity', () => {
+  const enrolledShelly = {
+    ...relay,
+    metadata: {
+      physicalId: 'shellyplus1-aabbccddeeff',
+    },
+  };
+
+  const networkDevice = {
+    id: 'network-device',
+    ipAddress: '192.168.7.21',
+    macAddress: 'aa:bb:cc:dd:ee:ff',
+  };
+
+  it('matches a complete hardware MAC', () => {
+    expect(
+      hasVerifiedEnrolledNetworkIdentity(
+        networkDevice,
+        [enrolledShelly],
+      ),
+    ).toBe(true);
+  });
+
+  it('does not mistake a shared IP for device identity', () => {
+    expect(
+      hasVerifiedEnrolledNetworkIdentity(
+        {
+          ...networkDevice,
+          macAddress: '11:22:33:44:55:66',
+        },
+        [enrolledShelly],
+      ),
+    ).toBe(false);
+  });
+
+  it('does not claim identity without MAC evidence', () => {
+    expect(
+      hasVerifiedEnrolledNetworkIdentity(
+        {
+          id: 'ESP-3254B7',
+          ipAddress: '192.168.1.133',
+        },
+        [enrolledShelly],
+      ),
+    ).toBe(false);
+  });
+
+  it('does not label an un-enrolled device', () => {
+    expect(
+      hasVerifiedEnrolledNetworkIdentity(
+        networkDevice,
+        [],
+      ),
+    ).toBe(false);
   });
 });

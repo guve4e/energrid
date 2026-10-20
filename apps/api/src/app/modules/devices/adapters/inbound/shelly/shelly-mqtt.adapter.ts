@@ -1,10 +1,10 @@
-import { DeviceRegistryService } from '../../../device-registry.service';
 import type { ElectricalReading } from '@energrid/domain-telemetry';
 import type {
   DeviceMqttAdapterResult,
   DeviceMqttMessage,
   DeviceMqttMessageAdapter,
 } from '../../../mqtt/device-mqtt-message-adapter';
+import type { PhysicalDeviceDiscovery } from '../../../enrollment/physical-device-inventory.repository';
 
 interface ShellyComponentTelemetry {
   physicalId: string;
@@ -29,8 +29,6 @@ interface ShellyComponentTelemetry {
 
 export class ShellyMqttAdapter implements DeviceMqttMessageAdapter {
   readonly id = 'shelly';
-
-  constructor(private readonly registry: DeviceRegistryService) {}
 
   subscriptions(): string[] {
     // Gen2+ defaults put the device ID at the root, not under a shared "shelly" prefix.
@@ -65,47 +63,35 @@ export class ShellyMqttAdapter implements DeviceMqttMessageAdapter {
       return {
         reason: 'shelly telemetry',
         effects: results.flatMap((result) => result.effects),
+        physicalDiscoveries: results.flatMap((result) => result.physicalDiscoveries ?? []),
       };
     }
     const telemetry = parseShellyComponentTelemetry(message.topic, raw);
 
     if (!telemetry) return null;
 
-    const deviceId =
-      this.registry.findApprovedDeviceIdByPhysicalChannel(
-        telemetry.physicalId,
-        telemetry.component,
-        telemetry.channel,
-      ) ||
-      (telemetry.component.startsWith('em1data:')
-        ? this.registry.findApprovedDeviceIdByPhysicalChannel(
-            telemetry.physicalId,
-            telemetry.component.replace('em1data:', 'em1:'),
-            telemetry.channel,
-          )
-        : null);
-
-    if (!deviceId) {
-      this.registry.registerDiscoveredShellyDevice(
-        telemetry.physicalId,
-        telemetry.component.replace('em1data:', 'em1:'),
-        telemetry.channel,
-        shellyCommandTopic(message.topic),
-      );
-
-      return {
-        reason: 'shelly device discovered',
-        effects: [],
-      };
-    }
+    const componentKey = telemetry.component.replace('em1data:', 'em1:');
+    const discovery = discoveredShellyComponent(
+      message.topic,
+      telemetry,
+      componentKey,
+    );
 
     return {
       reason: 'shelly telemetry',
       effects: [
+        { kind: 'discovery', payload: discovery },
         {
           kind: 'telemetry',
           payload: {
-            deviceId,
+            target: {
+              identity: {
+                namespace: 'mqtt:shelly-protocol-id',
+                value: telemetry.physicalId,
+              },
+              componentKey,
+              channel: telemetry.channel,
+            },
             values: telemetry.values,
             ...(telemetry.readings.length
               ? { readings: telemetry.readings }
@@ -117,6 +103,7 @@ export class ShellyMqttAdapter implements DeviceMqttMessageAdapter {
           },
         },
       ],
+      physicalDiscoveries: [physicalDiscovery(message, telemetry)],
     };
   }
 }
@@ -299,12 +286,67 @@ function parseShellyComponentTelemetry(
 
 function shellyPhysicalIdFromTopic(parts: string[]): string | null {
   const eventsIndex = parts.indexOf('events');
-  if (eventsIndex > 0) return parts[eventsIndex - 1];
+  if (eventsIndex > 0 && looksLikeShellyHardwareId(parts[eventsIndex - 1])) return parts[eventsIndex - 1];
 
   const statusIndex = parts.indexOf('status');
-  if (statusIndex > 0) return parts[statusIndex - 1];
+  if (statusIndex > 0 && looksLikeShellyHardwareId(parts[statusIndex - 1])) return parts[statusIndex - 1];
 
   return null;
+}
+
+function looksLikeShellyHardwareId(value: string | undefined): value is string {
+  // A configured topic prefix is not identity evidence. Only accept the
+  // canonical device-ID shape when protocol payload identity is absent.
+  return !!value && /^shelly[a-z0-9]+-[0-9a-f]{12}$/i.test(value);
+}
+
+function physicalDiscovery(
+  message: DeviceMqttMessage,
+  telemetry: ShellyComponentTelemetry,
+): Omit<PhysicalDeviceDiscovery, 'scope'> {
+  const componentKey = telemetry.component.replace('em1data:', 'em1:');
+  const capabilities = [
+    ...(telemetry.values.power !== undefined || telemetry.values.energy !== undefined ? ['power' as const] : []),
+    ...(telemetry.values.on !== undefined ? ['switch' as const] : []),
+  ];
+  return {
+    identity: { namespace: 'mqtt:shelly-protocol-id', value: telemetry.physicalId },
+    evidenceSource: 'mqtt_protocol_message',
+    observedAt: telemetry.observedAt,
+    components: [{ key: componentKey, capabilities }],
+    endpoint: { protocol: 'mqtt', kind: 'telemetry', address: message.topic },
+  };
+}
+
+function discoveredShellyComponent(
+  topic: string,
+  telemetry: ShellyComponentTelemetry,
+  componentKey: string,
+) {
+  const capabilities = [
+    ...(telemetry.values.power !== undefined || telemetry.values.energy !== undefined ? ['power' as const] : []),
+    ...(telemetry.values.on !== undefined ? ['switch' as const] : []),
+  ];
+  return {
+    id: `${telemetry.physicalId}:${componentKey}`,
+    displayName: `${telemetry.physicalId} ${componentKey}`,
+    suggestedName: `${telemetry.physicalId} ${componentKey}`,
+    suggestedRoom: 'Unknown',
+    protocol: 'mqtt' as const,
+    transport: 'mqtt' as const,
+    driver: 'shelly-discovered',
+    target: telemetry.physicalId,
+    capabilities,
+    source: 'mqtt' as const,
+    confidence: 0.8,
+    reason: 'Discovered from Shelly MQTT telemetry',
+    metadata: {
+      physicalId: telemetry.physicalId,
+      component: componentKey,
+      ...(telemetry.channel === null ? {} : { channel: telemetry.channel }),
+      ...(shellyCommandTopic(topic) ? { mqttCommandTopic: shellyCommandTopic(topic) } : {}),
+    },
+  };
 }
 
 function shellyBooleanValue(value: unknown): boolean | null {

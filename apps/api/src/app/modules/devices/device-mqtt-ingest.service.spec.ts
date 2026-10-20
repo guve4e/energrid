@@ -4,6 +4,20 @@ import { DeviceRegistryService } from './device-registry.service'
 import { DeviceObservationService } from './device-observation.service';
 import { OperationalLogService } from './operational-log.service';
 
+function createIngestService(registry: DeviceRegistryService) {
+  return new DeviceMqttIngestService(
+    registry,
+    new OperationalLogService(),
+    new DeviceObservationService(),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { find: async () => ({ status: 'enrolled' }) } as any,
+  );
+}
+
 describe('DeviceMqttIngestService', () => {
   const originalEnv = process.env;
 
@@ -25,14 +39,14 @@ describe('DeviceMqttIngestService', () => {
     process.env = originalEnv;
   });
 
-  it('maps legacy Arduino temperature topics into approved registry devices', () => {
+  it('maps legacy Arduino temperature topics into approved registry devices', async () => {
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
+    const service = createIngestService(registry);
 
-    service['handleLine'](
+    await service['handleLine'](
       'sensors/arduino/temp {"temperature":23.5,"humidity":48.2,"timestamp":"2026-08-03T10:15:00.000Z"}',
     );
-    service['handleLine'](
+    await service['handleLine'](
       'sensors/arduino/temp2 {"temperature":31.5,"humidity":56.1,"timestamp":"2026-08-03T10:16:00.000Z"}',
     );
 
@@ -64,14 +78,14 @@ describe('DeviceMqttIngestService', () => {
     );
   });
 
-  it('keeps a recent MQTT debug trace for handled and ignored messages', () => {
+  it('keeps a recent MQTT debug trace for handled and ignored messages', async () => {
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
+    const service = createIngestService(registry);
 
-    service['handleLine'](
+    await service['handleLine'](
       'energrid/valentin/boyana-home/devices/kitchen_temperature/telemetry {"deviceId":"kitchen_temperature","values":{"temperature":24.1}}',
     );
-    service['handleLine']('energrid/valentin/boyana-home/debug/raw hello');
+    await service['handleLine']('energrid/valentin/boyana-home/debug/raw hello');
 
     const state = service.getDebugState();
 
@@ -96,7 +110,7 @@ describe('DeviceMqttIngestService', () => {
 
   it('subscribes to the legacy framework device branch by default', () => {
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
+    const service = createIngestService(registry);
 
     expect(service.getDebugState().subscriptions).toEqual(
       expect.arrayContaining(['energrid/valentin/boyana-home/#', 'devices/#']),
@@ -104,14 +118,14 @@ describe('DeviceMqttIngestService', () => {
     expect(service.getDebugState().legacyDeviceTopics).toEqual(['devices/#']);
   });
 
-  it('maps legacy framework device status topics into approved read-only devices', () => {
+  it('maps legacy framework device status topics into approved read-only devices', async () => {
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
+    const service = createIngestService(registry);
 
-    service['handleLine'](
+    await service['handleLine'](
       'devices/temp-kitchen/status {"deviceId":"temp-kitchen","name":"ESP8266 Temp Sensor","type":"sensor","firmwareVersion":"1.1.0","location":"garage","temperature":{"value":23.5},"humidity":{"value":48.1},"config":{"readings":{"temperature":{"enabled":true,"unit":"°C"},"humidity":{"enabled":true,"unit":"%"}}}}',
     );
-    service['handleLine'](
+    await service['handleLine'](
       'devices/ac/status {"deviceId":"ac","name":"ac","type":"power-sensor","location":"DIN","power":{"value":3347.2},"current":{"value":1.824},"energy_delta":{"value":0.034636}}',
     );
 
@@ -149,14 +163,14 @@ describe('DeviceMqttIngestService', () => {
     );
   });
 
-  it('uses legacy online topics only as status updates for existing devices', () => {
+  it('uses legacy online topics only as status updates for existing devices', async () => {
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
+    const service = createIngestService(registry);
 
-    service['handleLine'](
+    await service['handleLine'](
       'devices/temp-garage/status {"deviceId":"temp-garage","name":"ESP8266 Temp Sensor","type":"sensor","temperature":31.5}',
     );
-    service['handleLine']('devices/temp-garage/online false');
+    await service['handleLine']('devices/temp-garage/online false');
 
     const devices = registry.getDevices();
     const garage = devices.find((device) => device.id === 'temp-garage');
@@ -169,7 +183,7 @@ describe('DeviceMqttIngestService', () => {
 
   it('emits live MQTT debug messages as they are recorded', async () => {
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
+    const service = createIngestService(registry);
     const nextMessage = firstValueFrom(service.streamDebugMessages());
 
     service['handleLine'](
@@ -186,7 +200,7 @@ describe('DeviceMqttIngestService', () => {
       }),
     );
   });
-  it('maps native Shelly NotifyStatus into approved device telemetry', () => {
+  it('maps native Shelly NotifyStatus into approved device telemetry', async () => {
     process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify([
       {
         deviceId: 'kitchen.light.island.led',
@@ -205,9 +219,9 @@ describe('DeviceMqttIngestService', () => {
     ]);
 
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
+    const service = createIngestService(registry);
 
-    service['handleLine'](
+    await service['handleLine'](
       'shellyplus1-78ee4ccf5cf0/events/rpc ' +
         JSON.stringify({
           src: 'shellyplus1-78ee4ccf5cf0',
@@ -250,7 +264,7 @@ describe('DeviceMqttIngestService', () => {
     );
   });
 
-  it('acknowledges a pending command from native Shelly telemetry', () => {
+  it('acknowledges a pending command from native Shelly telemetry', async () => {
     process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify([
       {
         deviceId: 'kitchen.light.island.led',
@@ -269,7 +283,7 @@ describe('DeviceMqttIngestService', () => {
     ]);
 
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
+    const service = createIngestService(registry);
 
     registry.markDeviceCommandPending('kitchen.light.island.led', {
       action: 'turn_on',
@@ -277,7 +291,7 @@ describe('DeviceMqttIngestService', () => {
       ttlMs: 5000,
     });
 
-    service['handleLine'](
+    await service['handleLine'](
       'shellyplus1-78ee4ccf5cf0/events/rpc ' +
         JSON.stringify({
           src: 'shellyplus1-78ee4ccf5cf0',
@@ -323,7 +337,7 @@ describe('DeviceMqttIngestService', () => {
     ]);
 
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
+    const service = createIngestService(registry);
 
     registry.markDeviceCommandPending('kitchen.light.island.led', {
       action: 'turn_on',
@@ -377,7 +391,7 @@ describe('DeviceMqttIngestService', () => {
     ]);
 
     const registry = new DeviceRegistryService();
-    const service = new DeviceMqttIngestService(registry, new OperationalLogService(), new DeviceObservationService());
+    const service = createIngestService(registry);
 
     registry.markDeviceCommandPending('kitchen.light.island.led', {
       action: 'turn_on',

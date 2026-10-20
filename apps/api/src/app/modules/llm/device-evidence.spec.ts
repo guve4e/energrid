@@ -41,6 +41,28 @@ describe('Device Evidence Engine', () => {
     expect(snapshotId(first)).toBe(snapshotId(second))
   })
 
+  it('binds evidence IDs and timestamps to the server-selected network scope', () => {
+    const timestamp = '2026-10-20T09:00:00.000Z'
+    const first = buildNetworkEvidenceSnapshot({
+      ...device,
+      observedAt: timestamp,
+      scope: { tenantId: 'tenant-a', siteId: 'site-a', networkId: 'upstream' },
+      observations: [{ source: 'tcp', attribute: 'port.80.open', value: true, observedAt: timestamp }],
+    }, timestamp)
+    const second = buildNetworkEvidenceSnapshot({
+      ...device,
+      observedAt: timestamp,
+      scope: { tenantId: 'tenant-a', siteId: 'site-a', networkId: 'guest' },
+      observations: [{ source: 'tcp', attribute: 'port.80.open', value: true, observedAt: timestamp }],
+    }, timestamp)
+
+    expect(first.scope?.networkId).toBe('upstream')
+    expect(first.evidence.find(item => item.attribute === 'port.80.open')).toMatchObject({
+      confidence: 'observed', scope: first.scope, observedAt: timestamp,
+    })
+    expect(first.evidence.map(item => item.id)).not.toEqual(second.evidence.map(item => item.id))
+  })
+
   it('does not include arbitrary metadata or secrets', () => {
     const snapshot = buildNetworkEvidenceSnapshot({
       ...device,

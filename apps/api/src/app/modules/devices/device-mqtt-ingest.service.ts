@@ -1,5 +1,7 @@
+import { MqttEvidenceDiscoveryService } from './mqtt/mqtt-evidence-discovery.service';
 import {
   BadRequestException,
+  Inject,
   Injectable,
   Logger,
   OnModuleDestroy,
@@ -11,16 +13,22 @@ import {
   spawn,
   type ChildProcessWithoutNullStreams,
 } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { Subject } from 'rxjs';
 import { DeviceRegistryService } from './device-registry.service';
 import { OperationalLogService } from './operational-log.service';
 import { DeviceObservationService } from './device-observation.service';
 import { DeviceMqttMessageRouter } from './mqtt/device-mqtt-message-router';
+import type { DeviceMqttObservationAdmission } from './mqtt/device-mqtt-message-router';
 import { ApprovedMqttObservationRuntime } from './mqtt/approved-mqtt-observation.runtime';
 import { MqttEvidenceCaptureService } from './mqtt/mqtt-evidence-capture.service';
 import type { DeviceCapabilityKind } from './device-registry.types';
 import { TelemetryIngestService } from '../telemetry/telemetry-ingest.service';
+import { PHYSICAL_DEVICE_INVENTORY_SERVICE } from './enrollment/device-enrollment.module';
+import { DEVICE_ENROLLMENT_SERVICE } from './enrollment/device-enrollment.module';
+import type { DeviceEnrollmentService } from './enrollment/device-enrollment.service';
+import type { PhysicalDeviceInventoryService } from './enrollment/physical-device-inventory.service';
 import {
   DurableMqttSubscriber,
   durableMqttOptions,
@@ -36,6 +44,7 @@ export interface MqttDebugMessage {
   validJson: boolean;
   handled: boolean;
   reason: string;
+  correlationId?: string;
 }
 
 export interface MqttDebugState {
@@ -78,12 +87,22 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
     private readonly approvedObservations?: ApprovedMqttObservationRuntime,
     @Optional()
     private readonly evidenceCapture?: MqttEvidenceCaptureService,
+    @Optional()
+    private readonly evidenceDiscovery?: MqttEvidenceDiscoveryService,
+    @Optional()
+    @Inject(PHYSICAL_DEVICE_INVENTORY_SERVICE)
+    private readonly physicalInventory?: PhysicalDeviceInventoryService,
+    @Optional()
+    @Inject(DEVICE_ENROLLMENT_SERVICE)
+    private readonly enrollment?: DeviceEnrollmentService,
   ) {
     this.messageRouter = new DeviceMqttMessageRouter(
       registry,
       observation,
       telemetry,
       approvedObservations?.route,
+      physicalInventory,
+      enrollment,
     );
   }
 
@@ -310,7 +329,22 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
     return this.handlePayload(topic, payloadText);
   }
 
-  private handlePayload(topic: string, payloadText: string): Promise<void> {
+  private async handlePayload(topic: string, payloadText: string): Promise<void> {
+    const correlationId = randomUUID();
+    this.operationalLog.recordMqttStage({
+      correlationId,
+      topic,
+      stage: 'received',
+      outcome: 'received',
+    });
+    const boilerRoomEvidenceTopic =
+      topic === 'devices/temp-boiler-room/data';
+    if (boilerRoomEvidenceTopic) {
+      this.logger.log(
+        '[MQTT EVIDENCE DIAG] handle_payload_entered topic=devices/temp-boiler-room/data',
+      );
+    }
+
     let payload: unknown;
     try {
       payload = JSON.parse(payloadText);
@@ -321,7 +355,16 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
         false,
         false,
         'ignored non-json',
+        correlationId,
       );
+      this.operationalLog.recordMqttStage({
+        correlationId,
+        topic,
+        stage: 'parse',
+        outcome: 'failed',
+        reasonCode: 'invalid_json',
+      });
+      this.recordUnparsedSkips(topic, correlationId);
       this.logger.warn(`[DEVICE MQTT INGEST] ignored non-json topic=${topic}`);
       if (!topic.startsWith('$SYS/')) {
         this.operationalLog?.record({
@@ -338,29 +381,174 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
       return Promise.resolve();
     }
 
-    if (this.evidenceCapture?.matches(topic)) {
-      void this.evidenceCapture
-        .capture(topic, payloadText)
-        .catch((error: unknown) => {
-          const reason =
-            error instanceof Error ? error.message : 'unknown error';
+    this.operationalLog.recordMqttStage({
+      correlationId,
+      topic,
+      stage: 'parse',
+      outcome: 'parsed',
+    });
 
-          this.logger.warn(
-            `[MQTT EVIDENCE] capture failed topic=${topic}: ${reason}`,
-          );
-        });
+    if (boilerRoomEvidenceTopic) {
+      this.logger.log(
+        '[MQTT EVIDENCE DIAG] handle_payload_json_valid topic=devices/temp-boiler-room/data',
+      );
     }
 
-    const routed = this.messageRouter.route({
+    const captureMatches = this.evidenceCapture?.matches(topic) ?? false;
+    this.operationalLog.recordMqttStage({
+      correlationId,
+      topic,
+      stage: 'evidence',
+      outcome: captureMatches ? 'matched' : 'skipped',
+      ...(!captureMatches
+        ? { reasonCode: this.evidenceCapture ? 'topic_not_bound' : 'capture_service_unavailable' }
+        : {}),
+    } as import('./operational-log.service').MqttProcessingStageEvent);
+    if (boilerRoomEvidenceTopic) {
+      this.logger.log(
+        `[MQTT EVIDENCE DIAG] capture_match topic=devices/temp-boiler-room/data matched=${captureMatches} serviceAvailable=${Boolean(this.evidenceCapture)}`,
+      );
+    }
+
+    if (captureMatches && this.evidenceCapture) {
+      void this.evidenceCapture.capture(topic, payloadText)
+        .then(async (captureResult) => {
+          if (captureResult.outcome === 'skipped') {
+            this.operationalLog.recordMqttStage({
+              correlationId,
+              topic,
+              stage: 'persistence',
+              outcome: 'skipped',
+              reasonCode: captureResult.reasonCode,
+            });
+            this.recordDiscoverySkipped(topic, correlationId, captureResult.reasonCode);
+            return;
+          }
+          this.operationalLog.recordMqttStage({
+            correlationId,
+            topic,
+            stage: 'persistence',
+            outcome: 'succeeded',
+          });
+          if (boilerRoomEvidenceTopic) {
+            this.logger.log(
+              '[MQTT EVIDENCE DIAG] capture_succeeded topic=devices/temp-boiler-room/data',
+            );
+          }
+          if (!this.evidenceDiscovery) {
+            this.recordDiscoverySkipped(topic, correlationId, 'discovery_service_unavailable');
+            return;
+          }
+          try {
+            const discovery = await this.evidenceDiscovery.refreshForTopic(topic);
+            this.operationalLog.recordMqttStage({
+              correlationId,
+              topic,
+              stage: 'discovery',
+              outcome: discovery.outcome,
+              ...('reasonCode' in discovery ? { reasonCode: discovery.reasonCode } : {}),
+            } as import('./operational-log.service').MqttProcessingStageEvent);
+            this.operationalLog.recordMqttStage({
+              correlationId,
+              topic,
+              stage: 'registry',
+              outcome: discovery.registryUpdated ? 'updated' : 'not_updated',
+              ...(!discovery.registryUpdated
+                ? { reasonCode: 'reasonCode' in discovery ? discovery.reasonCode : 'discovery_not_updated' }
+                : {}),
+            } as import('./operational-log.service').MqttProcessingStageEvent);
+          } catch {
+            this.operationalLog.recordMqttStage({
+              correlationId,
+              topic,
+              stage: 'discovery',
+              outcome: 'failed',
+              reasonCode: 'discovery_refresh_failed',
+            });
+            this.operationalLog.recordMqttStage({
+              correlationId,
+              topic,
+              stage: 'registry',
+              outcome: 'not_updated',
+              reasonCode: 'discovery_refresh_failed',
+            });
+          }
+        })
+        .catch((error: unknown) => {
+          this.operationalLog.recordMqttStage({
+            correlationId,
+            topic,
+            stage: 'persistence',
+            outcome: 'failed',
+            reasonCode: 'evidence_persistence_failed',
+          });
+          this.recordDiscoverySkipped(topic, correlationId, 'evidence_persistence_failed');
+          this.logger.warn('[MQTT EVIDENCE] capture failed; see operational diagnostics.');
+        });
+    } else {
+      const reasonCode = this.evidenceCapture ? 'topic_not_bound' : 'capture_service_unavailable';
+      this.operationalLog.recordMqttStage({
+        correlationId,
+        topic,
+        stage: 'persistence',
+        outcome: 'skipped',
+        reasonCode,
+      });
+      this.recordDiscoverySkipped(topic, correlationId, 'evidence_not_captured');
+    }
+
+    const routed = await this.messageRouter.route({
       topic,
       payload,
       payloadText,
     });
 
     if (routed) {
-      this.recordDebugMessage(topic, payloadText, true, true, routed.reason);
+      this.operationalLog.recordMqttStage({
+        correlationId,
+        topic,
+        stage: 'routing',
+        outcome: 'routed',
+      });
+      this.recordObservationOutcome(
+        topic,
+        correlationId,
+        routed.observationAdmissions ?? routed.observationAdmission,
+      );
+      if (routed.physicalDiscovery) {
+        void routed.physicalDiscovery.then(() => {
+          this.operationalLog.recordMqttStage({
+            correlationId, topic, stage: 'discovery', outcome: 'refreshed',
+          });
+        }).catch(() => {
+          this.operationalLog.recordMqttStage({
+            correlationId, topic, stage: 'discovery', outcome: 'failed',
+            reasonCode: 'physical_identity_persistence_failed',
+          });
+          this.operationalLog.recordMqttStage({
+            correlationId, topic, stage: 'registry', outcome: 'not_updated',
+            reasonCode: 'physical_identity_persistence_failed',
+          });
+        });
+      }
+      this.recordDebugMessage(topic, payloadText, true, true, routed.reason, correlationId);
       return routed.persisted;
     }
+
+    this.operationalLog.recordMqttStage({
+      correlationId,
+      topic,
+      stage: 'routing',
+      outcome: 'skipped',
+      reasonCode: 'no_matching_adapter',
+    });
+    this.operationalLog.recordMqttStage({
+      correlationId,
+      topic,
+      stage: 'observation',
+      outcome: 'skipped',
+      reasonCode: 'no_matching_adapter',
+    });
 
     this.recordDebugMessage(
       topic,
@@ -368,8 +556,97 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
       true,
       false,
       'json topic outside known handlers',
+      correlationId,
     );
     return Promise.resolve();
+  }
+
+  private recordUnparsedSkips(topic: string, correlationId: string): void {
+    for (const [stage, reasonCode] of [
+      ['routing', 'invalid_json'],
+      ['evidence', 'invalid_json'],
+      ['persistence', 'invalid_json'],
+      ['discovery', 'evidence_not_captured'],
+      ['observation', 'invalid_json'],
+      ['registry', 'discovery_not_run'],
+    ] as const) {
+      const outcome = stage === 'registry' ? 'not_updated' : 'skipped';
+      this.operationalLog.recordMqttStage({
+        correlationId,
+        topic,
+        stage,
+        outcome,
+        reasonCode,
+      } as import('./operational-log.service').MqttProcessingStageEvent);
+    }
+  }
+
+  private recordDiscoverySkipped(topic: string, correlationId: string, reasonCode: string): void {
+    this.operationalLog.recordMqttStage({
+      correlationId,
+      topic,
+      stage: 'discovery',
+      outcome: 'skipped',
+      reasonCode,
+    });
+    this.operationalLog.recordMqttStage({
+      correlationId,
+      topic,
+      stage: 'registry',
+      outcome: 'not_updated',
+      reasonCode: 'discovery_not_run',
+    });
+  }
+
+  private recordObservationOutcome(
+    topic: string,
+    correlationId: string,
+    decision:
+      | DeviceMqttObservationAdmission[]
+      | { outcome: string; reasonCode?: string }
+      | Promise<{ outcome: string; reasonCode?: string }>
+      | undefined,
+  ): void {
+    if (!decision) {
+      this.operationalLog.recordMqttStage({
+        correlationId,
+        topic,
+        stage: 'observation',
+        outcome: 'skipped',
+        reasonCode: 'adapter_has_no_observation_effect',
+      });
+      return;
+    }
+    if (Array.isArray(decision)) {
+      for (const result of decision) {
+        this.operationalLog.recordMqttStage({
+          correlationId,
+          topic,
+          ...(result.deviceId ? { deviceId: result.deviceId } : {}),
+          stage: 'observation',
+          outcome: result.outcome,
+          ...('reasonCode' in result && result.reasonCode ? { reasonCode: result.reasonCode } : {}),
+        } as import('./operational-log.service').MqttProcessingStageEvent);
+      }
+      return;
+    }
+    void Promise.resolve(decision).then((result) => {
+      this.operationalLog.recordMqttStage({
+        correlationId,
+        topic,
+        stage: 'observation',
+        outcome: result.outcome,
+        ...('reasonCode' in result && result.reasonCode ? { reasonCode: result.reasonCode } : {}),
+      } as import('./operational-log.service').MqttProcessingStageEvent);
+    }).catch(() => {
+      this.operationalLog.recordMqttStage({
+        correlationId,
+        topic,
+        stage: 'observation',
+        outcome: 'rejected',
+        reasonCode: 'observation_processing_failed',
+      });
+    });
   }
 
   private ingestLegacyTemperature(
@@ -546,6 +823,7 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
     validJson: boolean,
     handled: boolean,
     reason: string,
+    correlationId?: string,
   ): void {
     const message = {
       topic,
@@ -555,6 +833,7 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
       validJson,
       handled,
       reason,
+      correlationId,
     };
 
     this.recentMessages.push(message);

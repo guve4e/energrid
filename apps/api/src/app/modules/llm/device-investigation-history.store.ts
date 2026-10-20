@@ -11,8 +11,32 @@ export interface StoredDeviceInvestigation {
   schemaVersion: 1;
   id: string;
   deviceId: string;
+  scope?: DeviceInvestigationScope;
+  targetIdentity?: string;
   createdAt: string;
   result: DeviceAiInvestigationResult;
+}
+
+export interface DeviceInvestigationScope {
+  tenantId: string;
+  siteId: string;
+  networkId: string;
+}
+
+export interface StoredInvestigationAction {
+  scope: DeviceInvestigationScope;
+  investigationId: string;
+  proposalId: string;
+  status: 'running' | 'completed' | 'rejected' | 'failed';
+  reasonCode: string;
+  observedAt: string;
+  result?: {
+    ipAddress?: string;
+    statusCode?: number;
+    server?: string;
+    contentType?: string;
+    observedAt?: string;
+  };
 }
 
 export interface ProfileInvestigationScope {
@@ -69,12 +93,28 @@ function deviceKey(deviceId: string, createdAt: string, id: string): string {
   return `device:${encodeURIComponent(deviceId)}:${createdAt}:${id}`;
 }
 
+function scopedDevicePrefix(scope: DeviceInvestigationScope, deviceId: string): string {
+  return [
+    'scoped-device',
+    encodeURIComponent(scope.tenantId),
+    encodeURIComponent(scope.siteId),
+    encodeURIComponent(scope.networkId),
+    encodeURIComponent(deviceId),
+    '',
+  ].join(':');
+}
+
+function actionRecordKey(investigationId: string, proposalId: string): string {
+  return `scoped-action:${encodeURIComponent(investigationId)}:${encodeURIComponent(proposalId)}`;
+}
+
 @Injectable()
 export class DeviceInvestigationHistoryStore implements OnModuleDestroy {
   private readonly db: ClassicLevel<
     string,
-    StoredDeviceInvestigation | StoredDeviceProfileInvestigation | string
+    StoredDeviceInvestigation | StoredDeviceProfileInvestigation | StoredInvestigationAction | string
   >;
+  private readonly actionClaims = new Set<string>();
 
   constructor(
     @Optional()
@@ -117,6 +157,152 @@ export class DeviceInvestigationHistoryStore implements OnModuleDestroy {
     ]);
 
     return record;
+  }
+
+  /** New scoped records cannot be queried through legacy unscoped indexes. */
+  async saveScoped(
+    scope: DeviceInvestigationScope,
+    targetIdentity: string,
+    result: DeviceAiInvestigationResult,
+    recordId?: string,
+  ): Promise<StoredDeviceInvestigation> {
+    validateInvestigationScope(scope, targetIdentity);
+    const id = recordId || randomUUID();
+    const record: StoredDeviceInvestigation = {
+      schemaVersion: 1,
+      id,
+      deviceId: result.deviceId,
+      scope: { ...scope },
+      targetIdentity,
+      createdAt: new Date().toISOString(),
+      result: { ...structuredClone(result), investigationId: id },
+    };
+    const indexKey = scopedDevicePrefix(scope, result.deviceId) +
+      record.createdAt + ':' + record.id;
+
+    await this.db.batch([
+      { type: 'put', key: `scoped-investigation:${record.id}`, value: record },
+      { type: 'put', key: indexKey, value: record.id },
+    ]);
+    return record;
+  }
+
+  async getScoped(
+    scope: DeviceInvestigationScope,
+    id: string,
+  ): Promise<StoredDeviceInvestigation | null> {
+    validateInvestigationScope(scope, 'target');
+    let value: StoredDeviceInvestigation | StoredDeviceProfileInvestigation | StoredInvestigationAction | string | undefined;
+    try {
+      value = await this.db.get(`scoped-investigation:${id}`);
+    } catch (error) {
+      if (isMissingLevelKey(error)) return null;
+      throw error;
+    }
+    if (!value || typeof value === 'string' || 'kind' in value || 'proposalId' in value || !value.scope || !sameScope(value.scope, scope)) {
+      return null;
+    }
+    return value;
+  }
+
+  async listScoped(
+    scope: DeviceInvestigationScope,
+    deviceId: string,
+    limit = 50,
+  ): Promise<StoredDeviceInvestigation[]> {
+    validateInvestigationScope(scope, 'target');
+    const prefix = scopedDevicePrefix(scope, deviceId);
+    const records: StoredDeviceInvestigation[] = [];
+    for await (const [, id] of this.db.iterator({
+      gte: prefix,
+      lt: `${prefix}\uffff`,
+      reverse: true,
+      limit: Math.min(200, Math.max(1, Math.floor(limit))),
+    })) {
+      if (typeof id !== 'string') continue;
+      const record = await this.getScoped(scope, id);
+      if (record) records.push(record);
+    }
+    return records;
+  }
+
+  async beginAction(
+    scope: DeviceInvestigationScope,
+    investigationId: string,
+    proposalId: string,
+  ): Promise<boolean> {
+    if (!(await this.getScoped(scope, investigationId)) || !proposalId.trim()) return false;
+    const key = actionRecordKey(investigationId, proposalId);
+    if (this.actionClaims.has(key)) return false;
+    this.actionClaims.add(key);
+    try {
+      let existing: StoredDeviceInvestigation | StoredDeviceProfileInvestigation | StoredInvestigationAction | string | undefined;
+      try {
+        existing = await this.db.get(key);
+      } catch (error) {
+        if (!isMissingLevelKey(error)) throw error;
+      }
+      if (existing !== undefined) return false;
+      const record: StoredInvestigationAction = {
+        scope: { ...scope }, investigationId, proposalId,
+        status: 'running', reasonCode: 'execution_started', observedAt: new Date().toISOString(),
+      };
+      await this.db.put(key, record);
+      return true;
+    } finally {
+      this.actionClaims.delete(key);
+    }
+  }
+
+  async finishAction(
+    scope: DeviceInvestigationScope,
+    investigationId: string,
+    proposalId: string,
+    result: {
+      outcome: 'completed' | 'rejected' | 'failed';
+      reasonCode: string;
+      ipAddress?: string;
+      statusCode?: number;
+      server?: string;
+      contentType?: string;
+      observedAt?: string;
+    },
+  ): Promise<StoredInvestigationAction | null> {
+    const current = await this.getAction(scope, investigationId, proposalId);
+    if (!current || current.status !== 'running') return null;
+    const record: StoredInvestigationAction = {
+      ...current,
+      status: result.outcome,
+      reasonCode: result.reasonCode,
+      observedAt: new Date().toISOString(),
+      ...(result.outcome === 'completed' ? {
+        result: {
+          ...(result.ipAddress ? { ipAddress: result.ipAddress } : {}),
+          ...(typeof result.statusCode === 'number' ? { statusCode: result.statusCode } : {}),
+          ...(result.server ? { server: result.server } : {}),
+          ...(result.contentType ? { contentType: result.contentType } : {}),
+          ...(result.observedAt ? { observedAt: result.observedAt } : {}),
+        },
+      } : {}),
+    };
+    await this.db.put(actionRecordKey(investigationId, proposalId), record);
+    return record;
+  }
+
+  async getAction(
+    scope: DeviceInvestigationScope,
+    investigationId: string,
+    proposalId: string,
+  ): Promise<StoredInvestigationAction | null> {
+    let value: StoredDeviceInvestigation | StoredDeviceProfileInvestigation | StoredInvestigationAction | string | undefined;
+    try {
+      value = await this.db.get(actionRecordKey(investigationId, proposalId));
+    } catch (error) {
+      if (isMissingLevelKey(error)) return null;
+      throw error;
+    }
+    if (!value || typeof value === 'string' || !('proposalId' in value) || !sameScope(value.scope, scope)) return null;
+    return value;
   }
 
   /**
@@ -178,6 +364,7 @@ export class DeviceInvestigationHistoryStore implements OnModuleDestroy {
     let record:
       | StoredDeviceInvestigation
       | StoredDeviceProfileInvestigation
+      | StoredInvestigationAction
       | string
       | undefined;
 
@@ -245,7 +432,8 @@ export class DeviceInvestigationHistoryStore implements OnModuleDestroy {
       const record = await this.db.get(recordKey(id));
       return record &&
         typeof record !== 'string' &&
-        !('kind' in record)
+        !('kind' in record) &&
+        !('proposalId' in record)
           ? record
           : null;
     } catch (error) {
@@ -282,4 +470,24 @@ export class DeviceInvestigationHistoryStore implements OnModuleDestroy {
 
     return records;
   }
+}
+
+function validateInvestigationScope(
+  scope: DeviceInvestigationScope,
+  targetIdentity: string,
+): void {
+  if (!scope?.tenantId?.trim() || !scope.siteId?.trim() || !scope.networkId?.trim() || !targetIdentity.trim()) {
+    throw new Error('Investigation scope and target identity are required');
+  }
+}
+
+function sameScope(left: DeviceInvestigationScope, right: DeviceInvestigationScope): boolean {
+  return left.tenantId === right.tenantId &&
+    left.siteId === right.siteId &&
+    left.networkId === right.networkId;
+}
+
+function isMissingLevelKey(error: unknown): boolean {
+  return !!error && typeof error === 'object' && 'code' in error &&
+    error.code === 'LEVEL_NOT_FOUND';
 }

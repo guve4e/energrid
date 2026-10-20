@@ -1,11 +1,16 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
+import NetworkDiscoveryCard from './components/discovery/NetworkDiscoveryCard.vue';
+import PendingEnrollmentList from './components/discovery/PendingEnrollmentList.vue';
+import { buildPendingEnrollmentCards } from './components/discovery/pending-enrollment';
+import './discovery.css';
 import ExecutionTimelineModal from './components/execution/ExecutionTimelineModal.vue';
 import WeatherDashboard from './components/weather/WeatherDashboard.vue';
 import EnergyDashboard from './components/energy/EnergyDashboard.vue';
 import DeviceControlSetup from './components/devices/DeviceControlSetup.vue';
 import DeviceSwitchControl from './components/devices/DeviceSwitchControl.vue';
 import DeviceConnectionDiagnostics from './components/devices/DeviceConnectionDiagnostics.vue';
+import DeviceNetworkIdentityPanel from './components/devices/DeviceNetworkIdentityPanel.vue';
 import DeviceCommissioning from './components/devices/DeviceCommissioning.vue';
 import {
   microphoneRequestError,
@@ -15,7 +20,7 @@ import {
 import { closeCompletedTurnSocket } from './voice-turn-socket';
 import { diagnoseVoicePerformance } from './voice-performance-diagnosis';
 import { filterInventoryDevices, inventoryConnectionStatus, isExampleDevice, needsControlSetup } from './components/devices/device-inventory';
-import { matchNetworkDevice } from './components/devices/device-network';
+import { matchNetworkDevice, hasVerifiedEnrolledNetworkIdentity } from './components/devices/device-network';
 import { canSwitchDevice, controlRouteLabel } from './components/devices/device-control';
 import type { DeviceControlState } from '@energrid/domain-devices';
 import { pageFromPath, pathForPage } from './portal-route';
@@ -52,7 +57,10 @@ type PortalExecutionTrace = {
   }>;
 };
 
+import type { PendingIdentityInput } from './components/discovery/pending-enrollment';
+
 type PortalState = {
+  pendingDeviceIdentities?: Record<string, PendingIdentityInput>;
   executionTraces?: PortalExecutionTrace[];
   tenant: { id: string; name: string };
   site: { id: string; name: string; mode: string };
@@ -98,6 +106,7 @@ type PortalState = {
     assistantEnabled?: boolean;
     settingsUrl?: string;
     commissioning?: { physicalOutcome: 'not_confirmed' | 'confirmed'; confirmedAt: string | null };
+    responseProfile?: { learningEnabled?: boolean };
     capabilities: Array<{
       kind: string;
       actions: string[];
@@ -156,6 +165,10 @@ type PortalState = {
     networkZoneId: string;
     networkZoneName: string;
     macAddress?: string;
+    identityConflict?: {
+      reason: 'multiple_macs_for_endpoint';
+      macAddresses: string[];
+    };
     hostname?: string;
     vendor?: string;
     protocol: string;
@@ -863,12 +876,59 @@ const bottleneckMessage = computed(() => {
   return diagnoseVoicePerformance(metrics.value, transcript.value, voiceSetupError.value);
 });
 const deviceCards = computed(() => state.value?.devices || []);
+
+const enrolledDeviceKeys = ref<Set<string>>(new Set());
+const enrollmentStatuses = ref<Map<string, 'enrolled' | 'suspended' | 'retired'>>(new Map());
+const enrollmentError = ref('');
+
+function deviceEnrollmentStatus(device: PortalDevice): 'enrolled' | 'suspended' | 'retired' | 'not_enrolled' | 'unknown' {
+  if (enrollmentError.value) return 'unknown';
+  return enrollmentStatuses.value.get(JSON.stringify([device.tenantId, device.siteId, device.id])) || 'not_enrolled';
+}
+
+const enrolledInventoryDevices = computed(() =>
+  deviceCards.value.filter(device =>
+    device.trustStatus === 'approved' &&
+    enrolledDeviceKeys.value.has(
+      JSON.stringify([device.tenantId, device.siteId, device.id]),
+    ),
+  ),
+);
+
+const retiredInventoryDevices = computed(() =>
+  deviceCards.value.filter(device =>
+    device.trustStatus === 'approved' &&
+    enrollmentStatuses.value.get(JSON.stringify([device.tenantId, device.siteId, device.id])) === 'retired',
+  ),
+);
+
+const inventoryDeviceSummary = computed(() => {
+  const devices = enrolledInventoryDevices.value;
+  const ids = new Set(devices.map(device => device.id));
+
+  return {
+    total: devices.length,
+    approved: devices.length,
+    controllable: devices.filter(canSwitchDevice).length,
+    sensors: devices.filter(device =>
+      device.capabilities.some(capability =>
+        capability.actions.includes('read'),
+      ),
+    ).length,
+    systems: (state.value?.systems || []).filter(system =>
+      system.deviceIds.some(id => ids.has(id)),
+    ).length,
+    learningEnabled: devices.filter(device =>
+      device.responseProfile?.learningEnabled === true,
+    ).length,
+  };
+});
 const approvedDevices = computed(() =>
   deviceCards.value.filter((device) => device.trustStatus === 'approved'),
 );
 const deviceCapabilityOptions = computed(() => {
   const capabilities = new Set<string>();
-  for (const device of deviceCards.value) {
+  for (const device of enrolledInventoryDevices.value) {
     for (const capability of device.capabilities)
       capabilities.add(capability.kind);
   }
@@ -876,14 +936,14 @@ const deviceCapabilityOptions = computed(() => {
 });
 const deviceZoneOptions = computed(() => {
   const zones = new Map<string, string>();
-  for (const device of deviceCards.value)
+  for (const device of enrolledInventoryDevices.value)
     zones.set(device.zoneId, device.zoneName);
   return [...zones.entries()]
     .map(([id, name]) => ({ id, name }))
     .sort((left, right) => left.name.localeCompare(right.name));
 });
-const filteredInventoryDevices = computed(() => filterInventoryDevices(deviceCards.value, {
-  approval: deviceApprovalFilter.value,
+const filteredInventoryDevices = computed(() => filterInventoryDevices(enrolledInventoryDevices.value, {
+  approval: 'approved',
   source: deviceSourceFilter.value,
   search: deviceSearch.value,
   capability: deviceCapabilityFilter.value,
@@ -909,6 +969,10 @@ function clearInventoryFilters() {
 const discoveredDevices = computed(() =>
   deviceCards.value.filter((device) => device.trustStatus === 'discovered'),
 );
+const pendingEnrollmentCards = computed(() => buildPendingEnrollmentCards(
+  discoveredDevices.value,
+  state.value?.pendingDeviceIdentities ?? {},
+));
 const approvedOnboardingDevices = computed(() =>
   approvedDevices.value
     .filter((device) => device.metadata?.approvedFromDiscovery === true)
@@ -985,6 +1049,9 @@ type AiInvestigationProposal = {
 };
 
 type AiInvestigationResult = {
+  investigationId?: string;
+  parentInvestigationId?: string;
+  actionResult?: { action: string; outcome: string; reasonCode: string; statusCode?: number };
   deviceId: string;
   provider: string;
   model: string;
@@ -1103,6 +1170,34 @@ function openAiHistoryRecord(record: AiHistoryRecord): void {
 const aiReports = ref<Record<string, AiInvestigationResult>>({});
 const aiErrors = ref<Record<string, string>>({});
 const aiInvestigating = ref<Record<string, boolean>>({});
+const aiActionRunning = ref<Record<string, boolean>>({});
+const aiActionErrors = ref<Record<string, string>>({});
+const aiActionResults = ref<Record<string, { outcome: string; reasonCode: string; statusCode?: number }>>({});
+type LlmProviderAvailability = {
+  mode: 'disabled' | 'local-only' | 'cloud-enabled';
+  provider: string | null;
+  available: boolean;
+  cloudDataConsentRequired: boolean;
+  reasonCode?: string;
+};
+const llmProviderAvailability = ref<LlmProviderAvailability | null>(null);
+
+async function loadLlmProviderAvailability(): Promise<LlmProviderAvailability> {
+  const response = await fetch(`${apiBase}/portal/investigations/availability`, {
+    headers: { Authorization: `Bearer ${accessToken.value}` },
+  });
+  if (!response.ok) throw new Error(`Provider status unavailable (${response.status})`);
+  const status = await response.json() as LlmProviderAvailability;
+  llmProviderAvailability.value = status;
+  return status;
+}
+
+async function confirmCloudEvidence(status: LlmProviderAvailability): Promise<boolean> {
+  if (!status.cloudDataConsentRequired) return true;
+  return window.confirm(
+    'This investigation will send the selected device’s network identifiers and evidence to the configured cloud AI provider. Continue?',
+  );
+}
 
 const deviceIntelligencePanel = ref<HTMLElement | null>(null);
 
@@ -1120,6 +1215,7 @@ function openDeviceIntelligenceOnly(deviceId: string): void {
 
   void loadAiHistory(deviceId);
   void loadMqttProfileHistory(deviceId);
+  void loadLlmProviderAvailability();
   void revealDeviceIntelligence();
 }
 
@@ -1137,13 +1233,18 @@ async function investigateNetworkDeviceWithAi(device: NetworkDevice) {
   delete aiReports.value[device.id];
 
   try {
+    const provider = await loadLlmProviderAvailability();
+    if (!provider.available) throw new Error(`Investigation provider unavailable (${provider.reasonCode || 'unavailable'}).`);
+    if (!(await confirmCloudEvidence(provider))) return;
     const response = await fetch(
       `${apiBase}/portal/network/${encodeURIComponent(device.id)}/investigate`,
       {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${accessToken.value}`,
+          'Content-Type': 'application/json',
         },
+        body: JSON.stringify({ cloudDataConsent: provider.cloudDataConsentRequired }),
       },
     );
 
@@ -1172,6 +1273,53 @@ async function investigateNetworkDeviceWithAi(device: NetworkDevice) {
       error instanceof Error ? error.message : 'Investigation failed';
   } finally {
     aiInvestigating.value[device.id] = false;
+  }
+}
+
+async function executeInvestigationProposal(proposal: AiInvestigationProposal): Promise<void> {
+  const deviceId = selectedAiDeviceId.value;
+  const report = selectedAiReport.value;
+  if (!deviceId || !report?.investigationId || aiActionRunning.value[proposal.id]) return;
+  const target = selectedAiDevice.value;
+  if (!target) return;
+  if (proposal.action !== 'inspect_http_headers') {
+    aiActionErrors.value[proposal.id] = 'This action has no supported deterministic executor yet.';
+    return;
+  }
+  if (!window.confirm(`Energrid will send one HTTP HEAD request to ${target.ipAddress}:80 using this current LAN observation. Continue?`)) return;
+  aiActionRunning.value[proposal.id] = true;
+  delete aiActionErrors.value[proposal.id];
+  try {
+    const provider = await loadLlmProviderAvailability();
+    if (!provider.available) throw new Error(`Reassessment provider unavailable (${provider.reasonCode || 'unavailable'}).`);
+    if (!(await confirmCloudEvidence(provider))) return;
+    const response = await fetch(
+      `${apiBase}/portal/network/${encodeURIComponent(deviceId)}/investigations/${encodeURIComponent(report.investigationId)}/actions/${encodeURIComponent(proposal.id)}/execute`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken.value}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ approved: true, cloudDataConsent: provider.cloudDataConsentRequired }),
+      },
+    );
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.message || `Diagnostic action failed (${response.status})`);
+    aiActionResults.value[proposal.id] = {
+      outcome: body.outcome,
+      reasonCode: body.reasonCode || body.action?.reasonCode || 'completed',
+      statusCode: body.action?.result?.statusCode,
+    };
+    if (body.reassessment) {
+      aiReports.value[deviceId] = body.reassessment as AiInvestigationResult;
+      selectedAiHistoryId.value = body.reassessment.investigationId || null;
+      void loadAiHistory(deviceId);
+    }
+  } catch (error) {
+    aiActionErrors.value[proposal.id] = error instanceof Error ? error.message : 'Diagnostic action failed';
+  } finally {
+    aiActionRunning.value[proposal.id] = false;
   }
 }
 
@@ -1339,13 +1487,18 @@ async function investigateMqttProfile(deviceId: string): Promise<void> {
   delete mqttProfileErrors.value[deviceId];
 
   try {
+    const provider = await loadLlmProviderAvailability();
+    if (!provider.available) throw new Error(`Investigation provider unavailable (${provider.reasonCode || 'unavailable'}).`);
+    if (!(await confirmCloudEvidence(provider))) return;
     const response = await fetch(
       `${apiBase}/portal/network/${encodeURIComponent(deviceId)}/profile-investigations`,
       {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${accessToken.value}`,
+          'Content-Type': 'application/json',
         },
+        body: JSON.stringify({ cloudDataConsent: provider.cloudDataConsentRequired }),
       },
     );
 
@@ -1415,7 +1568,53 @@ const selectedAiError = computed(() =>
     : null,
 );
 
-const networkDevices = computed(() => state.value?.networkDevices || []);
+// Live scan evidence and remembered discovery history are different.
+// Only live evidence may establish current reachability.
+const liveNetworkDevices = computed(
+  () => state.value?.networkDevices || [],
+);
+
+function networkDiscoveryIdentity(device: NetworkDevice): string {
+  const mac = device.macAddress?.trim().toLowerCase();
+
+  if (mac && mac !== 'ff:ff:ff:ff:ff:ff')
+    return `mac:${mac}`;
+
+  if (
+    device.vendor === 'Shelly' &&
+    device.id.toLowerCase().startsWith('shelly')
+  )
+    return `shelly:${device.id.toLowerCase()}`;
+
+  return `endpoint:${device.networkZoneId}:${device.ipAddress}`;
+}
+
+// Discovery displays remembered devices immediately.
+// Live observations take precedence when the same identity is encountered.
+const networkDevices = computed<NetworkDevice[]>(() => {
+  const live = liveNetworkDevices.value;
+  const remembered = discoveryMemory.value?.devices || [];
+
+  const liveIdentities = new Set(live.map(networkDiscoveryIdentity));
+  const liveEndpoints = new Set(
+    live.map(device => `${device.networkZoneId}:${device.ipAddress}`),
+  );
+
+  const historical = remembered
+    .filter(record =>
+      !liveIdentities.has(record.identity) &&
+      !liveEndpoints.has(
+        `${record.device.networkZoneId}:${record.device.ipAddress}`,
+      ),
+    )
+    .map(record => ({
+      ...record.device,
+      // A historical observation never proves current connectivity.
+      status: 'unknown' as NetworkDevice['status'],
+    }));
+
+  return [...live, ...historical];
+});
 
 const historicalNetworkDevices = computed(() => {
   const memory = discoveryMemory.value;
@@ -1875,6 +2074,16 @@ function logDiscoveryDecision(device: PortalDevice, action: string) {
   appendLog(`[discovery] ${action} requested for ${device.displayName}`);
 }
 
+function applyPendingDecision(candidateId: string, action: 'approve' | 'block') {
+  const device = discoveredDevices.value.find(candidate => candidate.id === candidateId);
+  if (device) void applyDiscoveryDecision(device, action);
+}
+
+function renamePendingCandidate(candidateId: string) {
+  const device = discoveredDevices.value.find(candidate => candidate.id === candidateId);
+  if (device) logDiscoveryDecision(device, 'rename');
+}
+
 async function scanNetwork() {
   if (scanningNetwork.value) return;
   scanningNetwork.value = true;
@@ -1930,7 +2139,8 @@ async function scanNetwork() {
 
 async function refreshDiscovery() {
   await loadState();
-  if (!stateError.value && !networkDevices.value.length) await scanNetwork();
+  await loadDiscoveryMemory();
+  if (!stateError.value && !liveNetworkDevices.value.length && !discoveryMemory.value?.devices.length) void scanNetwork();
 }
 
 async function reviewNetworkDevice(device: NetworkDevice) {
@@ -2473,7 +2683,7 @@ function openApprovedOnboardingTarget(device: PortalDevice) {
 }
 
 function approvedDeviceNetworkMatch(device: PortalDevice) {
-  return matchNetworkDevice(device, networkDevices.value);
+  return matchNetworkDevice(device, liveNetworkDevices.value);
 }
 
 function approvedDeviceSettingsUrl(device: PortalDevice) {
@@ -2512,9 +2722,28 @@ function networkDeviceClass(device: NetworkDevice) {
 }
 
 function networkDeviceBadge(device: NetworkDevice) {
-  if (canProxyDevice(device)) return 'gateway ready';
-  if (isEnergridCapableNetworkDevice(device)) return 'capable';
-  return 'network only';
+  const integration = canProxyDevice(device)
+    ? 'gateway ready'
+    : isEnergridCapableNetworkDevice(device)
+      ? 'capable'
+      : 'network only';
+
+  const enrolledDevices = approvedDevices.value.filter(candidate =>
+    enrolledDeviceKeys.value.has(
+      JSON.stringify([
+        candidate.tenantId,
+        candidate.siteId,
+        candidate.id,
+      ]),
+    ),
+  );
+
+  return hasVerifiedEnrolledNetworkIdentity(
+    device,
+    enrolledDevices,
+  )
+    ? `enrolled · ${integration}`
+    : integration;
 }
 
 function parseMqttPayload(value: string) {
@@ -2608,6 +2837,84 @@ function closeMobileMenu() {
   mobileMenuOpen.value = false;
 }
 
+async function loadEnrollmentMembership() {
+  enrolledDeviceKeys.value = new Set();
+  enrollmentStatuses.value = new Map();
+  enrollmentError.value = '';
+
+  try {
+    const response = await fetch(
+      `${apiBase}/portal/devices/enrollments`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken.value}`,
+        },
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error(`Enrollment API returned ${response.status}`);
+    }
+
+    const payload: unknown = await response.json();
+
+    if (
+      !payload ||
+      typeof payload !== 'object' ||
+      !('enrollments' in payload) ||
+      !Array.isArray(payload.enrollments)
+    ) {
+      throw new Error('Invalid enrollment response');
+    }
+
+    const keys = new Set<string>();
+    const statuses = new Map<string, 'enrolled' | 'suspended' | 'retired'>();
+
+    for (const item of payload.enrollments) {
+      if (
+        !item ||
+        typeof item !== 'object' ||
+        typeof item.tenantId !== 'string' ||
+        typeof item.siteId !== 'string' ||
+        typeof item.deviceId !== 'string' ||
+        !['enrolled', 'suspended', 'retired'].includes(item.status)
+      ) {
+        throw new Error('Invalid enrollment record');
+      }
+
+      if (item.status === 'enrolled') {
+        const key = JSON.stringify([
+          item.tenantId,
+          item.siteId,
+          item.deviceId,
+        ]);
+        keys.add(key);
+        statuses.set(key, 'enrolled');
+      } else {
+        statuses.set(JSON.stringify([item.tenantId, item.siteId, item.deviceId]), item.status);
+      }
+    }
+
+    enrolledDeviceKeys.value = keys;
+    enrollmentStatuses.value = statuses;
+  } catch (error) {
+    enrolledDeviceKeys.value = new Set();
+    enrollmentStatuses.value = new Map();
+    enrollmentError.value =
+      error instanceof Error
+        ? error.message
+        : 'Device enrollment unavailable';
+  }
+}
+
+async function handleDeviceRetired() {
+  await Promise.all([loadEnrollmentMembership(), loadState()]);
+}
+
+async function handleDeviceReenrolled() {
+  await Promise.all([loadEnrollmentMembership(), loadState()]);
+}
+
 async function loadState() {
   loadingState.value = true;
   stateError.value = '';
@@ -2622,6 +2929,7 @@ async function loadState() {
     }
     if (!response.ok) throw new Error('State unavailable');
     state.value = (await response.json()) as PortalState;
+    await loadEnrollmentMembership();
     if (activePage.value === 'discovery') {
       await loadDiscoveryMemory();
     }
@@ -3780,27 +4088,27 @@ onBeforeUnmount(() => {
           <div class="summary-strip">
             <div>
               <span>Total</span>
-              <strong>{{ deviceSummary.total }}</strong>
+              <strong>{{ inventoryDeviceSummary.total }}</strong>
             </div>
             <div>
               <span>Approved</span>
-              <strong>{{ deviceSummary.approved }}</strong>
+              <strong>{{ inventoryDeviceSummary.approved }}</strong>
             </div>
             <div>
               <span>Controllable</span>
-              <strong>{{ deviceSummary.controllable }}</strong>
+              <strong>{{ inventoryDeviceSummary.controllable }}</strong>
             </div>
             <div>
               <span>Sensors</span>
-              <strong>{{ deviceSummary.sensors }}</strong>
+              <strong>{{ inventoryDeviceSummary.sensors }}</strong>
             </div>
             <div>
               <span>Systems</span>
-              <strong>{{ deviceSummary.systems }}</strong>
+              <strong>{{ inventoryDeviceSummary.systems }}</strong>
             </div>
             <div>
               <span>Learning</span>
-              <strong>{{ deviceSummary.learningEnabled }}</strong>
+              <strong>{{ inventoryDeviceSummary.learningEnabled }}</strong>
             </div>
           </div>
 
@@ -3812,10 +4120,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <div class="inventory-views" role="group" aria-label="Device approval">
-            <button type="button" :aria-pressed="deviceApprovalFilter === 'approved'" @click="deviceApprovalFilter = 'approved'">Approved {{ approvedDevices.length }}</button>
-            <button type="button" :aria-pressed="deviceApprovalFilter === 'discovered'" @click="deviceApprovalFilter = 'discovered'">Pending {{ discoveredDevices.length }}</button>
-          </div>
+
 
           <div class="device-inventory-toolbar">
             <label class="search-field inventory-search">
@@ -3872,11 +4177,26 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          <div v-if="retiredInventoryDevices.length" class="retired-device-list">
+            <h4>Retired devices</h4>
+            <button v-for="device in retiredInventoryDevices" :key="device.id" type="button" class="ghost" @click="selectDevice(device)">
+              {{ device.displayName }} · {{ device.id }}
+            </button>
+          </div>
+
           <div
-            v-if="deviceCards.length === 0"
+            v-if="enrollmentError"
+            class="discovery-empty compact"
+            role="alert"
+          >
+            <strong>Device inventory unavailable</strong>
+            <span>{{ enrollmentError }}</span>
+          </div>
+          <div
+            v-else-if="enrolledInventoryDevices.length === 0"
             class="discovery-empty compact"
           >
-            <strong>No approved devices yet</strong>
+            <strong>No enrolled devices yet</strong>
             <span
               >Approve devices from Discovery or publish them through the site
               bus.</span
@@ -3990,6 +4310,83 @@ onBeforeUnmount(() => {
               </button>
             </div>
 
+
+            <section
+              class="device-observation-overview"
+              aria-label="Device measurements"
+            >
+              <div class="device-observation-heading">
+                <div>
+                  <span class="device-observation-eyebrow">
+                    Device overview
+                  </span>
+                  <h4>Measurements</h4>
+                </div>
+                <span class="device-observation-protocol">
+                  {{ selectedDevice.adapter.protocol.toUpperCase() }}
+                  · {{ canToggleDevice(selectedDevice) ? 'Controls available' : 'Read only' }}
+                </span>
+              </div>
+
+              <div
+                v-if="
+                  typeof selectedDevice.state.values.temperature === 'number' ||
+                  typeof selectedDevice.state.values.humidity === 'number'
+                "
+                class="device-observation-grid"
+              >
+                <div
+                  v-if="typeof selectedDevice.state.values.temperature === 'number'"
+                  class="device-observation-metric"
+                >
+                  <span>Temperature</span>
+                  <strong>
+                    {{ formatNumber(selectedDevice.state.values.temperature) }}°C
+                  </strong>
+                </div>
+
+                <div
+                  v-if="typeof selectedDevice.state.values.humidity === 'number'"
+                  class="device-observation-metric"
+                >
+                  <span>Humidity</span>
+                  <strong>
+                    {{ formatNumber(selectedDevice.state.values.humidity) }}%
+                  </strong>
+                </div>
+              </div>
+
+              <p v-else class="device-observation-empty">
+                No temperature or humidity readings available yet.
+              </p>
+
+              <div class="device-observation-footer">
+                <span>
+                  {{
+                    selectedDevice.state.observedAt
+                      ? `Last observation: ${new Date(selectedDevice.state.observedAt).toLocaleString()}`
+                      : 'No observation timestamp'
+                  }}
+                </span>
+
+                <span>
+                  {{
+                    selectedDevice.state.source === 'approved-observation'
+                      ? 'Approved observation source'
+                      : `Reported source: ${selectedDevice.state.source || 'unknown'}`
+                  }}
+                </span>
+              </div>
+
+              <p
+                v-if="selectedDevice.adapter.protocol === 'mqtt'"
+                class="device-observation-route"
+              >
+                MQTT topic:
+                <code>{{ selectedDevice.adapter.target }}</code>
+              </p>
+            </section>
+
             <div class="device-setup-actions">
               <div v-if="selectedDevice.trustStatus !== 'approved'" class="device-approval-actions">
                 <strong>Approval required</strong>
@@ -4005,9 +4402,31 @@ onBeforeUnmount(() => {
                 <a v-if="approvedDeviceProxyUrl(selectedDevice)" class="ghost-link" :href="approvedDeviceProxyUrl(selectedDevice)">Via gateway</a>
                 <a v-if="approvedDeviceSettingsUrl(selectedDevice)" class="ghost-link" :href="approvedDeviceSettingsUrl(selectedDevice)" target="_blank" rel="noreferrer">Open settings</a>
               </div>
-              <DeviceConnectionDiagnostics :key="selectedDevice.id" :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" />
-              <DeviceControlSetup :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" :network-devices="networkDevices" :finding-address="scanningNetwork" :address-search-error="stateError" @find-address="scanNetwork" @saved="loadState" />
-              <DeviceCommissioning
+
+              <details class="device-detail-disclosure">
+                <summary>Connection & diagnostics</summary>
+                <div class="device-detail-disclosure-content">
+                  <DeviceNetworkIdentityPanel
+                    :key="selectedDevice.id"
+                    :device-id="selectedDevice.id"
+                    :device-name="selectedDevice.displayName"
+                    :enrollment-status="deviceEnrollmentStatus(selectedDevice)"
+                    :protocol="selectedDevice.adapter.protocol"
+                    :protocol-endpoint="selectedDevice.adapter.target || selectedDevice.adapter.telemetryTopic || selectedDevice.adapter.eventTopicPrefix"
+                    :api-base="apiBase"
+                    :access-token="accessToken"
+                    @retired="handleDeviceRetired"
+                    @reenrolled="handleDeviceReenrolled"
+                  />
+                  <DeviceConnectionDiagnostics v-if="canToggleDevice(selectedDevice)" :key="selectedDevice.id" :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" />
+                  <DeviceControlSetup :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" :network-devices="networkDevices" :finding-address="scanningNetwork" :address-search-error="stateError" @find-address="scanNetwork" @saved="loadState" />
+                </div>
+              </details>
+
+              <details class="device-detail-disclosure">
+                <summary>Installation, settings & history</summary>
+                <div class="device-detail-disclosure-content">
+                  <DeviceCommissioning
                 v-if="selectedDevice.trustStatus === 'approved'"
                 :device="selectedDevice"
                 :api-base="apiBase"
@@ -4015,6 +4434,9 @@ onBeforeUnmount(() => {
                 :settings-url-suggestion="approvedDeviceNetworkMatch(selectedDevice)?.settingsUrl"
                 @saved="loadState"
               />
+                </div>
+              </details>
+
             </div>
 
             <dl class="device-facts detail-facts">
@@ -4220,6 +4642,12 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
+          <nav class="discovery-jump-links" aria-label="Discovery sections">
+            <a href="#discovery-memory">Memory <span>{{ discoveryMemory?.summary.known ?? '—' }}</span></a>
+            <a href="#pending-onboarding">Pending <span>{{ discoveredDevices.length }}</span></a>
+            <a href="#approved-onboarding">Approved <span>{{ approvedOnboardingDevices.length }}</span></a>
+          </nav>
+
           <div v-if="scanningNetwork" class="discovery-scan-progress" role="status" aria-live="polite">
             <div class="discovery-scan-progress-heading">
               <strong>Scanning configured networks…</strong>
@@ -4264,7 +4692,6 @@ onBeforeUnmount(() => {
                   type="search"
                   aria-label="Search network devices"
                   placeholder="Search IP, hostname, MAC, vendor..."
-                  style="min-width: 230px; max-width: 350px"
                 />
                 <button
                   v-if="deviceIntelligenceSearch"
@@ -4351,116 +4778,28 @@ onBeforeUnmount(() => {
                   <strong>{{ zone.name }}</strong>
                   <span>{{ visibleNetworkDevices.filter(d => d.networkZoneId === zone.id).length }} devices · {{ zone.cidr }}</span>
                 </summary>
-                <div class="network-table-wrap">
-              <table class="network-table">
-                <thead>
-                  <tr>
-                    <th>Device</th>
-                    <th>Address</th>
-                    <th>Model</th>
-                    <th>Network</th>
-                    <th>Status</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="device in visibleNetworkDevices.filter(d => d.networkZoneId === zone.id)" :key="device.id">
-                    <td data-label="Device">
-                      <strong>{{
-                        device.vendor || device.hostname || 'Network device'
-                      }}</strong>
-                      <span>{{ device.id }}</span>
-                      <span>{{
-                        device.hostname ||
-                        device.app ||
-                        device.protocol ||
-                        'unknown'
-                      }}</span>
-                    </td>
-                    <td data-label="Address">
-                      <strong>{{ device.ipAddress }}</strong>
-                      <span>{{ device.macAddress || 'no mac yet' }}</span>
-                    </td>
-                    <td data-label="Model">
-                      <strong>{{
-                        device.model ||
-                        device.app ||
-                        device.protocol ||
-                        'unknown'
-                      }}</strong>
-                      <span>{{ device.reason }}</span>
-                    </td>
-                    <td data-label="Network">
-                      <strong>{{ device.networkZoneName }}</strong>
-                      <span>{{ device.networkZoneId }}</span>
-                    </td>
-                    <td data-label="Status">
-                      <span :class="['trust-pill', networkDeviceClass(device)]">
-                        {{ networkDeviceBadge(device) }}
-                      </span>
-                    </td>
-                    <td data-label="Actions">
-                      <div class="network-actions">
-
-                        <button
-                          type="button"
-                          class="secondary"
-                          :disabled="aiInvestigating[device.id]"
-                          @click="investigateNetworkDeviceWithAi(device)"
-                        >
-                          {{ aiInvestigating[device.id] ? 'Investigating…' : 'Investigate with AI' }}
-                        </button>
-                        <button
-                          type="button"
-                          class="secondary"
-                          @click="openDeviceIntelligenceOnly(device.id)"
-                        >Review Intelligence</button>
-
-                        <template v-if="deviceHasSsh(device)">
-                          <a
-                            class="ghost-link"
-                            :href="`ssh://${device.ipAddress}`"
-                            title="Open SSH using your system's registered SSH handler"
-                          >
-                            SSH ↗
-                          </a>
-                          <button
-                            type="button"
-                            class="secondary"
-                            @click="copySshCommand(device)"
-                          >
-                            Copy SSH
-                          </button>
-                        </template>
-
-                        <button v-if="device.components?.length || deviceCards.some(candidate => candidate.metadata?.physicalId === device.id)" type="button" class="primary" @click="reviewNetworkDevice(device)">Review channels</button>
-                        <span v-else>{{ device.vendor === 'Shelly' ? 'Channels unavailable' : 'Adapter needed' }}</span>
-                        <a
-                          v-if="device.settingsUrl"
-                          class="ghost-link"
-                          :href="device.settingsUrl"
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          Open settings
-                        </a>
-                        <a
-                          v-if="canProxyDevice(device)"
-                          class="ghost-link"
-                          :href="deviceProxyUrl(device)"
-                        >
-                          Via gateway
-                        </a>
-                      </div>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+                <div class="network-device-list">
+                  <NetworkDiscoveryCard
+                    v-for="device in visibleNetworkDevices.filter(d => d.networkZoneId === zone.id)"
+                    :key="device.networkZoneId + ':' + device.ipAddress"
+                    :device="device"
+                    :badge="networkDeviceBadge(device)"
+                    :badge-class="networkDeviceClass(device)"
+                    :investigating="aiInvestigating[device.id]"
+                    :has-ssh="deviceHasSsh(device)"
+                    :has-channels="!!device.components?.length || deviceCards.some(candidate => candidate.metadata?.physicalId === device.id)"
+                    :identity-conflict="device.identityConflict"
+                    :proxy-url="canProxyDevice(device) ? deviceProxyUrl(device) : undefined"
+                    @review="openDeviceIntelligenceOnly(device.id)"
+                    @investigate="investigateNetworkDeviceWithAi(device)"
+                    @channels="reviewNetworkDevice(device)"
+                    @copy-ssh="copySshCommand(device)"
+                  />
                 </div>
               </details>
             </div>
 
-            <section class="discovery-memory-section">
+            <section id="discovery-memory" class="discovery-memory-section">
               <div class="section-row">
                 <div>
                   <h3>Discovery Memory</h3>
@@ -4543,6 +4882,9 @@ onBeforeUnmount(() => {
                       <td data-label="Last known address">
                         <strong>{{ record.device.ipAddress }}</strong>
                         <span>{{ record.device.macAddress || 'MAC unknown' }}</span>
+                        <span v-if="record.device.identityConflict" role="status">
+                          Conflicting MAC evidence: {{ record.device.identityConflict.macAddresses.join(', ') }}
+                        </span>
                       </td>
                       <td data-label="Model">
                         {{ record.device.model || record.device.protocol || 'Unknown' }}
@@ -4576,10 +4918,9 @@ onBeforeUnmount(() => {
 
           <section
             v-if="selectedAiDeviceId"
-            class="panel"
+            class="panel discovery-intelligence-panel"
             ref="deviceIntelligencePanel"
             aria-label="Device Intelligence investigation"
-            style="margin-top: 24px; padding: 24px"
           >
             <div class="section-row">
               <div>
@@ -4604,6 +4945,20 @@ onBeforeUnmount(() => {
               </button>
             </div>
 
+            <p
+              v-if="llmProviderAvailability && !llmProviderAvailability.available"
+              class="section-help"
+              role="status"
+            >
+              AI investigation unavailable: {{ llmProviderAvailability.provider || 'provider' }}
+              · {{ llmProviderAvailability.reasonCode }}. Discovery and device operation remain available.
+            </p>
+            <p
+              v-else-if="llmProviderAvailability?.cloudDataConsentRequired"
+              class="section-help"
+            >
+              Cloud AI is enabled. The Portal asks before sending network identifiers or captured evidence.
+            </p>
             <p
               v-if="aiInvestigating[selectedAiDeviceId]"
               role="status"
@@ -4706,8 +5061,9 @@ onBeforeUnmount(() => {
             >
               <div class="section-row">
                 <div>
-                  <h4>Proposed MQTT profiles</h4>
+                  <h4>MQTT profile investigations</h4>
                   <p class="section-help">
+                    MQTT evidence has its own source identity; a LAN match is not assumed.
                     Captured evidence · AI proposal · Deterministic replay
                   </p>
                 </div>
@@ -4749,11 +5105,11 @@ onBeforeUnmount(() => {
                 already exist. No device commands or installations.
               </p>
 
-              <div class="device-ai-card-detail" style="margin: 12px 0">
+              <div class="device-ai-card-detail evidence-source-note" style="margin: 12px 0">
                 <strong>Kitchen ESP8266 — real MQTT evidence</strong>
                 <p class="section-help">
-                  Independent of the selected LAN device.
-                  Topic: <code>devices/temp-kitchen/data</code>
+                  Independent MQTT source; association with the selected LAN
+                  device is unverified. Topic: <code>devices/temp-kitchen/data</code>
                 </p>
                 <button
                   type="button"
@@ -4839,7 +5195,7 @@ onBeforeUnmount(() => {
               >
                 <p
                   v-if="selectedMqttProfile.result.provider === 'offline-preview'"
-                  class="section-help"
+                  class="section-help synthetic-preview-note"
                   role="status"
                 >
                   SYNTHETIC PREVIEW — Not captured, not AI-generated,
@@ -4943,6 +5299,12 @@ onBeforeUnmount(() => {
               class="device-ai-report"
             >
               <p>{{ selectedAiReport.report.summary }}</p>
+              <p v-if="selectedAiReport.actionResult" class="section-help" role="status">
+                {{ selectedAiReport.actionResult.action.replaceAll('_', ' ') }}:
+                {{ selectedAiReport.actionResult.outcome }}
+                · {{ selectedAiReport.actionResult.reasonCode }}
+                <span v-if="selectedAiReport.actionResult.statusCode"> · HTTP {{ selectedAiReport.actionResult.statusCode }}</span>
+              </p>
 
               <div class="device-ai-report-grid">
                 <section>
@@ -5160,8 +5522,24 @@ onBeforeUnmount(() => {
                       </ul>
                     </div>
 
-                    <p class="section-help">
-                      Proposed only · No action authorized or executed
+                    <button
+                      v-if="proposal.action === 'inspect_http_headers' && selectedAiReport.investigationId"
+                      type="button"
+                      class="secondary"
+                      :disabled="!!aiActionRunning[proposal.id]"
+                      @click="executeInvestigationProposal(proposal)"
+                    >
+                      {{ aiActionRunning[proposal.id] ? 'Running diagnostic...' : 'Approve and run HTTP identity check' }}
+                    </button>
+                    <p v-else class="section-help">
+                      Proposed only · No supported executor for this action
+                    </p>
+                    <p v-if="aiActionErrors[proposal.id]" class="error" role="alert">
+                      {{ aiActionErrors[proposal.id] }}
+                    </p>
+                    <p v-if="aiActionResults[proposal.id]" class="section-help" role="status">
+                      Action {{ aiActionResults[proposal.id].outcome }} · {{ aiActionResults[proposal.id].reasonCode }}
+                      <span v-if="aiActionResults[proposal.id].statusCode"> · HTTP {{ aiActionResults[proposal.id].statusCode }}</span>
                     </p>
                   </article>
                 </div>
@@ -5183,7 +5561,7 @@ onBeforeUnmount(() => {
             </div>
           </section>
 
-          <details class="discovery-accordion discovery-onboarding-accordion">
+          <details id="pending-onboarding" class="discovery-accordion discovery-onboarding-accordion">
             <summary>
               <strong>Pending Energrid onboarding</strong>
               <span>{{ discoveredDevices.length }} pending</span>
@@ -5197,85 +5575,17 @@ onBeforeUnmount(() => {
             >
           </div>
 
-          <div v-else class="discovery-list">
-            <article
-              v-for="device in discoveredDevices"
-              :key="device.id"
-              class="discovery-card"
-            >
-              <div>
-                <span class="discovery-source">{{
-                  device.discovery?.source || device.adapter.protocol
-                }}</span>
-                <h3>
-                  {{ device.discovery?.suggestedName || device.displayName }}
-                </h3>
-                <p>{{ device.discovery?.reason || 'Discovered locally.' }}</p>
-              </div>
-              <dl class="device-facts">
-                <div>
-                  <dt>Suggested room</dt>
-                  <dd>
-                    {{ device.discovery?.suggestedRoom || device.zoneName }}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Capabilities</dt>
-                  <dd>
-                    {{
-                      device.capabilities
-                        .map((capability) => capability.kind)
-                        .join(', ')
-                    }}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Confidence</dt>
-                  <dd>
-                    {{ Math.round((device.discovery?.confidence || 0) * 100) }}%
-                  </dd>
-                </div>
-              </dl>
-              <div class="discovery-actions">
-                <button
-                  class="primary"
-                  type="button"
-                  :disabled="!!discoveryDecisionBusy[device.id]"
-                  @click="applyDiscoveryDecision(device, 'approve')"
-                >
-                  {{
-                    discoveryDecisionBusy[device.id] === 'approve'
-                      ? 'Approving...'
-                      : 'Approve'
-                  }}
-                </button>
-                <button
-                  class="ghost"
-                  type="button"
-                  :disabled="!!discoveryDecisionBusy[device.id]"
-                  @click="logDiscoveryDecision(device, 'rename')"
-                >
-                  Rename
-                </button>
-                <button
-                  class="ghost"
-                  type="button"
-                  :disabled="!!discoveryDecisionBusy[device.id]"
-                  @click="applyDiscoveryDecision(device, 'block')"
-                >
-                  {{
-                    discoveryDecisionBusy[device.id] === 'block'
-                      ? 'Blocking...'
-                      : 'Block'
-                  }}
-                </button>
-              </div>
-            </article>
-          </div>
+          <PendingEnrollmentList
+            v-else
+            :cards="pendingEnrollmentCards"
+            :busy-by-candidate-id="discoveryDecisionBusy"
+            @decide="applyPendingDecision"
+            @rename="renamePendingCandidate"
+          />
 
           </details>
 
-          <div class="section-row discovery-section-title">
+          <div id="approved-onboarding" class="section-row discovery-section-title">
             <h3>Approved from onboarding</h3>
             <span>{{ approvedOnboardingDevices.length }} approved</span>
           </div>

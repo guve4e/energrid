@@ -221,6 +221,7 @@ export interface NetworkDeviceEndpoint {
   ipAddress: string;
   networkZoneId: string;
   networkZoneName: string;
+  gatewayId?: string;
   macAddress?: string;
 }
 
@@ -233,11 +234,18 @@ export interface NetworkObservation {
 
 export interface NetworkDiscoveredDevice {
   endpoints?: NetworkDeviceEndpoint[];
+  identityConflict?: {
+    reason: 'multiple_macs_for_endpoint';
+    macAddresses: string[];
+  };
   id: string;
   ipAddress: string;
   networkZoneId: string;
   networkZoneName: string;
+  gatewayId?: string;
   macAddress?: string;
+  /** MAC reported by the protocol endpoint itself; kept distinct from the LAN neighbor-table MAC. */
+  deviceReportedMacAddress?: string;
   hostname?: string;
   vendor?: string;
   protocol: DeviceProtocol | 'unknown';
@@ -245,6 +253,7 @@ export interface NetworkDiscoveredDevice {
   status: DeviceOnlineStatus;
   settingsUrl?: string;
   model?: string;
+  firmwareVersion?: string;
   app?: string;
   generation?: number;
   components?: Array<{ component: string; channel: number }>;

@@ -1,5 +1,6 @@
 import {
   Injectable,
+  ForbiddenException,
   ServiceUnavailableException,
 } from '@nestjs/common'
 import OpenAI from 'openai'
@@ -10,6 +11,13 @@ import type {
 } from './llm-provider'
 
 export type LlmMode = 'disabled' | 'local-only' | 'cloud-enabled'
+export interface LlmAvailability {
+  mode: LlmMode
+  provider: string | null
+  available: boolean
+  cloudDataConsentRequired: boolean
+  reasonCode?: 'inference_disabled' | 'provider_unavailable'
+}
 
 @Injectable()
 export class LlmGatewayService {
@@ -19,7 +27,10 @@ export class LlmGatewayService {
     this.providers.set(provider.id, provider)
   }
 
-  async generate(request: LlmRequest): Promise<LlmResponse> {
+  async generate(
+    request: LlmRequest,
+    options: { cloudDataConsent?: boolean } = {},
+  ): Promise<LlmResponse> {
     const mode = this.getMode()
 
     if (mode === 'disabled') {
@@ -49,7 +60,31 @@ export class LlmGatewayService {
       )
     }
 
+    if (mode === 'cloud-enabled' && options.cloudDataConsent !== true) {
+      throw new ForbiddenException('Explicit cloud evidence consent is required')
+    }
+
+    if (provider.isAvailable && !provider.isAvailable()) {
+      throw new ServiceUnavailableException(`LLM provider "${providerId}" is unavailable`)
+    }
+
     return provider.generate(request)
+  }
+
+  availability(): LlmAvailability {
+    const mode = this.getMode()
+    const providerId = mode === 'disabled'
+      ? null
+      : process.env.ENERGRID_LLM_PROVIDER?.trim() || (mode === 'cloud-enabled' ? 'openai' : 'local')
+    const provider = providerId ? this.providers.get(providerId) : undefined
+    const available = mode !== 'disabled' && !!provider && (provider.isAvailable?.() ?? true)
+    return {
+      mode,
+      provider: providerId,
+      available,
+      cloudDataConsentRequired: mode === 'cloud-enabled',
+      ...(!available ? { reasonCode: mode === 'disabled' ? 'inference_disabled' as const : 'provider_unavailable' as const } : {}),
+    }
   }
 
   getMode(): LlmMode {
@@ -72,6 +107,10 @@ export class LlmGatewayService {
 @Injectable()
 export class OpenAiDeviceLlmProvider implements LlmProvider {
   readonly id = 'openai'
+
+  isAvailable(): boolean {
+    return !!process.env.OPENAI_API_KEY?.trim()
+  }
 
   async generate(request: LlmRequest): Promise<LlmResponse> {
     const apiKey = process.env.OPENAI_API_KEY

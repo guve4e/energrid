@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common'
 
 export interface DeviceObservation {
   deviceId: string
-  observedAt: string
+  receivedAt: string
   source: string
   values: Record<string, unknown>
 }
@@ -25,8 +25,8 @@ export class DeviceObservationService {
 
     this.memory.set(observation.deviceId, {
       deviceId: observation.deviceId,
-      firstSeen: existing?.firstSeen || observation.observedAt,
-      lastSeen: observation.observedAt,
+      firstSeen: existing?.firstSeen || observation.receivedAt,
+      lastSeen: observation.receivedAt,
       observations: (existing?.observations || 0) + 1,
       lastValues: observation.values,
       source: observation.source,

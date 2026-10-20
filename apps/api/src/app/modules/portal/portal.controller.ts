@@ -1,9 +1,13 @@
 import {
   All,
   BadRequestException,
+  ConflictException,
   Body,
   Controller,
   Get,
+  Inject,
+  Optional,
+  ServiceUnavailableException,
   Header,
   Param,
   Patch,
@@ -17,6 +21,8 @@ import {
 import { ApiExcludeController } from '@nestjs/swagger'
 import { map } from 'rxjs'
 import { DeviceAiInvestigationService } from '../llm/device-ai-investigation.service'
+import type { DeviceInvestigationScope } from '../llm/device-investigation-history.store'
+import { DeviceInvestigationWorkflowService } from '../llm/device-investigation-workflow.service'
 import { MqttEvidenceCaptureService } from '../devices/mqtt/mqtt-evidence-capture.service'
 import { DeviceControlService } from '../devices/device-control.service'
 import { DeviceDiagnosticsService } from '../devices/device-diagnostics.service'
@@ -24,6 +30,15 @@ import { DeviceDiscoveryMemoryStore } from '../devices/device-discovery-memory.s
 import { DeviceLanDiscoveryService } from '../devices/device-lan-discovery.service'
 import { DeviceMqttIngestService } from '../devices/device-mqtt-ingest.service'
 import { DeviceRegistryService } from '../devices/device-registry.service'
+import { DeviceOnboardingService } from './device-onboarding.service'
+import { DeviceEnrollmentService } from '../devices/enrollment/device-enrollment.service'
+import {
+  DEVICE_ENROLLMENT_SERVICE,
+  PHYSICAL_DEVICE_INVENTORY_SERVICE,
+} from '../devices/enrollment/device-enrollment.module'
+import type { PhysicalDeviceInventoryService } from '../devices/enrollment/physical-device-inventory.service'
+import type { PhysicalDeviceInventoryRecord } from '../devices/enrollment/physical-device-inventory.repository'
+import { projectPendingDeviceIdentity } from './pending-device-identity.projection'
 import { shellyLanCandidates } from '../devices/adapters/inbound/shelly/shelly-lan-candidates'
 import {
   type DeviceProxyRequest,
@@ -44,8 +59,17 @@ export class PortalController {
     private readonly deviceRegistry: DeviceRegistryService,
     private readonly diagnostics: DeviceDiagnosticsService,
     private readonly deviceAi: DeviceAiInvestigationService,
+    private readonly investigationWorkflow: DeviceInvestigationWorkflowService,
     private readonly mqttEvidence: MqttEvidenceCaptureService,
     private readonly discoveryMemory: DeviceDiscoveryMemoryStore,
+    @Optional()
+    @Inject(DEVICE_ENROLLMENT_SERVICE)
+    private readonly enrollment?: DeviceEnrollmentService,
+    @Optional()
+    private readonly onboarding?: DeviceOnboardingService,
+    @Optional()
+    @Inject(PHYSICAL_DEVICE_INVENTORY_SERVICE)
+    private readonly physicalInventory?: PhysicalDeviceInventoryService,
   ) {}
 
   @Get()
@@ -55,9 +79,123 @@ export class PortalController {
   }
 
   @Get('state')
-  getState(@Req() request: DeviceProxyRequest) {
+  async getState(@Req() request: DeviceProxyRequest) {
     assertPortalControlToken(request)
-    return this.stateService.getState()
+    const state = this.stateService.getState()
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+    const pending = (state.devices ?? []).filter(device =>
+      device.trustStatus === 'discovered' &&
+      device.tenantId === tenant.id &&
+      device.siteId === site.id,
+    )
+    const networkHistory = await this.discoveryMemory.listIdentityEvidence().catch(() => [])
+    let inventory: PhysicalDeviceInventoryRecord[] = []
+    let inventoryAvailable = !!this.physicalInventory
+    if (this.physicalInventory) {
+      try {
+        inventory = await this.physicalInventory.list({ tenantId: tenant.id, siteId: site.id })
+      } catch {
+        inventoryAvailable = false
+      }
+    }
+    const pendingDeviceIdentities = Object.fromEntries(pending.map(device => [
+      device.id,
+      projectPendingDeviceIdentity(device, inventory, this.lanDiscovery.getLastScan(), inventoryAvailable, networkHistory),
+    ]))
+    return { ...state, pendingDeviceIdentities }
+  }
+
+
+  @Get('devices/enrollments')
+  async listDeviceEnrollments(@Req() request: DeviceProxyRequest) {
+    assertPortalControlToken(request)
+
+    if (!this.enrollment) {
+      throw new ServiceUnavailableException(
+        'Device enrollment repository is unavailable',
+      )
+    }
+
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+
+    return {
+      enrollments: await this.enrollment.list({
+        tenantId: tenant.id,
+        siteId: site.id,
+      }),
+    }
+  }
+
+  @Get('devices/:deviceId/network-identity')
+  async getDeviceNetworkIdentity(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+    if (!this.enrollment || !this.physicalInventory) {
+      throw new ServiceUnavailableException('Device identity service is unavailable')
+    }
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+    const scope = { tenantId: tenant.id, siteId: site.id }
+    const enrollment = await this.enrollment.find({ ...scope, deviceId })
+    if (!enrollment) {
+      throw new NotFoundException('Enrolled device was not found')
+    }
+    const physicalDevice = await this.physicalInventory.forLogicalDevice(scope, deviceId)
+    const history = physicalDevice?.networkObservations ?? []
+    const current = history.find(item => item.isCurrent) ?? null
+    const logicalAssignment = physicalDevice?.assignments.find(
+      item => item.deviceId === deviceId,
+    ) ?? null
+    const association = current ? {
+      ...current,
+      networkZoneId: current.networkScope,
+      networkZoneName: current.networkScope,
+      observedAt: current.observedAt,
+      evidenceSource: current.evidenceSource,
+      verificationStatus: current.verificationStatus,
+    } : null
+    return {
+      logicalDeviceId: deviceId,
+      logicalAssignment,
+      association,
+      history,
+      physicalDevice,
+    }
+  }
+
+  @Post('devices/:deviceId/component-assignment')
+  async assignDeviceComponent(
+    @Param('deviceId') deviceId: string,
+    @Body() body: { physicalDeviceId?: unknown; componentKey?: unknown; role?: unknown },
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+    if (!this.enrollment || !this.physicalInventory) {
+      throw new ServiceUnavailableException('Device identity service is unavailable')
+    }
+    if (typeof body?.physicalDeviceId !== 'string' || !body.physicalDeviceId.trim() ||
+      (body.componentKey !== undefined && typeof body.componentKey !== 'string') ||
+      (body.role !== undefined && typeof body.role !== 'string')) {
+      throw new BadRequestException('Physical device assignment is invalid')
+    }
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+    const current = await this.physicalInventory.forLogicalDevice(
+      { tenantId: tenant.id, siteId: site.id }, deviceId,
+    )
+    const assignment = current?.assignments.find(item => item.deviceId === deviceId)
+    if (!assignment || assignment.physicalDeviceId !== body.physicalDeviceId ||
+      (assignment.componentKey ?? '') !== (typeof body.componentKey === 'string' ? body.componentKey : '')) {
+      throw new ConflictException('Physical identity assignments are managed by protocol discovery')
+    }
+    const physicalDevice = await this.physicalInventory.assignComponent({
+      device: { tenantId: tenant.id, siteId: site.id, deviceId },
+      physicalDeviceId: body.physicalDeviceId,
+      ...(typeof body.componentKey === 'string' && body.componentKey.trim() ? { componentKey: body.componentKey } : {}),
+      ...(typeof body.role === 'string' && body.role.trim() ? { role: body.role } : {}),
+      actor: 'portal-control-token',
+    })
+    return { physicalDevice }
   }
 
   @Get('network/scan')
@@ -94,21 +232,48 @@ export class PortalController {
   @Post('network/:deviceId/investigate')
   async investigateNetworkDeviceWithAi(
     @Param('deviceId') deviceId: string,
+    @Body() body: { cloudDataConsent?: unknown },
     @Req() request: DeviceProxyRequest,
   ) {
     assertPortalControlToken(request)
 
-    const state = await this.stateService.getState()
-
+    const device = await this.resolveInvestigationTarget(deviceId)
+    const scope = this.investigationScope(device)
     return this.deviceAi.investigate(
+      scope,
       deviceId,
-      state.networkDevices,
+      [device],
+      body?.cloudDataConsent === true,
     )
+  }
+
+  @Post('network/:deviceId/investigations/:investigationId/actions/:proposalId/execute')
+  async executeInvestigationAction(
+    @Param('deviceId') deviceId: string,
+    @Param('investigationId') investigationId: string,
+    @Param('proposalId') proposalId: string,
+    @Body() body: { approved?: unknown; cloudDataConsent?: unknown },
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+    const target = await this.resolveInvestigationTarget(deviceId)
+    const scope = this.investigationScope(target)
+    return this.investigationWorkflow.executeProposedAction({
+      scope,
+      deviceId,
+      investigationId,
+      proposalId,
+      target,
+      zones: this.lanDiscovery.getZones(),
+      approved: body?.approved === true,
+      cloudDataConsent: body?.cloudDataConsent === true,
+    })
   }
 
   @Post('network/:deviceId/profile-investigations')
   async investigateNetworkMqttProfile(
     @Param('deviceId') deviceId: string,
+    @Body() body: { cloudDataConsent?: unknown },
     @Req() request: DeviceProxyRequest,
   ) {
     assertPortalControlToken(request)
@@ -118,6 +283,7 @@ export class PortalController {
     return this.deviceAi.investigateStoredMqttProfile(
       { tenantId: tenant.id, siteId: site.id },
       deviceId,
+      body?.cloudDataConsent === true,
     )
   }
 
@@ -135,6 +301,12 @@ export class PortalController {
       deviceId,
       50,
     )
+  }
+
+  @Get('investigations/availability')
+  getInvestigationAvailability(@Req() request: DeviceProxyRequest) {
+    assertPortalControlToken(request)
+    return this.deviceAi.getProviderAvailability()
   }
 
   @Get('network/:deviceId/profile-investigations/:investigationId')
@@ -160,7 +332,8 @@ export class PortalController {
     @Req() request: DeviceProxyRequest,
   ) {
     assertPortalControlToken(request)
-    return this.deviceAi.listHistory(deviceId, 50)
+    const device = await this.resolveInvestigationTarget(deviceId)
+    return this.deviceAi.listHistory(this.investigationScope(device), deviceId, 50)
   }
 
   @Get('network/:deviceId/investigations/:investigationId')
@@ -170,7 +343,30 @@ export class PortalController {
     @Req() request: DeviceProxyRequest,
   ) {
     assertPortalControlToken(request)
-    return this.deviceAi.getHistoryRecord(deviceId, investigationId)
+    const device = await this.resolveInvestigationTarget(deviceId)
+    return this.deviceAi.getHistoryRecord(this.investigationScope(device), deviceId, investigationId)
+  }
+
+  private async resolveInvestigationTarget(deviceId: string) {
+    const live = this.lanDiscovery.getLastScan().find(device => device.id === deviceId)
+    if (live) return live
+    const remembered = (await this.discoveryMemory.list())
+      .find(record => record.device.id === deviceId)
+    if (remembered) return remembered.device
+    throw new NotFoundException('Discovered device not found in this site')
+  }
+
+  private investigationScope(device: {
+    id: string
+    networkZoneId: string
+    gatewayId?: string
+  }): DeviceInvestigationScope {
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+    return {
+      tenantId: tenant.id,
+      siteId: site.id,
+      networkId: `${device.gatewayId || 'gateway-unknown'}:${device.networkZoneId}`,
+    }
   }
 
   @Get('mqtt/evidence/:deviceId/status')
@@ -250,6 +446,58 @@ export class PortalController {
     return result
   }
 
+  @Post('devices/:deviceId/retire')
+  async retireDevice(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+    if (!this.enrollment) {
+      throw new ServiceUnavailableException('Device enrollment service is unavailable')
+    }
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+    const identity = { tenantId: tenant.id, siteId: site.id, deviceId }
+    const current = await this.enrollment.find(identity)
+    if (!current) throw new NotFoundException('Enrolled device was not found')
+    if (current.status === 'retired') {
+      throw new ConflictException('Device is already retired')
+    }
+    const enrollment = await this.enrollment.retire(identity, 'portal-control-token')
+    this.deviceRegistry.setEnrollmentStatus(deviceId, 'retired')
+    return { status: 'retired', enrollment }
+  }
+
+  @Post('devices/:deviceId/reenroll')
+  async reenrollDevice(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+    if (!this.enrollment) {
+      throw new ServiceUnavailableException('Device enrollment service is unavailable')
+    }
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+    const identity = { tenantId: tenant.id, siteId: site.id, deviceId }
+    const current = await this.enrollment.find(identity)
+    if (!current) throw new NotFoundException('Enrolled device was not found')
+    if (current.status !== 'retired') {
+      throw new ConflictException('Only a retired device can be explicitly reenrolled')
+    }
+    const device = this.deviceRegistry.getDevices().find(item =>
+      item.id === deviceId && item.tenantId === tenant.id && item.siteId === site.id,
+    )
+    if (!device || device.trustStatus !== 'approved') {
+      throw new ConflictException('Previously approved hardware is required for reenrollment')
+    }
+    const enrollment = await this.enrollment.reenroll(
+      identity,
+      current.displayName,
+      'portal-control-token',
+    )
+    this.deviceRegistry.setEnrollmentStatus(deviceId, 'enrolled')
+    return { status: 'enrolled', enrollment }
+  }
+
   @Post('devices/:deviceId/control')
   async configureDeviceControl(
     @Param('deviceId') deviceId: string,
@@ -288,12 +536,19 @@ export class PortalController {
     @Req() request: DeviceProxyRequest,
   ) {
     assertPortalControlToken(request)
-    const device = this.deviceRegistry.approveDiscoveredDevice(deviceId)
-    if (!device) {
-      throw new NotFoundException(`Discovered device ${deviceId} was not found.`)
+    if (!this.onboarding) {
+      throw new ServiceUnavailableException(
+        'Device onboarding is unavailable',
+      )
     }
-    await this.deviceRegistry.persistInstallation(device, true)
-    return { status: 'approved', device }
+
+    const device = await this.onboarding.approve(deviceId)
+
+    return {
+      status: 'approved',
+      enrollment: 'enrolled',
+      device,
+    }
   }
 
   @Post('devices/:deviceId/commissioning/confirm-physical-outcome')

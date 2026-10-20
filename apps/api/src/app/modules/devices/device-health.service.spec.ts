@@ -8,6 +8,10 @@ describe('DeviceHealthService', () => {
     service = new DeviceHealthService();
   });
 
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
   function memory(secondsAgo: number): DeviceMemory {
     return {
       deviceId: 'test.device',
@@ -40,6 +44,32 @@ describe('DeviceHealthService', () => {
     expect(result.status).toBe('stale');
     expect(result.confidence).toBe(0.95);
     expect(result.reason).toContain('reachability has not been checked');
+  });
+
+  it('does not treat a future-dated observation as fresh', () => {
+    const now = Date.parse('2026-10-20T10:00:00.000Z');
+    jest.spyOn(Date, 'now').mockReturnValue(now);
+    const future = {
+      ...memory(0),
+      lastSeen: new Date(now + 60_000).toISOString(),
+    };
+
+    const result = service.evaluate(future);
+
+    expect(result.status).toBe('stale');
+    expect(result.ageSeconds).toBeNull();
+    expect(result.reason).toContain('future');
+  });
+
+  it('does not establish health from an invalid observation timestamp', () => {
+    const now = Date.parse('2026-10-20T10:00:00.000Z');
+    jest.spyOn(Date, 'now').mockReturnValue(now);
+
+    const result = service.evaluate({ ...memory(0), lastSeen: 'not-a-timestamp' });
+
+    expect(result.status).toBe('stale');
+    expect(result.ageSeconds).toBeNull();
+    expect(result.reason.toLowerCase()).toContain('invalid');
   });
 
   it('never returns invalid confidence values', () => {

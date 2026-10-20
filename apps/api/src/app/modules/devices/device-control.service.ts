@@ -3,6 +3,7 @@ import {
   Injectable,
   ForbiddenException,
   NotFoundException,
+  Inject,
 } from '@nestjs/common';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -20,6 +21,8 @@ import type {
   DeviceCapabilityAction,
   RegisteredDevice,
 } from './device-registry.types';
+import { DEVICE_ENROLLMENT_SERVICE } from './enrollment/device-enrollment.module';
+import type { DeviceEnrollmentService } from './enrollment/device-enrollment.service';
 
 const execFileAsync = promisify(execFile);
 
@@ -37,7 +40,11 @@ export interface DeviceActionResult {
 export class DeviceControlService {
   private readonly http = new ShellyHttpControl();
 
-  constructor(private readonly registry: DeviceRegistryService) {}
+  constructor(
+    private readonly registry: DeviceRegistryService,
+    @Inject(DEVICE_ENROLLMENT_SERVICE)
+    private readonly enrollment: DeviceEnrollmentService,
+  ) {}
 
   configure(deviceId: string, value: unknown): RegisteredDevice {
     try {
@@ -99,7 +106,34 @@ export class DeviceControlService {
         message: problem,
         affectedDeviceIds: [],
       };
+
+    const enrollmentProblem = await this.enrollmentProblem(device, new Set());
+    if (enrollmentProblem) throw new ForbiddenException(enrollmentProblem);
+
     return this.executeBinarySwitch(device, action === 'turn_on', action);
+  }
+
+  private async enrollmentProblem(
+    device: RegisteredDevice,
+    seen: Set<string>,
+  ): Promise<string | null> {
+    if (seen.has(device.id)) return 'Circular device group; no command was sent.';
+    const enrollment = await this.enrollment.find({
+      tenantId: device.tenantId,
+      siteId: device.siteId,
+      deviceId: device.id,
+    });
+    if (!enrollment || enrollment.status !== 'enrolled') {
+      return 'The device is not actively enrolled; no command was sent.';
+    }
+    const next = new Set(seen).add(device.id);
+    for (const id of device.memberDeviceIds ?? []) {
+      const member = this.findDevice(id);
+      if (!member) return 'A group member is missing; no command was sent.';
+      const problem = await this.enrollmentProblem(member, next);
+      if (problem) return problem;
+    }
+    return null;
   }
 
   private controlProblem(

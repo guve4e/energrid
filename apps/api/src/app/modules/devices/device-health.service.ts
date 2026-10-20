@@ -5,7 +5,7 @@ export interface DeviceHealthSnapshot {
   deviceId: string;
   status: 'healthy' | 'degraded' | 'stale';
   confidence: number;
-  ageSeconds: number;
+  ageSeconds: number | null;
   lastSeen: string;
   reason: string;
 }
@@ -16,20 +16,22 @@ export class DeviceHealthService {
     private readonly observation: DeviceObservationService,
   ) {}
 
-  getAll(): DeviceHealthSnapshot[] {
+  getAll(now: number = Date.now()): DeviceHealthSnapshot[] {
     return this.observation
       .getAll()
-      .map((memory) => this.evaluate(memory));
+      .map((memory) => this.evaluate(memory, now));
   }
 
-  evaluate(memory: DeviceMemory): DeviceHealthSnapshot {
-    const now = Date.now();
-    const lastSeen = new Date(memory.lastSeen).getTime();
+  evaluate(memory: DeviceMemory, now: number = Date.now()): DeviceHealthSnapshot {
+    const lastSeen = Date.parse(memory.lastSeen);
+    if (!Number.isFinite(lastSeen)) {
+      return this.unverified(memory, 'Invalid telemetry receive timestamp');
+    }
+    if (lastSeen > now) {
+      return this.unverified(memory, 'Telemetry receive timestamp is in the future');
+    }
 
-    const ageSeconds = Math.max(
-      0,
-      Math.floor((now - lastSeen) / 1000),
-    );
+    const ageSeconds = Math.floor((now - lastSeen) / 1000);
 
     if (ageSeconds <= 30) {
       return {
@@ -60,6 +62,20 @@ export class DeviceHealthService {
       ageSeconds,
       lastSeen: memory.lastSeen,
       reason: 'No recent telemetry; device reachability has not been checked',
+    };
+  }
+
+  private unverified(
+    memory: DeviceMemory,
+    reason: string,
+  ): DeviceHealthSnapshot {
+    return {
+      deviceId: memory.deviceId,
+      status: 'stale',
+      confidence: 0.95,
+      ageSeconds: null,
+      lastSeen: memory.lastSeen,
+      reason: `${reason}; device freshness cannot be established`,
     };
   }
 }

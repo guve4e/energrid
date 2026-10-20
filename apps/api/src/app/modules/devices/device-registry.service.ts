@@ -1,4 +1,4 @@
-import { Injectable, Optional, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Optional, OnModuleInit } from '@nestjs/common';
 import {
   deviceControlState,
   parseDeviceControlBinding,
@@ -20,6 +20,9 @@ import { OperationalLogService } from './operational-log.service';
 import { DeviceExecutionInvestigator } from './investigation/device-execution-investigator';
 import { DeviceInstallationStore } from './device-installation.store';
 import type { DeviceInstallationRecord } from './device-installation.store';
+import type { DeviceEnrollmentStatus } from '@energrid/domain-devices';
+import { DEVICE_ENROLLMENT_SERVICE } from './enrollment/device-enrollment.module';
+import type { DeviceEnrollmentService } from './enrollment/device-enrollment.service';
 
 export interface DiscoveredDeviceConfig {
   id?: string;
@@ -161,10 +164,14 @@ export class DeviceRegistryService implements OnModuleInit {
 
   private readonly latestCommandIdByDeviceId = new Map<string, string>();
   private readonly persistedInstallations = new Map<string, DeviceInstallationRecord>();
+  private readonly enrollmentStatusByDeviceId = new Map<string, DeviceEnrollmentStatus>();
 
   constructor(
     private readonly operationalLog?: OperationalLogService,
     @Optional() private readonly installationStore?: DeviceInstallationStore,
+    @Optional()
+    @Inject(DEVICE_ENROLLMENT_SERVICE)
+    private readonly enrollment?: DeviceEnrollmentService,
   ) {
     const configured: unknown = JSON.parse(
       process.env.HOME_DEVICE_CONTROL_BINDINGS_JSON || '{}',
@@ -199,11 +206,21 @@ export class DeviceRegistryService implements OnModuleInit {
   }
 
   private async loadInstallations(): Promise<void> {
-    if (!this.installationStore) return;
     const siteId = configuredSite().siteId;
+    if (this.enrollment) {
+      const { tenantId } = configuredSite();
+      const enrollments = await this.enrollment.list({ tenantId, siteId });
+      for (const enrollment of enrollments) {
+        this.enrollmentStatusByDeviceId.set(enrollment.deviceId, enrollment.status);
+      }
+    }
+    if (!this.installationStore) return;
     for (const record of await this.installationStore.list(siteId)) {
       const device = record.device;
       this.persistedInstallations.set(device.id, record);
+      if (this.enrollment && this.enrollmentStatusByDeviceId.get(device.id) !== 'enrolled') {
+        continue;
+      }
       this.liveApprovedDeviceConfigs.set(device.id, {
         id: device.id,
         displayName: device.displayName,
@@ -728,7 +745,9 @@ export class DeviceRegistryService implements OnModuleInit {
       driver: discovered.adapter.driver,
       target: discovered.adapter.target,
       bridge: discovered.adapter.bridge,
-      configured: discovered.adapter.protocol !== 'none',
+      configured:
+        discovered.adapter.protocol !== 'none' &&
+        discovered.metadata?.mqttEvidenceCandidate !== true,
       capabilities,
       values: discovered.state.values,
       state: {
@@ -840,23 +859,35 @@ export class DeviceRegistryService implements OnModuleInit {
     });
   }
 
-  registerDiscoveredDevice(config: DiscoveredDeviceConfig): void {
+  registerDiscoveredDevice(config: DiscoveredDeviceConfig): boolean {
     const id = safeId(config.id);
 
     if (!id) {
-      return;
+      return false;
     }
 
-    if (this.liveApprovedDeviceConfigs.has(id)) {
-      return;
+    if (this.liveApprovedDeviceConfigs.has(id) && !this.isEnrollmentRetired(id)) {
+      return false;
     }
+
+    const retired = this.isEnrollmentRetired(id);
+    if (retired) this.liveApprovedDeviceConfigs.delete(id);
+    const metadata = cleanMetadata({
+      ...this.liveDiscoveredDeviceConfigs.get(id)?.metadata,
+      ...config.metadata,
+      ...(retired ? { previouslyEnrolledRetired: true } : {}),
+    });
 
     this.liveDiscoveredDeviceConfigs.set(id, {
       ...config,
-      metadata: cleanMetadata({ ...this.liveDiscoveredDeviceConfigs.get(id)?.metadata, ...config.metadata }),
+      ...(retired ? {
+        reason: 'Previously enrolled device is retired. Explicit approval is required to reenroll.',
+      } : {}),
+      metadata,
       confidence: config.confidence ?? 0.5,
       reason: config.reason || 'Discovered device awaiting approval.',
     });
+    return true;
   }
 
   getKitchenLightShellyDevices(): ShellyRpcDeviceConfig[] {
@@ -1163,9 +1194,59 @@ export class DeviceRegistryService implements OnModuleInit {
         process.env.HOME_APPROVED_DEVICES_JSON ||
           process.env.HOME_DEVICE_REGISTRY_JSON ||
           process.env.DEVICE_REGISTRY_JSON,
-      ),
-      ...parseApprovedDevices([...this.liveApprovedDeviceConfigs.values()]),
+      ).filter(device => !this.isEnrollmentInactive(device.id)),
+      ...parseApprovedDevices([...this.liveApprovedDeviceConfigs.values()])
+        .filter(device => !this.isEnrollmentInactive(device.id)),
     ];
+  }
+
+  setEnrollmentStatus(deviceId: string, status: DeviceEnrollmentStatus): void {
+    const id = safeId(deviceId);
+    if (!id) return;
+    this.enrollmentStatusByDeviceId.set(id, status);
+    if (status !== 'enrolled') {
+      this.liveApprovedDeviceConfigs.delete(id);
+      return;
+    }
+
+    const record = this.persistedInstallations.get(id);
+    if (!record) return;
+    const device = record.device;
+    this.liveApprovedDeviceConfigs.set(id, {
+      id: device.id,
+      displayName: device.displayName,
+      tenantId: device.tenantId,
+      siteId: device.siteId,
+      siteName: device.siteName,
+      gatewayId: device.gatewayId,
+      kind: device.kind,
+      zoneId: device.zoneId,
+      zoneName: device.zoneName,
+      protocol: device.adapter.protocol,
+      transport: device.adapter.transport,
+      driver: device.adapter.driver,
+      target: device.adapter.target,
+      bridge: device.adapter.bridge,
+      configured: device.adapter.configured,
+      capabilities: device.capabilities.map(capability => capability.kind),
+      assistantEnabled: device.assistantEnabled === true,
+      settingsUrl: device.settingsUrl,
+      metadata: cleanMetadata(Object.fromEntries(
+        Object.entries(device.metadata || {}).filter(([key]) => key !== 'previouslyEnrolledRetired'),
+      )),
+      values: {},
+      state: { values: {}, observedAt: null, source: 'device-store', status: 'unknown' },
+    });
+    this.liveDiscoveredDeviceConfigs.delete(id);
+  }
+
+  isEnrollmentRetired(deviceId: string): boolean {
+    return this.enrollmentStatusByDeviceId.get(deviceId) === 'retired';
+  }
+
+  private isEnrollmentInactive(deviceId: string): boolean {
+    const status = this.enrollmentStatusByDeviceId.get(deviceId);
+    return status !== undefined && status !== 'enrolled';
   }
 
   ingestRegistryPayload(payload: unknown): void {
@@ -1375,7 +1456,7 @@ export class DeviceRegistryService implements OnModuleInit {
       },
       observedAt: payload.observedAt,
       source: 'approved-observation',
-      status: live?.status || 'online',
+      status: live?.status || 'unknown',
     });
 
     this.observeCommandTelemetry(

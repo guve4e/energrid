@@ -19,6 +19,8 @@ export interface DeviceEvidence {
   value: string | number | boolean
   observedAt: string
   confidence: EvidenceConfidence
+  scope?: { tenantId: string; siteId: string; networkId: string }
+  verification?: 'scan_observed' | 'device_reported' | 'inferred'
 }
 
 export interface DeviceEvidenceSnapshot {
@@ -26,6 +28,7 @@ export interface DeviceEvidenceSnapshot {
   deviceId: string
   createdAt: string
   evidence: DeviceEvidence[]
+  scope?: { tenantId: string; siteId: string; networkId: string }
 }
 
 export interface DeviceHypothesis {
@@ -67,9 +70,13 @@ export function evidenceId(
   source: EvidenceSource,
   attribute: string,
   value: string | number | boolean,
+  scope?: { tenantId: string; siteId: string; networkId: string },
 ): string {
   const canonical = JSON.stringify([
     deviceId,
+    scope?.tenantId || '',
+    scope?.siteId || '',
+    scope?.networkId || '',
     source,
     attribute,
     value,
@@ -87,6 +94,7 @@ export function snapshotId(
   const canonical = JSON.stringify([
     snapshot.schemaVersion,
     snapshot.deviceId,
+    snapshot.scope || null,
     snapshot.evidence.map((item) => [
       item.id,
       item.observedAt,
