@@ -59,13 +59,15 @@ describe('broker publisher evidence v1', () => {
     expect(payloadSha256('payload')).toBe('239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5');
     const original = process.env.HOME_NETWORK_ZONES_JSON;
     process.env.HOME_NETWORK_ZONES_JSON = JSON.stringify({ zones: [
-      { id: 'house', name: 'HouseNet', cidr: '192.168.1.0/24', seedIps: [], gatewayIps: ['192.168.1.1', '192.168.1.254'] },
+      { id: 'upstream-lan', name: 'HouseNet', cidr: '192.168.1.0/24', seedIps: [], gatewayIps: ['192.168.1.1', '192.168.1.254'] },
+      { id: 'eero-lan', name: 'Eero LAN', cidr: '192.168.7.0/24', seedIps: [], gatewayIps: ['192.168.7.1'] },
     ] });
     try {
       expect(isPlausibleShellyLanCandidate('192.168.1.44')).toBe(true);
       expect(isPlausibleShellyLanCandidate('192.168.1.1')).toBe(false);
       expect(isPlausibleShellyLanCandidate('192.168.1.254')).toBe(false);
-      expect(isPlausibleShellyLanCandidate('192.168.7.44')).toBe(false);
+      expect(isPlausibleShellyLanCandidate('192.168.7.44')).toBe(true);
+      expect(isPlausibleShellyLanCandidate('192.168.7.1')).toBe(false);
       expect(isPlausibleShellyLanCandidate('89.106.117.205')).toBe(false);
       expect(isPlausibleShellyLanCandidate('172.32.0.4')).toBe(false);
     } finally {

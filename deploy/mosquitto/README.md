@@ -26,6 +26,7 @@ Enable Energrid attribution only when all of these protected settings are suppli
 - `HOME_MQTT_ATTRIBUTION_BROKER_ID` (same value as `plugin_opt_broker_id`)
 - `HOME_MQTT_ATTRIBUTION_CLIENT_ID` (stable and unique)
 - `HOME_MQTT_ATTRIBUTION_HMAC_KEY` (same key as the broker file)
+- `HOME_MQTT_ATTRIBUTION_USERNAME` and `HOME_MQTT_ATTRIBUTION_PASSWORD` (dedicated read-only evidence subscriber credentials; do not reuse `HOME_MQTT_USERNAME` or `HOME_MQTT_PASSWORD`)
 
 The subscriber uses a persistent QoS 1 session and reconnects automatically. The event is correlated to an Energrid-parsed Shelly message by exact topic and payload digest, never by assuming the MQTT client ID is the Shelly ID. Events that are ambiguous across publishers are not correlated.
 

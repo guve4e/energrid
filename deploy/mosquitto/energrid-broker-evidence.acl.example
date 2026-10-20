@@ -1,4 +1,6 @@
-# Append to the existing ACL file after configuring the corresponding
-# dedicated broker user. Do not grant wildcard or write access for this user.
-user energrid-attribution
+# Preserve the existing anonymous ordinary MQTT access. Explicitly deny all
+# client access to the evidence topic before granting the dedicated reader.
+topic readwrite #
+topic deny energrid/broker-evidence/v1
+user energrid-broker-attribution-reader
 topic read energrid/broker-evidence/v1

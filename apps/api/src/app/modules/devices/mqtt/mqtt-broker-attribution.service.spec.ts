@@ -1,5 +1,5 @@
 import { payloadSha256, signBrokerPublisherEvidence, type BrokerPublisherEvidenceV1 } from './broker-publisher-evidence'
-import { MqttBrokerAttributionService } from './mqtt-broker-attribution.service'
+import { brokerAttributionOptions, MqttBrokerAttributionService } from './mqtt-broker-attribution.service'
 
 const brokerId = 'house-broker-pi'
 const clientId = 'wall-switch-client-17'
@@ -47,6 +47,8 @@ describe('MqttBrokerAttributionService', () => {
     process.env.HOME_MQTT_ATTRIBUTION_BROKER_ID = brokerId
     process.env.HOME_MQTT_ATTRIBUTION_CLIENT_ID = 'energrid-attribution-test'
     process.env.HOME_MQTT_ATTRIBUTION_HMAC_KEY = key
+    process.env.HOME_MQTT_ATTRIBUTION_USERNAME = 'attribution-reader'
+    process.env.HOME_MQTT_ATTRIBUTION_PASSWORD = 'attribution-password'
     process.env.HOME_MQTT_HOST = 'broker.test'
     process.env.HOME_MQTT_PORT = '1883'
     process.env.HOME_NETWORK_ZONES_JSON = JSON.stringify({
@@ -143,6 +145,35 @@ describe('MqttBrokerAttributionService', () => {
     expect(memory.recordIdentityObservation.mock.calls[0][1]).not.toHaveProperty('macAddress')
     expect(inventory.recordMqttPublisherEvidence.mock.calls[0][1].clientId).not.toBe(protocolId)
     expect(rpc).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses dedicated attribution MQTT credentials without inheriting ordinary MQTT credentials', () => {
+    process.env.HOME_MQTT_USERNAME = 'ordinary-ingest-user'
+    process.env.HOME_MQTT_PASSWORD = 'ordinary-ingest-password'
+    process.env.HOME_MQTT_ATTRIBUTION_USERNAME = 'attribution-reader'
+    process.env.HOME_MQTT_ATTRIBUTION_PASSWORD = 'attribution-password'
+
+    expect(brokerAttributionOptions(process.env)).toMatchObject({
+      username: 'attribution-reader',
+      password: 'attribution-password',
+    })
+    expect(brokerAttributionOptions(process.env)?.username).not.toBe(process.env.HOME_MQTT_USERNAME)
+    expect(brokerAttributionOptions(process.env)?.password).not.toBe(process.env.HOME_MQTT_PASSWORD)
+  })
+
+  it.each([
+    ['username', 'HOME_MQTT_ATTRIBUTION_USERNAME'],
+    ['password', 'HOME_MQTT_ATTRIBUTION_PASSWORD'],
+  ])('fails closed when dedicated attribution %s is missing', (_label, variable) => {
+    process.env.HOME_MQTT_USERNAME = 'ordinary-ingest-user'
+    process.env.HOME_MQTT_PASSWORD = 'ordinary-ingest-password'
+    process.env.HOME_MQTT_ATTRIBUTION_USERNAME = 'attribution-reader'
+    process.env.HOME_MQTT_ATTRIBUTION_PASSWORD = 'attribution-password'
+    delete process.env[variable]
+
+    expect(() => brokerAttributionOptions(process.env)).toThrow(
+      'MQTT broker attribution requires HOME_MQTT_ATTRIBUTION_USERNAME and HOME_MQTT_ATTRIBUTION_PASSWORD',
+    )
   })
 
   it('retains broker evidence but rejects a wrong Shelly RPC identity', async () => {

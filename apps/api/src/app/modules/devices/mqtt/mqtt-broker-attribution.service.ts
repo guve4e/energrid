@@ -57,8 +57,8 @@ export interface BrokerAttributionOptions {
   brokerId: string
   clientId: string
   hmacKey: string
-  username?: string
-  password?: string
+  username: string
+  password: string
 }
 
 export function brokerAttributionOptions(env: NodeJS.ProcessEnv): BrokerAttributionOptions | null {
@@ -67,8 +67,15 @@ export function brokerAttributionOptions(env: NodeJS.ProcessEnv): BrokerAttribut
   const brokerId = env.HOME_MQTT_ATTRIBUTION_BROKER_ID?.trim()
   const clientId = env.HOME_MQTT_ATTRIBUTION_CLIENT_ID?.trim()
   const hmacKey = env.HOME_MQTT_ATTRIBUTION_HMAC_KEY?.trim()
+  const username = env.HOME_MQTT_ATTRIBUTION_USERNAME?.trim()
+  const password = env.HOME_MQTT_ATTRIBUTION_PASSWORD
   const host = env.HOME_MQTT_HOST || env.MQTT_HOST
   const port = Number(env.HOME_MQTT_PORT || env.MQTT_PORT || 1883)
+  if (!username || !password?.trim()) {
+    throw new Error(
+      'MQTT broker attribution requires HOME_MQTT_ATTRIBUTION_USERNAME and HOME_MQTT_ATTRIBUTION_PASSWORD; ordinary MQTT credentials are not used.',
+    )
+  }
   if (
     !host ||
     !brokerId ||
@@ -88,8 +95,8 @@ export function brokerAttributionOptions(env: NodeJS.ProcessEnv): BrokerAttribut
     brokerId,
     clientId,
     hmacKey,
-    username: env.HOME_MQTT_USERNAME,
-    password: env.HOME_MQTT_PASSWORD,
+    username,
+    password,
   }
 }
 

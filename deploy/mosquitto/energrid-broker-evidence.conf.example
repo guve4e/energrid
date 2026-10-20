@@ -1,5 +1,9 @@
 # Add to the existing broker configuration only after a reviewed maintenance window.
+# The production listener remains in the main config. Preserve its existing
+# allow_anonymous setting; the ACL below preserves anonymous ordinary topics.
 # The plugin emits only Mosquitto-attributed client metadata and a payload hash.
+password_file /etc/mosquitto/energrid-broker-evidence.passwd
+acl_file /etc/mosquitto/energrid-broker-evidence.acl
 plugin /usr/lib/mosquitto/energrid-broker-evidence.so
 plugin_opt_broker_id house-broker-pi
 plugin_opt_evidence_topic energrid/broker-evidence/v1
