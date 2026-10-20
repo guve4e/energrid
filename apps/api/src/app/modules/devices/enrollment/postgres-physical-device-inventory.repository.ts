@@ -8,6 +8,9 @@ import type {
   PhysicalDeviceNetworkObservation,
   PhysicalDeviceScope,
   PhysicalLanObservation,
+  MqttPublisherEvidence,
+  MqttPublisherEvidenceRecord,
+  MqttPublisherIdentityVerification,
 } from './physical-device-inventory.repository';
 
 type PhysicalRow = {
@@ -299,6 +302,105 @@ export class PostgresPhysicalDeviceInventoryRepository implements PhysicalDevice
         client.release();
       }
     }
+  }
+
+  async recordMqttPublisherEvidence(scope: PhysicalDeviceScope, evidence: MqttPublisherEvidence): Promise<boolean> {
+    const result = await this.pool.query(
+      `INSERT INTO device_inventory.mqtt_publisher_evidence
+        (tenant_id,site_id,event_id,physical_device_id,shelly_protocol_id,broker_id,
+         client_id,peer_ip,published_topic,payload_sha256,observed_at,connection_state,identity_verification)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::inet,$9,$10,$11,$12,$13)
+       ON CONFLICT (tenant_id,site_id,broker_id,event_id) DO NOTHING
+       RETURNING event_id`,
+      [scope.tenantId, scope.siteId, evidence.eventId, evidence.physicalDeviceId,
+        evidence.shellyProtocolId, evidence.brokerId, evidence.clientId, evidence.peerIp,
+        evidence.publishedTopic, evidence.payloadSha256, evidence.observedAt, evidence.connectionState,
+        evidence.identityVerification ?? (evidence.physicalDeviceId ? 'publisher_observed' : 'unmatched')],
+    );
+    return result.rowCount === 1;
+  }
+
+  async associateMqttPublisherEvidence(
+    scope: PhysicalDeviceScope,
+    brokerId: string,
+    eventId: string,
+    physicalDeviceId: string,
+    shellyProtocolId: string,
+  ): Promise<void> {
+    const result = await this.pool.query(
+      `UPDATE device_inventory.mqtt_publisher_evidence
+       SET physical_device_id=$5, shelly_protocol_id=$6, identity_verification='publisher_observed'
+       WHERE tenant_id=$1 AND site_id=$2 AND broker_id=$3 AND event_id=$4
+         AND identity_verification='unmatched'`,
+      [scope.tenantId, scope.siteId, brokerId, eventId, physicalDeviceId, shellyProtocolId],
+    );
+    if (!result.rowCount) {
+      const existing = await this.pool.query(
+        `SELECT 1 FROM device_inventory.mqtt_publisher_evidence
+         WHERE tenant_id=$1 AND site_id=$2 AND broker_id=$3 AND event_id=$4
+           AND physical_device_id=$5 AND shelly_protocol_id=$6`,
+        [scope.tenantId, scope.siteId, brokerId, eventId, physicalDeviceId, shellyProtocolId],
+      );
+      if (!existing.rowCount) throw new Error('Unmatched MQTT publisher evidence was not found');
+    }
+  }
+
+  async updateMqttPublisherIdentityVerification(
+    scope: PhysicalDeviceScope,
+    brokerId: string,
+    eventId: string,
+    verification: MqttPublisherIdentityVerification,
+    verifiedLanIp?: string,
+  ): Promise<void> {
+    if ((verification === 'rpc_verified') !== Boolean(verifiedLanIp)) {
+      throw new Error('Verified LAN address must match the RPC verification result');
+    }
+    const result = await this.pool.query(
+      `UPDATE device_inventory.mqtt_publisher_evidence
+       SET identity_verification=$5, verified_lan_ip=$6::inet
+       WHERE tenant_id=$1 AND site_id=$2 AND broker_id=$3 AND event_id=$4`,
+      [scope.tenantId, scope.siteId, brokerId, eventId, verification, verifiedLanIp ?? null],
+    );
+    if (!result.rowCount) throw new Error('MQTT publisher evidence was not found');
+  }
+
+  async listRecentMqttPublisherEvidence(scope: PhysicalDeviceScope): Promise<MqttPublisherEvidenceRecord[]> {
+    const result = await this.pool.query<{
+      physical_device_id: string | null;
+      shelly_protocol_id: string | null;
+      broker_id: string;
+      client_id: string;
+      peer_ip: string;
+      observed_at: Date | string;
+      connection_state: 'connected' | 'disconnected';
+      identity_verification: MqttPublisherEvidenceRecord['identityVerification'];
+    }>(
+      `SELECT physical_device_id,shelly_protocol_id,broker_id,client_id,peer_ip::text,
+              observed_at,connection_state,identity_verification
+       FROM device_inventory.mqtt_publisher_evidence
+       WHERE tenant_id=$1 AND site_id=$2 AND physical_device_id IS NOT NULL
+         AND observed_at >= NOW() - INTERVAL '90 days'
+       ORDER BY observed_at DESC LIMIT 5000`,
+      [scope.tenantId, scope.siteId],
+    );
+    return result.rows.map(row => ({
+      physicalDeviceId: row.physical_device_id,
+      shellyProtocolId: row.shelly_protocol_id,
+      brokerId: row.broker_id,
+      clientId: row.client_id,
+      peerIp: row.peer_ip,
+      observedAt: iso(row.observed_at),
+      connectionState: row.connection_state,
+      identityVerification: row.identity_verification,
+    }));
+  }
+
+  async pruneMqttPublisherEvidence(scope: PhysicalDeviceScope, olderThan: string): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM device_inventory.mqtt_publisher_evidence
+       WHERE tenant_id=$1 AND site_id=$2 AND observed_at < $3::timestamptz`,
+      [scope.tenantId, scope.siteId, olderThan],
+    );
   }
 
   async get(scope: PhysicalDeviceScope, physicalDeviceId: string) {

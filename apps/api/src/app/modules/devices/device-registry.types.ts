@@ -268,6 +268,7 @@ export interface NetworkDiscoveryZone {
   cidr?: string;
   interfaceName?: string;
   seedIps: string[];
+  gatewayIps?: string[];
   role?: 'primary' | 'iot' | 'camera' | 'guest' | 'service';
 }
 

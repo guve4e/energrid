@@ -378,6 +378,28 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
     await this.db.batch(operations);
   }
 
+  /** Persist one independently verified endpoint without claiming a complete network scan. */
+  async recordIdentityObservation(
+    observedAt: string,
+    device: NetworkDiscoveredDevice,
+  ): Promise<void> {
+    const identity = networkDiscoveryIdentity(device);
+    const databaseKey = key(identity);
+    const previousValue = await this.getOptional(databaseKey);
+    const previous = isKnownDevice(previousValue) ? previousValue : null;
+    const record: KnownNetworkDevice = {
+      schemaVersion: 1,
+      identity,
+      firstSeenAt: previous?.firstSeenAt || observedAt,
+      lastSeenAt: observedAt,
+      lastScanId: `identity:${observedAt}`,
+      device: structuredClone(previous
+        ? mergeNetworkHistory(previous.device, device)
+        : device),
+    };
+    await this.db.put(databaseKey, record);
+  }
+
   async list(): Promise<KnownNetworkDevice[]> {
     return dedupeKnownRecords(await this.listIdentityEvidence());
   }

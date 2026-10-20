@@ -65,6 +65,52 @@ describe('pending device identity projection', () => {
     });
   });
 
+  it('projects broker peer evidence separately and never treats it as a LAN observation', () => {
+    const candidateDevice = candidate(`${shellyId}:em1:0`, 'em1:0');
+    const result = projectPendingDeviceIdentity(
+      candidateDevice,
+      [inventory()],
+      [],
+      true,
+      [],
+      () => Date.parse(observedAt),
+      [{
+        physicalDeviceId: 'inventory-physical-1',
+        shellyProtocolId: shellyId,
+        brokerId: 'house-broker-pi',
+        clientId: 'shelly-mqtt-client',
+        peerIp: '192.168.1.1',
+        observedAt,
+        connectionState: 'connected',
+        identityVerification: 'not_plausible',
+      }],
+    );
+    expect(result).toMatchObject({
+      brokerObservedPeerIpAddress: '192.168.1.1',
+      brokerObservedAt: observedAt,
+      brokerIdentityVerification: 'not_plausible',
+      ipAddress: null,
+      lastObservedIpAddress: null,
+      status: 'protocol_observed',
+    });
+  });
+
+  it('withholds broker peer evidence when the protocol identity has conflicting physical records', () => {
+    const duplicate = { ...inventory(), physicalDeviceId: 'inventory-physical-2' };
+    const result = projectPendingDeviceIdentity(
+      candidate(`${shellyId}:em1:0`, 'em1:0'),
+      [inventory(), duplicate],
+      [], true, [], () => Date.parse(observedAt),
+      [{
+        physicalDeviceId: 'inventory-physical-1', shellyProtocolId: shellyId,
+        brokerId: 'house-broker-pi', clientId: 'client-1', peerIp: '192.168.1.44',
+        observedAt, connectionState: 'connected', identityVerification: 'publisher_observed',
+      }],
+    );
+    expect(result.status).toBe('conflict');
+    expect(result.brokerObservedPeerIpAddress).toBeNull();
+  });
+
   it('does not describe an online Shelly observation as current after its freshness window expires', () => {
     const staleAt = '2026-10-20T11:57:00.000Z';
     const staleLan = lan(['em1:0'], { discoveredAt: staleAt });

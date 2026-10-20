@@ -1,4 +1,7 @@
-import type { PhysicalDeviceInventoryRecord } from '../devices/enrollment/physical-device-inventory.repository';
+import type {
+  MqttPublisherEvidenceRecord,
+  PhysicalDeviceInventoryRecord,
+} from '../devices/enrollment/physical-device-inventory.repository';
 import type { KnownNetworkDevice } from '../devices/device-discovery-memory.store';
 import type { NetworkDiscoveredDevice, RegisteredDevice } from '../devices/device-registry.types';
 import { isNetworkObservationFresh } from '../devices/network-observation-freshness';
@@ -26,6 +29,9 @@ export interface PendingDeviceIdentityProjection {
   lastObservedHostname: string | null;
   lastObservedGatewayId: string | null;
   lastObservedNetworkId: string | null;
+  brokerObservedPeerIpAddress: string | null;
+  brokerObservedAt: string | null;
+  brokerIdentityVerification: string | null;
   verificationStatus: string;
   status: 'correlated' | 'protocol_observed' | 'not_identified' | 'conflict';
   networkAddressStatus: 'current' | 'historical' | 'reused' | null;
@@ -41,6 +47,7 @@ export function projectPendingDeviceIdentity(
   inventoryAvailable = true,
   networkHistory: readonly KnownNetworkDevice[] = [],
   now: () => number = Date.now,
+  brokerEvidence: readonly MqttPublisherEvidenceRecord[] = [],
 ): PendingDeviceIdentityProjection {
   const metadata = candidate.metadata ?? {};
   const physicalHardwareId = stringField(metadata.physicalId);
@@ -66,6 +73,9 @@ export function projectPendingDeviceIdentity(
     lastObservedHostname: null,
     lastObservedGatewayId: null,
     lastObservedNetworkId: null,
+    brokerObservedPeerIpAddress: null,
+    brokerObservedAt: null,
+    brokerIdentityVerification: null,
     networkAddressStatus: null,
   } as const;
 
@@ -126,9 +136,20 @@ export function projectPendingDeviceIdentity(
     };
   }
 
+  const latestBrokerEvidence = brokerEvidence
+    .filter(item => item.physicalDeviceId === physical.physicalDeviceId &&
+      sameProtocolId(item.shellyProtocolId ?? '', physicalHardwareId))
+    .sort((left, right) => right.observedAt.localeCompare(left.observedAt))[0];
+  const brokerEvidenceFields = {
+    brokerObservedPeerIpAddress: latestBrokerEvidence?.peerIp ?? null,
+    brokerObservedAt: latestBrokerEvidence?.observedAt ?? null,
+    brokerIdentityVerification: latestBrokerEvidence?.identityVerification ?? null,
+  };
+
   if (!componentInCandidate) {
     return {
       ...base,
+      ...brokerEvidenceFields,
       physicalDeviceId: physical.physicalDeviceId,
       evidenceSource: physical.identityEvidenceSource ?? 'physical-device inventory',
       lastObservedAt: physical.identityLastObservedAt ?? physical.lastSeenAt,
@@ -163,6 +184,7 @@ export function projectPendingDeviceIdentity(
   if (allEvidence.some(({ device }) => device.identityConflict) || matchingScopes.size > 1) {
     return {
       ...base,
+      ...brokerEvidenceFields,
       physicalDeviceId: physical.physicalDeviceId,
       evidenceSource: 'Shelly MQTT identity + LAN HTTP/RPC identity',
       lastObservedAt: latestTimestamp(physical.identityLastObservedAt, ...allEvidence.map(({ observedAt }) => observedAt)),
@@ -181,6 +203,7 @@ export function projectPendingDeviceIdentity(
   if (!lastObservation) {
     return {
       ...base,
+      ...brokerEvidenceFields,
       physicalDeviceId: physical.physicalDeviceId,
       evidenceSource: physical.identityEvidenceSource ?? 'Shelly MQTT protocol identity',
       lastObservedAt: physical.identityLastObservedAt ?? physical.lastSeenAt,
@@ -199,13 +222,13 @@ export function projectPendingDeviceIdentity(
     lastObservedGatewayId: lastObservation.gatewayId ?? null,
     lastObservedNetworkId: lastObservation.networkZoneName || lastObservation.networkZoneId,
   };
-
   if (!observed) {
     const reusedAddress = historical
       ? currentMacAtHistoricalAddress(historical.device, networkDevices)
       : null;
     return {
       ...base,
+      ...brokerEvidenceFields,
       ...observationFields,
       physicalDeviceId: physical.physicalDeviceId,
       evidenceSource: `${physical.identityEvidenceSource ?? 'Shelly MQTT protocol identity'} + ${historical.persisted ? 'persisted_lan_discovery_memory' : 'expired_lan_scan_observation'}`,
@@ -219,8 +242,10 @@ export function projectPendingDeviceIdentity(
     };
   }
 
+  const observationReason = typeof observed.reason === 'string' ? observed.reason : '';
   return {
     ...base,
+    ...brokerEvidenceFields,
     ...observationFields,
     physicalDeviceId: physical.physicalDeviceId,
     ipAddress: observed.ipAddress,
@@ -229,12 +254,14 @@ export function projectPendingDeviceIdentity(
     hostname: observed.hostname ?? null,
     gatewayId: observed.gatewayId ?? null,
     networkId: observed.networkZoneId,
-    evidenceSource: `${physical.identityEvidenceSource ?? 'Shelly MQTT protocol identity'} + lan_http_rpc`,
+    evidenceSource: `${physical.identityEvidenceSource ?? 'Shelly MQTT protocol identity'} + ${observationReason.includes('broker publisher attribution') ? 'broker_publisher_attribution + exact_shelly_http_rpc' : 'lan_http_rpc'}`,
     lastObservedAt: observed.discoveredAt,
     verificationStatus: physical.verificationStatus,
     status: 'correlated',
     networkAddressStatus: 'current',
-    reason: 'Exact Shelly protocol hardware ID and component match current LAN HTTP/RPC evidence. This is protocol correlation, not independent hardware authentication.',
+    reason: observationReason.includes('broker publisher attribution')
+      ? 'A broker-attributed Shelly MQTT publish led to a bounded read-only RPC check; the returned protocol ID exactly matches this candidate. The address is fresh RPC-confirmed evidence.'
+      : 'Exact Shelly protocol hardware ID and component match current LAN HTTP/RPC evidence. This is protocol correlation, not independent hardware authentication.',
   };
 }
 

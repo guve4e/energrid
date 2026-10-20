@@ -33,6 +33,7 @@ import {
   DurableMqttSubscriber,
   durableMqttOptions,
 } from './mqtt/durable-mqtt-subscriber';
+import { MqttBrokerAttributionService } from './mqtt/mqtt-broker-attribution.service';
 
 const execFileAsync = promisify(execFile);
 
@@ -95,6 +96,8 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
     @Optional()
     @Inject(DEVICE_ENROLLMENT_SERVICE)
     private readonly enrollment?: DeviceEnrollmentService,
+    @Optional()
+    private readonly brokerAttribution?: MqttBrokerAttributionService,
   ) {
     this.messageRouter = new DeviceMqttMessageRouter(
       registry,
@@ -502,6 +505,33 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
       payload,
       payloadText,
     });
+
+    const shellyIdentity = routed?.physicalDiscoveries?.find(
+      item => item.identity.namespace === 'mqtt:shelly-protocol-id',
+    );
+    if (shellyIdentity && routed?.physicalDiscovery && this.brokerAttribution) {
+      const protocolId = shellyIdentity.identity.value;
+      const componentKeys = [...new Set((routed.physicalDiscoveries || [])
+        .filter(item => item.identity.value === protocolId)
+        .flatMap(item => item.components.map(component => component.key)))];
+      void routed.physicalDiscovery.then(records => {
+        const physical = records.find(record =>
+          record.identity?.namespace === 'mqtt:shelly-protocol-id' &&
+          record.identity.value.toLowerCase() === protocolId.toLowerCase(),
+        );
+        if (!physical) return;
+        this.brokerAttribution?.observeShellyMessage({
+          topic,
+          payloadText,
+          protocolId,
+          componentKeys,
+          physicalDeviceId: physical.physicalDeviceId,
+          observedAt: new Date().toISOString(),
+        });
+      }).catch(() => {
+        this.logger.warn('Broker attribution deferred because physical identity persistence failed.');
+      });
+    }
 
     if (routed) {
       this.operationalLog.recordMqttStage({

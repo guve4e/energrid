@@ -1,0 +1,6 @@
+# Add to the existing broker configuration only after a reviewed maintenance window.
+# The plugin emits only Mosquitto-attributed client metadata and a payload hash.
+plugin /usr/lib/mosquitto/energrid-broker-evidence.so
+plugin_opt_broker_id house-broker-pi
+plugin_opt_evidence_topic energrid/broker-evidence/v1
+plugin_opt_hmac_key_file /etc/mosquitto/energrid-broker-evidence.key

@@ -20,6 +20,7 @@ function identity(candidateId: string, componentId: string, extra: Partial<Pendi
     evidenceSource: 'mqtt_protocol_message', lastObservedAt: '2026-10-20T09:00:00.000Z',
     lastObservedIpAddress: null, lastObservedMacAddress: null, lastObservedDeviceReportedMacAddress: null, lastObservedHostname: null,
     lastObservedGatewayId: null, lastObservedNetworkId: null,
+    brokerObservedPeerIpAddress: null, brokerObservedAt: null, brokerIdentityVerification: null,
     verificationStatus: 'protocol_observed', status: 'protocol_observed', networkAddressStatus: null, reason: 'Protocol identity recorded.',
     ...extra,
   };
@@ -92,6 +93,22 @@ describe('Pending Enrollment presentation', () => {
       ipAddress: null,
       capabilities: ['temperature', 'humidity'],
     });
+  });
+
+  it('shows broker peer evidence separately without treating it as a verified LAN address', () => {
+    const device = candidate(`${physicalId}:em1:0`, 'em1:0');
+    const [card] = buildPendingEnrollmentCards([device], {
+      [device.id]: identity(device.id, 'em1:0', {
+        brokerObservedPeerIpAddress: '192.168.1.1',
+        brokerObservedAt: '2026-10-20T09:01:00.000Z',
+        brokerIdentityVerification: 'not_plausible',
+      }),
+    });
+
+    expect(card.ipAddress).toBeNull();
+    expect(card.networkLabel).toBe('Not established');
+    expect(card.brokerObservedPeerIpAddress).toBe('192.168.1.1');
+    expect(card.brokerIdentityVerification).toBe('not_plausible');
   });
 
   it('labels a historical Shelly IP as reused and keeps protocol and LAN MAC evidence distinct', () => {

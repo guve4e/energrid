@@ -39,6 +39,9 @@ export interface PendingIdentityInput {
   lastObservedHostname: string | null;
   lastObservedGatewayId: string | null;
   lastObservedNetworkId: string | null;
+  brokerObservedPeerIpAddress: string | null;
+  brokerObservedAt: string | null;
+  brokerIdentityVerification: string | null;
   verificationStatus: string;
   status: 'correlated' | 'protocol_observed' | 'not_identified' | 'conflict';
   networkAddressStatus: 'current' | 'historical' | 'reused' | null;
@@ -63,6 +66,9 @@ export interface PendingCandidateDetails {
   networkAddressStatus: 'current' | 'historical' | 'reused' | null;
   reason: string;
   retired: boolean;
+  brokerObservedPeerIpAddress: string | null;
+  brokerObservedAt: string | null;
+  brokerIdentityVerification: string | null;
 }
 
 export interface PendingEnrollmentCardModel {
@@ -80,6 +86,9 @@ export interface PendingEnrollmentCardModel {
   hostname: string | null;
   network: string | null;
   networkEvidenceStatus: string | null;
+  brokerObservedPeerIpAddress: string | null;
+  brokerObservedAt: string | null;
+  brokerIdentityVerification: string | null;
   unknownNetworkMessage: string | null;
   componentSummary: string;
   components: string[];
@@ -140,6 +149,9 @@ function toCard(
   const newestObservation = [...networkIdentities]
     .filter(item => item.lastObservedAt)
     .sort((left, right) => (right.lastObservedAt ?? '').localeCompare(left.lastObservedAt ?? ''))[0];
+  const newestBrokerEvidence = [...networkIdentities]
+    .filter(item => item.brokerObservedAt)
+    .sort((left, right) => (right.brokerObservedAt ?? '').localeCompare(left.brokerObservedAt ?? ''))[0];
   const live = !hasConflict && currentIdentities.length > 0;
   const ipAddress = hasConflict ? null : live
     ? currentIdentities.sort((left, right) => (right.lastObservedAt ?? '').localeCompare(left.lastObservedAt ?? ''))[0].ipAddress
@@ -173,6 +185,9 @@ function toCard(
         ? 'Historical · IP now observed with a different MAC'
       : 'Historical · not recently confirmed'
       : null,
+    brokerObservedPeerIpAddress: newestBrokerEvidence?.brokerObservedPeerIpAddress ?? null,
+    brokerObservedAt: newestBrokerEvidence?.brokerObservedAt ?? null,
+    brokerIdentityVerification: newestBrokerEvidence?.brokerIdentityVerification ?? null,
     unknownNetworkMessage: ipAddress ? null : hasConflict
       ? 'Network identity conflict — address withheld'
       : candidates.every(candidate => candidate.adapter.protocol === 'mqtt')
@@ -209,6 +224,9 @@ function detail(
     networkAddressStatus: identity?.networkAddressStatus ?? null,
     reason: identity?.reason || 'Backend identity evidence is unavailable.',
     retired: candidate.metadata?.previouslyEnrolledRetired === true,
+    brokerObservedPeerIpAddress: identity?.brokerObservedPeerIpAddress ?? null,
+    brokerObservedAt: identity?.brokerObservedAt ?? null,
+    brokerIdentityVerification: identity?.brokerIdentityVerification ?? null,
   };
 }
 

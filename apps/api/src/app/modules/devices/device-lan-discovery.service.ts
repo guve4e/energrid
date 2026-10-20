@@ -22,6 +22,7 @@ import {
 import type { PhysicalDeviceInventoryService } from './enrollment/physical-device-inventory.service'
 import type { PhysicalLanObservation } from './enrollment/physical-device-inventory.repository'
 import { shellyLanCandidates } from './adapters/inbound/shelly/shelly-lan-candidates'
+import { readOnlyShellyDeviceInfo } from './adapters/inbound/shelly/read-only-shelly-rpc'
 
 const execFileAsync = promisify(execFile)
 const activeScanConcurrency = 24
@@ -352,6 +353,14 @@ function configuredNetworkZones(): NetworkDiscoveryZone[] {
   ]
 }
 
+export function configuredNetworkZoneForAddress(ipAddress: string): NetworkDiscoveryZone | null {
+  const zones = configuredNetworkZones()
+  if (!candidateBelongsToConfiguredZone({ ipAddress }, zones)) return null
+  const zone = zones.find(candidate => candidateMatchesZone({ ipAddress }, candidate))
+  if (!zone || zone.seedIps.includes(ipAddress) || zone.gatewayIps?.includes(ipAddress)) return null
+  return zone
+}
+
 export function parseNetworkZones(value: string | undefined): NetworkDiscoveryZone[] {
   if (!value) return []
 
@@ -378,11 +387,18 @@ function normalizeNetworkZone(item: unknown, index: number): NetworkDiscoveryZon
     interface?: string
     seedIps?: string[]
     seeds?: string[]
+    gatewayIps?: string[]
     role?: NetworkDiscoveryZone['role']
   }
 
   const id = safeZoneId(raw.id || raw.name || `network-${index + 1}`)
   const seedIps = [...(raw.seedIps || []), ...(raw.seeds || [])]
+    .filter((ipAddress) => /^\d{1,3}(?:\.\d{1,3}){3}$/.test(ipAddress))
+    .filter(isUsefulLanIp)
+  const configuredGateways = Array.isArray(raw.gatewayIps)
+    ? raw.gatewayIps.filter((ipAddress): ipAddress is string => typeof ipAddress === 'string')
+    : []
+  const gatewayIps = [...new Set(configuredGateways)]
     .filter((ipAddress) => /^\d{1,3}(?:\.\d{1,3}){3}$/.test(ipAddress))
     .filter(isUsefulLanIp)
 
@@ -392,6 +408,7 @@ function normalizeNetworkZone(item: unknown, index: number): NetworkDiscoveryZon
     cidr: raw.cidr,
     interfaceName: raw.interfaceName || raw.interface,
     seedIps,
+    gatewayIps,
     role: raw.role,
   }
 }
@@ -989,40 +1006,15 @@ export async function probeShelly(ipAddress: string): Promise<{
   app?: string
   gen?: number
 } | null> {
-  const baseUrl = `http://${ipAddress}`
-  const candidates = [`${baseUrl}/rpc/Shelly.GetDeviceInfo`, `${baseUrl}/shelly`]
-
-  for (const url of candidates) {
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 1000)
-
-    try {
-      const response = await fetch(url, {
-        signal: controller.signal,
-        headers: { Accept: 'application/json' },
-        redirect: 'error',
-      })
-
-      if (!response.ok) continue
-
-      const body = await response.json() as Record<string, unknown>
-      if (!looksLikeShelly(body)) continue
-
-      return {
-        id: stringValue(body.id) || stringValue(body.mac),
-        mac: normalizeMacAddress(body.mac),
-        model: stringValue(body.model) || stringValue(body.type),
-        app: stringValue(body.app) || stringValue(body.app_name),
-        gen: numberValue(body.gen),
-      }
-    } catch {
-      // Most LAN devices will not be Shelly. Silence is useful here.
-    } finally {
-      clearTimeout(timeout)
-    }
+  const info = await readOnlyShellyDeviceInfo(ipAddress, 1000)
+  if (!info) return null
+  return {
+    id: info.id || info.mac,
+    mac: normalizeMacAddress(info.mac),
+    model: info.model,
+    app: info.app,
+    gen: info.gen,
   }
-
-  return null
 }
 
 function normalizeMacAddress(value: unknown): string | undefined {
@@ -1063,16 +1055,6 @@ export async function probeShellyComponents(ipAddress: string): Promise<NonNulla
   } finally {
     clearTimeout(timeout)
   }
-}
-
-function looksLikeShelly(body: Record<string, unknown>): boolean {
-  return Boolean(
-    stringValue(body.id)?.toLowerCase().includes('shelly') ||
-      stringValue(body.model)?.toLowerCase().includes('shelly') ||
-      stringValue(body.type)?.toLowerCase().includes('shelly') ||
-      stringValue(body.app)?.toLowerCase().includes('shelly') ||
-      body.gen,
-  )
 }
 
 function vendorFromCandidate(candidate: { macAddress?: string; hostname?: string }): string | undefined {

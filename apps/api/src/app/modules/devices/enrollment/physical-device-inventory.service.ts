@@ -8,6 +8,9 @@ import type {
   PhysicalDeviceInventoryRepository,
   PhysicalLanObservation,
   PhysicalDeviceScope,
+  MqttPublisherEvidence,
+  MqttPublisherEvidenceRecord,
+  MqttPublisherIdentityVerification,
 } from './physical-device-inventory.repository';
 
 export class PhysicalDeviceInventoryService {
@@ -32,6 +35,34 @@ export class PhysicalDeviceInventoryService {
 
   refreshNetworkObservations(scope: PhysicalDeviceScope, observations: PhysicalLanObservation[]) {
     return this.repository.refreshNetworkObservations(scope, observations);
+  }
+
+  recordMqttPublisherEvidence(scope: PhysicalDeviceScope, evidence: MqttPublisherEvidence) {
+    return this.repository.recordMqttPublisherEvidence(scope, evidence);
+  }
+
+  associateMqttPublisherEvidence(
+    scope: PhysicalDeviceScope,
+    brokerId: string,
+    eventId: string,
+    physicalDeviceId: string,
+    shellyProtocolId: string,
+  ) {
+    return this.repository.associateMqttPublisherEvidence(
+      scope, brokerId, eventId, physicalDeviceId, shellyProtocolId,
+    );
+  }
+
+  updateMqttPublisherIdentityVerification(
+    scope: PhysicalDeviceScope,
+    brokerId: string,
+    eventId: string,
+    verification: MqttPublisherIdentityVerification,
+    verifiedLanIp?: string,
+  ) {
+    return this.repository.updateMqttPublisherIdentityVerification(
+      scope, brokerId, eventId, verification, verifiedLanIp,
+    );
   }
 
   forLogicalDevice(scope: PhysicalDeviceScope, deviceId: string) {
@@ -122,6 +153,14 @@ export class PhysicalDeviceInventoryService {
       }
       throw error;
     }
+  }
+
+  listRecentMqttPublisherEvidence(scope: PhysicalDeviceScope): Promise<MqttPublisherEvidenceRecord[]> {
+    return this.repository.listRecentMqttPublisherEvidence(scope);
+  }
+
+  pruneMqttPublisherEvidence(scope: PhysicalDeviceScope, olderThan: string): Promise<void> {
+    return this.repository.pruneMqttPublisherEvidence(scope, olderThan);
   }
 }
 

@@ -20,6 +20,17 @@ function formatObservationTime(value: string): string {
   return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString() : 'time unavailable';
 }
 
+function brokerEvidenceLabel(status: string | null): string {
+  switch (status) {
+    case 'rpc_verified': return 'Exact Shelly RPC identity matched';
+    case 'rpc_mismatch': return 'RPC identity mismatch · not a verified LAN address';
+    case 'rpc_unreachable': return 'RPC unreachable · not a verified LAN address';
+    case 'not_plausible': return 'Not a LAN candidate · broker evidence only';
+    case 'publisher_observed': return 'Publisher correlated · LAN identity not verified';
+    default: return 'Broker evidence only · LAN identity not verified';
+  }
+}
+
 function toggleReview(cardKey: string) {
   expandedCardKey.value = expandedCardKey.value === cardKey ? null : cardKey;
 }
@@ -51,6 +62,14 @@ function toggleReview(cardKey: string) {
             <small v-if="card.networkEvidenceStatus">{{ card.networkEvidenceStatus }}</small>
           </template>
           <strong v-else>{{ card.unknownNetworkMessage }}</strong>
+          <div v-if="card.brokerObservedPeerIpAddress" class="broker-peer-evidence">
+            <span>Last broker-observed peer</span>
+            <strong>{{ card.brokerObservedPeerIpAddress }}</strong>
+            <small>
+              {{ card.brokerObservedAt ? formatObservationTime(card.brokerObservedAt) : 'Time unavailable' }}
+              · {{ brokerEvidenceLabel(card.brokerIdentityVerification) }}
+            </small>
+          </div>
         </div>
       </header>
 
@@ -99,6 +118,7 @@ function toggleReview(cardKey: string) {
             <div><dt>Protocol endpoint</dt><dd><code>{{ item.endpoint || 'Not reported' }}</code></dd></div>
             <div><dt>Evidence provenance</dt><dd>{{ item.evidenceSource }}</dd></div>
             <div><dt>Last observation</dt><dd>{{ item.observedAt ? new Date(item.observedAt).toLocaleString() : 'Not recorded' }}</dd></div>
+            <div v-if="item.brokerObservedPeerIpAddress"><dt>Broker peer evidence</dt><dd>{{ item.brokerObservedPeerIpAddress }} · {{ item.brokerObservedAt ? formatObservationTime(item.brokerObservedAt) : 'time unavailable' }} · {{ brokerEvidenceLabel(item.brokerIdentityVerification) }}</dd></div>
             <div><dt>Confidence heuristic</dt><dd>{{ item.confidence === null ? 'Not reported' : `${Math.round(item.confidence * 100)}%` }}</dd></div>
             <div><dt>Identity evidence</dt><dd>{{ item.verificationStatus }} · {{ item.reason }}</dd></div>
           </dl>
@@ -118,6 +138,9 @@ function toggleReview(cardKey: string) {
 .pending-network-summary { display: grid; justify-items: start; gap: 3px; min-width: 0; }
 .pending-network-summary > span, .pending-network-summary > small { color: var(--discovery-muted); font-size: 11px; overflow-wrap: anywhere; }
 .pending-network-summary > strong { font-size: 13px; overflow-wrap: anywhere; }
+.broker-peer-evidence { display: grid; justify-items: start; gap: 2px; margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--discovery-border); }
+.broker-peer-evidence > span, .broker-peer-evidence > small { color: var(--discovery-muted); font-size: 10px; overflow-wrap: anywhere; }
+.broker-peer-evidence > strong { color: var(--discovery-text); font-size: 13px; font-variant-numeric: tabular-nums; }
 .pending-network-summary .pending-ip-address { color: var(--discovery-text); font-size: 18px; font-variant-numeric: tabular-nums; }
 .pending-network-summary.is-unknown { min-height: 64px; align-content: center; }
 .pending-device-summary { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 12px 20px; align-items: center; margin-top: 10px; }

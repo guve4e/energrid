@@ -1,0 +1,4 @@
+# Append to the existing ACL file after configuring the corresponding
+# dedicated broker user. Do not grant wildcard or write access for this user.
+user energrid-attribution
+topic read energrid/broker-evidence/v1

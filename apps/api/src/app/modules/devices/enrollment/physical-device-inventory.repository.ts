@@ -60,6 +60,43 @@ export interface PhysicalLanObservation {
   evidenceSource: string;
 }
 
+export interface MqttPublisherEvidence {
+  eventId: string;
+  physicalDeviceId?: string;
+  shellyProtocolId?: string;
+  brokerId: string;
+  clientId: string;
+  peerIp: string;
+  publishedTopic: string | null;
+  payloadSha256: string | null;
+  observedAt: string;
+  connectionState: 'connected' | 'disconnected';
+  identityVerification?: 'unmatched' | 'publisher_observed';
+}
+
+export interface MqttPublisherEvidenceRecord {
+  physicalDeviceId: string | null;
+  shellyProtocolId: string | null;
+  brokerId: string;
+  clientId: string;
+  peerIp: string;
+  observedAt: string;
+  connectionState: 'connected' | 'disconnected';
+  identityVerification:
+    | 'unmatched'
+    | 'publisher_observed'
+    | 'rpc_verified'
+    | 'rpc_mismatch'
+    | 'rpc_unreachable'
+    | 'not_plausible';
+}
+
+export type MqttPublisherIdentityVerification =
+  | 'rpc_verified'
+  | 'rpc_mismatch'
+  | 'rpc_unreachable'
+  | 'not_plausible';
+
 export interface PhysicalDeviceNetworkObservation {
   id: string;
   physicalDeviceId: string;
@@ -132,6 +169,23 @@ export interface PhysicalDeviceInventoryRepository {
     assignedBy: string;
   }): Promise<PhysicalDeviceInventoryRecord>;
   refreshNetworkObservations(scope: PhysicalDeviceScope, observations: PhysicalLanObservation[]): Promise<void>;
+  recordMqttPublisherEvidence(scope: PhysicalDeviceScope, evidence: MqttPublisherEvidence): Promise<boolean>;
+  associateMqttPublisherEvidence(
+    scope: PhysicalDeviceScope,
+    brokerId: string,
+    eventId: string,
+    physicalDeviceId: string,
+    shellyProtocolId: string,
+  ): Promise<void>;
+  updateMqttPublisherIdentityVerification(
+    scope: PhysicalDeviceScope,
+    brokerId: string,
+    eventId: string,
+    verification: MqttPublisherIdentityVerification,
+    verifiedLanIp?: string,
+  ): Promise<void>;
+  listRecentMqttPublisherEvidence(scope: PhysicalDeviceScope): Promise<MqttPublisherEvidenceRecord[]>;
+  pruneMqttPublisherEvidence(scope: PhysicalDeviceScope, olderThan: string): Promise<void>;
   get(scope: PhysicalDeviceScope, physicalDeviceId: string): Promise<PhysicalDeviceInventoryRecord | null>;
   forLogicalDevice(scope: PhysicalDeviceScope, deviceId: string): Promise<PhysicalDeviceInventoryRecord | null>;
   list(scope: PhysicalDeviceScope): Promise<PhysicalDeviceInventoryRecord[]>;

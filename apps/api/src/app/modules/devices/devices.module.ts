@@ -19,6 +19,7 @@ import { TelemetryModule } from '../telemetry/telemetry.module'
 import { ApprovedMqttObservationRuntime } from './mqtt/approved-mqtt-observation.runtime'
 import { MqttEvidenceCaptureService } from './mqtt/mqtt-evidence-capture.service'
 import { MqttEvidenceDiscoveryService } from './mqtt/mqtt-evidence-discovery.service'
+import { MqttBrokerAttributionService } from './mqtt/mqtt-broker-attribution.service'
 import { DeviceEnrollmentModule } from './enrollment/device-enrollment.module'
 
 @Module({
@@ -29,6 +30,7 @@ import { DeviceEnrollmentModule } from './enrollment/device-enrollment.module'
     DeviceMqttIngestService,
     MqttEvidenceCaptureService,
     MqttEvidenceDiscoveryService,
+    MqttBrokerAttributionService,
     DeviceHttpPollService,
     DeviceLanNetworkEvidenceCollector,
     DeviceLanDiscoveryService,

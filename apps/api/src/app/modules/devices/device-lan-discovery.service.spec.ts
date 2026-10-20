@@ -496,14 +496,18 @@ describe('network discovery zones', () => {
         id: 'main-lan',
         name: 'Main LAN',
         cidr: '192.168.7.0/24',
+        interfaceName: undefined,
         seedIps: [],
+        gatewayIps: [],
         role: 'primary',
       },
       {
         id: 'camera-vlan',
         name: 'Camera VLAN',
         cidr: '192.168.20.0/24',
+        interfaceName: undefined,
         seedIps: ['192.168.20.40'],
+        gatewayIps: [],
         role: 'camera',
       },
     ])

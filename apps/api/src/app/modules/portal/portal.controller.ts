@@ -37,7 +37,10 @@ import {
   PHYSICAL_DEVICE_INVENTORY_SERVICE,
 } from '../devices/enrollment/device-enrollment.module'
 import type { PhysicalDeviceInventoryService } from '../devices/enrollment/physical-device-inventory.service'
-import type { PhysicalDeviceInventoryRecord } from '../devices/enrollment/physical-device-inventory.repository'
+import type {
+  MqttPublisherEvidenceRecord,
+  PhysicalDeviceInventoryRecord,
+} from '../devices/enrollment/physical-device-inventory.repository'
 import { projectPendingDeviceIdentity } from './pending-device-identity.projection'
 import { shellyLanCandidates } from '../devices/adapters/inbound/shelly/shelly-lan-candidates'
 import {
@@ -90,6 +93,7 @@ export class PortalController {
     )
     const networkHistory = await this.discoveryMemory.listIdentityEvidence().catch(() => [])
     let inventory: PhysicalDeviceInventoryRecord[] = []
+    let brokerEvidence: MqttPublisherEvidenceRecord[] = []
     let inventoryAvailable = !!this.physicalInventory
     if (this.physicalInventory) {
       try {
@@ -97,10 +101,25 @@ export class PortalController {
       } catch {
         inventoryAvailable = false
       }
+      try {
+        brokerEvidence = await this.physicalInventory.listRecentMqttPublisherEvidence({
+          tenantId: tenant.id, siteId: site.id,
+        })
+      } catch {
+        // Attribution is optional until its additive migration is deployed.
+      }
     }
     const pendingDeviceIdentities = Object.fromEntries(pending.map(device => [
       device.id,
-      projectPendingDeviceIdentity(device, inventory, this.lanDiscovery.getLastScan(), inventoryAvailable, networkHistory),
+      projectPendingDeviceIdentity(
+        device,
+        inventory,
+        [...this.lanDiscovery.getLastScan(), ...networkHistory.map(record => record.device)],
+        inventoryAvailable,
+        networkHistory,
+        Date.now,
+        brokerEvidence,
+      ),
     ]))
     return { ...state, pendingDeviceIdentities }
   }
