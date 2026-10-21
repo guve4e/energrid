@@ -22,6 +22,12 @@ describe('DeviceInstallationStore', () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it('waits for LevelDB to open before startup reads installation records', async () => {
+    await store.onModuleInit();
+
+    await expect(store.list('site-home')).resolves.toEqual([]);
+  });
+
   it('keeps installation identity and physical confirmation separate from device state', async () => {
     const device = {
       id: 'shellyplus1-aabbccddeeff:switch:0',

@@ -1,4 +1,4 @@
-import { Inject, Injectable, OnModuleDestroy, Optional } from '@nestjs/common';
+import { Inject, Injectable, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
 import { ClassicLevel } from 'classic-level';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -29,7 +29,7 @@ export const DEVICE_INSTALLATION_STORE_DIRECTORY = Symbol(
 );
 
 @Injectable()
-export class DeviceInstallationStore implements OnModuleDestroy {
+export class DeviceInstallationStore implements OnModuleInit, OnModuleDestroy {
   private readonly db: ClassicLevel<string, unknown>;
 
   constructor(
@@ -46,7 +46,12 @@ export class DeviceInstallationStore implements OnModuleDestroy {
     await this.db.close();
   }
 
+  async onModuleInit(): Promise<void> {
+    await this.ensureOpen();
+  }
+
   async list(siteId: string): Promise<DeviceInstallationRecord[]> {
+    await this.ensureOpen();
     const records: DeviceInstallationRecord[] = [];
     for await (const [, value] of this.db.iterator({
       gte: installationKey(siteId, ''),
@@ -58,6 +63,7 @@ export class DeviceInstallationStore implements OnModuleDestroy {
   }
 
   async get(siteId: string, deviceId: string): Promise<DeviceInstallationRecord | null> {
+    await this.ensureOpen();
     try {
       const value: unknown = await this.db.get(installationKey(siteId, deviceId));
       return isInstallationRecord(value) ? value : null;
@@ -68,14 +74,17 @@ export class DeviceInstallationStore implements OnModuleDestroy {
   }
 
   async save(record: DeviceInstallationRecord): Promise<void> {
+    await this.ensureOpen();
     await this.db.put(installationKey(record.device.siteId, record.device.id), record);
   }
 
   async append(event: DeviceInstallationEvent): Promise<void> {
+    await this.ensureOpen();
     await this.db.put(`event:${event.deviceId}:${event.id}`, event);
   }
 
   async events(deviceId: string, limit = 100): Promise<DeviceInstallationEvent[]> {
+    await this.ensureOpen();
     const items: DeviceInstallationEvent[] = [];
     for await (const [, value] of this.db.iterator({
       gte: `event:${deviceId}:`,
@@ -86,6 +95,10 @@ export class DeviceInstallationStore implements OnModuleDestroy {
       if (isInstallationEvent(value)) items.push(value);
     }
     return items;
+  }
+
+  private async ensureOpen(): Promise<void> {
+    if (this.db.status !== 'open') await this.db.open();
   }
 }
 
