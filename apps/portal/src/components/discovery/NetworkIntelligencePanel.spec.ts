@@ -142,6 +142,32 @@ describe('NetworkIntelligencePanel', () => {
     panel.unmount();
   });
 
+  it('distinguishes observed facts, manufacturer clues, and hypotheses in AI results', async () => {
+    const key = networkEndpointInvestigationKey('scan-1', 'eero', '192.168.7.20', 'aa:bb:cc:dd:ee:ff');
+    const panel = mount(NetworkIntelligencePanel, { props: {
+      scopes, snapshots: [snapshot], latest: snapshot, comparison: null,
+      endpointInvestigations: { [key]: { loading: false, result: {
+        schemaVersion: 1, scanId: 'scan-1', endpointId: 'aa:bb:cc:dd:ee:ff', createdAt: '2026-10-21T10:00:00Z', provider: 'test', model: 'test',
+        summary: 'Possible clues only.', identification: { deviceType: null, manufacturer: null, confidence: null, supportingEvidenceIds: [], uncertainty: 'Unknown.' },
+        findings: [
+          { kind: 'observed_fact', claim: 'TCP port 80 responded.', confidence: 1, supportingEvidenceIds: ['evidence-1'], missingEvidence: [] },
+          { kind: 'manufacturer_clue', claim: 'The interface assignment is Espressif Inc.', confidence: 0.7, supportingEvidenceIds: ['evidence-2'], missingEvidence: ['Device maker'] },
+          { kind: 'hypothesis', claim: 'It may be an embedded controller.', confidence: 0.5, supportingEvidenceIds: ['evidence-1'], missingEvidence: ['Native identity response'] },
+        ], missingEvidence: ['Native identity response'], safeFollowUpChecks: [],
+        evidence: [
+          { id: 'evidence-1', source: 'tcp', attribute: 'port.80.open', value: true, observedAt: '2026-10-21T10:00:00Z', confidence: 'observed' },
+          { id: 'evidence-2', source: 'ieee_oui_database', attribute: 'mac_oui.interface_vendor_clue', value: 'Espressif Inc.', observedAt: '2026-10-21T10:00:00Z', confidence: 'reported' },
+        ],
+      } } },
+    } });
+    await panel.findAll('button.ni-device-row')[1].trigger('click');
+    expect(panel.text()).toContain('Observed fact');
+    expect(panel.text()).toContain('Manufacturer clue');
+    expect(panel.text()).toContain('Hypothesis');
+    expect(panel.text()).toContain('Missing: Device maker');
+    panel.unmount();
+  });
+
   it('selects historical saved evidence and investigates that exact snapshot', async () => {
     const historical = {
       ...snapshot,

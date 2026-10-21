@@ -51,7 +51,7 @@ describe('NetworkEndpointInvestigatorService', () => {
       supportingEvidenceIds: [],
       uncertainty: 'Only an HTTP service is known.',
     },
-    findings: [{ claim: 'TCP port 80 was observed open.', confidence: 1, supportingEvidenceIds: ['placeholder'], missingEvidence: [] }],
+    findings: [{ kind: 'observed_fact', claim: 'TCP port 80 was observed open.', confidence: 1, supportingEvidenceIds: ['placeholder'], missingEvidence: [] }],
     missingEvidence: ['HTTP response headers'],
     safeFollowUpChecks: [{ action: 'inspect_http_headers', requiresHumanApproval: true }],
     ...overrides,
@@ -66,7 +66,7 @@ describe('NetworkEndpointInvestigatorService', () => {
       return {
         provider: 'test-provider', model: 'test-model',
         text: JSON.stringify(answer({ findings: [{
-          claim: 'TCP port 80 was observed open.', confidence: 1,
+          kind: 'observed_fact', claim: 'TCP port 80 was observed open.', confidence: 1,
           supportingEvidenceIds: [portEvidence.id], missingEvidence: [],
         }] })),
       };
@@ -100,7 +100,7 @@ describe('NetworkEndpointInvestigatorService', () => {
       const portEvidence = evidence.find(item => item.attribute === 'port.80.open')!;
       return {
         provider: 'test-provider', model: 'test-model',
-        text: JSON.stringify(answer({ findings: [{ claim: 'HTTP port observed.', confidence: 1, supportingEvidenceIds: [portEvidence.id], missingEvidence: [] }] })),
+        text: JSON.stringify(answer({ findings: [{ kind: 'observed_fact', claim: 'HTTP port observed.', confidence: 1, supportingEvidenceIds: [portEvidence.id], missingEvidence: [] }] })),
       };
     });
     const routerSnapshot = structuredClone(snapshot);
@@ -121,7 +121,7 @@ describe('NetworkEndpointInvestigatorService', () => {
       const evidence = JSON.parse(input.userPrompt).evidence as Array<{ id: string; attribute: string; provenance?: object }>;
       const port = evidence.find(item => item.attribute === 'port.80.open')!;
       return { provider: 'test-provider', model: 'test-model', text: JSON.stringify(answer({ findings: [{
-        claim: 'TCP port 80 was observed open.', confidence: 1, supportingEvidenceIds: [port.id], missingEvidence: [],
+        kind: 'observed_fact', claim: 'TCP port 80 was observed open.', confidence: 1, supportingEvidenceIds: [port.id], missingEvidence: [],
       }] })) };
     });
 
@@ -194,12 +194,51 @@ describe('NetworkEndpointInvestigatorService', () => {
       const portEvidence = evidence.find(item => item.attribute === 'port.80.open')!;
       return {
         provider: 'local', model: 'local-test',
-        text: JSON.stringify(answer({ findings: [{ claim: 'TCP port 80 was observed open.', confidence: 1, supportingEvidenceIds: [portEvidence.id], missingEvidence: [] }] })),
+        text: JSON.stringify(answer({ findings: [{ kind: 'observed_fact', claim: 'TCP port 80 was observed open.', confidence: 1, supportingEvidenceIds: [portEvidence.id], missingEvidence: [] }] })),
       };
     });
     const result = await service.investigate(snapshot, request);
     expect(result.identification).toMatchObject({ deviceType: null, manufacturer: null, confidence: null });
     expect(result.missingEvidence).toContain('HTTP response headers');
+  });
+
+  it('labels OUI evidence as a manufacturer clue and caps its confidence', async () => {
+    const clueSnapshot = structuredClone(snapshot);
+    clueSnapshot.endpoints[0].macAddress = '3c:71:bf:32:4b:44';
+    clueSnapshot.rawEvidence[0].evidence.macAddress = '3c:71:bf:32:4b:44';
+    generate.mockImplementation(async (input: { userPrompt: string }) => {
+      const evidence = JSON.parse(input.userPrompt).evidence as Array<{ id: string; attribute: string }>;
+      const oui = evidence.find(item => item.attribute === 'mac_oui.interface_vendor_clue')!;
+      return { provider: 'test-provider', model: 'test-model', text: JSON.stringify(answer({ findings: [{
+        kind: 'manufacturer_clue', claim: 'The network interface vendor is Espressif Inc.', confidence: 0.99,
+        supportingEvidenceIds: [oui.id], missingEvidence: ['Device manufacturer is not established'],
+      }] })) };
+    });
+    const result = await service.investigate(clueSnapshot, request);
+    expect(result.findings[0]).toMatchObject({ kind: 'manufacturer_clue', confidence: 0.7 });
+  });
+
+  it('requires hypotheses to state missing evidence and caps their confidence', async () => {
+    generate.mockImplementation(async (input: { userPrompt: string }) => {
+      const port = (JSON.parse(input.userPrompt).evidence as Array<{ id: string; attribute: string }>).find(item => item.attribute === 'port.80.open')!;
+      return { provider: 'test-provider', model: 'test-model', text: JSON.stringify(answer({ findings: [{
+        kind: 'hypothesis', claim: 'This may be a small embedded device.', confidence: 0.99,
+        supportingEvidenceIds: [port.id], missingEvidence: ['A device-native identity response'],
+      }] })) };
+    });
+    const result = await service.investigate(snapshot, request);
+    expect(result.findings[0]).toMatchObject({ kind: 'hypothesis', confidence: 0.5 });
+  });
+
+  it('rejects hypotheses that omit their evidence gaps', async () => {
+    generate.mockImplementation(async (input: { userPrompt: string }) => {
+      const port = (JSON.parse(input.userPrompt).evidence as Array<{ id: string; attribute: string }>).find(item => item.attribute === 'port.80.open')!;
+      return { provider: 'test-provider', model: 'test-model', text: JSON.stringify(answer({ findings: [{
+        kind: 'hypothesis', claim: 'This may be a camera.', confidence: 0.9,
+        supportingEvidenceIds: [port.id], missingEvidence: [],
+      }] })) };
+    });
+    await expect(service.investigate(snapshot, request)).rejects.toBeInstanceOf(BadGatewayException);
   });
 
   it('surfaces provider failures without fabricating a report', async () => {

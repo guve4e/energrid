@@ -21,6 +21,7 @@ export interface NetworkEndpointInvestigationResult {
     uncertainty: string;
   };
   findings: Array<{
+    kind: 'observed_fact' | 'manufacturer_clue' | 'hypothesis';
     claim: string;
     confidence: number;
     supportingEvidenceIds: string[];

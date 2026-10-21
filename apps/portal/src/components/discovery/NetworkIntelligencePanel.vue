@@ -276,6 +276,10 @@ function safeCheckLabel(action: string): string {
     : 'Review evidence with an operator';
 }
 
+function findingKindLabel(kind: 'observed_fact' | 'manufacturer_clue' | 'hypothesis'): string {
+  return ({ observed_fact: 'Observed fact', manufacturer_clue: 'Manufacturer clue', hypothesis: 'Hypothesis' })[kind];
+}
+
 function date(value?: string) {
   if (!value) return 'Time unavailable';
   const parsed = new Date(value);
@@ -439,8 +443,10 @@ function date(value?: string) {
                 </div>
                 <ul v-if="selectedInvestigation.result.findings.length" class="ni-investigation-findings">
                   <li v-for="(finding, index) in selectedInvestigation.result.findings" :key="`${finding.claim}:${index}`">
+                    <strong>{{ findingKindLabel(finding.kind) }}</strong>
                     <span>{{ finding.claim }}</span>
                     <small>{{ finding.supportingEvidenceIds.map(evidenceLabel).join('; ') }}</small>
+                    <small v-if="finding.missingEvidence.length">Missing: {{ finding.missingEvidence.join(' · ') }}</small>
                   </li>
                 </ul>
                 <div v-if="selectedInvestigation.result.missingEvidence.length" class="ni-investigation-gaps">
