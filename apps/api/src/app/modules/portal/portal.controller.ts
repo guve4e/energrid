@@ -22,6 +22,7 @@ import { ApiExcludeController } from '@nestjs/swagger'
 import { map } from 'rxjs'
 import { DeviceAiInvestigationService } from '../llm/device-ai-investigation.service'
 import { NetworkEndpointInvestigatorService } from '../llm/network-endpoint-investigator.service'
+import { ReadOnlyHttpIdentityProbe } from '../llm/read-only-http-identity-probe'
 import type { DeviceInvestigationScope } from '../llm/device-investigation-history.store'
 import { DeviceInvestigationWorkflowService } from '../llm/device-investigation-workflow.service'
 import { MqttEvidenceCaptureService } from '../devices/mqtt/mqtt-evidence-capture.service'
@@ -29,6 +30,7 @@ import { DeviceControlService } from '../devices/device-control.service'
 import { DeviceDiagnosticsService } from '../devices/device-diagnostics.service'
 import { DeviceDiscoveryMemoryStore } from '../devices/device-discovery-memory.store'
 import { DeviceLanDiscoveryService } from '../devices/device-lan-discovery.service'
+import { lookupMacVendor } from '../devices/mac-vendor-lookup'
 import { compareNetworkSnapshots } from '../devices/network-discovery-snapshot'
 import { DeviceMqttIngestService } from '../devices/device-mqtt-ingest.service'
 import { DeviceRegistryService } from '../devices/device-registry.service'
@@ -83,6 +85,8 @@ export class PortalController {
     private readonly physicalInventory?: PhysicalDeviceInventoryService,
     @Optional()
     private readonly networkEndpointInvestigator?: NetworkEndpointInvestigatorService,
+    @Optional()
+    private readonly networkEndpointProbe?: ReadOnlyHttpIdentityProbe,
   ) {}
 
   @Get()
@@ -272,7 +276,16 @@ export class PortalController {
   @Get('network/snapshots')
   async listNetworkSnapshots(@Req() request: DeviceProxyRequest) {
     assertPortalControlToken(request)
-    return { snapshots: await this.discoveryMemory.listSnapshots(50) }
+    const snapshots = await this.discoveryMemory.listSnapshots(50)
+    return { snapshots: snapshots.map(snapshot => ({
+      ...snapshot,
+      endpoints: snapshot.endpoints.map(endpoint => {
+        const vendor = lookupMacVendor(endpoint.macAddress)
+        return vendor.status === 'matched'
+          ? { ...endpoint, macVendorClue: vendor }
+          : endpoint
+      }),
+    })) }
   }
 
   @Get('network/capabilities')
@@ -354,6 +367,26 @@ export class PortalController {
       { scopeId, ipAddress, endpointId },
       body?.cloudDataConsent === true,
     )
+  }
+
+  @Post('network/snapshots/:scanId/scopes/:scopeId/endpoints/:ipAddress/:endpointId/probe-http')
+  async probeSnapshotEndpointHttp(
+    @Param('scanId') scanId: string,
+    @Param('scopeId') scopeId: string,
+    @Param('ipAddress') ipAddress: string,
+    @Param('endpointId') endpointId: string,
+    @Body() body: { approved?: unknown },
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+    if (!this.networkEndpointProbe) throw new ServiceUnavailableException('Read-only endpoint investigation is unavailable')
+    const snapshot = await this.discoveryMemory.getSnapshot(scanId)
+    if (!snapshot) throw new NotFoundException('Network discovery snapshot was not found')
+    const target = snapshot.endpoints.find(endpoint =>
+      endpoint.networkZoneId === scopeId && endpoint.ipAddress === ipAddress && endpoint.id === endpointId,
+    )
+    if (!target) throw new NotFoundException('Endpoint was not found in the selected snapshot')
+    return this.networkEndpointProbe.run(target, this.lanDiscovery.getZones(), body?.approved === true)
   }
 
   @Post('network/:deviceId/investigations/:investigationId/actions/:proposalId/execute')

@@ -35,6 +35,7 @@ export interface NetworkEndpointInvestigationResult {
     value: string | number | boolean;
     observedAt: string;
     confidence: 'observed' | 'reported' | 'inferred';
+    provenance?: { database: string; version: string; sourceSha256: string; assignmentType: string; classification: string; prefix: string };
   }>;
 }
 
@@ -43,6 +44,13 @@ export type NetworkEndpointInvestigationState = {
   error?: string;
   result?: NetworkEndpointInvestigationResult;
 };
+
+export type NetworkEndpointHttpProbeResult =
+  | { outcome: 'completed'; reasonCode: string; ipAddress: string; method: 'HEAD'; path: '/'; redirects: 'not_followed'; statusCode: number; server?: string; contentType?: string; observedAt: string }
+  | { outcome: 'rejected'; reasonCode: string }
+  | { outcome: 'failed'; reasonCode: string };
+
+export type NetworkEndpointHttpProbeState = { loading: boolean; result?: NetworkEndpointHttpProbeResult; error?: string };
 
 export function networkEndpointInvestigationKey(
   scanId: string,

@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { networkEndpointInvestigationKey, networkEndpointSafeCheckLabels, type NetworkEndpointInvestigationState } from './network-endpoint-investigation';
+import { networkEndpointInvestigationKey, networkEndpointSafeCheckLabels, type NetworkEndpointHttpProbeState, type NetworkEndpointInvestigationState } from './network-endpoint-investigation';
 
 type Scope = { id: string; name: string; cidr?: string; interfaceName?: string; seedIps?: string[] };
 type Observation = { source: string; attribute: string; value: string | number | boolean; observedAt: string; method?: string };
 type Endpoint = {
   id: string; ipAddress: string; networkZoneId: string; networkZoneName: string;
   macAddress?: string; deviceReportedMacAddress?: string; hostname?: string; vendor?: string;
+  macVendorClue?: { status: 'matched'; vendor: string; prefix: string; assignmentType: string; databaseVersion: string; source: string; classification: string };
   model?: string; app?: string; protocol: string; status: string; discoveredAt: string; reason: string;
   components?: Array<{ component: string; channel: number }>;
   identityConflict?: { reason: string; macAddresses: string[] };
@@ -62,12 +63,14 @@ const props = withDefaults(defineProps<{
   enrollmentStateAvailable?: boolean;
   endpointLifecycle?: EndpointLifecycle[];
   endpointInvestigations?: Record<string, NetworkEndpointInvestigationState>;
+  endpointHttpProbes?: Record<string, NetworkEndpointHttpProbeState>;
   busy?: boolean; error?: string;
 }>(), { enrollmentStateAvailable: true });
 const emit = defineEmits<{
   scan: [scopeIds: string[]]; cancel: [];
   openPending: [recordId?: string]; openDevice: [recordId: string];
   investigateEndpoint: [request: { scanId: string; scopeId: string; ipAddress: string; endpointId: string }];
+  probeEndpoint: [request: { scanId: string; scopeId: string; ipAddress: string; endpointId: string }];
 }>();
 
 const selectedScopeId = ref('');
@@ -78,6 +81,7 @@ const identityFilter = ref<'all' | 'verified' | 'unidentified'>('all');
 const diagnosticsOpen = ref(false);
 const mobileViewport = ref(false);
 const mobileDetailsOpen = ref(false);
+const probeApprovalOpen = ref(false);
 let mobileMediaQuery: MediaQueryList | undefined;
 
 function updateViewport() {
@@ -159,6 +163,9 @@ const selectedInvestigationKey = computed(() => selectedEndpoint.value && select
 const selectedInvestigation = computed(() => selectedInvestigationKey.value
   ? props.endpointInvestigations?.[selectedInvestigationKey.value] || null
   : null);
+const selectedHttpProbe = computed(() => selectedInvestigationKey.value
+  ? props.endpointHttpProbes?.[selectedInvestigationKey.value] || null
+  : null);
 const visibleEndpoints = computed(() => {
   const query = search.value.trim().toLowerCase();
   return endpoints.value.filter(endpoint => {
@@ -236,6 +243,21 @@ function runScan() {
 function investigateSelectedEndpoint() {
   if (!selectedEndpoint.value || !selectedSnapshot.value || verifiedIdentity(selectedEndpoint.value) || selectedEndpoint.value.identityConflict) return;
   emit('investigateEndpoint', {
+    scanId: selectedSnapshot.value.scanId,
+    scopeId: selectedEndpoint.value.networkZoneId,
+    ipAddress: selectedEndpoint.value.ipAddress,
+    endpointId: selectedEndpoint.value.id,
+  });
+}
+
+function requestHttpProbeApproval() {
+  probeApprovalOpen.value = true;
+}
+
+function approveHttpProbe() {
+  if (!selectedEndpoint.value || !selectedSnapshot.value || selectedHttpProbe.value?.loading) return;
+  probeApprovalOpen.value = false;
+  emit('probeEndpoint', {
     scanId: selectedSnapshot.value.scanId,
     scopeId: selectedEndpoint.value.networkZoneId,
     ipAddress: selectedEndpoint.value.ipAddress,
@@ -389,6 +411,7 @@ function date(value?: string) {
             <div><dt>Network</dt><dd>{{ selectedEndpoint.networkZoneName }} · {{ selectedEndpoint.networkZoneId }}</dd></div>
             <div><dt>Verified protocol identity</dt><dd>{{ verifiedIdentity(selectedEndpoint) ? selectedEndpoint.id : 'Not established' }}</dd></div>
             <div><dt>Observed MAC</dt><dd>{{ selectedEndpoint.macAddress || 'Not observed' }}</dd></div>
+            <div v-if="selectedEndpoint.macVendorClue"><dt>MAC vendor clue</dt><dd>{{ selectedEndpoint.macVendorClue.vendor }} · {{ selectedEndpoint.macVendorClue.prefix }} <small>Network-interface/chip assignment; not device manufacturer. {{ selectedEndpoint.macVendorClue.databaseVersion }}</small></dd></div>
             <div v-if="selectedEndpoint.deviceReportedMacAddress"><dt>Device-reported MAC</dt><dd>{{ selectedEndpoint.deviceReportedMacAddress }}</dd></div>
             <div><dt>Services</dt><dd>{{ endpointServices(selectedEndpoint).join(', ') || 'No services identified' }}</dd></div>
             <div><dt>Last observed</dt><dd>{{ date(selectedEndpoint.discoveredAt) }}</dd></div>
@@ -426,11 +449,29 @@ function date(value?: string) {
                 <div v-if="selectedInvestigation.result.safeFollowUpChecks.length" class="ni-investigation-followups">
                   <strong>Suggested safe checks</strong>
                   <ul><li v-for="check in selectedInvestigation.result.safeFollowUpChecks" :key="check.action">{{ safeCheckLabel(check.action) }} <small>· human approval required</small></li></ul>
+                  <button v-if="selectedInvestigation.result.safeFollowUpChecks.some(check => check.action === 'inspect_http_headers')" type="button" class="ni-probe-button" :disabled="selectedHttpProbe?.loading" @click="requestHttpProbeApproval">{{ selectedHttpProbe?.loading ? 'Reading HTTP headers…' : 'Review HTTP headers' }}</button>
                 </div>
                 <small class="ni-investigation-provenance">Based on saved snapshot {{ selectedInvestigation.result.scanId }} · {{ date(selectedInvestigation.result.createdAt) }} · {{ selectedInvestigation.result.provider }} / {{ selectedInvestigation.result.model }}</small>
               </div>
             </template>
           </section>
+          <section v-if="probeApprovalOpen && selectedEndpoint" class="ni-probe-approval" role="dialog" aria-modal="true" aria-labelledby="ni-probe-approval-title">
+            <h4 id="ni-probe-approval-title">Approve one read-only check?</h4>
+            <p>Energrid will contact <strong>{{ selectedEndpoint.ipAddress }}:80</strong> with <code>HEAD /</code> and read response headers only (up to 4 KB, 2.5 second timeout). It will not follow redirects, read a response body, send credentials, or change the device.</p>
+            <p>The server will proceed only if this saved observation is still fresh and the address remains inside its configured network scope.</p>
+            <div><button type="button" class="ni-button ni-button-secondary" @click="probeApprovalOpen = false">Cancel</button><button type="button" class="ni-button ni-button-primary" @click="approveHttpProbe">Approve and check</button></div>
+          </section>
+          <section v-if="selectedHttpProbe?.result" class="ni-http-probe-result" aria-live="polite">
+            <strong>HTTP check evidence · separate from AI interpretation</strong>
+            <template v-if="selectedHttpProbe.result.outcome === 'completed'">
+              <span>{{ selectedHttpProbe.result.method }} {{ selectedHttpProbe.result.path }} at {{ selectedHttpProbe.result.ipAddress }}:80 · HTTP {{ selectedHttpProbe.result.statusCode }}</span>
+              <span v-if="selectedHttpProbe.result.server">Server header: {{ selectedHttpProbe.result.server }}</span>
+              <span v-if="selectedHttpProbe.result.contentType">Content type: {{ selectedHttpProbe.result.contentType }}</span>
+              <small>Redirects were not followed. Observed {{ date(selectedHttpProbe.result.observedAt) }}. This does not establish device identity.</small>
+            </template>
+            <span v-else>{{ selectedHttpProbe.result.outcome === 'rejected' ? 'Check not run: ' + selectedHttpProbe.result.reasonCode.replaceAll('_', ' ') : 'Check failed: ' + selectedHttpProbe.result.reasonCode.replaceAll('_', ' ') }}</span>
+          </section>
+          <p v-if="selectedHttpProbe?.error" class="ni-investigation-error" role="alert">{{ selectedHttpProbe.error }}</p>
           <details class="ni-evidence">
             <summary>Evidence details</summary>
             <ul v-if="selectedEndpoint.observations?.length"><li v-for="item in selectedEndpoint.observations" :key="`${item.source}:${item.attribute}:${item.observedAt}`"><strong>{{ item.attribute }}</strong><span>{{ item.source }}<template v-if="item.method"> · {{ item.method }}</template></span><small>{{ date(item.observedAt) }}</small></li></ul>
@@ -570,6 +611,7 @@ h1, h2, h3, p { margin-top: 0; }
 .ni-detail-fields > div { display: grid; grid-template-columns: minmax(95px, .7fr) minmax(0, 1.3fr); gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--ni-border); }
 .ni-detail-fields dt { color: var(--ni-muted); font-size: 12px; }
 .ni-detail-fields dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-size: 12px; font-weight: 600; }
+.ni-detail-fields dd small { display: block; margin-top: 4px; color: var(--ni-muted); font-size: 10px; font-weight: 500; line-height: 1.4; }
 .ni-detail-reason { margin: 0; color: var(--ni-muted); font-size: 12px; line-height: 1.5; }
 .ni-endpoint-investigation { display: grid; gap: 10px; margin: 14px 0; padding: 13px; border: 1px solid var(--ni-border); border-radius: 12px; background: var(--ni-surface); }
 .ni-ai-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; color: var(--ni-text); font-size: 13px; }
@@ -591,6 +633,12 @@ h1, h2, h3, p { margin-top: 0; }
 .ni-investigation-gaps > strong, .ni-investigation-followups > strong { color: var(--ni-text); }
 .ni-investigation-followups small { color: var(--ni-muted); }
 .ni-investigation-provenance { overflow-wrap: anywhere; }
+.ni-probe-button { justify-self: start; min-height: 34px; border: 1px solid var(--ni-accent); border-radius: 8px; padding: 0 11px; color: var(--ni-accent); background: var(--ni-bg); font-weight: 700; cursor: pointer; }
+.ni-probe-approval, .ni-http-probe-result { display: grid; gap: 8px; margin-top: 10px; border: 1px solid var(--ni-border); border-radius: 10px; padding: 12px; color: var(--ni-text); background: var(--ni-bg); font-size: 12px; line-height: 1.45; }
+.ni-probe-approval { border-color: var(--ni-accent); }
+.ni-probe-approval h4, .ni-probe-approval p, .ni-http-probe-result strong { margin: 0; }
+.ni-probe-approval > div { display: flex; justify-content: flex-end; gap: 8px; }
+.ni-http-probe-result span, .ni-http-probe-result small { color: var(--ni-muted); overflow-wrap: anywhere; }
 .ni-endpoint-investigation [role="status"] { margin: 0; color: var(--ni-muted); font-size: 12px; line-height: 1.45; }
 .ni-evidence { margin-top: 13px; border-top: 1px solid var(--ni-border); padding-top: 11px; }
 .ni-evidence summary, .ni-diagnostics summary { cursor: pointer; font-size: 13px; font-weight: 700; }

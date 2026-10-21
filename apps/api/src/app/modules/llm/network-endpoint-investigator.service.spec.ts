@@ -113,6 +113,40 @@ describe('NetworkEndpointInvestigatorService', () => {
     expect(evidence).toContainEqual(expect.objectContaining({ source: 'router_client_feed', attribute: 'observed_mac', confidence: 'reported' }));
   });
 
+  it('adds a versioned Espressif interface-vendor clue without treating it as device identity', async () => {
+    const clueSnapshot = structuredClone(snapshot);
+    clueSnapshot.endpoints[0].macAddress = '3c:71:bf:32:4b:44';
+    clueSnapshot.rawEvidence[0].evidence.macAddress = '3c:71:bf:32:4b:44';
+    generate.mockImplementation(async (input: { userPrompt: string }) => {
+      const evidence = JSON.parse(input.userPrompt).evidence as Array<{ id: string; attribute: string; provenance?: object }>;
+      const port = evidence.find(item => item.attribute === 'port.80.open')!;
+      return { provider: 'test-provider', model: 'test-model', text: JSON.stringify(answer({ findings: [{
+        claim: 'TCP port 80 was observed open.', confidence: 1, supportingEvidenceIds: [port.id], missingEvidence: [],
+      }] })) };
+    });
+
+    const result = await service.investigate(clueSnapshot, request);
+    const clue = result.evidence.find(item => item.attribute === 'mac_oui.interface_vendor_clue');
+    expect(clue).toMatchObject({ source: 'ieee_oui_database', value: 'Espressif Inc.', confidence: 'reported' });
+    expect(clue?.provenance).toMatchObject({ assignmentType: 'MA-L', classification: 'network_interface_vendor_clue', prefix: '3C:71:BF', sourceSha256: expect.any(String) });
+    expect(JSON.stringify(clue?.provenance)).toContain('ieee-ma-l-snapshot-2026-10-21');
+    expect(result.identification.manufacturer).toBeNull();
+  });
+
+  it('does not accept a MAC chip-vendor clue as proof of the device manufacturer', async () => {
+    const clueSnapshot = structuredClone(snapshot);
+    clueSnapshot.endpoints[0].macAddress = '3c:71:bf:32:4b:44';
+    clueSnapshot.rawEvidence[0].evidence.macAddress = '3c:71:bf:32:4b:44';
+    generate.mockImplementation(async (input: { userPrompt: string }) => {
+      const clue = (JSON.parse(input.userPrompt).evidence as Array<{ id: string; attribute: string }>).find(item => item.attribute === 'mac_oui.interface_vendor_clue')!;
+      return { provider: 'test-provider', model: 'test-model', text: JSON.stringify(answer({ identification: {
+        deviceType: 'smart plug', manufacturer: 'Espressif Inc.', confidence: 0.9,
+        supportingEvidenceIds: [clue.id], uncertainty: '',
+      } })) };
+    });
+    await expect(service.investigate(clueSnapshot, request)).rejects.toBeInstanceOf(BadGatewayException);
+  });
+
   it('rejects already verified identities so discovery cannot relabel them', async () => {
     const verified = structuredClone(snapshot);
     verified.endpoints[0].observations!.push({ source: 'http_rpc', attribute: 'shelly.device_id', value: 'shellyplus1-abc123', observedAt: verified.completedAt });
@@ -129,6 +163,13 @@ describe('NetworkEndpointInvestigatorService', () => {
   it('rejects unsupported claims without evidence references', async () => {
     generate.mockResolvedValue({ provider: 'openai', model: 'test', text: JSON.stringify(answer({
       identification: { deviceType: 'camera', manufacturer: 'Example', confidence: 0.9, supportingEvidenceIds: [], uncertainty: '' },
+    })) });
+    await expect(service.investigate(snapshot, request)).rejects.toBeInstanceOf(BadGatewayException);
+  });
+
+  it('rejects a malformed or unallowlisted follow-up probe proposal', async () => {
+    generate.mockResolvedValue({ provider: 'openai', model: 'test', text: JSON.stringify(answer({
+      safeFollowUpChecks: [{ action: 'fetch_http://169.254.169.254/latest/meta-data', requiresHumanApproval: true }],
     })) });
     await expect(service.investigate(snapshot, request)).rejects.toBeInstanceOf(BadGatewayException);
   });

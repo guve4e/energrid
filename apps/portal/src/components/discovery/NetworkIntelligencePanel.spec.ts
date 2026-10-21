@@ -2,6 +2,7 @@ import { mount } from '@vue/test-utils';
 import { nextTick } from 'vue';
 import { describe, expect, it, vi } from 'vitest';
 import NetworkIntelligencePanel from './NetworkIntelligencePanel.vue';
+import { networkEndpointInvestigationKey } from './network-endpoint-investigation';
 
 const scopes = [
   { id: 'eero', name: 'Eero', cidr: '192.168.7.0/24', seedIps: [] },
@@ -114,6 +115,18 @@ describe('NetworkIntelligencePanel', () => {
     panel.unmount();
   });
 
+  it('labels an OUI assignment as a network-interface clue, not a device manufacturer', async () => {
+    const withVendorClue = { ...snapshot, endpoints: snapshot.endpoints.map(endpoint => endpoint.ipAddress === '192.168.7.20'
+      ? { ...endpoint, macVendorClue: { status: 'matched' as const, vendor: 'Espressif Inc.', prefix: '3C:71:BF', assignmentType: 'MA-L', databaseVersion: 'ieee-ma-l-2026-06-05-curated-v1', source: 'https://standards-oui.ieee.org/oui/oui.csv', classification: 'network_interface_vendor_clue' } }
+      : endpoint) };
+    const panel = mount(NetworkIntelligencePanel, { props: { scopes, snapshots: [withVendorClue], latest: withVendorClue, comparison: null } });
+    await panel.findAll('button.ni-device-row')[1].trigger('click');
+    expect(panel.text()).toContain('Espressif Inc.');
+    expect(panel.text()).toContain('Network-interface/chip assignment; not device manufacturer.');
+    expect(panel.text()).toContain('ieee-ma-l-2026-06-05-curated-v1');
+    panel.unmount();
+  });
+
   it('offers snapshot-scoped AI investigation only for unidentified endpoints', async () => {
     const panel = mount(NetworkIntelligencePanel, { props: { scopes, snapshots: [snapshot], latest: snapshot, comparison: null } });
     expect(panel.findAll('.ni-device-row')[0].text()).toContain('Shelly');
@@ -152,6 +165,39 @@ describe('NetworkIntelligencePanel', () => {
     expect(panel.emitted('investigateEndpoint')).toEqual([[
       { scanId: historical.scanId, scopeId: 'eero', ipAddress: '192.168.7.48', endpointId: 'unknown-192.168.7.48' },
     ]]);
+    panel.unmount();
+  });
+
+  it('requires a separate approval before emitting the fixed read-only HTTP check', async () => {
+    const key = networkEndpointInvestigationKey('scan-1', 'eero', '192.168.7.20', 'aa:bb:cc:dd:ee:ff');
+    const panel = mount(NetworkIntelligencePanel, { props: {
+      scopes, snapshots: [snapshot], latest: snapshot, comparison: null,
+      endpointInvestigations: { [key]: { loading: false, result: {
+        schemaVersion: 1, scanId: 'scan-1', endpointId: 'aa:bb:cc:dd:ee:ff', createdAt: '2026-10-21T10:00:00Z', provider: 'test', model: 'test',
+        summary: 'HTTP headers could help identify the service.', identification: { deviceType: null, manufacturer: null, confidence: null, supportingEvidenceIds: [], uncertainty: 'Unknown.' },
+        findings: [], missingEvidence: ['HTTP response headers'], safeFollowUpChecks: [{ action: 'inspect_http_headers', requiresHumanApproval: true }], evidence: [],
+      } } },
+    } });
+    await panel.findAll('button.ni-device-row')[1].trigger('click');
+    await panel.get('button.ni-probe-button').trigger('click');
+    expect(panel.get('[role="dialog"]').text()).toContain('192.168.7.20:80');
+    expect(panel.get('[role="dialog"]').text()).toContain('HEAD /');
+    expect(panel.get('[role="dialog"]').text()).toContain('will not follow redirects');
+    await panel.get('[role="dialog"] button.ni-button-secondary').trigger('click');
+    expect(panel.emitted('probeEndpoint')).toBeUndefined();
+
+    await panel.get('button.ni-probe-button').trigger('click');
+    await panel.get('[role="dialog"] button.ni-button-primary').trigger('click');
+    expect(panel.emitted('probeEndpoint')).toEqual([[
+      { scanId: 'scan-1', scopeId: 'eero', ipAddress: '192.168.7.20', endpointId: 'aa:bb:cc:dd:ee:ff' },
+    ]]);
+    await panel.setProps({ endpointHttpProbes: { [key]: { loading: false, result: {
+      outcome: 'completed', reasonCode: 'http_response_received', ipAddress: '192.168.7.20', method: 'HEAD', path: '/', redirects: 'not_followed',
+      statusCode: 302, server: 'fixture-device', contentType: 'text/html', observedAt: '2026-10-21T10:01:00Z',
+    } } } });
+    expect(panel.text()).toContain('HTTP check evidence · separate from AI interpretation');
+    expect(panel.text()).toContain('HTTP 302');
+    expect(panel.text()).toContain('Redirects were not followed');
     panel.unmount();
   });
 

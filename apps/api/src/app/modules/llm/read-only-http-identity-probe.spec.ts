@@ -1,5 +1,5 @@
 import type { NetworkDiscoveredDevice, NetworkDiscoveryZone } from '../devices/device-registry.types';
-import { ReadOnlyHttpIdentityProbe, type HttpHeadTransport } from './read-only-http-identity-probe';
+import { httpIdentityProbePolicy, ReadOnlyHttpIdentityProbe, type HttpHeadTransport } from './read-only-http-identity-probe';
 
 describe('ReadOnlyHttpIdentityProbe', () => {
   const target: NetworkDiscoveredDevice = {
@@ -20,23 +20,36 @@ describe('ReadOnlyHttpIdentityProbe', () => {
 
     const result = await probe.run(target, zones, true);
 
-    expect(result).toMatchObject({ outcome: 'completed', statusCode: 404, ipAddress: target.ipAddress });
+    expect(result).toMatchObject({ outcome: 'completed', statusCode: 404, ipAddress: target.ipAddress, method: 'HEAD', path: '/', redirects: 'not_followed' });
     expect(request).toHaveBeenCalledWith(target.ipAddress, 80, 2500, 4096);
+  });
+
+  it('uses a fixed allowlisted URL, bounded headers, no body, and does not follow redirects', async () => {
+    const request = jest.fn().mockResolvedValue({ statusCode: 302, headers: { server: 'fixture', contentType: 'text/html' } });
+    const probe = new ReadOnlyHttpIdentityProbe({ request } as HttpHeadTransport, now);
+    const result = await probe.run(target, zones, true);
+
+    expect(httpIdentityProbePolicy).toEqual({ method: 'HEAD', path: '/', port: 80, timeoutMs: 2500, maxHeaderBytes: 4096, redirects: 'not_followed', maxBodyBytes: 0 });
+    expect(result).toMatchObject({ outcome: 'completed', statusCode: 302, redirects: 'not_followed' });
+    expect(request).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a probe without explicit operator approval', async () => {
     const request = jest.fn();
     const probe = new ReadOnlyHttpIdentityProbe({ request } as HttpHeadTransport, now);
+    const before = structuredClone(target);
 
     await expect(probe.run(target, zones, false)).resolves.toMatchObject({
       outcome: 'rejected', reasonCode: 'operator_approval_required',
     });
     expect(request).not.toHaveBeenCalled();
+    expect(target).toEqual(before);
   });
 
   it.each([
     ['out-of-scope IP', { ...target, ipAddress: '192.168.2.9' }],
     ['public IP', { ...target, ipAddress: '8.8.8.8' }],
+    ['link-local metadata address', { ...target, ipAddress: '169.254.169.254' }],
     ['stale observation', { ...target, discoveredAt: '2026-10-20T08:50:00.000Z' }],
     ['non-live observation', { ...target, status: 'unknown' as const }],
   ])('rejects %s before transport access', async (_label, candidate) => {

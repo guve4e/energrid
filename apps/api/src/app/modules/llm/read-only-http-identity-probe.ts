@@ -9,12 +9,22 @@ export interface HttpHeadResponse {
   headers: { server?: string; contentType?: string };
 }
 
+export const httpIdentityProbePolicy = {
+  method: 'HEAD',
+  path: '/',
+  port: 80,
+  timeoutMs: 2500,
+  maxHeaderBytes: 4096,
+  redirects: 'not_followed',
+  maxBodyBytes: 0,
+} as const;
+
 export interface HttpHeadTransport {
   request(ipAddress: string, port: 80, timeoutMs: number, maxHeaderBytes: number): Promise<HttpHeadResponse>;
 }
 
 export type HttpIdentityProbeResult =
-  | { outcome: 'completed'; reasonCode: 'http_response_received'; ipAddress: string; statusCode: number; server?: string; contentType?: string; observedAt: string }
+  | { outcome: 'completed'; reasonCode: 'http_response_received'; ipAddress: string; method: 'HEAD'; path: '/'; redirects: 'not_followed'; statusCode: number; server?: string; contentType?: string; observedAt: string }
   | { outcome: 'rejected'; reasonCode: 'operator_approval_required' | 'network_target_not_current' | 'network_target_out_of_scope' | 'network_target_not_private' | 'conflicting_mac_evidence' | 'probe_rate_limited' | 'probe_capacity_reached' }
   | { outcome: 'failed'; reasonCode: 'http_probe_timeout_or_transport_error' };
 
@@ -68,11 +78,19 @@ export class ReadOnlyHttpIdentityProbe {
       if (oldest) this.lastStartedAt.delete(oldest);
     }
     try {
-      const response = await this.transport.request(target.ipAddress, 80, 2500, 4096);
+      const response = await this.transport.request(
+        target.ipAddress,
+        httpIdentityProbePolicy.port,
+        httpIdentityProbePolicy.timeoutMs,
+        httpIdentityProbePolicy.maxHeaderBytes,
+      );
       return {
         outcome: 'completed',
         reasonCode: 'http_response_received',
         ipAddress: target.ipAddress,
+        method: httpIdentityProbePolicy.method,
+        path: httpIdentityProbePolicy.path,
+        redirects: httpIdentityProbePolicy.redirects,
         statusCode: response.statusCode,
         ...(safeServerHeader(response.headers.server) ? { server: safeServerHeader(response.headers.server) } : {}),
         ...(safeContentType(response.headers.contentType) ? { contentType: safeContentType(response.headers.contentType) } : {}),
@@ -139,6 +157,5 @@ function isPrivateIpv4(value: string): boolean {
   const parts = value.split('.').map(Number);
   if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return false;
   const [a, b] = parts;
-  return a === 10 || (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) || (a === 169 && b === 254);
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
 }
