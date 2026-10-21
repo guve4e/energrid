@@ -206,16 +206,36 @@ describe('NetworkIntelligencePanel', () => {
     } });
     await panel.findAll('button.ni-device-row')[1].trigger('click');
     await panel.get('button.ni-probe-button').trigger('click');
+    expect(panel.text()).toContain('Refresh identity required');
+    expect(panel.get('[role="dialog"]').text()).toContain('192.168.7.20');
+    expect(panel.get('[role="dialog"]').text()).toContain('one ARP identity request');
+    await panel.get('[role="dialog"] button.ni-button-secondary').trigger('click');
+    expect(panel.emitted('refreshEndpointIdentity')).toBeUndefined();
+
+    await panel.get('button.ni-probe-button').trigger('click');
+    await panel.get('[role="dialog"] button.ni-button-primary').trigger('click');
+    expect(panel.emitted('refreshEndpointIdentity')).toEqual([[
+      { scanId: 'scan-1', scopeId: 'eero', ipAddress: '192.168.7.20', endpointId: 'aa:bb:cc:dd:ee:ff' },
+    ]]);
+    expect(panel.find('.ni-investigation-evidence summary').text()).toBe('Evidence');
+
+    await panel.setProps({ endpointIdentityRefreshes: { [key]: { loading: false, result: {
+      outcome: 'verified', reasonCode: 'historical_mac_matched', refreshId: 'refresh-once', action: 'http_head_root', source: 'direct_arp_reply', method: 'single_target_nmap_arp_ping', scopeId: 'eero',
+      ipAddress: '192.168.7.20', historicalMac: 'aa:bb:cc:dd:ee:ff', observedMac: 'aa:bb:cc:dd:ee:ff',
+      observedAt: new Date().toISOString(), interfaceName: 'en0',
+    } } } });
+    expect(panel.text()).toContain('Current MAC matches the saved MAC');
+    await panel.findAll('button.ni-probe-button').find(button => button.text() === 'Review HTTP headers')!.trigger('click');
     expect(panel.get('[role="dialog"]').text()).toContain('192.168.7.20:80');
     expect(panel.get('[role="dialog"]').text()).toContain('HEAD /');
     expect(panel.get('[role="dialog"]').text()).toContain('will not follow redirects');
     await panel.get('[role="dialog"] button.ni-button-secondary').trigger('click');
     expect(panel.emitted('probeEndpoint')).toBeUndefined();
 
-    await panel.get('button.ni-probe-button').trigger('click');
+    await panel.findAll('button.ni-probe-button').find(button => button.text() === 'Review HTTP headers')!.trigger('click');
     await panel.get('[role="dialog"] button.ni-button-primary').trigger('click');
     expect(panel.emitted('probeEndpoint')).toEqual([[
-      { scanId: 'scan-1', scopeId: 'eero', ipAddress: '192.168.7.20', endpointId: 'aa:bb:cc:dd:ee:ff' },
+      { scanId: 'scan-1', scopeId: 'eero', ipAddress: '192.168.7.20', endpointId: 'aa:bb:cc:dd:ee:ff', refreshId: 'refresh-once' },
     ]]);
     await panel.setProps({ endpointHttpProbes: { [key]: { loading: false, result: {
       outcome: 'completed', reasonCode: 'http_response_received', ipAddress: '192.168.7.20', method: 'HEAD', path: '/', redirects: 'not_followed',
@@ -224,6 +244,29 @@ describe('NetworkIntelligencePanel', () => {
     expect(panel.text()).toContain('HTTP check evidence · separate from AI interpretation');
     expect(panel.text()).toContain('HTTP 302');
     expect(panel.text()).toContain('Redirects were not followed');
+    panel.unmount();
+  });
+
+  it('does not offer an HTTP check when the refreshed MAC changed', async () => {
+    const key = networkEndpointInvestigationKey('scan-1', 'eero', '192.168.7.20', 'aa:bb:cc:dd:ee:ff');
+    const panel = mount(NetworkIntelligencePanel, { props: {
+      scopes, snapshots: [snapshot], latest: snapshot, comparison: null,
+      endpointInvestigations: { [key]: { loading: false, result: {
+        schemaVersion: 1, scanId: 'scan-1', endpointId: 'aa:bb:cc:dd:ee:ff', createdAt: '2026-10-21T10:00:00Z', provider: 'test', model: 'test',
+        summary: 'HTTP headers may help.', identification: { deviceType: null, manufacturer: null, confidence: null, supportingEvidenceIds: [], uncertainty: 'Unknown.' },
+        findings: [], missingEvidence: [], safeFollowUpChecks: [{ action: 'inspect_http_headers', requiresHumanApproval: true }], evidence: [],
+      } } },
+      endpointIdentityRefreshes: { [key]: { loading: false, result: {
+        outcome: 'changed', reasonCode: 'identity_changed', source: 'direct_arp_reply', method: 'single_target_nmap_arp_ping', scopeId: 'eero', ipAddress: '192.168.7.20',
+        historicalMac: 'aa:bb:cc:dd:ee:ff', observedMac: '10:20:30:40:50:60', observedAt: '2026-10-21T10:01:00Z',
+      } } },
+    } });
+    await panel.findAll('button.ni-device-row')[1].trigger('click');
+    expect(panel.text()).toContain('MAC changed at this address');
+    expect(panel.text()).toContain('Refresh identity required');
+    expect(panel.findAll('button.ni-probe-button')).toHaveLength(1);
+    expect(panel.findAll('button.ni-probe-button')[0].text()).toBe('Refresh identity');
+    expect(panel.emitted('probeEndpoint')).toBeUndefined();
     panel.unmount();
   });
 

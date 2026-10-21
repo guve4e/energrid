@@ -53,6 +53,13 @@ export type NetworkEndpointHttpProbeResult =
 
 export type NetworkEndpointHttpProbeState = { loading: boolean; result?: NetworkEndpointHttpProbeResult; error?: string };
 
+export type NetworkEndpointIdentityRefreshResult =
+  | { outcome: 'verified'; reasonCode: 'historical_mac_matched'; refreshId: string; action: 'http_head_root'; source: 'direct_arp_reply'; method: 'single_target_nmap_arp_ping'; scopeId: string; ipAddress: string; historicalMac: string; observedMac: string; observedAt: string; interfaceName?: string }
+  | { outcome: 'changed'; reasonCode: 'identity_changed'; source: 'direct_arp_reply'; method: 'single_target_nmap_arp_ping'; scopeId: string; ipAddress: string; historicalMac: string; observedMac: string; observedAt: string; interfaceName?: string }
+  | { outcome: 'failed' | 'rejected'; reasonCode: string };
+
+export type NetworkEndpointIdentityRefreshState = { loading: boolean; error?: string; result?: NetworkEndpointIdentityRefreshResult };
+
 export function networkEndpointInvestigationKey(
   scanId: string,
   scopeId: string,

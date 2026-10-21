@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import NetworkDiscoveryCard from './components/discovery/NetworkDiscoveryCard.vue';
 import NetworkIntelligencePanel from './components/discovery/NetworkIntelligencePanel.vue';
-import { cloudEvidenceConsentMessage, networkEndpointInvestigationKey, type NetworkEndpointHttpProbeResult, type NetworkEndpointHttpProbeState, type NetworkEndpointInvestigationState, type NetworkEndpointInvestigationResult } from './components/discovery/network-endpoint-investigation';
+import { cloudEvidenceConsentMessage, networkEndpointInvestigationKey, type NetworkEndpointHttpProbeResult, type NetworkEndpointHttpProbeState, type NetworkEndpointIdentityRefreshResult, type NetworkEndpointIdentityRefreshState, type NetworkEndpointInvestigationState, type NetworkEndpointInvestigationResult } from './components/discovery/network-endpoint-investigation';
 import { resolveNetworkEndpointLifecycle } from './components/discovery/network-endpoint-lifecycle';
 import PendingEnrollmentList from './components/discovery/PendingEnrollmentList.vue';
 import { buildPendingEnrollmentCards } from './components/discovery/pending-enrollment';
@@ -511,6 +511,7 @@ const networkSnapshotComparison = ref<NetworkSnapshotDiff | null>(null);
 const networkSnapshotsError = ref('');
 const networkEndpointInvestigations = ref<Record<string, NetworkEndpointInvestigationState>>({});
 const networkEndpointHttpProbes = ref<Record<string, NetworkEndpointHttpProbeState>>({});
+const networkEndpointIdentityRefreshes = ref<Record<string, NetworkEndpointIdentityRefreshState>>({});
 const nmapCapability = ref<NmapCapability | null>(null);
 const networkRuntime = ref<NetworkRuntime | null>(null);
 const discoveryDecisionBusy = ref<Record<string, string>>({});
@@ -1302,7 +1303,7 @@ async function investigateSnapshotEndpoint(request: {
 }
 
 async function probeSnapshotEndpoint(request: {
-  scanId: string; scopeId: string; ipAddress: string; endpointId: string;
+  scanId: string; scopeId: string; ipAddress: string; endpointId: string; refreshId: string;
 }): Promise<void> {
   const key = networkEndpointInvestigationKey(request.scanId, request.scopeId, request.ipAddress, request.endpointId);
   if (networkEndpointHttpProbes.value[key]?.loading) return;
@@ -1314,7 +1315,7 @@ async function probeSnapshotEndpoint(request: {
     const response = await fetch(`${apiBase}/portal/network/snapshots/${scanId}/scopes/${scopeId}/endpoints/${ipAddress}/${endpointId}/probe-http`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${accessToken.value}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ approved: true }),
+      body: JSON.stringify({ approved: true, refreshId: request.refreshId }),
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
@@ -1326,6 +1327,35 @@ async function probeSnapshotEndpoint(request: {
     networkEndpointHttpProbes.value = {
       ...networkEndpointHttpProbes.value,
       [key]: { loading: false, error: error instanceof Error ? error.message : 'HTTP check failed' },
+    };
+  }
+}
+
+async function refreshSnapshotEndpointIdentity(request: {
+  scanId: string; scopeId: string; ipAddress: string; endpointId: string;
+}): Promise<void> {
+  const key = networkEndpointInvestigationKey(request.scanId, request.scopeId, request.ipAddress, request.endpointId);
+  if (networkEndpointIdentityRefreshes.value[key]?.loading) return;
+  networkEndpointIdentityRefreshes.value = { ...networkEndpointIdentityRefreshes.value, [key]: { loading: true } };
+  try {
+    const endpointUrl = [request.scanId, request.scopeId, request.ipAddress, request.endpointId]
+      .map(encodeURIComponent).join('/');
+    const [scanId, scopeId, ipAddress, endpointId] = endpointUrl.split('/');
+    const response = await fetch(`${apiBase}/portal/network/snapshots/${scanId}/scopes/${scopeId}/endpoints/${ipAddress}/${endpointId}/refresh-identity`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken.value}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ approved: true }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(typeof body.message === 'string' ? body.message : `Identity refresh failed (${response.status})`);
+    }
+    const result = await response.json() as NetworkEndpointIdentityRefreshResult;
+    networkEndpointIdentityRefreshes.value = { ...networkEndpointIdentityRefreshes.value, [key]: { loading: false, result } };
+  } catch (error) {
+    networkEndpointIdentityRefreshes.value = {
+      ...networkEndpointIdentityRefreshes.value,
+      [key]: { loading: false, error: error instanceof Error ? error.message : 'Identity refresh failed' },
     };
   }
 }
@@ -4853,6 +4883,7 @@ onBeforeUnmount(() => {
             :endpoint-lifecycle="networkEndpointLifecycle"
             :endpoint-investigations="networkEndpointInvestigations"
             :endpoint-http-probes="networkEndpointHttpProbes"
+            :endpoint-identity-refreshes="networkEndpointIdentityRefreshes"
             :busy="scanningNetwork"
             :error="networkSnapshotsError || stateError"
             @scan="scanNetwork"
@@ -4860,6 +4891,7 @@ onBeforeUnmount(() => {
             @open-pending="openPendingEnrollment"
             @open-device="openEnrolledDevice"
             @investigate-endpoint="investigateSnapshotEndpoint"
+            @refresh-endpoint-identity="refreshSnapshotEndpointIdentity"
             @probe-endpoint="probeSnapshotEndpoint"
           />
         </section>

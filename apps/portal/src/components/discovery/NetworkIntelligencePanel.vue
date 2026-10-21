@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { networkEndpointInvestigationKey, networkEndpointSafeCheckLabels, type NetworkEndpointHttpProbeState, type NetworkEndpointInvestigationState } from './network-endpoint-investigation';
+import { networkEndpointInvestigationKey, networkEndpointSafeCheckLabels, type NetworkEndpointHttpProbeState, type NetworkEndpointIdentityRefreshState, type NetworkEndpointInvestigationState } from './network-endpoint-investigation';
 
 type Scope = { id: string; name: string; cidr?: string; interfaceName?: string; seedIps?: string[] };
 type Observation = { source: string; attribute: string; value: string | number | boolean; observedAt: string; method?: string };
@@ -64,13 +64,15 @@ const props = withDefaults(defineProps<{
   endpointLifecycle?: EndpointLifecycle[];
   endpointInvestigations?: Record<string, NetworkEndpointInvestigationState>;
   endpointHttpProbes?: Record<string, NetworkEndpointHttpProbeState>;
+  endpointIdentityRefreshes?: Record<string, NetworkEndpointIdentityRefreshState>;
   busy?: boolean; error?: string;
 }>(), { enrollmentStateAvailable: true });
 const emit = defineEmits<{
   scan: [scopeIds: string[]]; cancel: [];
   openPending: [recordId?: string]; openDevice: [recordId: string];
   investigateEndpoint: [request: { scanId: string; scopeId: string; ipAddress: string; endpointId: string }];
-  probeEndpoint: [request: { scanId: string; scopeId: string; ipAddress: string; endpointId: string }];
+  probeEndpoint: [request: { scanId: string; scopeId: string; ipAddress: string; endpointId: string; refreshId: string }];
+  refreshEndpointIdentity: [request: { scanId: string; scopeId: string; ipAddress: string; endpointId: string }];
 }>();
 
 const selectedScopeId = ref('');
@@ -82,7 +84,10 @@ const diagnosticsOpen = ref(false);
 const mobileViewport = ref(false);
 const mobileDetailsOpen = ref(false);
 const probeApprovalOpen = ref(false);
+const identityRefreshApprovalOpen = ref(false);
+const freshnessNow = ref(Date.now());
 let mobileMediaQuery: MediaQueryList | undefined;
+let freshnessTimer: ReturnType<typeof setInterval> | undefined;
 
 function updateViewport() {
   mobileViewport.value = window.matchMedia?.('(max-width: 640px)').matches ?? window.innerWidth <= 640;
@@ -90,11 +95,13 @@ function updateViewport() {
 
 onMounted(() => {
   updateViewport();
+  freshnessTimer = setInterval(() => { freshnessNow.value = Date.now(); }, 10_000);
   mobileMediaQuery = window.matchMedia?.('(max-width: 640px)');
   mobileMediaQuery?.addEventListener?.('change', updateViewport);
   window.addEventListener('resize', updateViewport);
 });
 onBeforeUnmount(() => {
+  if (freshnessTimer) clearInterval(freshnessTimer);
   mobileMediaQuery?.removeEventListener?.('change', updateViewport);
   window.removeEventListener('resize', updateViewport);
 });
@@ -166,6 +173,18 @@ const selectedInvestigation = computed(() => selectedInvestigationKey.value
 const selectedHttpProbe = computed(() => selectedInvestigationKey.value
   ? props.endpointHttpProbes?.[selectedInvestigationKey.value] || null
   : null);
+const selectedIdentityRefresh = computed(() => selectedInvestigationKey.value
+  ? props.endpointIdentityRefreshes?.[selectedInvestigationKey.value] || null
+  : null);
+watch(selectedInvestigationKey, () => {
+  identityRefreshApprovalOpen.value = false;
+  probeApprovalOpen.value = false;
+});
+const verifiedRefreshId = computed(() => selectedIdentityRefresh.value?.result?.outcome === 'verified'
+  && isFreshIdentityTimestamp(selectedIdentityRefresh.value.result.observedAt, freshnessNow.value)
+  ? selectedIdentityRefresh.value.result.refreshId
+  : '');
+watch(selectedIdentityRefresh, () => { freshnessNow.value = Date.now(); });
 const visibleEndpoints = computed(() => {
   const query = search.value.trim().toLowerCase();
   return endpoints.value.filter(endpoint => {
@@ -251,17 +270,34 @@ function investigateSelectedEndpoint() {
 }
 
 function requestHttpProbeApproval() {
+  if (!verifiedRefreshId.value) return;
   probeApprovalOpen.value = true;
 }
 
+function requestIdentityRefreshApproval() {
+  identityRefreshApprovalOpen.value = true;
+}
+
+function approveIdentityRefresh() {
+  if (!selectedEndpoint.value || !selectedSnapshot.value || selectedIdentityRefresh.value?.loading) return;
+  identityRefreshApprovalOpen.value = false;
+  emit('refreshEndpointIdentity', {
+    scanId: selectedSnapshot.value.scanId,
+    scopeId: selectedEndpoint.value.networkZoneId,
+    ipAddress: selectedEndpoint.value.ipAddress,
+    endpointId: selectedEndpoint.value.id,
+  });
+}
+
 function approveHttpProbe() {
-  if (!selectedEndpoint.value || !selectedSnapshot.value || selectedHttpProbe.value?.loading) return;
+  if (!selectedEndpoint.value || !selectedSnapshot.value || selectedHttpProbe.value?.loading || !verifiedRefreshId.value) return;
   probeApprovalOpen.value = false;
   emit('probeEndpoint', {
     scanId: selectedSnapshot.value.scanId,
     scopeId: selectedEndpoint.value.networkZoneId,
     ipAddress: selectedEndpoint.value.ipAddress,
     endpointId: selectedEndpoint.value.id,
+    refreshId: verifiedRefreshId.value,
   });
 }
 
@@ -284,6 +320,11 @@ function date(value?: string) {
   if (!value) return 'Time unavailable';
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? 'Time unavailable' : parsed.toLocaleString();
+}
+
+function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
+  const observedAt = Date.parse(value);
+  return Number.isFinite(observedAt) && observedAt <= nowMs && nowMs - observedAt <= 120_000;
 }
 </script>
 
@@ -431,40 +472,73 @@ function date(value?: string) {
               </button>
               <p v-if="selectedInvestigation?.error" class="ni-investigation-error" role="alert">{{ selectedInvestigation.error }}</p>
               <div v-if="selectedInvestigation?.result" class="ni-investigation-result" aria-live="polite">
-                <p class="ni-investigation-summary">{{ selectedInvestigation.result.summary }}</p>
-                <div class="ni-investigation-identification">
+                <section class="ni-investigation-assessment" aria-labelledby="ni-assessment-title">
+                  <h4 id="ni-assessment-title">Assessment</h4>
                   <strong v-if="selectedInvestigation.result.identification.deviceType || selectedInvestigation.result.identification.manufacturer">
                     Possible {{ [selectedInvestigation.result.identification.manufacturer, selectedInvestigation.result.identification.deviceType].filter(Boolean).join(' ') }}
                   </strong>
                   <strong v-else>Not enough evidence to identify this device.</strong>
+                  <p>{{ selectedInvestigation.result.summary }}</p>
                   <span v-if="selectedInvestigation.result.identification.confidence !== null">Estimated confidence {{ Math.round(selectedInvestigation.result.identification.confidence * 100) }}%</span>
-                  <span>{{ selectedInvestigation.result.identification.uncertainty }}</span>
-                  <small v-if="selectedInvestigation.result.identification.supportingEvidenceIds.length">Supported by: {{ selectedInvestigation.result.identification.supportingEvidenceIds.map(evidenceLabel).join('; ') }}</small>
-                </div>
-                <ul v-if="selectedInvestigation.result.findings.length" class="ni-investigation-findings">
-                  <li v-for="(finding, index) in selectedInvestigation.result.findings" :key="`${finding.claim}:${index}`">
-                    <strong>{{ findingKindLabel(finding.kind) }}</strong>
-                    <span>{{ finding.claim }}</span>
-                    <small>{{ finding.supportingEvidenceIds.map(evidenceLabel).join('; ') }}</small>
-                    <small v-if="finding.missingEvidence.length">Missing: {{ finding.missingEvidence.join(' · ') }}</small>
-                  </li>
-                </ul>
-                <div v-if="selectedInvestigation.result.missingEvidence.length" class="ni-investigation-gaps">
-                  <strong>Missing evidence</strong><span>{{ selectedInvestigation.result.missingEvidence.join(' · ') }}</span>
-                </div>
-                <div v-if="selectedInvestigation.result.safeFollowUpChecks.length" class="ni-investigation-followups">
-                  <strong>Suggested safe checks</strong>
-                  <ul><li v-for="check in selectedInvestigation.result.safeFollowUpChecks" :key="check.action">{{ safeCheckLabel(check.action) }} <small>· human approval required</small></li></ul>
-                  <button v-if="selectedInvestigation.result.safeFollowUpChecks.some(check => check.action === 'inspect_http_headers')" type="button" class="ni-probe-button" :disabled="selectedHttpProbe?.loading" @click="requestHttpProbeApproval">{{ selectedHttpProbe?.loading ? 'Reading HTTP headers…' : 'Review HTTP headers' }}</button>
-                </div>
-                <small class="ni-investigation-provenance">Based on saved snapshot {{ selectedInvestigation.result.scanId }} · {{ date(selectedInvestigation.result.createdAt) }} · {{ selectedInvestigation.result.provider }} / {{ selectedInvestigation.result.model }}</small>
+                  <small>{{ selectedInvestigation.result.identification.uncertainty }}</small>
+                </section>
+                <section class="ni-investigation-next-action" aria-labelledby="ni-next-action-title">
+                  <h4 id="ni-next-action-title">Next action</h4>
+                  <template v-if="selectedInvestigation.result.safeFollowUpChecks.some(check => check.action === 'inspect_http_headers')">
+                    <p>Historical evidence cannot establish who is at this address now. <strong>Refresh identity required</strong> before any HTTP check.</p>
+                    <button type="button" class="ni-probe-button" :disabled="selectedIdentityRefresh?.loading" @click="requestIdentityRefreshApproval">
+                      {{ selectedIdentityRefresh?.loading ? 'Refreshing identity…' : 'Refresh identity' }}
+                    </button>
+                    <div v-if="selectedIdentityRefresh?.result" class="ni-identity-refresh-result" aria-live="polite">
+                      <strong>{{ selectedIdentityRefresh.result.outcome === 'verified' ? 'Current MAC matches the saved MAC' : selectedIdentityRefresh.result.outcome === 'changed' ? 'MAC changed at this address' : selectedIdentityRefresh.result.reasonCode.replaceAll('_', ' ') }}</strong>
+                      <span v-if="selectedIdentityRefresh.result.outcome === 'verified' || selectedIdentityRefresh.result.outcome === 'changed'">
+                        Saved {{ selectedIdentityRefresh.result.historicalMac }} · observed {{ selectedIdentityRefresh.result.observedMac }} · {{ date(selectedIdentityRefresh.result.observedAt) }}
+                        <template v-if="selectedIdentityRefresh.result.interfaceName"> · {{ selectedIdentityRefresh.result.interfaceName }}</template>
+                      </span>
+                      <small>{{ selectedIdentityRefresh.result.outcome === 'verified' || selectedIdentityRefresh.result.outcome === 'changed' ? 'Source: a fresh, single-target ARP reply on the local link.' : 'Targeted link-layer evidence only.' }} No subnet scan or device configuration change.</small>
+                    </div>
+                    <p v-if="selectedIdentityRefresh?.result?.outcome === 'verified' && !verifiedRefreshId">The identity refresh expired. Refresh identity again before the HTTP check.</p>
+                    <p v-if="selectedIdentityRefresh?.error" class="ni-investigation-error" role="alert">{{ selectedIdentityRefresh.error }}</p>
+                    <button v-if="verifiedRefreshId" type="button" class="ni-probe-button" :disabled="selectedHttpProbe?.loading" @click="requestHttpProbeApproval">
+                      {{ selectedHttpProbe?.loading ? 'Reading HTTP headers…' : 'Review HTTP headers' }}
+                    </button>
+                  </template>
+                  <div v-else-if="selectedInvestigation.result.safeFollowUpChecks.length" class="ni-investigation-followups">
+                    <p v-for="check in selectedInvestigation.result.safeFollowUpChecks" :key="check.action">{{ safeCheckLabel(check.action) }} <small>· separate operator approval required</small></p>
+                  </div>
+                  <p v-else>No follow-up action is supported by the current evidence.</p>
+                </section>
+                <details class="ni-investigation-evidence">
+                  <summary>Evidence</summary>
+                  <ul v-if="selectedInvestigation.result.findings.length" class="ni-investigation-findings">
+                    <li v-for="(finding, index) in selectedInvestigation.result.findings" :key="`${finding.claim}:${index}`">
+                      <strong>{{ findingKindLabel(finding.kind) }}</strong>
+                      <span>{{ finding.claim }}</span>
+                      <small>{{ finding.supportingEvidenceIds.map(evidenceLabel).join('; ') }}</small>
+                      <small v-if="finding.missingEvidence.length">Missing: {{ finding.missingEvidence.join(' · ') }}</small>
+                    </li>
+                  </ul>
+                  <div v-if="selectedInvestigation.result.missingEvidence.length" class="ni-investigation-gaps">
+                    <strong>Missing evidence</strong><span>{{ selectedInvestigation.result.missingEvidence.join(' · ') }}</span>
+                  </div>
+                  <small v-if="selectedInvestigation.result.identification.supportingEvidenceIds.length" class="ni-investigation-provenance">
+                    Assessment cites {{ selectedInvestigation.result.identification.supportingEvidenceIds.map(evidenceLabel).join('; ') }}
+                  </small>
+                  <small class="ni-investigation-provenance">Saved snapshot {{ selectedInvestigation.result.scanId }} · {{ date(selectedInvestigation.result.createdAt) }} · {{ selectedInvestigation.result.provider }} / {{ selectedInvestigation.result.model }}</small>
+                </details>
               </div>
             </template>
+          </section>
+          <section v-if="identityRefreshApprovalOpen && selectedEndpoint" class="ni-probe-approval" role="dialog" aria-modal="true" aria-labelledby="ni-identity-refresh-title">
+            <h4 id="ni-identity-refresh-title">Approve one identity refresh?</h4>
+            <p>Energrid will send one ARP identity request for <strong>{{ selectedEndpoint.ipAddress }}</strong> on the directly connected interface in the configured <strong>{{ selectedEndpoint.networkZoneName }}</strong> scope. It will not scan the subnet or change the device.</p>
+            <p>Only a fresh MAC reply matching the saved MAC will authorize the separate HTTP approval. Routed targets, a changed MAC, or a missing reply block that check.</p>
+            <div><button type="button" class="ni-button ni-button-secondary" @click="identityRefreshApprovalOpen = false">Cancel</button><button type="button" class="ni-button ni-button-primary" @click="approveIdentityRefresh">Approve identity refresh</button></div>
           </section>
           <section v-if="probeApprovalOpen && selectedEndpoint" class="ni-probe-approval" role="dialog" aria-modal="true" aria-labelledby="ni-probe-approval-title">
             <h4 id="ni-probe-approval-title">Approve one read-only check?</h4>
             <p>Energrid will contact <strong>{{ selectedEndpoint.ipAddress }}:80</strong> with <code>HEAD /</code> and read response headers only (up to 4 KB, 2.5 second timeout). It will not follow redirects, read a response body, send credentials, or change the device.</p>
-            <p>The server will proceed only if this saved observation is still fresh and the address remains inside its configured network scope.</p>
+            <p>The server will proceed only with a still-fresh, one-use identity refresh for this exact endpoint and if the address remains inside its configured network scope.</p>
             <div><button type="button" class="ni-button ni-button-secondary" @click="probeApprovalOpen = false">Cancel</button><button type="button" class="ni-button ni-button-primary" @click="approveHttpProbe">Approve and check</button></div>
           </section>
           <section v-if="selectedHttpProbe?.result" class="ni-http-probe-result" aria-live="polite">
@@ -628,17 +702,26 @@ h1, h2, h3, p { margin-top: 0; }
 .ni-investigate-button:disabled { cursor: wait; opacity: .65; }
 .ni-investigation-error { margin: 0; color: #b42318; font-size: 12px; }
 .ni-investigation-result { display: grid; gap: 10px; min-width: 0; font-size: 12px; }
-.ni-investigation-summary { margin: 0; color: var(--ni-text); line-height: 1.5; }
-.ni-investigation-identification, .ni-investigation-gaps, .ni-investigation-followups { display: grid; gap: 5px; }
-.ni-investigation-identification { padding: 10px; border-radius: 9px; background: var(--ni-surface-raised); }
-.ni-investigation-identification > strong { color: var(--ni-text); font-size: 13px; }
-.ni-investigation-identification > span, .ni-investigation-gaps > span { color: var(--ni-muted); line-height: 1.45; }
-.ni-investigation-identification > small, .ni-investigation-findings small { color: var(--ni-muted); overflow-wrap: anywhere; line-height: 1.4; }
+.ni-investigation-assessment, .ni-investigation-next-action { display: grid; gap: 5px; min-width: 0; }
+.ni-investigation-assessment h4, .ni-investigation-next-action h4 { margin: 0; color: var(--ni-muted); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+.ni-investigation-assessment > strong { color: var(--ni-text); font-size: 13px; }
+.ni-investigation-assessment p, .ni-investigation-next-action p { margin: 0; color: var(--ni-text); line-height: 1.45; }
+.ni-investigation-assessment > span, .ni-investigation-assessment > small, .ni-investigation-gaps > span { color: var(--ni-muted); line-height: 1.45; }
+.ni-investigation-next-action { border-top: 1px solid var(--ni-border); padding-top: 9px; }
+.ni-investigation-next-action > p strong { color: var(--ni-accent); }
+.ni-identity-refresh-result { display: grid; gap: 3px; border-left: 3px solid var(--ni-accent); padding: 7px 9px; background: var(--ni-surface-raised); }
+.ni-identity-refresh-result span, .ni-identity-refresh-result small { color: var(--ni-muted); overflow-wrap: anywhere; }
+.ni-investigation-gaps, .ni-investigation-followups { display: grid; gap: 5px; }
+.ni-investigation-findings small { color: var(--ni-muted); overflow-wrap: anywhere; line-height: 1.4; }
 .ni-investigation-findings, .ni-investigation-followups ul { display: grid; gap: 8px; margin: 0; padding-left: 18px; }
 .ni-investigation-findings li { display: grid; gap: 3px; color: var(--ni-text); }
-.ni-investigation-gaps > strong, .ni-investigation-followups > strong { color: var(--ni-text); }
+.ni-investigation-gaps > strong { color: var(--ni-text); }
+.ni-investigation-followups p { margin: 0; color: var(--ni-muted); }
 .ni-investigation-followups small { color: var(--ni-muted); }
 .ni-investigation-provenance { overflow-wrap: anywhere; }
+.ni-investigation-evidence { border-top: 1px solid var(--ni-border); padding-top: 8px; }
+.ni-investigation-evidence summary { cursor: pointer; color: var(--ni-muted); font-size: 12px; font-weight: 700; }
+.ni-investigation-evidence > * + * { margin-top: 8px; }
 .ni-probe-button { justify-self: start; min-height: 34px; border: 1px solid var(--ni-accent); border-radius: 8px; padding: 0 11px; color: var(--ni-accent); background: var(--ni-bg); font-weight: 700; cursor: pointer; }
 .ni-probe-approval, .ni-http-probe-result { display: grid; gap: 8px; margin-top: 10px; border: 1px solid var(--ni-border); border-radius: 10px; padding: 12px; color: var(--ni-text); background: var(--ni-bg); font-size: 12px; line-height: 1.45; }
 .ni-probe-approval { border-color: var(--ni-accent); }

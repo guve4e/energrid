@@ -4,6 +4,8 @@ import { DeviceAiInvestigationService } from '../llm/device-ai-investigation.ser
 import { NetworkEndpointInvestigatorService } from '../llm/network-endpoint-investigator.service'
 import { DeviceInvestigationWorkflowService } from '../llm/device-investigation-workflow.service'
 import { ReadOnlyHttpIdentityProbe } from '../llm/read-only-http-identity-probe'
+import { NetworkEndpointIdentityRefresh } from '../llm/network-endpoint-identity-refresh'
+import { refreshLocalNeighborIdentity } from '../devices/adapters/outbound/network/targeted-neighbor-identity.adapter'
 import { DeviceInvestigationHistoryStore } from '../llm/device-investigation-history.store'
 import { PortalController } from './portal.controller'
 import { PortalDeviceProxyService } from './portal-device-proxy.service'
@@ -33,6 +35,7 @@ import { PortalWeatherController } from './portal-weather.controller'
     DeviceAiInvestigationService,
     NetworkEndpointInvestigatorService,
     { provide: ReadOnlyHttpIdentityProbe, useFactory: () => new ReadOnlyHttpIdentityProbe() },
+    { provide: NetworkEndpointIdentityRefresh, useFactory: () => new NetworkEndpointIdentityRefresh(refreshLocalNeighborIdentity) },
     DeviceInvestigationWorkflowService,
     DeviceInvestigationHistoryStore,
   ],
