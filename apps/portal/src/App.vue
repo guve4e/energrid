@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import NetworkDiscoveryCard from './components/discovery/NetworkDiscoveryCard.vue';
 import NetworkIntelligencePanel from './components/discovery/NetworkIntelligencePanel.vue';
+import { networkEndpointInvestigationKey, type NetworkEndpointInvestigationState, type NetworkEndpointInvestigationResult } from './components/discovery/network-endpoint-investigation';
 import { resolveNetworkEndpointLifecycle } from './components/discovery/network-endpoint-lifecycle';
 import PendingEnrollmentList from './components/discovery/PendingEnrollmentList.vue';
 import { buildPendingEnrollmentCards } from './components/discovery/pending-enrollment';
@@ -507,6 +508,7 @@ const networkSnapshots = ref<NetworkSnapshot[]>([]);
 const latestNetworkSnapshot = ref<NetworkSnapshot | null>(null);
 const networkSnapshotComparison = ref<NetworkSnapshotDiff | null>(null);
 const networkSnapshotsError = ref('');
+const networkEndpointInvestigations = ref<Record<string, NetworkEndpointInvestigationState>>({});
 const nmapCapability = ref<NmapCapability | null>(null);
 const networkRuntime = ref<NetworkRuntime | null>(null);
 const discoveryDecisionBusy = ref<Record<string, string>>({});
@@ -1261,6 +1263,42 @@ async function confirmCloudEvidence(status: LlmProviderAvailability): Promise<bo
   return window.confirm(
     'This investigation will send the selected device’s network identifiers and evidence to the configured cloud AI provider. Continue?',
   );
+}
+
+async function investigateSnapshotEndpoint(request: {
+  scanId: string; scopeId: string; ipAddress: string; endpointId: string;
+}): Promise<void> {
+  const key = networkEndpointInvestigationKey(request.scanId, request.scopeId, request.ipAddress, request.endpointId);
+  if (networkEndpointInvestigations.value[key]?.loading) return;
+  networkEndpointInvestigations.value = { ...networkEndpointInvestigations.value, [key]: { loading: true } };
+  try {
+    const provider = await loadLlmProviderAvailability();
+    if (!provider.available) throw new Error(`Investigation provider unavailable (${provider.reasonCode || 'unavailable'}).`);
+    if (!(await confirmCloudEvidence(provider))) return;
+    const endpointUrl = [request.scanId, request.scopeId, request.ipAddress, request.endpointId]
+      .map(encodeURIComponent).join('/');
+    const [scanId, scopeId, ipAddress, endpointId] = endpointUrl.split('/');
+    const response = await fetch(`${apiBase}/portal/network/snapshots/${scanId}/scopes/${scopeId}/endpoints/${ipAddress}/${endpointId}/investigate`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken.value}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cloudDataConsent: provider.cloudDataConsentRequired }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(typeof body.message === 'string' ? body.message : `Investigation failed (${response.status})`);
+    }
+    const result = await response.json() as NetworkEndpointInvestigationResult;
+    networkEndpointInvestigations.value = { ...networkEndpointInvestigations.value, [key]: { loading: false, result } };
+  } catch (error) {
+    networkEndpointInvestigations.value = {
+      ...networkEndpointInvestigations.value,
+      [key]: { loading: false, error: error instanceof Error ? error.message : 'Investigation failed' },
+    };
+  } finally {
+    if (networkEndpointInvestigations.value[key]?.loading) {
+      networkEndpointInvestigations.value = { ...networkEndpointInvestigations.value, [key]: { loading: false } };
+    }
+  }
 }
 
 const deviceIntelligencePanel = ref<HTMLElement | null>(null);
@@ -4784,12 +4822,14 @@ onBeforeUnmount(() => {
             :enrolled-count="enrollmentError ? null : enrolledPhysicalDeviceCount"
             :enrollment-state-available="!enrollmentError"
             :endpoint-lifecycle="networkEndpointLifecycle"
+            :endpoint-investigations="networkEndpointInvestigations"
             :busy="scanningNetwork"
             :error="networkSnapshotsError || stateError"
             @scan="scanNetwork"
             @cancel="cancelNetworkScan"
             @open-pending="openPendingEnrollment"
             @open-device="openEnrolledDevice"
+            @investigate-endpoint="investigateSnapshotEndpoint"
           />
         </section>
 

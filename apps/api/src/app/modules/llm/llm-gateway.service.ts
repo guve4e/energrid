@@ -129,6 +129,54 @@ export class OpenAiDeviceLlmProvider implements LlmProvider {
       maxRetries: 0,
     })
 
+    const defaultSchema = {
+      name: 'energrid_device_investigation',
+      schema: {
+        type: 'object',
+        properties: {
+          summary: { type: 'string' },
+          findings: { type: 'array', items: { type: 'string' } },
+          unknowns: { type: 'array', items: { type: 'string' } },
+          nextSteps: { type: 'array', items: { type: 'string' } },
+          hypotheses: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                claim: { type: 'string' },
+                confidence: { type: 'number' },
+                supportingEvidenceIds: { type: 'array', items: { type: 'string' } },
+                contradictingEvidenceIds: { type: 'array', items: { type: 'string' } },
+                missingEvidence: { type: 'array', items: { type: 'string' } },
+              },
+              required: ['id', 'claim', 'confidence', 'supportingEvidenceIds', 'contradictingEvidenceIds', 'missingEvidence'],
+              additionalProperties: false,
+            },
+          },
+          proposals: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                action: { type: 'string', enum: ['inspect_mdns', 'inspect_ssdp', 'inspect_http_headers', 'inspect_service_banner', 'review_registry', 'manual_identification'] },
+                reason: { type: 'string' },
+                requiredEvidenceIds: { type: 'array', items: { type: 'string' } },
+                requiresApproval: { type: 'boolean', enum: [true] },
+                status: { type: 'string', enum: ['proposed'] },
+              },
+              required: ['id', 'action', 'reason', 'requiredEvidenceIds', 'requiresApproval', 'status'],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ['summary', 'findings', 'unknowns', 'nextSteps', 'hypotheses', 'proposals'],
+        additionalProperties: false,
+      },
+    }
+    const outputSchema = request.outputSchema ?? defaultSchema
+
     const response = await client.responses.create({
       model,
       instructions: request.systemPrompt,
@@ -140,109 +188,9 @@ export class OpenAiDeviceLlmProvider implements LlmProvider {
       text: {
         format: {
           type: 'json_schema',
-          name: 'energrid_device_investigation',
+          name: outputSchema.name,
           strict: true,
-          schema: {
-            type: 'object',
-            properties: {
-              summary: { type: 'string' },
-              findings: {
-                type: 'array',
-                items: { type: 'string' },
-              },
-              unknowns: {
-                type: 'array',
-                items: { type: 'string' },
-              },
-              nextSteps: {
-                type: 'array',
-                items: { type: 'string' },
-              },
-              hypotheses: {
-                type: 'array',
-                items: {
-                  type: 'object',
-                  properties: {
-                    id: { type: 'string' },
-                    claim: { type: 'string' },
-                    confidence: { type: 'number' },
-                    supportingEvidenceIds: {
-                      type: 'array',
-                      items: { type: 'string' },
-                    },
-                    contradictingEvidenceIds: {
-                      type: 'array',
-                      items: { type: 'string' },
-                    },
-                    missingEvidence: {
-                      type: 'array',
-                      items: { type: 'string' },
-                    },
-                  },
-                  required: [
-                    'id',
-                    'claim',
-                    'confidence',
-                    'supportingEvidenceIds',
-                    'contradictingEvidenceIds',
-                    'missingEvidence',
-                  ],
-                  additionalProperties: false,
-                },
-              },
-              proposals: {
-                type: 'array',
-                items: {
-                  type: 'object',
-                  properties: {
-                    id: { type: 'string' },
-                    action: {
-                      type: 'string',
-                      enum: [
-                        'inspect_mdns',
-                        'inspect_ssdp',
-                        'inspect_http_headers',
-                        'inspect_service_banner',
-                        'review_registry',
-                        'manual_identification',
-                      ],
-                    },
-                    reason: { type: 'string' },
-                    requiredEvidenceIds: {
-                      type: 'array',
-                      items: { type: 'string' },
-                    },
-                    requiresApproval: {
-                      type: 'boolean',
-                      enum: [true],
-                    },
-                    status: {
-                      type: 'string',
-                      enum: ['proposed'],
-                    },
-                  },
-                  required: [
-                    'id',
-                    'action',
-                    'reason',
-                    'requiredEvidenceIds',
-                    'requiresApproval',
-                    'status',
-                  ],
-                  additionalProperties: false,
-                },
-              },
-            },
-            required: [
-              'summary',
-              'findings',
-              'unknowns',
-              'nextSteps',
-              'hypotheses',
-              'proposals',
-            ],
-            additionalProperties: false,
-          },
+          schema: outputSchema.schema,
         },
       },
     })

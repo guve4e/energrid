@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { networkEndpointInvestigationKey, networkEndpointSafeCheckLabels, type NetworkEndpointInvestigationState } from './network-endpoint-investigation';
 
 type Scope = { id: string; name: string; cidr?: string; interfaceName?: string; seedIps?: string[] };
 type Observation = { source: string; attribute: string; value: string | number | boolean; observedAt: string; method?: string };
@@ -8,6 +9,7 @@ type Endpoint = {
   macAddress?: string; deviceReportedMacAddress?: string; hostname?: string; vendor?: string;
   model?: string; app?: string; protocol: string; status: string; discoveredAt: string; reason: string;
   components?: Array<{ component: string; channel: number }>;
+  identityConflict?: { reason: string; macAddresses: string[] };
   observations?: Observation[];
 };
 type ScopeSnapshot = { id: string; name: string; cidr?: string; interfaceName?: string; complete: boolean; gatewayIpsObserved: string[] };
@@ -59,11 +61,13 @@ const props = withDefaults(defineProps<{
   enrolledCount?: number | null;
   enrollmentStateAvailable?: boolean;
   endpointLifecycle?: EndpointLifecycle[];
+  endpointInvestigations?: Record<string, NetworkEndpointInvestigationState>;
   busy?: boolean; error?: string;
 }>(), { enrollmentStateAvailable: true });
 const emit = defineEmits<{
   scan: [scopeIds: string[]]; cancel: [];
   openPending: [recordId?: string]; openDevice: [recordId: string];
+  investigateEndpoint: [request: { scanId: string; scopeId: string; ipAddress: string; endpointId: string }];
 }>();
 
 const selectedScopeId = ref('');
@@ -139,6 +143,12 @@ const recentChangeCount = computed(() => {
     + diff.identityChanges.filter(item => item.scopeId === selectedScopeId.value).length;
 });
 const selectedEndpoint = computed(() => endpoints.value.find(endpoint => endpointKey(endpoint) === selectedEndpointKey.value) || null);
+const selectedInvestigationKey = computed(() => selectedEndpoint.value && props.latest
+  ? networkEndpointInvestigationKey(props.latest.scanId, selectedEndpoint.value.networkZoneId, selectedEndpoint.value.ipAddress, selectedEndpoint.value.id)
+  : '');
+const selectedInvestigation = computed(() => selectedInvestigationKey.value
+  ? props.endpointInvestigations?.[selectedInvestigationKey.value] || null
+  : null);
 const visibleEndpoints = computed(() => {
   const query = search.value.trim().toLowerCase();
   return endpoints.value.filter(endpoint => {
@@ -211,6 +221,27 @@ function closeDetails() {
 
 function runScan() {
   if (selectedScopeId.value) emit('scan', [selectedScopeId.value]);
+}
+
+function investigateSelectedEndpoint() {
+  if (!selectedEndpoint.value || !props.latest || verifiedIdentity(selectedEndpoint.value) || selectedEndpoint.value.identityConflict) return;
+  emit('investigateEndpoint', {
+    scanId: props.latest.scanId,
+    scopeId: selectedEndpoint.value.networkZoneId,
+    ipAddress: selectedEndpoint.value.ipAddress,
+    endpointId: selectedEndpoint.value.id,
+  });
+}
+
+function evidenceLabel(id: string): string {
+  const item = selectedInvestigation.value?.result?.evidence.find(evidence => evidence.id === id);
+  return item ? `${item.attribute} · ${item.source} · ${date(item.observedAt)}` : 'Snapshot evidence';
+}
+
+function safeCheckLabel(action: string): string {
+  return action in networkEndpointSafeCheckLabels
+    ? networkEndpointSafeCheckLabels[action as keyof typeof networkEndpointSafeCheckLabels]
+    : 'Review evidence with an operator';
 }
 
 function date(value?: string) {
@@ -346,6 +377,42 @@ function date(value?: string) {
             <div><dt>Collector</dt><dd>{{ latest.collector.host }} · {{ latest.collector.interfaces.join(', ') || 'interface unknown' }}</dd></div>
           </dl>
           <p class="ni-detail-reason">{{ selectedEndpoint.reason }}</p>
+          <section v-if="!verifiedIdentity(selectedEndpoint)" class="ni-endpoint-investigation" aria-label="AI device investigation">
+            <div class="ni-ai-heading"><strong>✦ AI Device Investigator</strong><span>Snapshot evidence only · read-only</span></div>
+            <p v-if="selectedEndpoint.identityConflict" role="status">Conflicting identity evidence is present. Keep these records separate and resolve the conflict with independent evidence.</p>
+            <template v-else>
+              <button type="button" class="ni-investigate-button" :disabled="selectedInvestigation?.loading" @click="investigateSelectedEndpoint">
+                {{ selectedInvestigation?.loading ? 'Investigating…' : selectedInvestigation?.result ? 'Investigate again' : 'Investigate with AI' }}
+              </button>
+              <p v-if="selectedInvestigation?.error" class="ni-investigation-error" role="alert">{{ selectedInvestigation.error }}</p>
+              <div v-if="selectedInvestigation?.result" class="ni-investigation-result" aria-live="polite">
+                <p class="ni-investigation-summary">{{ selectedInvestigation.result.summary }}</p>
+                <div class="ni-investigation-identification">
+                  <strong v-if="selectedInvestigation.result.identification.deviceType || selectedInvestigation.result.identification.manufacturer">
+                    Possible {{ [selectedInvestigation.result.identification.manufacturer, selectedInvestigation.result.identification.deviceType].filter(Boolean).join(' ') }}
+                  </strong>
+                  <strong v-else>Not enough evidence to identify this device.</strong>
+                  <span v-if="selectedInvestigation.result.identification.confidence !== null">Estimated confidence {{ Math.round(selectedInvestigation.result.identification.confidence * 100) }}%</span>
+                  <span>{{ selectedInvestigation.result.identification.uncertainty }}</span>
+                  <small v-if="selectedInvestigation.result.identification.supportingEvidenceIds.length">Supported by: {{ selectedInvestigation.result.identification.supportingEvidenceIds.map(evidenceLabel).join('; ') }}</small>
+                </div>
+                <ul v-if="selectedInvestigation.result.findings.length" class="ni-investigation-findings">
+                  <li v-for="(finding, index) in selectedInvestigation.result.findings" :key="`${finding.claim}:${index}`">
+                    <span>{{ finding.claim }}</span>
+                    <small>{{ finding.supportingEvidenceIds.map(evidenceLabel).join('; ') }}</small>
+                  </li>
+                </ul>
+                <div v-if="selectedInvestigation.result.missingEvidence.length" class="ni-investigation-gaps">
+                  <strong>Missing evidence</strong><span>{{ selectedInvestigation.result.missingEvidence.join(' · ') }}</span>
+                </div>
+                <div v-if="selectedInvestigation.result.safeFollowUpChecks.length" class="ni-investigation-followups">
+                  <strong>Suggested safe checks</strong>
+                  <ul><li v-for="check in selectedInvestigation.result.safeFollowUpChecks" :key="check.action">{{ safeCheckLabel(check.action) }} <small>· human approval required</small></li></ul>
+                </div>
+                <small class="ni-investigation-provenance">Based on saved snapshot {{ selectedInvestigation.result.scanId }} · {{ date(selectedInvestigation.result.createdAt) }} · {{ selectedInvestigation.result.provider }} / {{ selectedInvestigation.result.model }}</small>
+              </div>
+            </template>
+          </section>
           <details class="ni-evidence">
             <summary>Evidence details</summary>
             <ul v-if="selectedEndpoint.observations?.length"><li v-for="item in selectedEndpoint.observations" :key="`${item.source}:${item.attribute}:${item.observedAt}`"><strong>{{ item.attribute }}</strong><span>{{ item.source }}<template v-if="item.method"> · {{ item.method }}</template></span><small>{{ date(item.observedAt) }}</small></li></ul>
@@ -486,6 +553,27 @@ h1, h2, h3, p { margin-top: 0; }
 .ni-detail-fields dt { color: var(--ni-muted); font-size: 12px; }
 .ni-detail-fields dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-size: 12px; font-weight: 600; }
 .ni-detail-reason { margin: 0; color: var(--ni-muted); font-size: 12px; line-height: 1.5; }
+.ni-endpoint-investigation { display: grid; gap: 10px; margin: 14px 0; padding: 13px; border: 1px solid var(--ni-border); border-radius: 12px; background: var(--ni-surface); }
+.ni-ai-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; color: var(--ni-text); font-size: 13px; }
+.ni-ai-heading strong { color: var(--ni-accent); }
+.ni-ai-heading > span, .ni-investigation-provenance { color: var(--ni-muted); font-size: 11px; }
+.ni-investigate-button { justify-self: start; min-height: 36px; border: 1px solid var(--ni-accent); border-radius: 9px; padding: 0 13px; color: #fff; background: var(--ni-accent); font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }
+.ni-investigate-button:hover:not(:disabled) { filter: brightness(.94); }
+.ni-investigate-button:disabled { cursor: wait; opacity: .65; }
+.ni-investigation-error { margin: 0; color: #b42318; font-size: 12px; }
+.ni-investigation-result { display: grid; gap: 10px; min-width: 0; font-size: 12px; }
+.ni-investigation-summary { margin: 0; color: var(--ni-text); line-height: 1.5; }
+.ni-investigation-identification, .ni-investigation-gaps, .ni-investigation-followups { display: grid; gap: 5px; }
+.ni-investigation-identification { padding: 10px; border-radius: 9px; background: var(--ni-surface-raised); }
+.ni-investigation-identification > strong { color: var(--ni-text); font-size: 13px; }
+.ni-investigation-identification > span, .ni-investigation-gaps > span { color: var(--ni-muted); line-height: 1.45; }
+.ni-investigation-identification > small, .ni-investigation-findings small { color: var(--ni-muted); overflow-wrap: anywhere; line-height: 1.4; }
+.ni-investigation-findings, .ni-investigation-followups ul { display: grid; gap: 8px; margin: 0; padding-left: 18px; }
+.ni-investigation-findings li { display: grid; gap: 3px; color: var(--ni-text); }
+.ni-investigation-gaps > strong, .ni-investigation-followups > strong { color: var(--ni-text); }
+.ni-investigation-followups small { color: var(--ni-muted); }
+.ni-investigation-provenance { overflow-wrap: anywhere; }
+.ni-endpoint-investigation [role="status"] { margin: 0; color: var(--ni-muted); font-size: 12px; line-height: 1.45; }
 .ni-evidence { margin-top: 13px; border-top: 1px solid var(--ni-border); padding-top: 11px; }
 .ni-evidence summary, .ni-diagnostics summary { cursor: pointer; font-size: 13px; font-weight: 700; }
 .ni-evidence ul, .ni-diagnostics ul { display: grid; gap: 8px; margin: 12px 0 0; padding: 0; list-style: none; }

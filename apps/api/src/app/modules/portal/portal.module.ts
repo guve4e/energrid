@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common'
 import { LlmGatewayService, OpenAiDeviceLlmProvider } from '../llm/llm-gateway.service'
 import { DeviceAiInvestigationService } from '../llm/device-ai-investigation.service'
+import { NetworkEndpointInvestigatorService } from '../llm/network-endpoint-investigator.service'
 import { DeviceInvestigationWorkflowService } from '../llm/device-investigation-workflow.service'
 import { ReadOnlyHttpIdentityProbe } from '../llm/read-only-http-identity-probe'
 import { DeviceInvestigationHistoryStore } from '../llm/device-investigation-history.store'
@@ -30,6 +31,7 @@ import { PortalWeatherController } from './portal-weather.controller'
       },
     },
     DeviceAiInvestigationService,
+    NetworkEndpointInvestigatorService,
     { provide: ReadOnlyHttpIdentityProbe, useFactory: () => new ReadOnlyHttpIdentityProbe() },
     DeviceInvestigationWorkflowService,
     DeviceInvestigationHistoryStore,

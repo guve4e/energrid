@@ -21,6 +21,7 @@ import {
 import { ApiExcludeController } from '@nestjs/swagger'
 import { map } from 'rxjs'
 import { DeviceAiInvestigationService } from '../llm/device-ai-investigation.service'
+import { NetworkEndpointInvestigatorService } from '../llm/network-endpoint-investigator.service'
 import type { DeviceInvestigationScope } from '../llm/device-investigation-history.store'
 import { DeviceInvestigationWorkflowService } from '../llm/device-investigation-workflow.service'
 import { MqttEvidenceCaptureService } from '../devices/mqtt/mqtt-evidence-capture.service'
@@ -80,6 +81,8 @@ export class PortalController {
     @Optional()
     @Inject(PHYSICAL_DEVICE_INVENTORY_SERVICE)
     private readonly physicalInventory?: PhysicalDeviceInventoryService,
+    @Optional()
+    private readonly networkEndpointInvestigator?: NetworkEndpointInvestigatorService,
   ) {}
 
   @Get()
@@ -327,6 +330,28 @@ export class PortalController {
       scope,
       deviceId,
       [device],
+      body?.cloudDataConsent === true,
+    )
+  }
+
+  @Post('network/snapshots/:scanId/scopes/:scopeId/endpoints/:ipAddress/:endpointId/investigate')
+  async investigateSnapshotEndpoint(
+    @Param('scanId') scanId: string,
+    @Param('scopeId') scopeId: string,
+    @Param('ipAddress') ipAddress: string,
+    @Param('endpointId') endpointId: string,
+    @Body() body: { cloudDataConsent?: unknown },
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+    if (!this.networkEndpointInvestigator) {
+      throw new ServiceUnavailableException('Network endpoint investigation is unavailable')
+    }
+    const snapshot = await this.discoveryMemory.getSnapshot(scanId)
+    if (!snapshot) throw new NotFoundException('Network discovery snapshot was not found')
+    return this.networkEndpointInvestigator.investigate(
+      snapshot,
+      { scopeId, ipAddress, endpointId },
       body?.cloudDataConsent === true,
     )
   }

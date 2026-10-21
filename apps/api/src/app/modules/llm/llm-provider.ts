@@ -3,6 +3,12 @@ export interface LlmRequest {
   systemPrompt: string
   userPrompt: string
   maxOutputTokens?: number
+  outputSchema?: LlmJsonSchema
+}
+
+export interface LlmJsonSchema {
+  name: string
+  schema: Record<string, unknown>
 }
 
 export interface LlmResponse {

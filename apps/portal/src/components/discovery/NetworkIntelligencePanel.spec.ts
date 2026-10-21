@@ -114,6 +114,21 @@ describe('NetworkIntelligencePanel', () => {
     panel.unmount();
   });
 
+  it('offers snapshot-scoped AI investigation only for unidentified endpoints', async () => {
+    const panel = mount(NetworkIntelligencePanel, { props: { scopes, snapshots: [snapshot], latest: snapshot, comparison: null } });
+    expect(panel.findAll('.ni-device-row')[0].text()).toContain('Shelly');
+    expect(panel.findAll('button.ni-device-row')[0].element.getAttribute('aria-pressed')).toBe('true');
+    expect(panel.find('.ni-investigate-button').exists()).toBe(false);
+
+    await panel.findAll('button.ni-device-row')[1].trigger('click');
+    expect(panel.get('.ni-investigate-button').text()).toBe('Investigate with AI');
+    await panel.get('.ni-investigate-button').trigger('click');
+    expect(panel.emitted('investigateEndpoint')).toEqual([[
+      { scanId: 'scan-1', scopeId: 'eero', ipAddress: '192.168.7.20', endpointId: 'aa:bb:cc:dd:ee:ff' },
+    ]]);
+    panel.unmount();
+  });
+
   it('opens endpoint details as a mobile drawer and keeps the list keyboard reachable', async () => {
     vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn() }));
     Object.defineProperty(window, 'matchMedia', { configurable: true, value: () => ({ matches: true, addEventListener: vi.fn() }) });
