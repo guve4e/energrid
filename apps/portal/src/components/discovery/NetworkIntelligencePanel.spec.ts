@@ -82,6 +82,22 @@ describe('NetworkIntelligencePanel', () => {
     panel.unmount();
   });
 
+  it('puts evidence-backed gateway role ahead of the unidentified-device label without claiming hardware identity', async () => {
+    const withGatewayRole = { ...snapshot, networkRoles: [{
+      id: 'role:gateway:eero:192.168.7.20', role: 'default_gateway' as const, label: 'Observed default gateway' as const,
+      scopeId: 'eero', scopeName: 'Eero', ipAddress: '192.168.7.20', observedAt: '2026-10-21T10:00:00Z',
+      observer: { id: 'observer/mac', host: 'macbook', interfaceName: 'en0' }, routeDestination: '0.0.0.0/0', routeEvidence: 'netstat_route_table',
+    }] };
+    const panel = mount(NetworkIntelligencePanel, { props: { scopes, snapshots: [withGatewayRole], latest: withGatewayRole, comparison: null } });
+    await panel.findAll('button.ni-device-row')[1].trigger('click');
+    expect(panel.text()).toContain('Observed default gateway');
+    expect(panel.text()).toContain('Default route 0.0.0.0/0 from macbook on en0');
+    expect(panel.text()).toContain('Router make, model, and device identity are not established.');
+    expect(panel.text()).toContain('Verified protocol identity');
+    expect(panel.text()).toContain('Not established');
+    panel.unmount();
+  });
+
   it('keeps incomplete scans distinct from empty networks and supports cancellation', async () => {
     const panel = mount(NetworkIntelligencePanel, { props: {
       scopes, snapshots: [], latest: null, comparison: null, busy: true,

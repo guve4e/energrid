@@ -33,6 +33,7 @@ import { DeviceDiscoveryMemoryStore } from '../devices/device-discovery-memory.s
 import { DeviceLanDiscoveryService } from '../devices/device-lan-discovery.service'
 import { lookupMacVendor } from '../devices/mac-vendor-lookup'
 import { compareNetworkSnapshots } from '../devices/network-discovery-snapshot'
+import { projectNetworkRoles } from '../devices/network-role-evidence'
 import { DeviceMqttIngestService } from '../devices/device-mqtt-ingest.service'
 import { DeviceRegistryService } from '../devices/device-registry.service'
 import { DeviceOnboardingService } from './device-onboarding.service'
@@ -282,6 +283,7 @@ export class PortalController {
     const snapshots = await this.discoveryMemory.listSnapshots(50)
     return { snapshots: snapshots.map(snapshot => ({
       ...snapshot,
+      networkRoles: projectNetworkRoles(snapshot),
       endpoints: snapshot.endpoints.map(endpoint => {
         const vendor = lookupMacVendor(endpoint.macAddress)
         return vendor.status === 'matched'
@@ -365,10 +367,12 @@ export class PortalController {
     }
     const snapshot = await this.discoveryMemory.getSnapshot(scanId)
     if (!snapshot) throw new NotFoundException('Network discovery snapshot was not found')
+    const history = await this.discoveryMemory.listSnapshots(50)
     return this.networkEndpointInvestigator.investigate(
       snapshot,
       { scopeId, ipAddress, endpointId },
       body?.cloudDataConsent === true,
+      history.filter(item => item.scanId !== snapshot.scanId),
     )
   }
 

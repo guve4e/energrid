@@ -84,9 +84,71 @@ describe('NetworkEndpointInvestigatorService', () => {
       expect.objectContaining({ source: 'tcp', attribute: 'port.80.open', observedAt: '2026-10-21T10:00:40.000Z' }),
       expect.objectContaining({ source: 'neighbor_table', attribute: 'observed_mac', value: 'aa:bb:cc:dd:ee:ff' }),
     ]));
+    expect(payload.endpoint).toMatchObject({ scanOutcome: 'responded_during_scan', currentReachabilityEstablished: false });
+    expect(payload.endpoint).not.toHaveProperty('status');
     expect(prompt).not.toContain('should-not-leak');
     expect(prompt).not.toContain('secret=');
     expect(generate.mock.calls[0][0].outputSchema).toBeDefined();
+  });
+
+  it('gives the investigator route-derived gateway role and carefully scoped historical context', async () => {
+    const gatewaySnapshot = structuredClone(snapshot);
+    gatewaySnapshot.scopes[0].interfaceName = 'en0';
+    gatewaySnapshot.runtime!.observedAt = '2026-10-21T10:01:00.000Z';
+    gatewaySnapshot.runtime!.routes = [{ destination: '0.0.0.0/0', family: 'IPv4', gateway: '192.168.7.48', interfaceName: 'en0', evidence: 'netstat_route_table' }];
+    gatewaySnapshot.runtime!.localScopes = [{ cidr: '192.168.7.0/24', interfaceName: 'en0' }];
+    gatewaySnapshot.runtime!.configuredScopes = [{ id: 'eero', name: 'Eero LAN', cidr: '192.168.7.0/24', interfaceName: 'en0', reachability: 'on_link', boundedScanEligible: true, reason: 'Local interface route.' }];
+    gatewaySnapshot.endpoints[0].macAddress = '3c:71:bf:32:4b:44';
+    const prior = structuredClone(gatewaySnapshot);
+    prior.scanId = 'scan-eero-prior';
+    prior.completedAt = '2026-10-20T10:01:00.000Z';
+    prior.endpoints[0].discoveredAt = prior.completedAt;
+    prior.runtime!.observedAt = prior.completedAt;
+    prior.endpoints[0].macAddress = 'aa:bb:cc:dd:ee:ff';
+    generate.mockImplementation(async (input: { userPrompt: string }) => {
+      const payload = JSON.parse(input.userPrompt);
+      const port = payload.evidence.find((item: { attribute: string }) => item.attribute === 'port.80.open');
+      return { provider: 'test', model: 'test', text: JSON.stringify(answer({ findings: [{
+        kind: 'observed_fact', claim: 'TCP port 80 responded during a historical scan.', confidence: 1,
+        supportingEvidenceIds: [port.id], missingEvidence: ['Router make and model'],
+      }], missingEvidence: ['Router make and model'] })) };
+    });
+
+    const result = await service.investigate(gatewaySnapshot, request, false, [prior]);
+    const [input] = generate.mock.calls[0];
+    const payload = JSON.parse(input.userPrompt);
+    expect(payload.networkRole).toMatchObject({ label: 'Observed default gateway', observer: { host: 'mac.local', interfaceName: 'en0' }, observedAt: gatewaySnapshot.runtime!.observedAt });
+    expect(payload.historicalAddressContext).toEqual([expect.objectContaining({ correlation: 'address_only_unlinked', identityContinuityEstablished: false })]);
+    expect(payload.endpoint.currentReachabilityEstablished).toBe(false);
+    expect(input.systemPrompt).toContain('network role such as default gateway is an observed route role');
+    expect(input.systemPrompt).toContain('never "currently online"');
+    expect(result.networkRole).toMatchObject({ role: 'default_gateway', observer: { host: 'mac.local', interfaceName: 'en0' } });
+    expect(result.findings[0]).toMatchObject({ kind: 'observed_fact', supportingEvidenceIds: [result.networkRole!.id] });
+    expect(result.summary).toContain('router make and model remain unknown');
+  });
+
+  it('carries prior protocol identity history only when the observed MAC also matches', async () => {
+    const prior = structuredClone(snapshot);
+    prior.scanId = 'scan-prior';
+    prior.completedAt = '2026-10-20T10:01:00.000Z';
+    prior.endpoints[0].id = 'shellyplus1-old';
+    prior.endpoints[0].vendor = 'Shelly';
+    prior.endpoints[0].protocol = 'http';
+    prior.endpoints[0].discoveredAt = prior.completedAt;
+    prior.endpoints[0].observations = [{ source: 'http_rpc', attribute: 'shelly.device_id', value: 'shellyplus1-old', observedAt: prior.completedAt, scopeId: 'eero' }];
+    generate.mockImplementation(async (input: { userPrompt: string }) => {
+      const payload = JSON.parse(input.userPrompt);
+      const port = payload.evidence.find((item: { attribute: string }) => item.attribute === 'port.80.open');
+      return { provider: 'test', model: 'test', text: JSON.stringify(answer({ findings: [{
+        kind: 'observed_fact', claim: 'A TCP port responded during this scan.', confidence: 1, supportingEvidenceIds: [port.id], missingEvidence: [],
+      }] })) };
+    });
+    await service.investigate(snapshot, request, false, [prior]);
+    const history = JSON.parse(generate.mock.calls[0][0].userPrompt).historicalAddressContext;
+    expect(history).toEqual([expect.objectContaining({
+      scanId: 'scan-prior', correlation: 'matching_observed_mac', observedMac: snapshot.endpoints[0].macAddress,
+      identityContinuityEstablished: true, protocolIdentities: [{ value: 'shellyplus1-old', observedAt: prior.completedAt }],
+    })]);
   });
 
   it('rejects an endpoint outside the requested snapshot scope', async () => {

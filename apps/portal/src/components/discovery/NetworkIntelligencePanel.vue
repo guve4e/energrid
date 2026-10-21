@@ -14,11 +14,13 @@ type Endpoint = {
   observations?: Observation[];
 };
 type ScopeSnapshot = { id: string; name: string; cidr?: string; interfaceName?: string; complete: boolean; gatewayIpsObserved: string[] };
+type NetworkRole = { id: string; role: 'default_gateway'; label: 'Observed default gateway'; scopeId: string; scopeName: string; ipAddress: string; observedAt: string; observer: { id: string; host: string; interfaceName: string }; routeDestination: string; routeEvidence: string };
 type Snapshot = {
   scanId: string; schemaVersion: number; startedAt: string; completedAt: string;
   collector: { id: string; host: string; interfaces: string[] };
   scopes: ScopeSnapshot[]; methods: string[]; successes: number; failures: string[]; limitations: string[];
   endpoints: Endpoint[];
+  networkRoles?: NetworkRole[];
   topology: { relationships: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }> };
   runtime?: Observer;
 };
@@ -164,6 +166,9 @@ const recentChangeCount = computed(() => {
     + diff.identityChanges.filter(item => item.scopeId === selectedScopeId.value).length;
 });
 const selectedEndpoint = computed(() => endpoints.value.find(endpoint => endpointKey(endpoint) === selectedEndpointKey.value) || null);
+const endpointNetworkRole = (endpoint: Endpoint) => selectedSnapshot.value?.networkRoles?.find(role =>
+  role.scopeId === endpoint.networkZoneId && role.ipAddress === endpoint.ipAddress,
+) || null;
 const selectedInvestigationKey = computed(() => selectedEndpoint.value && selectedSnapshot.value
   ? networkEndpointInvestigationKey(selectedSnapshot.value.scanId, selectedEndpoint.value.networkZoneId, selectedEndpoint.value.ipAddress, selectedEndpoint.value.id)
   : '');
@@ -204,7 +209,7 @@ const coverageLabel = computed(() => {
   return incomplete ? 'Partial coverage' : 'Scan complete';
 });
 const lastScanLabel = computed(() => selectedSnapshot.value ? new Date(selectedSnapshot.value.completedAt).toLocaleString() : 'Awaiting first scan');
-const identityName = (endpoint: Endpoint) => endpoint.hostname || [endpoint.vendor, endpoint.model || endpoint.app].filter(Boolean).join(' ') || 'Unidentified endpoint';
+const identityName = (endpoint: Endpoint) => endpoint.hostname || [endpoint.vendor, endpoint.model || endpoint.app].filter(Boolean).join(' ') || endpointNetworkRole(endpoint)?.label || 'Unidentified endpoint';
 
 watch(() => selectedSnapshot.value?.scanId, () => {
   if (endpoints.value.length && !endpoints.value.some(endpoint => endpointKey(endpoint) === selectedEndpointKey.value)) {
@@ -395,6 +400,7 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
           <span class="ni-node-symbol" aria-hidden="true">{{ verifiedIdentity(endpoint) ? '●' : '?' }}</span>
           <span class="ni-node-ip">{{ endpoint.ipAddress }}</span>
           <span class="ni-node-name">{{ identityName(endpoint) }} · {{ lifecycleLabel(endpointLifecycle(endpoint)) }}</span>
+          <span v-if="endpointNetworkRole(endpoint)" class="ni-node-role">{{ endpointNetworkRole(endpoint)?.label }}</span>
         </button>
       </div>
       <div v-else class="ni-empty-scope"><strong>No endpoints are recorded for this network in the selected snapshot.</strong><span>This means no endpoints were detected in this run; it does not establish that the network has no devices.</span></div>
@@ -423,7 +429,7 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
           <button v-for="endpoint in visibleEndpoints" :key="endpointKey(endpoint)" :data-endpoint-key="endpointKey(endpoint)" type="button" role="listitem" :class="['ni-device-row', { active: selectedEndpointKey === endpointKey(endpoint) }]" :aria-pressed="selectedEndpointKey === endpointKey(endpoint)" @click="selectEndpoint(endpoint)">
             <span :class="['ni-device-icon', verifiedIdentity(endpoint) ? 'is-verified' : 'is-unknown']" aria-hidden="true">{{ verifiedIdentity(endpoint) ? '◉' : '?' }}</span>
             <span class="ni-device-main"><strong>{{ identityName(endpoint) }}</strong><span>{{ endpoint.ipAddress }}<template v-if="endpoint.vendor"> · {{ endpoint.vendor }}</template></span></span>
-            <span class="ni-device-meta"><span :class="['ni-identity-label', verifiedIdentity(endpoint) ? 'is-verified' : 'is-unknown']">{{ lifecycleLabel(endpointLifecycle(endpoint)) }}</span><span>{{ date(endpoint.discoveredAt) }}</span></span>
+            <span class="ni-device-meta"><span v-if="endpointNetworkRole(endpoint)" class="ni-role-label">{{ endpointNetworkRole(endpoint)?.label }}</span><span :class="['ni-identity-label', verifiedIdentity(endpoint) ? 'is-verified' : 'is-unknown']">{{ lifecycleLabel(endpointLifecycle(endpoint)) }}</span><span>{{ date(endpoint.discoveredAt) }}</span></span>
             <span class="ni-device-services">{{ endpointServices(endpoint).join(', ') || 'No services identified' }}</span>
             <span class="ni-chevron" aria-hidden="true">›</span>
           </button>
@@ -451,6 +457,11 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
             <span>Energrid approval exists; active enrollment is not confirmed.</span>
             <button type="button" @click="emit('openDevice', lifecycleFor(selectedEndpoint)?.recordId || '')">Open device record ›</button>
           </div>
+          <section v-if="endpointNetworkRole(selectedEndpoint)" class="ni-network-role" aria-label="Observed network role">
+            <strong>{{ endpointNetworkRole(selectedEndpoint)?.label }}</strong>
+            <span>Default route {{ endpointNetworkRole(selectedEndpoint)?.routeDestination }} from {{ endpointNetworkRole(selectedEndpoint)?.observer.host }} on {{ endpointNetworkRole(selectedEndpoint)?.observer.interfaceName }} · {{ endpointNetworkRole(selectedEndpoint)?.routeEvidence }} · {{ date(endpointNetworkRole(selectedEndpoint)!.observedAt) }}</span>
+            <small>Network role only. Router make, model, and device identity are not established.</small>
+          </section>
           <dl class="ni-detail-fields">
             <div><dt>IP address</dt><dd>{{ selectedEndpoint.ipAddress }}</dd></div>
             <div><dt>Network</dt><dd>{{ selectedEndpoint.networkZoneName }} · {{ selectedEndpoint.networkZoneId }}</dd></div>
@@ -694,6 +705,10 @@ h1, h2, h3, p { margin-top: 0; }
 .ni-detail-fields dd small { display: block; margin-top: 4px; color: var(--ni-muted); font-size: 10px; font-weight: 500; line-height: 1.4; }
 .ni-detail-reason { margin: 0; color: var(--ni-muted); font-size: 12px; line-height: 1.5; }
 .ni-endpoint-investigation { display: grid; gap: 10px; margin: 14px 0; padding: 13px; border: 1px solid var(--ni-border); border-radius: 12px; background: var(--ni-surface); }
+.ni-network-role { display: grid; gap: 3px; margin: 10px 0; padding: 10px 12px; border-left: 3px solid var(--ni-accent); border-radius: 8px; background: var(--ni-soft); }
+.ni-network-role strong { color: var(--ni-text); font-size: 13px; }
+.ni-network-role span, .ni-network-role small { color: var(--ni-muted); font-size: 12px; line-height: 1.4; }
+.ni-role-label, .ni-node-role { color: var(--ni-accent); font-size: 11px; font-weight: 750; }
 .ni-ai-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; color: var(--ni-text); font-size: 13px; }
 .ni-ai-heading strong { color: var(--ni-accent); }
 .ni-ai-heading > span, .ni-investigation-provenance { color: var(--ni-muted); font-size: 11px; }

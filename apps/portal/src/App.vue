@@ -327,6 +327,7 @@ type NetworkSnapshot = {
   scopes: Array<{ id: string; name: string; cidr?: string; interfaceName?: string; complete: boolean; gatewayIpsObserved: string[] }>;
   methods: string[]; successes: number; failures: string[]; limitations: string[]; endpoints: NetworkDevice[];
   topology: { relationships: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }> };
+  networkRoles?: Array<{ id: string; role: 'default_gateway'; label: 'Observed default gateway'; scopeId: string; scopeName: string; ipAddress: string; observedAt: string; observer: { id: string; host: string; interfaceName: string }; routeDestination: string; routeEvidence: string }>;
   runtime?: NetworkRuntime;
 };
 type NetworkSnapshotDiff = {

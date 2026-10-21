@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import type { NetworkDiscoveredDevice, NetworkObservation } from '../devices/device-registry.types';
 import type { NetworkDiscoverySnapshot } from '../devices/network-discovery-snapshot';
 import { lookupMacVendor } from '../devices/mac-vendor-lookup';
+import { projectNetworkRoles, type NetworkRoleEvidence } from '../devices/network-role-evidence';
 import { LlmGatewayService } from './llm-gateway.service';
 import type { LlmJsonSchema } from './llm-provider';
 
@@ -37,6 +38,7 @@ export interface NetworkEndpointInvestigationResult {
   }>;
   missingEvidence: string[];
   safeFollowUpChecks: Array<{ action: NetworkEndpointSafeCheck; requiresHumanApproval: true }>;
+  networkRole: NetworkRoleEvidence | null;
   evidence: Array<{
     id: string;
     source: string;
@@ -122,6 +124,7 @@ export class NetworkEndpointInvestigatorService {
     snapshot: NetworkDiscoverySnapshot,
     selector: EndpointSelector,
     cloudDataConsent = false,
+    historicalSnapshots: readonly NetworkDiscoverySnapshot[] = [],
   ): Promise<NetworkEndpointInvestigationResult> {
     const endpoint = snapshot.endpoints.find(item =>
       item.networkZoneId === selector.scopeId && item.ipAddress === selector.ipAddress && item.id === selector.endpointId,
@@ -133,13 +136,51 @@ export class NetworkEndpointInvestigatorService {
 
     const evidence = buildEvidence(snapshot, endpoint);
     const scope = snapshot.scopes.find(item => item.id === selector.scopeId);
+    const networkRole = projectNetworkRoles(snapshot).find(item => item.scopeId === selector.scopeId && item.ipAddress === endpoint.ipAddress) || null;
+    const vantageInterfaceName = networkRole?.observer.interfaceName || scope?.interfaceName ||
+      snapshot.runtime?.configuredScopes.find(item => item.id === selector.scopeId)?.interfaceName;
+    if (networkRole) {
+      if (evidence.length >= MAX_EVIDENCE) evidence.pop();
+      evidence.push({ id: networkRole.id, source: 'runtime_route_table', attribute: 'network_role.default_gateway', value: networkRole.label,
+        observedAt: networkRole.observedAt, confidence: 'observed' });
+    }
+    const relevantRoutes = snapshot.runtime?.routes
+      .filter(route => route.family === 'IPv4' && ((!!vantageInterfaceName && route.interfaceName === vantageInterfaceName) || route.gateway === endpoint.ipAddress))
+      .slice(0, 12) || [];
+    const relevantInterfaces = snapshot.runtime?.interfaces
+      .filter(item => !!vantageInterfaceName && item.name === vantageInterfaceName)
+      .slice(0, 1)
+      .map(item => ({ name: item.name, macAddress: item.macAddress, addresses: item.addresses.slice(0, 8) })) || [];
+    const historicalAddressContext = historicalSnapshots
+      .filter(previous => previous.completedAt < snapshot.completedAt && previous.scopes.some(item => item.id === selector.scopeId && item.cidr === scope?.cidr))
+      .map(previous => {
+        const previousEndpoint = previous.endpoints.find(item => item.networkZoneId === selector.scopeId && item.ipAddress === endpoint.ipAddress);
+        if (!previousEndpoint) return null;
+        const sameObservedMac = !!endpoint.macAddress && !!previousEndpoint.macAddress && endpoint.macAddress.toLowerCase() === previousEndpoint.macAddress.toLowerCase();
+        const previousRole = projectNetworkRoles(previous).some(item => item.scopeId === selector.scopeId && item.ipAddress === endpoint.ipAddress)
+          ? 'Observed default gateway' : null;
+        return {
+          scanId: previous.scanId,
+          observedAt: previousEndpoint.discoveredAt,
+          scopeId: selector.scopeId,
+          scopeCidr: scope?.cidr || null,
+          ipAddress: endpoint.ipAddress,
+          correlation: sameObservedMac ? 'matching_observed_mac' : 'address_only_unlinked',
+          observedMac: sameObservedMac ? endpoint.macAddress : null,
+          roleAtAddress: previousRole,
+          identityContinuityEstablished: sameObservedMac,
+          ...(sameObservedMac ? { protocolIdentities: previousEndpoint.observations?.filter(item =>
+            item.source === 'http_rpc' && item.attribute === 'shelly.device_id' && typeof item.value === 'string',
+          ).slice(0, 4).map(item => ({ value: item.value, observedAt: item.observedAt })) || [] } : {}),
+        };
+      }).filter((item): item is NonNullable<typeof item> => item !== null).slice(0, 5);
     const promptData = {
       scan: {
         scanId: snapshot.scanId,
         schemaVersion: snapshot.schemaVersion,
         startedAt: snapshot.startedAt,
         completedAt: snapshot.completedAt,
-        scope: scope ? { id: scope.id, name: scope.name, cidr: scope.cidr, complete: scope.complete } : null,
+        scope: scope ? { id: scope.id, name: scope.name, cidr: scope.cidr, complete: scope.complete, gatewayIpsObserved: scope.gatewayIpsObserved.slice(0, 8) } : null,
         methods: snapshot.methods.slice(0, 20),
         limitations: snapshot.limitations.slice(0, 12).map(safeText),
       },
@@ -148,11 +189,18 @@ export class NetworkEndpointInvestigatorService {
         host: safeText(snapshot.collector.host),
         interfaces: snapshot.collector.interfaces.slice(0, 8).map(safeText),
         platform: snapshot.runtime?.observer.platform || 'unknown',
+        observedAt: snapshot.runtime?.observedAt || snapshot.completedAt,
+        localScopes: snapshot.runtime?.localScopes.filter(item => item.cidr === scope?.cidr || (!!vantageInterfaceName && item.interfaceName === vantageInterfaceName)).slice(0, 12) || [],
+        interfacesObserved: relevantInterfaces,
+        relevantRoutes,
       },
+      networkRole,
+      historicalAddressContext,
       endpoint: {
         id: safeText(endpoint.id), ipAddress: endpoint.ipAddress,
         scopeId: endpoint.networkZoneId, protocol: endpoint.protocol,
-        status: endpoint.status, discoveredAt: endpoint.discoveredAt,
+        scanOutcome: endpoint.status === 'online' ? 'responded_during_scan' : endpoint.status, scanObservedAt: endpoint.discoveredAt,
+        currentReachabilityEstablished: false,
       },
       evidence,
     };
@@ -170,6 +218,9 @@ export class NetworkEndpointInvestigatorService {
         'Do not claim a manufacturer or device type as fact. Return a possible identification only when cited evidence supports it.',
         'An OUI vendor match identifies the registered network-interface/chip vendor only; it is not proof of the device manufacturer or device type. Separate observed facts, vendor clues, hypotheses, and missing evidence.',
         'Historical snapshot evidence describes what was observed then and never proves present reachability.',
+        'A network role such as default gateway is an observed route role, not proof of hardware type, make, model, or physical identity.',
+        'Historical address context is correlated only when it carries a matching observed MAC; address-only entries are explicitly unlinked and must not be described as the same device.',
+        'An endpoint scan status is scan-time evidence only. Say "responded during the scan" and never "currently online".',
         'Every finding and non-null identification must cite one or more exact supplied evidence IDs. Never invent evidence IDs.',
         'When evidence is insufficient, use null for type, manufacturer, and confidence; state uncertainty and missing evidence.',
         'Choose safe follow-up actions only from the provided enum. They are suggestions for a human and are never executed.',
@@ -181,6 +232,12 @@ export class NetworkEndpointInvestigatorService {
     }, { cloudDataConsent });
 
     const parsed = parseOutput(response.text, evidence);
+    if (networkRole) {
+      const roleClaim = `${networkRole.label} for ${safeText(networkRole.scopeName, 100)} was recorded by ${safeText(networkRole.observer.host, 100)} on ${safeText(networkRole.observer.interfaceName, 64)} at ${networkRole.observedAt}. This is a network role, not a verified device identity; router make and model remain unknown.`;
+      parsed.summary = safeText(`${roleClaim} ${parsed.summary}`, 800);
+      parsed.findings = [{ kind: 'observed_fact' as const, claim: roleClaim, confidence: 1, supportingEvidenceIds: [networkRole.id], missingEvidence: ['Router manufacturer and model', 'Verified hardware identity'] },
+        ...parsed.findings.filter(item => !item.supportingEvidenceIds.includes(networkRole.id))].slice(0, 8);
+    }
     return {
       schemaVersion: 1,
       scanId: snapshot.scanId,
@@ -189,6 +246,7 @@ export class NetworkEndpointInvestigatorService {
       provider: safeText(response.provider, 64),
       model: safeText(response.model, 96),
       ...parsed,
+      networkRole,
       evidence,
     };
   }
