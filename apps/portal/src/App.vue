@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import NetworkDiscoveryCard from './components/discovery/NetworkDiscoveryCard.vue';
 import NetworkIntelligencePanel from './components/discovery/NetworkIntelligencePanel.vue';
+import { resolveNetworkEndpointLifecycle } from './components/discovery/network-endpoint-lifecycle';
 import PendingEnrollmentList from './components/discovery/PendingEnrollmentList.vue';
 import { buildPendingEnrollmentCards } from './components/discovery/pending-enrollment';
 import './discovery.css';
@@ -601,6 +602,11 @@ const navItems = computed(() => [
     label: 'Discovery',
     active: activePage.value === 'discovery',
   },
+  {
+    id: 'network-intelligence',
+    label: 'Network Intelligence',
+    active: activePage.value === 'network-intelligence',
+  },
   { id: 'bus', label: 'Bus', active: activePage.value === 'bus' },
   { id: 'systems', label: 'Systems', active: activePage.value === 'systems' },
   { id: 'energy', label: 'Energy', active: activePage.value === 'energy' },
@@ -1019,6 +1025,23 @@ const approvedOnboardingDevices = computed(() =>
     .filter((device) => device.metadata?.approvedFromDiscovery === true)
     .sort((left, right) => left.displayName.localeCompare(right.displayName)),
 );
+
+const enrolledPhysicalDeviceCount = computed(() => new Set(
+  enrolledInventoryDevices.value.map(device => {
+    const physicalId = [device.metadata?.physicalId, device.metadata?.hardwareId]
+      .find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+    return `${device.tenantId}:${device.siteId}:${(physicalId || device.id).toLowerCase()}`;
+  }),
+).size);
+
+const networkEndpointLifecycle = computed(() => (latestNetworkSnapshot.value?.endpoints || []).map(endpoint =>
+  resolveNetworkEndpointLifecycle(
+    endpoint,
+    pendingEnrollmentCards.value,
+    enrolledInventoryDevices.value,
+    approvedDevices.value,
+  ),
+));
 
 const deviceDiagnostics = computed(() => state.value?.deviceDiagnostics || []);
 
@@ -2097,12 +2120,33 @@ function setActivePage(pageId: string, syncUrl = true) {
   if (pageId === 'assistant') void loadVoiceRuns();
   if (pageId === 'devices') void loadState();
   if (pageId === 'discovery') void refreshDiscovery();
+  if (pageId === 'network-intelligence') void refreshNetworkIntelligence();
   if (pageId === 'bus') {
     void loadMqttBus();
     startMqttBusStream();
   } else {
     stopMqttBusStream();
   }
+}
+
+function openPendingEnrollment(recordId?: string) {
+  setActivePage('discovery');
+  void nextTick(() => {
+    const targetId = recordId ? `pending-record-${encodeURIComponent(recordId)}` : 'pending-onboarding';
+    (document.getElementById(targetId) || document.getElementById('pending-onboarding'))
+      ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+}
+
+function openEnrolledDevice(recordId: string) {
+  setActivePage('devices');
+  if (!recordId) return;
+  void nextTick(() => {
+    const device = deviceCards.value.find(candidate => candidate.id === recordId);
+    if (device) selectDevice(device);
+    document.getElementById(`device-record-${encodeURIComponent(recordId)}`)
+      ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
 }
 
 function handlePortalRouteChange() {
@@ -2233,6 +2277,10 @@ async function refreshDiscovery() {
   await loadState();
   await loadDiscoveryMemory();
   await loadNetworkSnapshots();
+}
+
+async function refreshNetworkIntelligence() {
+  await Promise.all([loadState(), loadNetworkSnapshots()]);
 }
 
 async function reviewNetworkDevice(device: NetworkDevice) {
@@ -2886,7 +2934,8 @@ async function login() {
   user.value = data.user;
   localStorage.setItem(tokenKey, data.accessToken);
   localStorage.setItem(userKey, JSON.stringify(data.user));
-  await loadState();
+  if (activePage.value === 'network-intelligence') await refreshNetworkIntelligence();
+  else await loadState();
 }
 
 function logout() {
@@ -3698,6 +3747,7 @@ function delta(start: number, end: number) {
 if (accessToken.value && user.value) {
   setEndpointMode(endpointMode.value);
   if (activePage.value === 'discovery') void refreshDiscovery();
+  else if (activePage.value === 'network-intelligence') void refreshNetworkIntelligence();
   else void loadState();
   loadVoiceRuns();
 }
@@ -3858,6 +3908,13 @@ onBeforeUnmount(() => {
                 d="M8.5 8.5 6.4 6.4M15.5 15.5l2.1 2.1M15.5 8.5l2.1-2.1M8.5 15.5l-2.1 2.1"
               />
               <circle cx="12" cy="12" r="3" />
+            </svg>
+            <svg v-else-if="item.id === 'network-intelligence'" viewBox="0 0 24 24">
+              <circle cx="5" cy="7" r="2" />
+              <circle cx="18" cy="5" r="2" />
+              <circle cx="16" cy="18" r="2" />
+              <circle cx="6" cy="17" r="2" />
+              <path d="m7 7 9-2M6 9l0 6M8 17l6 1M17 7l-1 9" />
             </svg>
             <svg v-else-if="item.id === 'bus'" viewBox="0 0 24 24">
               <path d="M5 7h14M5 12h14M5 17h14" />
@@ -4320,6 +4377,7 @@ onBeforeUnmount(() => {
                 <tr
                   v-for="device in filteredInventoryDevices"
                   :key="device.id"
+                  :id="`device-record-${encodeURIComponent(device.id)}`"
                   :class="{ selected: selectedDeviceId === device.id }"
                   @click="selectDevice(device)"
                 >
@@ -4712,6 +4770,30 @@ onBeforeUnmount(() => {
         </section>
 
         <section
+          v-else-if="activePage === 'network-intelligence'"
+          class="network-intelligence-workspace"
+        >
+          <NetworkIntelligencePanel
+            :scopes="state?.networkZones || []"
+            :snapshots="networkSnapshots"
+            :latest="latestNetworkSnapshot"
+            :comparison="networkSnapshotComparison"
+            :nmap-capability="nmapCapability"
+            :observer="networkRuntime"
+            :pending-count="stateError ? null : pendingEnrollmentCards.length"
+            :enrolled-count="enrollmentError ? null : enrolledPhysicalDeviceCount"
+            :enrollment-state-available="!enrollmentError"
+            :endpoint-lifecycle="networkEndpointLifecycle"
+            :busy="scanningNetwork"
+            :error="networkSnapshotsError || stateError"
+            @scan="scanNetwork"
+            @cancel="cancelNetworkScan"
+            @open-pending="openPendingEnrollment"
+            @open-device="openEnrolledDevice"
+          />
+        </section>
+
+        <section
           v-else-if="activePage === 'discovery'"
           class="panel workspace-panel discovery-workspace"
         >
@@ -4725,19 +4807,6 @@ onBeforeUnmount(() => {
               >
             </div>
           </div>
-
-          <NetworkIntelligencePanel
-            :scopes="state?.networkZones || []"
-            :snapshots="networkSnapshots"
-            :latest="latestNetworkSnapshot"
-            :comparison="networkSnapshotComparison"
-            :nmap-capability="nmapCapability"
-            :observer="networkRuntime"
-            :busy="scanningNetwork"
-            :error="networkSnapshotsError || stateError"
-            @scan="scanNetwork"
-            @cancel="cancelNetworkScan"
-          />
 
           <nav class="discovery-jump-links" aria-label="Discovery sections">
             <a href="#discovery-memory">Memory <span>{{ discoveryMemory?.summary.known ?? '—' }}</span></a>

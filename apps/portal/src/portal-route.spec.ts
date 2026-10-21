@@ -8,6 +8,7 @@ describe('portal route helpers', () => {
     ['/weather/', 'weather'],
     ['/energy/', 'energy'],
     ['/devices/shelly', 'devices'],
+    ['/network-intelligence/', 'network-intelligence'],
     ['/not-a-page', 'assistant'],
   ])('maps %s to %s', (path, page) => {
     expect(pageFromPath(path)).toBe(page);
@@ -18,5 +19,6 @@ describe('portal route helpers', () => {
     expect(pathForPage('weather')).toBe('/weather/');
     expect(pathForPage('energy')).toBe('/energy/');
     expect(pathForPage('logs')).toBe('/logs/');
+    expect(pathForPage('network-intelligence')).toBe('/network-intelligence/');
   });
 });

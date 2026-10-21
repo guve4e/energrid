@@ -38,7 +38,7 @@ function toggleReview(cardKey: string) {
 
 <template>
   <div class="discovery-list pending-enrollment-list">
-    <article v-for="card in cards" :key="card.key" class="pending-device-card">
+    <article v-for="card in cards" :key="card.key" :id="`pending-record-${encodeURIComponent(card.key)}`" class="pending-device-card">
       <header class="pending-device-heading">
         <div class="pending-device-title">
           <h3>{{ card.title }}</h3>

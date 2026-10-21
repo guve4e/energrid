@@ -116,6 +116,28 @@ async function render(path: string, fetch: unknown) {
   await flushPromises();
 }
 describe('device onboarding page workflow with mocked services', () => {
+  it('loads network snapshots and configured scopes after signing into Network Intelligence', async () => {
+    localStorage.clear();
+    const state = { ...data(), networkZones: [{ id: 'lan', name: 'LAN', cidr: '192.168.7.0/24', seedIps: [] }] };
+    const fetch = vi.fn(async (url: string) => {
+      if (url === '/auth/login') return { ok: true, json: async () => ({ accessToken: 'network-token', user: { id: 'admin', name: 'Admin', email: 'unit@test' } }) };
+      if (url === '/portal/state') return { ok: true, json: async () => structuredClone(state) };
+      if (url === '/portal/devices/enrollments') return { ok: true, json: async () => ({ enrollments: [] }) };
+      if (url === '/portal/network/capabilities') return { ok: true, json: async () => ({ nmap: { available: true, enabled: true }, observer: null }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    await render('/network-intelligence/', fetch);
+    await page!.get('#email').setValue('unit@test');
+    await page!.get('#password').setValue('test-password');
+    await button('Sign in').trigger('click');
+    await flushPromises();
+
+    expect(page!.find('select[aria-label="Select network scope"]').element).toBeTruthy();
+    expect(page!.text()).toContain('LAN · 192.168.7.0/24');
+    expect(page!.text()).not.toContain('Network snapshots unavailable');
+    expect(fetch.mock.calls.some(([url]) => url === '/portal/network/capabilities')).toBe(true);
+  });
+
   it('shows backend network identity evidence and an explicit missing-evidence reason in Pending Enrollment', async () => {
     const physicalId = 'shellyproem50-8c4f00dbd258';
     const shellyCandidate = {
@@ -376,6 +398,8 @@ describe('device onboarding page workflow with mocked services', () => {
     const state = { ...data(), networkZones: [{ id: 'lan', name: 'LAN', cidr: '192.168.7.0/24', seedIps: [] }] };
     const fetch = vi.fn(async (url: string, options?: RequestInit) => {
       if (url === '/portal/network/memory') return { ok: true, json: async () => ({ devices: [], summary: { known: 0, observedInLatestScan: 0, notObservedInLatestScan: 0, lastScanId: null } }) };
+      if (url === '/portal/network/snapshots') return { ok: true, json: async () => ({ snapshots: [] }) };
+      if (url === '/portal/network/capabilities') return { ok: true, json: async () => ({ nmap: { available: true, enabled: true }, observer: null }) };
       if (url === '/portal/network/scan') {
         state.networkDevices = [
           network,
@@ -428,8 +452,10 @@ describe('device onboarding page workflow with mocked services', () => {
           json: async () => (url === '/portal/state' ? structuredClone(state) : { runs: [] }),
       };
     });
-    await render('/discovery/', fetch);
-    await button('Discover selected networks').trigger('click');
+    await render('/network-intelligence/', fetch);
+    await button('Scan network').trigger('click');
+    await flushPromises();
+    await button('Discovery').trigger('click');
     await flushPromises();
     expect(button('All devices').attributes('aria-pressed')).toBe('true');
     expect(page!.text()).toContain('Ring');

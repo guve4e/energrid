@@ -41,7 +41,7 @@ function closeActions() {
       <span :class="['trust-pill', badgeClass]">{{ badge }}</span>
     </div>
     <div class="network-device-inspect">
-      <button type="button" class="secondary" :aria-label="`Review intelligence for ${name} at ${device.ipAddress}`" @click="$emit('review')">Review intelligence</button>
+      <button type="button" class="primary" :aria-label="`Review intelligence for ${name} at ${device.ipAddress}`" @click="$emit('review')">Review intelligence</button>
     </div>
     <details ref="actions" class="network-device-more" @keydown.esc.stop.prevent="closeActions">
       <summary :aria-label="`More actions and details for ${name} at ${device.ipAddress}`">More <span aria-hidden="true">⌄</span></summary>
@@ -94,7 +94,7 @@ function closeActions() {
 .network-device-details { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; margin: 16px 0 0; }
 .network-device-details dt { color: var(--discovery-muted, #52636b); font-size: 11px; margin-bottom: 4px; }
 .network-device-details dd { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
-.network-discovery-card :is(button, a, summary):focus-visible { outline: 2px solid #20ac7c; outline-offset: 3px; }
+.network-discovery-card :is(button, a, summary):focus-visible { outline: 2px solid var(--discovery-accent, #2863e6); outline-offset: 3px; }
 @container device-list (min-width: 650px) {
   .network-discovery-card { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto auto auto; gap: 16px; }
   .network-device-identity { grid-column: auto; }

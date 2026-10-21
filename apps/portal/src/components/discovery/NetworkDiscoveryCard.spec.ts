@@ -11,6 +11,7 @@ describe('network discovery card', () => {
     expect(card.get('article').attributes('aria-label')).toContain(device.ipAddress);
     expect(card.get('.network-device-identity').text()).toContain(device.hostname);
     expect(card.get('.connectivity').text()).toBe('online');
+    expect(card.get('.network-device-inspect button').classes()).toContain('primary');
     expect(card.get('details').attributes('open')).toBeUndefined();
     expect(card.get('summary').attributes('aria-label')).toContain(device.ipAddress);
     card.unmount();

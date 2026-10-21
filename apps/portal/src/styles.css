@@ -4979,3 +4979,18 @@ pre {
     padding: 4px 14px 16px;
   }
 }
+/* Network Intelligence adapts its scoped palette to the Portal theme. */
+.theme-dark .network-intelligence-page {
+  --ni-bg: #080d1d;
+  --ni-surface: #111a2b;
+  --ni-surface-raised: #151f32;
+  --ni-border: #344258;
+  --ni-text: #f3f6fc;
+  --ni-muted: #b6c2d3;
+  --ni-accent: #79a8ff;
+  --ni-accent-soft: #1c3159;
+  --ni-unknown: #c2ccda;
+  --ni-unknown-soft: #263247;
+  --ni-success: #78e4a9;
+  --ni-success-soft: #153628;
+}
