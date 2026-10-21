@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import NetworkDiscoveryCard from './components/discovery/NetworkDiscoveryCard.vue';
 import NetworkIntelligencePanel from './components/discovery/NetworkIntelligencePanel.vue';
-import { networkEndpointInvestigationKey, type NetworkEndpointInvestigationState, type NetworkEndpointInvestigationResult } from './components/discovery/network-endpoint-investigation';
+import { cloudEvidenceConsentMessage, networkEndpointInvestigationKey, type NetworkEndpointInvestigationState, type NetworkEndpointInvestigationResult } from './components/discovery/network-endpoint-investigation';
 import { resolveNetworkEndpointLifecycle } from './components/discovery/network-endpoint-lifecycle';
 import PendingEnrollmentList from './components/discovery/PendingEnrollmentList.vue';
 import { buildPendingEnrollmentCards } from './components/discovery/pending-enrollment';
@@ -1260,9 +1260,7 @@ async function loadLlmProviderAvailability(): Promise<LlmProviderAvailability> {
 
 async function confirmCloudEvidence(status: LlmProviderAvailability): Promise<boolean> {
   if (!status.cloudDataConsentRequired) return true;
-  return window.confirm(
-    'This investigation will send the selected device’s network identifiers and evidence to the configured cloud AI provider. Continue?',
-  );
+  return window.confirm(cloudEvidenceConsentMessage(status.provider));
 }
 
 async function investigateSnapshotEndpoint(request: {

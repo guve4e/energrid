@@ -53,6 +53,11 @@ export function networkEndpointInvestigationKey(
   return JSON.stringify([scanId, scopeId, ipAddress, endpointId]);
 }
 
+export function cloudEvidenceConsentMessage(provider: string | null): string {
+  const destination = provider === 'openai' ? 'OpenAI' : provider || 'the configured cloud AI provider';
+  return `This investigation sends local network metadata from the selected saved snapshot to ${destination}: IP address, hostname, observed or device-reported MAC, service details, device/protocol identifiers, timestamps, network scope, and observer host/interface. Captured payloads and credentials are excluded. Continue?`;
+}
+
 export const networkEndpointSafeCheckLabels: Record<NetworkEndpointSafeCheck, string> = {
   review_dhcp_lease: 'Review the router DHCP lease',
   inspect_http_headers: 'Review HTTP response headers',
