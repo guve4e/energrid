@@ -20,6 +20,7 @@ import {
 import { DeviceDiscoveryMemoryStore } from './device-discovery-memory.store'
 import { DeviceRegistryService } from './device-registry.service'
 import type { NetworkDiscoveredDevice } from './device-registry.types'
+import { NmapNetworkEvidenceAdapter, type NmapCommandRunner } from './adapters/outbound/network/nmap-network-evidence.adapter'
 
 jest.mock('node:child_process', () => ({
   execFile: jest.fn((_command, _args, _options, callback) => callback(new Error('mocked'))),
@@ -106,6 +107,40 @@ describe('LAN discovery evidence persistence', () => {
     expect(result.devices).toEqual([])
     expect(result.snapshot.scopes.map(scope => scope.id)).toEqual(['eero'])
     expect(await memory.listSnapshots()).toHaveLength(1)
+  })
+
+  it('persists Nmap observations and services through the existing immutable snapshot store', async () => {
+    process.env.HOME_NMAP_ENABLED = 'true'
+    const xml = `<nmaprun><host endtime="1792560002"><status state="up"/><address addr="192.168.1.133" addrtype="ipv4"/><ports><port protocol="tcp" portid="80"><state state="open"/><service name="http"/></port></ports></host><runstats><finished exit="success"/><hosts up="1" down="253" total="254"/></runstats></nmaprun>`
+    const runner: NmapCommandRunner = async (_command, args) => ({
+      stdout: args[0] === '--version' ? 'Nmap version 7.95' : xml,
+      stderr: '',
+    })
+    const adapter = new NmapNetworkEvidenceAdapter(runner, () => ({}), () => new Date('2026-10-21T00:00:00.000Z'))
+    const service = new DeviceLanDiscoveryService(
+      memory,
+      {} as DeviceRegistryService,
+      new DeviceLanNetworkEvidenceCollector(adapter),
+    )
+
+    const result = await service.scanNow({ fullSubnetConfirmed: true })
+    const saved = await memory.getSnapshot(result.snapshot.scanId)
+    const identityRecords = await memory.listIdentityEvidence()
+    const endpoint = saved?.endpoints.find(item => item.ipAddress === '192.168.1.133')
+
+    expect(result.snapshot.methods).toContain('nmap_tcp_connect_service_scan')
+    expect(result.snapshot.scopes[0]).toMatchObject({ id: 'home-lan', complete: true })
+    expect(endpoint?.observations).toContainEqual(expect.objectContaining({
+      source: 'tcp', attribute: 'port.80.open', value: true, scopeId: 'home-lan',
+      method: 'nmap_tcp_connect_service_scan', observedAt: '2026-10-21T05:20:02.000Z',
+    }))
+    expect(identityRecords.flatMap(record => record.device.observations || [])).not.toContainEqual(
+      expect.objectContaining({ method: 'nmap_tcp_connect_service_scan' }),
+    )
+    expect(saved?.rawEvidence).toContainEqual(expect.objectContaining({
+      source: 'nmap', scopeId: 'home-lan',
+      evidence: expect.objectContaining({ observations: expect.arrayContaining([expect.objectContaining({ method: 'nmap_tcp_connect_service_scan' })]) }),
+    }))
   })
 
   it('persists each same-scan MAC identity before projecting the ambiguous endpoint', async () => {

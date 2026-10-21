@@ -338,6 +338,7 @@ type NetworkSnapshotDiff = {
   identityChanges: Array<{ scopeId: string; ipAddress: string; previous: string; current: string }>;
   topologyChanges: { added: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }>; removed: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }> };
 };
+type NmapCapability = { available: boolean; enabled: boolean; version?: string; reason?: string };
 
 
 function deviceHasSsh(device: NetworkDevice): boolean {
@@ -485,6 +486,7 @@ const scanStartedAt = ref(0);
 const scanElapsedSeconds = ref(0);
 const scanFeedback = ref('');
 let scanTimer: ReturnType<typeof setInterval> | undefined;
+let networkScanAbortController: AbortController | undefined;
 const discoveryMemory = ref<DiscoveryMemoryResponse | null>(null);
 const discoveryMemoryLoading = ref(false);
 const discoveryMemoryError = ref('');
@@ -493,6 +495,7 @@ const networkSnapshots = ref<NetworkSnapshot[]>([]);
 const latestNetworkSnapshot = ref<NetworkSnapshot | null>(null);
 const networkSnapshotComparison = ref<NetworkSnapshotDiff | null>(null);
 const networkSnapshotsError = ref('');
+const nmapCapability = ref<NmapCapability | null>(null);
 const discoveryDecisionBusy = ref<Record<string, string>>({});
 const findingHttpPageByDeviceId = ref<Record<string, boolean>>({});
 const discoveryView = ref<'capable' | 'all'>('all');
@@ -1703,6 +1706,13 @@ async function loadNetworkSnapshots() {
     });
     if (!response.ok) throw new Error(`Network snapshots unavailable (${response.status})`);
     const result = await response.json() as { snapshots: NetworkSnapshot[] };
+    const capabilityResponse = await fetch(`${apiBase}/portal/network/capabilities`, {
+      headers: { Authorization: `Bearer ${accessToken.value}` },
+    });
+    if (capabilityResponse.ok) {
+      const capability = await capabilityResponse.json() as { nmap: NmapCapability };
+      nmapCapability.value = capability.nmap;
+    }
     networkSnapshots.value = result.snapshots;
     latestNetworkSnapshot.value = result.snapshots[0] || null;
     networkSnapshotComparison.value = null;
@@ -2154,7 +2164,7 @@ async function scanNetwork(scopeIds?: string[]) {
     return;
   }
   const fullSubnetConfirmed = selectedScopes.some(scope => !!scope.cidr);
-  if (fullSubnetConfirmed && !window.confirm(`This will scan the selected subnet(s): ${selectedScopes.filter(scope => scope.cidr).map(scope => `${scope.name} ${scope.cidr}`).join(', ')}. The scan is bounded to 254 hosts per subnet. Continue?`)) return;
+  if (fullSubnetConfirmed && !window.confirm(`This will scan the selected subnet(s): ${selectedScopes.filter(scope => scope.cidr).map(scope => `${scope.name} ${scope.cidr}`).join(', ')}. Each subnet is limited to 254 addresses; when enabled, Nmap checks a fixed set of TCP service ports with bounded concurrency and timeouts. Continue?`)) return;
   scanningNetwork.value = true;
   scanStartedAt.value = Date.now();
   scanElapsedSeconds.value = 0;
@@ -2166,10 +2176,12 @@ async function scanNetwork(scopeIds?: string[]) {
   stateError.value = '';
   try {
     appendLog('[discovery] scanning selected networks');
+    networkScanAbortController = new AbortController();
     const response = await fetch(`${apiBase}/portal/network/scan`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${accessToken.value}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ scopeIds: selectedScopeIds, fullSubnetConfirmed }),
+      signal: networkScanAbortController.signal,
     });
     if (!response.ok) throw new Error('Network scan unavailable');
     const result = await response.json() as {
@@ -2185,15 +2197,22 @@ async function scanNetwork(scopeIds?: string[]) {
     await loadState();
     await loadDiscoveryMemory();
   } catch (error) {
-    stateError.value = error instanceof Error ? error.message : 'Network scan unavailable';
+    stateError.value = networkScanAbortController?.signal.aborted
+      ? 'The scan was cancelled. Any completed observations remain available in the saved snapshot.'
+      : error instanceof Error ? error.message : 'Network scan unavailable';
     scanFeedback.value = `Scan failed: ${stateError.value}`;
     appendLog(`[discovery] scan failed: ${stateError.value}`);
   } finally {
     scanElapsedSeconds.value = Math.floor((Date.now() - scanStartedAt.value) / 1000);
     if (scanTimer) clearInterval(scanTimer);
     scanTimer = undefined;
+    networkScanAbortController = undefined;
     scanningNetwork.value = false;
   }
+}
+
+function cancelNetworkScan() {
+  networkScanAbortController?.abort();
 }
 
 async function refreshDiscovery() {
@@ -4698,9 +4717,11 @@ onBeforeUnmount(() => {
             :snapshots="networkSnapshots"
             :latest="latestNetworkSnapshot"
             :comparison="networkSnapshotComparison"
+            :nmap-capability="nmapCapability"
             :busy="scanningNetwork"
             :error="networkSnapshotsError || stateError"
             @scan="scanNetwork"
+            @cancel="cancelNetworkScan"
           />
 
           <nav class="discovery-jump-links" aria-label="Discovery sections">

@@ -6,7 +6,7 @@ type Endpoint = {
   id: string; ipAddress: string; networkZoneId: string; networkZoneName: string;
   macAddress?: string; deviceReportedMacAddress?: string; hostname?: string; vendor?: string;
   model?: string; protocol: string; status: string; discoveredAt: string; reason: string;
-  observations?: Array<{ source: string; attribute: string; value: string | number | boolean; observedAt: string }>;
+  observations?: Array<{ source: string; attribute: string; value: string | number | boolean; observedAt: string; method?: string }>;
 };
 type Snapshot = {
   scanId: string; schemaVersion: number; startedAt: string; completedAt: string;
@@ -31,9 +31,10 @@ type Diff = {
 
 const props = defineProps<{
   scopes: Scope[]; snapshots: Snapshot[]; latest: Snapshot | null; comparison: Diff | null;
+  nmapCapability?: { available: boolean; enabled: boolean; version?: string; reason?: string } | null;
   busy?: boolean; error?: string;
 }>();
-const emit = defineEmits<{ scan: [scopeIds: string[]] }>();
+const emit = defineEmits<{ scan: [scopeIds: string[]]; cancel: [] }>();
 const selectedScopeIds = ref<string[]>([]);
 watch(() => props.scopes, scopes => {
   const available = new Set(scopes.map(scope => scope.id));
@@ -41,9 +42,14 @@ watch(() => props.scopes, scopes => {
   if (!selectedScopeIds.value.length) selectedScopeIds.value = scopes.map(scope => scope.id);
 }, { immediate: true, deep: true });
 
-const services = (endpoint: Endpoint) => [...new Set((endpoint.observations || [])
-  .filter(observation => observation.source === 'tcp' && observation.value === true)
-  .map(observation => observation.attribute.replace(/^port\./, '').replace(/\.open$/, '')))];
+const services = (endpoint: Endpoint) => [...new Set((endpoint.observations || []).flatMap(observation => {
+  const namedService = /^port\.(\d+)\.service$/.exec(observation.attribute);
+  if (namedService && observation.source === 'tcp' && typeof observation.value === 'string') return [`${observation.value} (TCP ${namedService[1]})`];
+  if (observation.value !== true) return [];
+  const openPort = /^port\.(\d+)\.open$/.exec(observation.attribute);
+  if (openPort && observation.source === 'tcp') return [`TCP ${openPort[1]}`];
+  return [];
+}))];
 const rpcVerified = (endpoint: Endpoint) => endpoint.vendor === 'Shelly' && endpoint.protocol === 'http' && /^shelly[a-z0-9._-]+$/i.test(endpoint.id);
 const date = (value: string) => new Date(value).toLocaleString();
 </script>
@@ -56,17 +62,24 @@ const date = (value: string) => new Date(value).toLocaleString();
         <h3 id="network-intelligence-title">Network snapshots</h3>
         <span class="section-help">Each completed scan is preserved. “Not detected” never means offline.</span>
       </div>
-      <button type="button" class="primary" :disabled="busy || selectedScopeIds.length === 0" @click="emit('scan', [...selectedScopeIds])">
-        {{ busy ? 'Discovering…' : 'Discover selected networks' }}
-      </button>
+      <div class="scan-actions">
+        <button type="button" class="primary" :disabled="busy || selectedScopeIds.length === 0" @click="emit('scan', [...selectedScopeIds])">
+          {{ busy ? 'Discovering…' : 'Discover selected networks' }}
+        </button>
+        <button v-if="busy" type="button" @click="emit('cancel')">Cancel scan</button>
+      </div>
     </div>
+    <p class="section-help" role="status">
+      Nmap {{ nmapCapability?.available ? `available · ${nmapCapability.version || 'version unknown'}` : `unavailable · ${nmapCapability?.reason || 'status not checked'}` }} ·
+      {{ nmapCapability?.enabled ? 'scanning enabled' : 'scanning disabled' }}. Service checks still require an operator-confirmed scan.
+    </p>
     <fieldset class="network-scope-picker">
       <legend>Choose scan scope</legend>
       <label v-for="scope in scopes" :key="scope.id">
         <input v-model="selectedScopeIds" type="checkbox" :value="scope.id" />
         <span>{{ scope.name }}<small>{{ scope.cidr || 'Seeded endpoints only' }}</small></span>
       </label>
-      <small>Subnet scans use bounded ICMP/TCP probes (up to 254 hosts per configured subnet). The next step asks for confirmation before scanning.</small>
+      <small>Confirmed scans use bounded existing probes and, when enabled, Nmap TCP service checks for up to 254 addresses per configured subnet.</small>
     </fieldset>
     <p v-if="error" role="alert">{{ error }}</p>
 
@@ -135,6 +148,7 @@ const date = (value: string) => new Date(value).toLocaleString();
 .snapshot-summary dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 0; }
 .snapshot-summary dt { font-size: 11px; color: var(--discovery-muted, #52636b); }
 .snapshot-summary dd { margin: 4px 0 0; overflow-wrap: anywhere; font-size: 12px; }
+.scan-actions { display: flex; gap: 8px; align-items: center; }
 .snapshot-diff { display: flex; flex-wrap: wrap; gap: 8px 14px; border-left: 3px solid var(--discovery-accent, #20ac7c); padding: 8px 12px; }
 .snapshot-diff ul { flex-basis: 100%; margin: 0; }
 .network-table small { display: block; margin-top: 4px; }

@@ -230,6 +230,9 @@ export interface NetworkObservation {
   attribute: string;
   value: string | number | boolean;
   observedAt: string;
+  scopeId?: string;
+  interfaceName?: string;
+  method?: string;
 }
 
 export interface NetworkDiscoveredDevice {

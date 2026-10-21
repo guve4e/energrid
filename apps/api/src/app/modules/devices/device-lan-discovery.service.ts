@@ -25,6 +25,7 @@ import type { PhysicalLanObservation } from './enrollment/physical-device-invent
 import { shellyLanCandidates } from './adapters/inbound/shelly/shelly-lan-candidates'
 import { readOnlyShellyDeviceInfo } from './adapters/inbound/shelly/read-only-shelly-rpc'
 import { compareNetworkSnapshots, type NetworkDiscoverySnapshot, type NetworkDiscoverySnapshotDiff } from './network-discovery-snapshot'
+import { NmapNetworkEvidenceAdapter, type NmapCapability, type NmapScanResult } from './adapters/outbound/network/nmap-network-evidence.adapter'
 
 const execFileAsync = promisify(execFile)
 const activeScanConcurrency = 24
@@ -51,21 +52,38 @@ export type NetworkCandidate = {
   interfaceName?: string
   evidenceSource?: string
   observedAt?: string
+  observations?: NetworkDiscoveredDevice['observations']
 }
 
 @Injectable()
 export class DeviceLanNetworkEvidenceCollector {
-  async collectCandidates(zones: NetworkDiscoveryZone[]): Promise<NetworkCandidate[]> {
+  constructor(@Optional() private readonly nmapAdapter?: NmapNetworkEvidenceAdapter) {}
+
+  async getNmapCapability(): Promise<NmapCapability & { enabled: boolean }> {
+    const capability = await (this.nmapAdapter || new NmapNetworkEvidenceAdapter()).getCapability()
+    return { ...capability, enabled: process.env.HOME_NMAP_ENABLED === 'true' }
+  }
+
+  async collectEvidence(zones: NetworkDiscoveryZone[], signal?: AbortSignal): Promise<{
+    candidates: NetworkCandidate[]
+    nmap: NmapScanResult
+  }> {
     const reachableDevices = await activeScanZones(zones)
     const tcpDevices = await tcpDiscoverZones(zones, reachableDevices)
     const arpDevices = await readNeighborTable()
     const routerClients = await readRouterClientCandidates()
+    const nmap = await (this.nmapAdapter || new NmapNetworkEvidenceAdapter()).scan(zones, {
+      enabled: process.env.HOME_NMAP_ENABLED === 'true',
+      maxHosts: Number(process.env.HOME_NMAP_MAX_HOSTS) || 254,
+      timeoutMs: Number(process.env.HOME_NMAP_TIMEOUT_MS) || 120_000,
+      signal,
+    })
     const stamp = (candidates: NetworkCandidate[], source: string) => candidates.map(candidate => ({
       ...candidate,
       evidenceSource: candidate.evidenceSource || source,
       observedAt: candidate.observedAt || new Date().toISOString(),
     }))
-    return [
+    const candidates = [
       ...stamp(arpDevices, 'neighbor_table'),
       ...stamp(routerClients, 'router_clients'),
       ...stamp(reachableDevices, 'icmp'),
@@ -75,6 +93,28 @@ export class DeviceLanNetworkEvidenceCollector {
       }))), 'seed_ip'),
     ].map(candidate => assignNetworkZone(candidate, zones))
       .filter((candidate) => candidateBelongsToConfiguredZone(candidate, zones))
+    const nmapCandidates: NetworkCandidate[] = nmap.hosts.flatMap(host => {
+      const zone = zones.find(item => item.id === host.scopeId)
+      if (!zone) return []
+      return [{
+        ipAddress: host.ipAddress,
+        ...(host.macAddress ? { macAddress: host.macAddress } : {}),
+        ...(host.hostname ? { hostname: host.hostname } : {}),
+        ...(host.interfaceName ? { interfaceName: host.interfaceName } : {}),
+        networkZoneId: zone.id,
+        networkZoneName: zone.name,
+        status: host.status,
+        reason: host.reason,
+        evidenceSource: 'nmap',
+        observedAt: host.observedAt,
+        observations: host.observations,
+      }]
+    })
+    return { candidates: [...candidates, ...nmapCandidates], nmap }
+  }
+
+  async collectCandidates(zones: NetworkDiscoveryZone[]): Promise<NetworkCandidate[]> {
+    return (await this.collectEvidence(zones)).candidates
   }
 
   enrichCandidate(
@@ -109,7 +149,11 @@ export class DeviceLanDiscoveryService {
     return this.lastZones.length > 0 ? this.lastZones : configuredNetworkZones()
   }
 
-  async scanNow(options: { scopeIds?: string[]; fullSubnetConfirmed?: boolean } = {}): Promise<{
+  getNmapCapability(): Promise<NmapCapability & { enabled: boolean }> {
+    return this.evidenceCollector.getNmapCapability()
+  }
+
+  async scanNow(options: { scopeIds?: string[]; fullSubnetConfirmed?: boolean; signal?: AbortSignal } = {}): Promise<{
     scannedAt: string
     zones: NetworkDiscoveryZone[]
     devices: NetworkDiscoveredDevice[]
@@ -123,7 +167,8 @@ export class DeviceLanDiscoveryService {
     if (zones.some(zone => zone.cidr) && options.fullSubnetConfirmed !== true) {
       throw new BadRequestException('Full-subnet discovery requires explicit operator confirmation')
     }
-    const discoveredCandidates = await this.evidenceCollector.collectCandidates(zones)
+    const evidence = await this.evidenceCollector.collectEvidence(zones, options.signal)
+    const discoveredCandidates = evidence.candidates
     const endpointCandidates = mergeNeighborCandidates(discoveredCandidates)
     const identityCandidates = identityCandidatesForScan(discoveredCandidates)
     const conflictingEndpoints = new Set(endpointCandidates
@@ -139,10 +184,16 @@ export class DeviceLanDiscoveryService {
     )
 
     this.lastZones = configuredZones
-    this.lastScan = dedupeNetworkDevices(devices)
+    this.lastScan = addNmapEndpointEvidence(
+      dedupeNetworkDevices(devices),
+      discoveredCandidates.filter(candidate => candidate.evidenceSource === 'nmap'),
+    )
     const boundedEvidence = buildBoundedRawEvidence(discoveredCandidates, this.lastScan, startedAt)
     const completedAt = new Date().toISOString()
-    await this.discoveryMemory.recordScan(completedAt, devices)
+    await this.discoveryMemory.recordScan(completedAt, devices.map(device => {
+      const observations = (device.observations || []).filter(item => item.method !== 'nmap_tcp_connect_service_scan')
+      return { ...device, ...(observations.length ? { observations } : { observations: undefined }) }
+    }))
     if (this.physicalInventory) {
       const { tenant, site } = this.registry.getSnapshot()
       try {
@@ -190,7 +241,11 @@ export class DeviceLanDiscoveryService {
         throw error
       }
     }
-    const collectorInterfaces = interfacesForZones(zones)
+    const collectorInterfaces = [...new Set([
+      ...interfacesForZones(zones),
+      ...evidence.nmap.scopes.flatMap(scope => scope.interfaceName ? [scope.interfaceName] : []),
+    ])].sort()
+    const nmapScopeById = new Map(evidence.nmap.scopes.map(scope => [scope.scopeId, scope]))
     const snapshot: NetworkDiscoverySnapshot = {
       schemaVersion: 1,
       scanId,
@@ -205,18 +260,22 @@ export class DeviceLanDiscoveryService {
         id: zone.id,
         name: zone.name,
         ...(zone.cidr ? { cidr: zone.cidr } : {}),
-        ...(interfaceForZone(zone) ? { interfaceName: interfaceForZone(zone) } : {}),
+        ...((nmapScopeById.get(zone.id)?.interfaceName || interfaceForZone(zone))
+          ? { interfaceName: nmapScopeById.get(zone.id)?.interfaceName || interfaceForZone(zone) }
+          : {}),
         ...(zone.role ? { role: zone.role } : {}),
-        complete: scanScopeComplete(zone),
+        complete: evidence.nmap.scopes.some(result => result.scopeId === zone.id && result.complete) ||
+          (process.env.HOME_NMAP_ENABLED !== 'true' && scanScopeComplete(zone)),
         gatewayIpsObserved: [...new Set(this.lastScan
           .filter(device => device.networkZoneId === zone.id && device.gatewayId && isIpv4Address(device.gatewayId))
           .map(device => device.gatewayId!))].sort(),
       })),
-      methods: discoveryMethods(zones),
+      methods: [...new Set([...discoveryMethods(zones), ...evidence.nmap.methods])].sort(),
       successes: this.lastScan.length,
-      failures: [],
+      failures: evidence.nmap.failures,
       limitations: [
         ...scanLimitations(zones),
+        ...evidence.nmap.limitations,
         ...(boundedEvidence.omitted ? [`Raw candidate evidence was bounded; ${boundedEvidence.omitted} record(s) omitted.`] : []),
       ],
       rawEvidence: boundedEvidence.records,
@@ -471,6 +530,7 @@ function sanitizeCandidateEvidence(candidate: NetworkCandidate): Record<string, 
     'vendor', 'model', 'protocol', 'confidence', 'status', 'firmwareVersion',
     'app', 'generation', 'components', 'deviceReportedMacAddress', 'reason',
     'networkZoneId', 'networkZoneName', 'interfaceName', 'evidenceSource', 'observedAt',
+    'observations',
   ] as const
   return Object.fromEntries(allowed.flatMap(field =>
     candidate[field] === undefined ? [] : [[field, candidate[field]]],
@@ -759,6 +819,7 @@ async function enrichNetworkDevice(
     components: candidate.components,
     deviceReportedMacAddress: candidate.deviceReportedMacAddress,
     reason: candidate.reason || 'Visible in the local network neighbour table.',
+    observations: candidate.observations || [],
     ...(candidate.macEvidence && new Set(candidate.macEvidence.map(mac => mac.toLowerCase())).size > 1 ? {
       identityConflict: {
         reason: 'multiple_macs_for_endpoint',
@@ -776,11 +837,11 @@ async function enrichNetworkDevice(
     base.hostname = evidence.hostname
   }
 
-  base.observations = buildNetworkObservations(
+  base.observations = mergeNetworkObservations(candidate.observations || [], buildNetworkObservations(
     { ...candidate, hostnameEvidence: candidate.hostnameEvidence },
     evidence,
     networkEvidenceObservedAt,
-  )
+  ))
   base.discoveredAt = networkEvidenceObservedAt
 
   const shelly = allowEndpointEnrichment
@@ -1250,6 +1311,40 @@ export function dedupeNetworkDevices(
   return dedupeNetworkEndpoints(devices)
 }
 
+function addNmapEndpointEvidence(
+  endpoints: NetworkDiscoveredDevice[],
+  candidates: NetworkCandidate[],
+): NetworkDiscoveredDevice[] {
+  const byKey = new Map(endpoints.map(endpoint => [`${endpoint.networkZoneId}:${endpoint.ipAddress}`, endpoint]))
+  for (const candidate of candidates) {
+    if (!candidate.networkZoneId || !candidate.networkZoneName) continue
+    const key = `${candidate.networkZoneId}:${candidate.ipAddress}`
+    const endpoint = byKey.get(key)
+    if (endpoint) {
+      byKey.set(key, {
+        ...endpoint,
+        observations: mergeNetworkObservations(endpoint.observations || [], candidate.observations || []),
+      })
+      continue
+    }
+    byKey.set(key, {
+      id: candidate.macAddress || candidate.ipAddress,
+      ipAddress: candidate.ipAddress,
+      networkZoneId: candidate.networkZoneId,
+      networkZoneName: candidate.networkZoneName,
+      ...(candidate.macAddress ? { macAddress: candidate.macAddress } : {}),
+      ...(candidate.hostname ? { hostname: candidate.hostname } : {}),
+      protocol: 'unknown',
+      confidence: 0,
+      status: candidate.status || 'unknown',
+      discoveredAt: candidate.observedAt || new Date().toISOString(),
+      reason: candidate.reason || 'Observed by a bounded TCP service scan.',
+      observations: candidate.observations || [],
+    })
+  }
+  return [...byKey.values()].sort((a, b) => a.networkZoneId.localeCompare(b.networkZoneId) || a.ipAddress.localeCompare(b.ipAddress))
+}
+
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
@@ -1317,6 +1412,16 @@ export function buildNetworkObservations(
   }
 
   return observations
+}
+
+function mergeNetworkObservations(
+  ...groups: NonNullable<NetworkDiscoveredDevice['observations']>[]
+): NonNullable<NetworkDiscoveredDevice['observations']> {
+  const unique = new Map<string, NonNullable<NetworkDiscoveredDevice['observations']>[number]>()
+  for (const observation of groups.flat()) {
+    unique.set(JSON.stringify(observation), observation)
+  }
+  return [...unique.values()]
 }
 
 async function collectGenericHostEvidence(

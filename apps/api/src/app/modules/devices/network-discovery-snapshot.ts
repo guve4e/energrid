@@ -218,7 +218,7 @@ function changedIdentity(previous: NetworkDiscoveredDevice, current: NetworkDisc
 
 function serviceEvidence(device: NetworkDiscoveredDevice): string[] {
   return [...new Set((device.observations || [])
-    .filter(observation => observation.source === 'tcp' && observation.value === true)
+    .filter(observation => observation.source === 'tcp' && observation.value === true && /\.open$/.test(observation.attribute))
     .map(observation => `${observation.attribute}=${observation.value}`))].sort();
 }
 

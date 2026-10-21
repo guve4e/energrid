@@ -27,10 +27,14 @@ describe('NetworkIntelligencePanel', () => {
       endpoints: [{ id: 'shellyplus1-123456789abc', ipAddress: '192.168.7.10', networkZoneId: 'eero', networkZoneName: 'Eero',
         vendor: 'Shelly', protocol: 'http', status: 'online', discoveredAt: '2026-10-21T10:00:03Z', reason: 'Shelly HTTP API responded',
         macAddress: '12:34:56:78:9a:bc', deviceReportedMacAddress: '12:34:56:78:9a:bc',
-        observations: [{ source: 'tcp', attribute: 'port.80.open', value: true, observedAt: '2026-10-21T10:00:03Z' }] }],
+        observations: [
+          { source: 'tcp', attribute: 'port.80.open', value: true, observedAt: '2026-10-21T10:00:03Z' },
+          { source: 'tcp', attribute: 'port.80.service', value: 'http Example 1.2', observedAt: '2026-10-21T10:00:03Z', method: 'nmap_tcp_connect_service_scan' },
+        ] }],
     };
     const panel = mount(NetworkIntelligencePanel, { props: {
       scopes, snapshots: [snapshot], latest: snapshot,
+      nmapCapability: { available: true, enabled: true, version: '7.95' },
       comparison: { fromScanId: 'scan-0', toScanId: 'scan-1', comparableScopes: ['eero'], incompleteScopes: [],
         addedEndpoints: [], notDetectedEndpoints: [{ scopeId: 'eero', ipAddress: '192.168.7.4' }],
         verifiedAddressChanges: [], ipReuse: [], serviceChanges: [], scopeChanges: [], macChanges: [], gatewayChanges: [],
@@ -40,9 +44,20 @@ describe('NetworkIntelligencePanel', () => {
     expect(panel.text()).toContain('192.168.7.10');
     expect(panel.text()).toContain('RPC verified: shellyplus1-123456789abc');
     expect(panel.text()).toContain('80');
+    expect(panel.text()).toContain('http Example 1.2 (TCP 80)');
+    expect(panel.text()).toContain('available · 7.95');
     expect(panel.text()).toContain('No remote collector');
     expect(panel.text()).toContain('not detected');
     expect(panel.text()).not.toContain('offline endpoint');
+    panel.unmount();
+  });
+
+  it('offers operator cancellation while a bounded scan is running', async () => {
+    const panel = mount(NetworkIntelligencePanel, { props: {
+      scopes, snapshots: [], latest: null, comparison: null, busy: true,
+    } });
+    await panel.get('button:last-of-type').trigger('click');
+    expect(panel.emitted('cancel')).toEqual([[]]);
     panel.unmount();
   });
 });

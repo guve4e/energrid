@@ -51,6 +51,12 @@ import {
 } from './portal-device-proxy.service'
 import { PortalStateService } from './portal-state.service'
 
+type DisconnectAwareResponse = {
+  writableEnded: boolean;
+  once(event: 'close', listener: () => void): unknown;
+  off(event: 'close', listener: () => void): unknown;
+};
+
 @ApiExcludeController()
 @Controller('portal')
 export class PortalController {
@@ -222,6 +228,7 @@ export class PortalController {
   async scanNetwork(
     @Body() body: { scopeIds?: unknown; fullSubnetConfirmed?: unknown },
     @Req() request: DeviceProxyRequest,
+    @Res({ passthrough: true }) response?: DisconnectAwareResponse,
   ) {
     assertPortalControlToken(request)
     if (!Array.isArray(body?.scopeIds) || body.scopeIds.length === 0 ||
@@ -237,10 +244,21 @@ export class PortalController {
     if (selected.some(zone => zone.cidr) && body.fullSubnetConfirmed !== true) {
       throw new BadRequestException('Full-subnet discovery requires explicit operator confirmation')
     }
-    const scan = await this.lanDiscovery.scanNow({
-      scopeIds: body.scopeIds as string[],
-      fullSubnetConfirmed: body.fullSubnetConfirmed,
-    })
+    const controller = new AbortController()
+    const abortIfDisconnected = () => {
+      if (response && !response.writableEnded) controller.abort()
+    }
+    response?.once('close', abortIfDisconnected)
+    let scan: Awaited<ReturnType<DeviceLanDiscoveryService['scanNow']>>
+    try {
+      scan = await this.lanDiscovery.scanNow({
+        scopeIds: body.scopeIds as string[],
+        fullSubnetConfirmed: body.fullSubnetConfirmed,
+        signal: controller.signal,
+      })
+    } finally {
+      response?.off('close', abortIfDisconnected)
+    }
     for (const device of scan.devices) {
       for (const candidate of shellyLanCandidates(device))
         this.deviceRegistry.registerDiscoveredDevice(candidate)
@@ -252,6 +270,12 @@ export class PortalController {
   async listNetworkSnapshots(@Req() request: DeviceProxyRequest) {
     assertPortalControlToken(request)
     return { snapshots: await this.discoveryMemory.listSnapshots(50) }
+  }
+
+  @Get('network/capabilities')
+  async networkCapabilities(@Req() request: DeviceProxyRequest) {
+    assertPortalControlToken(request)
+    return { nmap: await this.lanDiscovery.getNmapCapability() }
   }
 
   @Get('network/snapshots/:fromScanId/compare/:toScanId')
