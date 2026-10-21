@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, Optional } from '@nestjs/common'
+import { BadRequestException, Inject, Injectable, Logger, Optional } from '@nestjs/common'
 import {
   dedupeNetworkEndpoints,
   DeviceDiscoveryMemoryStore,
@@ -6,7 +6,8 @@ import {
 } from './device-discovery-memory.store'
 import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
-import { networkInterfaces } from 'node:os'
+import { hostname as localHostname, networkInterfaces } from 'node:os'
+import { randomUUID } from 'node:crypto'
 import { reverse } from 'node:dns/promises'
 import { Socket } from 'node:net'
 import { promisify } from 'node:util'
@@ -23,6 +24,7 @@ import type { PhysicalDeviceInventoryService } from './enrollment/physical-devic
 import type { PhysicalLanObservation } from './enrollment/physical-device-inventory.repository'
 import { shellyLanCandidates } from './adapters/inbound/shelly/shelly-lan-candidates'
 import { readOnlyShellyDeviceInfo } from './adapters/inbound/shelly/read-only-shelly-rpc'
+import { compareNetworkSnapshots, type NetworkDiscoverySnapshot, type NetworkDiscoverySnapshotDiff } from './network-discovery-snapshot'
 
 const execFileAsync = promisify(execFile)
 const activeScanConcurrency = 24
@@ -47,6 +49,8 @@ export type NetworkCandidate = {
   networkZoneId?: string
   networkZoneName?: string
   interfaceName?: string
+  evidenceSource?: string
+  observedAt?: string
 }
 
 @Injectable()
@@ -56,18 +60,19 @@ export class DeviceLanNetworkEvidenceCollector {
     const tcpDevices = await tcpDiscoverZones(zones, reachableDevices)
     const arpDevices = await readNeighborTable()
     const routerClients = await readRouterClientCandidates()
+    const stamp = (candidates: NetworkCandidate[], source: string) => candidates.map(candidate => ({
+      ...candidate,
+      evidenceSource: candidate.evidenceSource || source,
+      observedAt: candidate.observedAt || new Date().toISOString(),
+    }))
     return [
-      ...arpDevices,
-      ...routerClients,
-      ...reachableDevices,
-      ...tcpDevices,
-      ...zones.flatMap((zone) =>
-        zone.seedIps.map((ipAddress) => ({
-          ipAddress,
-          networkZoneId: zone.id,
-          networkZoneName: zone.name,
-        })),
-      ),
+      ...stamp(arpDevices, 'neighbor_table'),
+      ...stamp(routerClients, 'router_clients'),
+      ...stamp(reachableDevices, 'icmp'),
+      ...stamp(tcpDevices, 'tcp'),
+      ...stamp(zones.flatMap(zone => zone.seedIps.map(ipAddress => ({
+        ipAddress, networkZoneId: zone.id, networkZoneName: zone.name,
+      }))), 'seed_ip'),
     ].map(candidate => assignNetworkZone(candidate, zones))
       .filter((candidate) => candidateBelongsToConfiguredZone(candidate, zones))
   }
@@ -104,13 +109,20 @@ export class DeviceLanDiscoveryService {
     return this.lastZones.length > 0 ? this.lastZones : configuredNetworkZones()
   }
 
-  async scanNow(): Promise<{
+  async scanNow(options: { scopeIds?: string[]; fullSubnetConfirmed?: boolean } = {}): Promise<{
     scannedAt: string
     zones: NetworkDiscoveryZone[]
     devices: NetworkDiscoveredDevice[]
+    snapshot: NetworkDiscoverySnapshot
+    comparison: NetworkDiscoverySnapshotDiff | null
   }> {
-    const scannedAt = new Date().toISOString()
-    const zones = configuredNetworkZones()
+    const startedAt = new Date().toISOString()
+    const scanId = randomUUID()
+    const configuredZones = configuredNetworkZones()
+    const zones = selectScanZones(configuredZones, options.scopeIds)
+    if (zones.some(zone => zone.cidr) && options.fullSubnetConfirmed !== true) {
+      throw new BadRequestException('Full-subnet discovery requires explicit operator confirmation')
+    }
     const discoveredCandidates = await this.evidenceCollector.collectCandidates(zones)
     const endpointCandidates = mergeNeighborCandidates(discoveredCandidates)
     const identityCandidates = identityCandidatesForScan(discoveredCandidates)
@@ -122,13 +134,15 @@ export class DeviceLanDiscoveryService {
         this.evidenceCollector.enrichCandidate(candidate as NetworkCandidate & {
           networkZoneId: string
           networkZoneName: string
-        }, scannedAt, !conflictingEndpoints.has(`${candidate.networkZoneId}:${candidate.ipAddress}`)),
+        }, startedAt, !conflictingEndpoints.has(`${candidate.networkZoneId}:${candidate.ipAddress}`)),
       ),
     )
 
-    this.lastZones = zones
+    this.lastZones = configuredZones
     this.lastScan = dedupeNetworkDevices(devices)
-    await this.discoveryMemory.recordScan(scannedAt, devices)
+    const boundedEvidence = buildBoundedRawEvidence(discoveredCandidates, this.lastScan, startedAt)
+    const completedAt = new Date().toISOString()
+    await this.discoveryMemory.recordScan(completedAt, devices)
     if (this.physicalInventory) {
       const { tenant, site } = this.registry.getSnapshot()
       try {
@@ -176,12 +190,53 @@ export class DeviceLanDiscoveryService {
         throw error
       }
     }
+    const collectorInterfaces = interfacesForZones(zones)
+    const snapshot: NetworkDiscoverySnapshot = {
+      schemaVersion: 1,
+      scanId,
+      startedAt,
+      completedAt: new Date().toISOString(),
+      collector: {
+        id: `${localHostname()}/${collectorInterfaces.join(',') || 'interface-unknown'}`,
+        host: localHostname(),
+        interfaces: collectorInterfaces,
+      },
+      scopes: zones.map(zone => ({
+        id: zone.id,
+        name: zone.name,
+        ...(zone.cidr ? { cidr: zone.cidr } : {}),
+        ...(interfaceForZone(zone) ? { interfaceName: interfaceForZone(zone) } : {}),
+        ...(zone.role ? { role: zone.role } : {}),
+        complete: scanScopeComplete(zone),
+        gatewayIpsObserved: [...new Set(this.lastScan
+          .filter(device => device.networkZoneId === zone.id && device.gatewayId && isIpv4Address(device.gatewayId))
+          .map(device => device.gatewayId!))].sort(),
+      })),
+      methods: discoveryMethods(zones),
+      successes: this.lastScan.length,
+      failures: [],
+      limitations: [
+        ...scanLimitations(zones),
+        ...(boundedEvidence.omitted ? [`Raw candidate evidence was bounded; ${boundedEvidence.omitted} record(s) omitted.`] : []),
+      ],
+      rawEvidence: boundedEvidence.records,
+      rawEvidenceOmitted: boundedEvidence.omitted,
+      endpoints: structuredClone(this.lastScan),
+      topology: { relationships: [] },
+    }
+    await this.discoveryMemory.recordSnapshot(snapshot)
+    const previousSnapshots = await this.discoveryMemory.listSnapshots(100)
+    const previous = previousSnapshots.find(item => item.scanId !== scanId &&
+      item.scopes.some(previousScope => zones.some(zone => previousScope.id === zone.id && previousScope.cidr === zone.cidr)))
+    const comparison = previous ? compareNetworkSnapshots(previous, snapshot) : null
     this.logger.log(`[LAN DISCOVERY] zones=${zones.length} devices=${this.lastScan.length}`)
 
     return {
-      scannedAt,
+      scannedAt: startedAt,
       zones,
       devices: this.lastScan,
+      snapshot,
+      comparison,
     }
   }
 }
@@ -352,6 +407,121 @@ function configuredNetworkZones(): NetworkDiscoveryZone[] {
     })),
   ]
 }
+
+function selectScanZones(zones: NetworkDiscoveryZone[], scopeIds?: string[]): NetworkDiscoveryZone[] {
+  if (!scopeIds?.length) return zones
+  const requested = [...new Set(scopeIds.map(id => id.trim()).filter(Boolean))]
+  const selected = zones.filter(zone => requested.includes(zone.id))
+  if (selected.length !== requested.length || selected.length === 0) {
+    throw new BadRequestException('Select one or more configured network scopes')
+  }
+  return selected
+}
+
+function scanScopeComplete(zone: NetworkDiscoveryZone): boolean {
+  if (process.env.HOME_LAN_ACTIVE_SCAN_ENABLED === 'false' || !zone.cidr) return false
+  const prefix = Number(zone.cidr.split('/')[1])
+  if (!Number.isInteger(prefix) || prefix < 24 || prefix > 30) return false
+  return ipsInCidr(zone.cidr).length === (2 ** (32 - prefix)) - 2
+}
+
+function interfaceForZone(zone: NetworkDiscoveryZone): string | undefined {
+  if (zone.interfaceName) return zone.interfaceName
+  if (!zone.cidr) return undefined
+  for (const [name, addresses] of Object.entries(networkInterfaces())) {
+    if (addresses?.some(address => !address.internal && address.family === 'IPv4' && ipInCidr(address.address, zone.cidr!))) {
+      return name
+    }
+  }
+  return undefined
+}
+
+function interfacesForZones(zones: NetworkDiscoveryZone[]): string[] {
+  return [...new Set(zones.map(interfaceForZone).filter((value): value is string => !!value))].sort()
+}
+
+function discoveryMethods(zones: NetworkDiscoveryZone[]): string[] {
+  const methods = ['neighbor_table', 'reverse_dns', 'tcp_service_probe', 'shelly_http_rpc']
+  if (process.env.HOME_LAN_ACTIVE_SCAN_ENABLED !== 'false') methods.push('icmp', 'tcp_reachability')
+  if (process.env.HOME_ROUTER_CLIENTS_JSON || process.env.HOME_ROUTER_CLIENTS_FILE || process.env.HOME_ROUTER_CLIENTS_COMMAND) methods.push('router_clients')
+  if (zones.some(zone => zone.seedIps.length > 0)) methods.push('seed_ip')
+  return methods.sort()
+}
+
+function scanLimitations(zones: NetworkDiscoveryZone[]): string[] {
+  const limitations = [
+    'Neighbor-table evidence is local to the collector interface; routed segments require router or on-segment evidence for MAC attribution.',
+    'No remote Raspberry Pi collector is included in this scan.',
+    'Router and neighbor-table source errors are not currently reported separately from empty results.',
+    'Physical links and wired/Wi-Fi attachment are not collected; topology relationships remain unknown.',
+  ]
+  if (process.env.HOME_LAN_ACTIVE_SCAN_ENABLED === 'false') limitations.push('Active ICMP/TCP subnet probing is disabled.')
+  for (const zone of zones) {
+    if (zone.cidr && !scanScopeComplete(zone)) limitations.push(`Scope ${zone.id} was not fully enumerated within the supported bounded host limit.`)
+  }
+  if (!process.env.HOME_ROUTER_CLIENTS_JSON && !process.env.HOME_ROUTER_CLIENTS_FILE && !process.env.HOME_ROUTER_CLIENTS_COMMAND) {
+    limitations.push('No router DHCP/client feed is configured for this collector.')
+  }
+  return [...new Set(limitations)]
+}
+
+function sanitizeCandidateEvidence(candidate: NetworkCandidate): Record<string, unknown> {
+  const allowed = [
+    'ipAddress', 'macAddress', 'hostname', 'hostnameEvidence', 'macEvidence',
+    'vendor', 'model', 'protocol', 'confidence', 'status', 'firmwareVersion',
+    'app', 'generation', 'components', 'deviceReportedMacAddress', 'reason',
+    'networkZoneId', 'networkZoneName', 'interfaceName', 'evidenceSource', 'observedAt',
+  ] as const
+  return Object.fromEntries(allowed.flatMap(field =>
+    candidate[field] === undefined ? [] : [[field, candidate[field]]],
+  ))
+}
+
+function buildBoundedRawEvidence(
+  candidates: NetworkCandidate[],
+  devices: NetworkDiscoveredDevice[],
+  fallbackObservedAt: string,
+): { records: NetworkDiscoverySnapshot['rawEvidence']; omitted: number } {
+  const records: NetworkDiscoverySnapshot['rawEvidence'] = []
+  let bytes = 0
+  let omitted = 0
+  const evidenceRecords: NetworkDiscoverySnapshot['rawEvidence'] = candidates.map(candidate => ({
+    observedAt: candidate.observedAt || fallbackObservedAt,
+    source: candidate.evidenceSource || 'collector_result',
+    scopeId: candidate.networkZoneId || 'unknown',
+    evidence: sanitizeCandidateEvidence(candidate),
+  }))
+  for (const device of devices.filter(item => item.vendor === 'Shelly' && item.protocol === 'http')) {
+    evidenceRecords.push({
+      observedAt: device.discoveredAt,
+      source: 'shelly_http_rpc',
+      scopeId: device.networkZoneId,
+      evidence: {
+        protocolId: device.id,
+        deviceReportedMacAddress: device.deviceReportedMacAddress,
+        model: device.model,
+        generation: device.generation,
+        components: device.components,
+      },
+    })
+  }
+  for (const record of evidenceRecords) {
+    const recordBytes = Buffer.byteLength(JSON.stringify(record))
+    if (records.length >= 2048 || bytes + recordBytes > 1024 * 1024) {
+      omitted++
+      continue
+    }
+    records.push(record)
+    bytes += recordBytes
+  }
+  return { records, omitted }
+}
+
+function isIpv4Address(value: string): boolean {
+  const parts = value.split('.')
+  return parts.length === 4 && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+}
+
 
 export function configuredNetworkZoneForAddress(ipAddress: string): NetworkDiscoveryZone | null {
   const zones = configuredNetworkZones()
@@ -600,6 +770,7 @@ async function enrichNetworkDevice(
   const evidence = allowEndpointEnrichment
     ? await collectGenericHostEvidence(candidate.ipAddress)
     : { services: [] }
+  const networkEvidenceObservedAt = new Date().toISOString()
 
   if (evidence.hostname && !base.hostname) {
     base.hostname = evidence.hostname
@@ -608,13 +779,20 @@ async function enrichNetworkDevice(
   base.observations = buildNetworkObservations(
     { ...candidate, hostnameEvidence: candidate.hostnameEvidence },
     evidence,
-    discoveredAt,
+    networkEvidenceObservedAt,
   )
+  base.discoveredAt = networkEvidenceObservedAt
 
   const shelly = allowEndpointEnrichment
     ? await probeShelly(candidate.ipAddress)
     : null
   if (!shelly) return base
+
+  const rpcObservedAt = new Date().toISOString()
+  const rpcObservations: NonNullable<NetworkDiscoveredDevice['observations']> = [
+    { source: 'http_rpc', attribute: 'shelly.device_id', value: shelly.id || '', observedAt: rpcObservedAt },
+    ...(shelly.mac ? [{ source: 'http_rpc' as const, attribute: 'shelly.device_reported_mac', value: shelly.mac, observedAt: rpcObservedAt }] : []),
+  ]
 
   return {
     ...base,
@@ -623,6 +801,7 @@ async function enrichNetworkDevice(
     protocol: 'http',
     confidence: 0.9,
     status: 'online',
+    discoveredAt: rpcObservedAt,
     settingsUrl: `http://${candidate.ipAddress}`,
     model: shelly.model,
     app: shelly.app,
@@ -631,6 +810,7 @@ async function enrichNetworkDevice(
     components: shelly.gen && shelly.gen >= 2 && shelly.id
       ? await probeShellyComponents(candidate.ipAddress)
       : [],
+    observations: [...(base.observations || []), ...rpcObservations],
     reason: 'Shelly HTTP API responded on the local network.',
   }
 }
@@ -655,12 +835,12 @@ function assignNetworkZone(
 
   const zone = zones.find((item) =>
     candidateMatchesZone(candidate, item),
-  ) || zones[0]
+  )
 
   return {
     ...candidate,
-    networkZoneId: zone?.id || 'local-lan',
-    networkZoneName: zone?.name || 'Local LAN',
+    networkZoneId: zone?.id || 'unassigned',
+    networkZoneName: zone?.name || 'Unassigned scope',
   }
 }
 

@@ -226,7 +226,7 @@ export interface NetworkDeviceEndpoint {
 }
 
 export interface NetworkObservation {
-  source: 'icmp' | 'dns' | 'tcp';
+  source: 'icmp' | 'dns' | 'tcp' | 'http_rpc';
   attribute: string;
   value: string | number | boolean;
   observedAt: string;

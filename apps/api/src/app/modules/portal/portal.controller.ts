@@ -28,6 +28,7 @@ import { DeviceControlService } from '../devices/device-control.service'
 import { DeviceDiagnosticsService } from '../devices/device-diagnostics.service'
 import { DeviceDiscoveryMemoryStore } from '../devices/device-discovery-memory.store'
 import { DeviceLanDiscoveryService } from '../devices/device-lan-discovery.service'
+import { compareNetworkSnapshots } from '../devices/network-discovery-snapshot'
 import { DeviceMqttIngestService } from '../devices/device-mqtt-ingest.service'
 import { DeviceRegistryService } from '../devices/device-registry.service'
 import { DeviceOnboardingService } from './device-onboarding.service'
@@ -217,15 +218,55 @@ export class PortalController {
     return { physicalDevice }
   }
 
-  @Get('network/scan')
-  async scanNetwork(@Req() request: DeviceProxyRequest) {
+  @Post('network/scan')
+  async scanNetwork(
+    @Body() body: { scopeIds?: unknown; fullSubnetConfirmed?: unknown },
+    @Req() request: DeviceProxyRequest,
+  ) {
     assertPortalControlToken(request)
-    const scan = await this.lanDiscovery.scanNow()
+    if (!Array.isArray(body?.scopeIds) || body.scopeIds.length === 0 ||
+      body.scopeIds.some(id => typeof id !== 'string' || !id.trim()) ||
+      typeof body.fullSubnetConfirmed !== 'boolean') {
+      throw new BadRequestException('Choose network scopes and explicitly confirm any full-subnet scan')
+    }
+    const configured = this.lanDiscovery.getZones()
+    const selected = configured.filter(zone => (body.scopeIds as string[]).includes(zone.id))
+    if (selected.length !== new Set(body.scopeIds as string[]).size) {
+      throw new BadRequestException('One or more selected network scopes are not configured')
+    }
+    if (selected.some(zone => zone.cidr) && body.fullSubnetConfirmed !== true) {
+      throw new BadRequestException('Full-subnet discovery requires explicit operator confirmation')
+    }
+    const scan = await this.lanDiscovery.scanNow({
+      scopeIds: body.scopeIds as string[],
+      fullSubnetConfirmed: body.fullSubnetConfirmed,
+    })
     for (const device of scan.devices) {
       for (const candidate of shellyLanCandidates(device))
         this.deviceRegistry.registerDiscoveredDevice(candidate)
     }
     return scan
+  }
+
+  @Get('network/snapshots')
+  async listNetworkSnapshots(@Req() request: DeviceProxyRequest) {
+    assertPortalControlToken(request)
+    return { snapshots: await this.discoveryMemory.listSnapshots(50) }
+  }
+
+  @Get('network/snapshots/:fromScanId/compare/:toScanId')
+  async compareNetworkSnapshotRoute(
+    @Param('fromScanId') fromScanId: string,
+    @Param('toScanId') toScanId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request)
+    const [previous, current] = await Promise.all([
+      this.discoveryMemory.getSnapshot(fromScanId),
+      this.discoveryMemory.getSnapshot(toScanId),
+    ])
+    if (!previous || !current) throw new NotFoundException('Network discovery snapshot was not found')
+    return compareNetworkSnapshots(previous, current)
   }
 
   @Get('network/memory')

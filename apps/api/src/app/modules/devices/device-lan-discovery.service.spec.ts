@@ -82,6 +82,32 @@ describe('LAN discovery evidence persistence', () => {
     jest.restoreAllMocks()
   })
 
+  it('requires explicit confirmation before a configured subnet scan and writes nothing before confirmation', async () => {
+    const service = new DeviceLanDiscoveryService(memory, {} as DeviceRegistryService, new DeviceLanNetworkEvidenceCollector())
+
+    await expect(service.scanNow()).rejects.toThrow('explicit operator confirmation')
+    expect(await memory.listSnapshots()).toEqual([])
+    expect(await memory.listIdentityEvidence()).toEqual([])
+  })
+
+  it('scans only selected scopes and discards router evidence that belongs to another configured scope', async () => {
+    process.env.HOME_NETWORK_ZONES_JSON = JSON.stringify({ zones: [
+      { id: 'eero', name: 'Eero', cidr: '192.168.7.0/24' },
+      { id: 'housenet', name: 'HouseNet', cidr: '192.168.1.0/24' },
+    ] })
+    process.env.HOME_ROUTER_CLIENTS_JSON = JSON.stringify([{
+      ipAddress: '192.168.1.133', macAddress: '02:00:00:00:00:0a',
+    }])
+    const service = new DeviceLanDiscoveryService(memory, {} as DeviceRegistryService, new DeviceLanNetworkEvidenceCollector())
+
+    const result = await service.scanNow({ scopeIds: ['eero'], fullSubnetConfirmed: true })
+
+    expect(result.zones.map(zone => zone.id)).toEqual(['eero'])
+    expect(result.devices).toEqual([])
+    expect(result.snapshot.scopes.map(scope => scope.id)).toEqual(['eero'])
+    expect(await memory.listSnapshots()).toHaveLength(1)
+  })
+
   it('persists each same-scan MAC identity before projecting the ambiguous endpoint', async () => {
     const service = new DeviceLanDiscoveryService(
       memory,
@@ -89,9 +115,13 @@ describe('LAN discovery evidence persistence', () => {
       new DeviceLanNetworkEvidenceCollector(),
     )
 
-    const result = await service.scanNow()
+    const result = await service.scanNow({ fullSubnetConfirmed: true })
     const identityRecords = await memory.listIdentityEvidence()
     const endpointRecords = await memory.list()
+    const savedSnapshot = await memory.getSnapshot(result.snapshot.scanId)
+    expect(savedSnapshot).toEqual(result.snapshot)
+    expect(savedSnapshot?.rawEvidence.length).toBeGreaterThan(0)
+    expect(savedSnapshot?.rawEvidence.length).toBeLessThanOrEqual(2048)
     const byMac = new Map(identityRecords.map(record => [record.device.macAddress, record.device]))
 
     expect(identityRecords).toHaveLength(2)
@@ -133,7 +163,7 @@ describe('LAN discovery evidence persistence', () => {
 
   it('deduplicates repeated hardware, retains DHCP history, and uses only the current endpoint identity', async () => {
     const service = new DeviceLanDiscoveryService(memory, {} as DeviceRegistryService, new DeviceLanNetworkEvidenceCollector())
-    await service.scanNow()
+    await service.scanNow({ fullSubnetConfirmed: true })
 
     process.env.HOME_ROUTER_CLIENTS_JSON = JSON.stringify([
       {
@@ -147,7 +177,7 @@ describe('LAN discovery evidence persistence', () => {
         components: [{ component: 'humidity:0', channel: 0 }],
       },
     ])
-    const repeatedIdentityScan = await service.scanNow()
+    const repeatedIdentityScan = await service.scanNow({ fullSubnetConfirmed: true })
     let records = await memory.listIdentityEvidence()
     const identityA = records.find(record => record.device.macAddress === '02:00:00:00:00:0a')!
     expect(records).toHaveLength(2)
@@ -163,7 +193,7 @@ describe('LAN discovery evidence persistence', () => {
       vendor: 'Acme B', model: 'Relay B', firmwareVersion: '4.5.6',
       components: [{ component: 'switch:0', channel: 0 }],
     }])
-    const reusedAddressScan = await service.scanNow()
+    const reusedAddressScan = await service.scanNow({ fullSubnetConfirmed: true })
     records = await memory.listIdentityEvidence()
     expect(records).toHaveLength(2)
     expect(records.find(record => record.device.macAddress === '02:00:00:00:00:0a')?.device)
@@ -173,6 +203,9 @@ describe('LAN discovery evidence persistence', () => {
       macAddress: '02:00:00:00:00:0b', model: 'Relay B',
     })
     expect(reusedAddressScan.devices[0].identityConflict).toBeUndefined()
+    expect(reusedAddressScan.comparison?.ipReuse).toContainEqual(expect.objectContaining({
+      scopeId: 'home-lan', ipAddress: '192.168.1.133',
+    }))
   })
 
   it('keeps the same address isolated across configured network scopes', async () => {
@@ -192,7 +225,7 @@ describe('LAN discovery evidence persistence', () => {
     ])
 
     const service = new DeviceLanDiscoveryService(memory, {} as DeviceRegistryService, new DeviceLanNetworkEvidenceCollector())
-    const result = await service.scanNow()
+    const result = await service.scanNow({ fullSubnetConfirmed: true })
     const records = await memory.listIdentityEvidence()
 
     expect(records).toHaveLength(2)
@@ -233,7 +266,7 @@ describe('LAN discovery evidence persistence', () => {
       memory, registry as never, new DeviceLanNetworkEvidenceCollector(), inventory as never,
     )
 
-    const result = await service.scanNow()
+    const result = await service.scanNow({ fullSubnetConfirmed: true })
 
     expect(result.devices).toHaveLength(1)
     expect(result.devices[0]).toMatchObject({
@@ -288,7 +321,7 @@ describe('LAN discovery evidence persistence', () => {
       memory, registry as never, new DeviceLanNetworkEvidenceCollector(), inventory as never,
     )
 
-    await expect(service.scanNow()).rejects.toThrow('inventory unavailable')
+    await expect(service.scanNow({ fullSubnetConfirmed: true })).rejects.toThrow('inventory unavailable')
 
     expect(await memory.listIdentityEvidence()).toHaveLength(1)
     expect(inventory.refreshNetworkObservations).not.toHaveBeenCalled()
@@ -307,7 +340,7 @@ describe('LAN discovery evidence persistence', () => {
     }
     const service = new DeviceLanDiscoveryService(memory, registry as never, new DeviceLanNetworkEvidenceCollector())
 
-    const result = await service.scanNow()
+    const result = await service.scanNow({ fullSubnetConfirmed: true })
 
     expect(result.devices).toEqual(expect.arrayContaining([
       expect.objectContaining({

@@ -8,6 +8,7 @@ import {
 import type {
   NetworkDiscoveredDevice,
 } from './device-registry.types';
+import type { NetworkDiscoverySnapshot } from './network-discovery-snapshot';
 
 function device(
   ipAddress: string,
@@ -58,6 +59,24 @@ describe('DeviceDiscoveryMemoryStore', () => {
     expect(records[0].firstSeenAt).toBe(timestamp);
     expect(records[0].lastSeenAt).toBe(timestamp);
   });
+
+  it('stores immutable scan snapshots across store restarts and rejects replacing an existing scan ID', async () => {
+    const snapshot: NetworkDiscoverySnapshot = {
+      schemaVersion: 1, scanId: 'scan-immutable-1', startedAt: '2026-10-18T10:00:00.000Z',
+      completedAt: '2026-10-18T10:00:05.000Z', collector: { id: 'mac/en0', host: 'mac', interfaces: ['en0'] },
+      scopes: [{ id: 'home', name: 'Home', cidr: '192.168.7.0/24', complete: true, gatewayIpsObserved: [] }],
+      methods: ['icmp', 'tcp'], successes: 1, failures: [], limitations: [], rawEvidenceOmitted: 0,
+      rawEvidence: [{ observedAt: '2026-10-18T10:00:01.000Z', source: 'neighbor_table', scopeId: 'home', evidence: { ipAddress: '192.168.7.21' } }],
+      endpoints: [device('192.168.7.21', '78:ee:4c:cf:42:68')], topology: { relationships: [] },
+    }
+    await store.recordSnapshot(snapshot)
+    await expect(store.recordSnapshot({ ...snapshot, completedAt: '2026-10-18T10:01:00.000Z' }))
+      .rejects.toThrow('Discovery snapshot already exists')
+    await store.onModuleDestroy()
+    store = new DeviceDiscoveryMemoryStore(directory)
+    expect(await store.getSnapshot(snapshot.scanId)).toEqual(snapshot)
+    expect(await store.listSnapshots()).toEqual([snapshot])
+  })
 
   it('retains devices absent from a later scan', async () => {
     await store.recordScan('2026-10-18T10:00:00.000Z', [

@@ -6,6 +6,7 @@ import type {
   NetworkDeviceEndpoint,
   NetworkDiscoveredDevice,
 } from './device-registry.types';
+import type { NetworkDiscoverySnapshot } from './network-discovery-snapshot';
 
 export const DEVICE_DISCOVERY_MEMORY_DIRECTORY = Symbol(
   'DEVICE_DISCOVERY_MEMORY_DIRECTORY',
@@ -378,6 +379,29 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
     await this.db.batch(operations);
   }
 
+  async recordSnapshot(snapshot: NetworkDiscoverySnapshot): Promise<void> {
+    const snapshotKey = `snapshot:${encodeURIComponent(snapshot.scanId)}`;
+    if (await this.getOptional(snapshotKey) !== undefined) {
+      throw new Error(`Discovery snapshot already exists: ${snapshot.scanId}`);
+    }
+    await this.db.put(snapshotKey, structuredClone(snapshot));
+  }
+
+  async getSnapshot(scanId: string): Promise<NetworkDiscoverySnapshot | null> {
+    const value = await this.getOptional(`snapshot:${encodeURIComponent(scanId)}`);
+    return isNetworkDiscoverySnapshot(value) ? value : null;
+  }
+
+  async listSnapshots(limit = 50): Promise<NetworkDiscoverySnapshot[]> {
+    const snapshots: NetworkDiscoverySnapshot[] = [];
+    for await (const [, value] of this.db.iterator({ gte: 'snapshot:', lt: 'snapshot:\uffff' })) {
+      if (isNetworkDiscoverySnapshot(value)) snapshots.push(value);
+    }
+    return snapshots
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.scanId.localeCompare(a.scanId))
+      .slice(0, Math.max(1, Math.min(Math.floor(limit), 100)));
+  }
+
   /** Persist one independently verified endpoint without claiming a complete network scan. */
   async recordIdentityObservation(
     observedAt: string,
@@ -433,4 +457,17 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
       notObservedInLatestScan: records.length - observedInLatestScan,
     };
   }
+}
+
+
+function isNetworkDiscoverySnapshot(value: unknown): value is NetworkDiscoverySnapshot {
+  if (!value || typeof value !== 'object') return false;
+  const snapshot = value as Partial<NetworkDiscoverySnapshot>;
+  return snapshot.schemaVersion === 1 &&
+    typeof snapshot.scanId === 'string' &&
+    typeof snapshot.startedAt === 'string' &&
+    typeof snapshot.completedAt === 'string' &&
+    Array.isArray(snapshot.scopes) &&
+    Array.isArray(snapshot.rawEvidence) &&
+    Array.isArray(snapshot.endpoints);
 }

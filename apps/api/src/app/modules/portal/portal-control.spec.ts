@@ -26,6 +26,7 @@ describe('portal control configuration authorization', () => {
     const scanNow = jest
       .fn()
       .mockResolvedValue({ devices: [], zones: [], scannedAt: 'now' });
+    const getZones = jest.fn(() => [{ id: 'home-lan', name: 'Home LAN', cidr: '192.168.7.0/24', seedIps: [] }]);
     const registerDiscoveredDevice = jest.fn();
     const persistInstallation = jest.fn().mockResolvedValue(undefined);
     const persistInstallationEvent = jest.fn().mockResolvedValue(undefined);
@@ -38,6 +39,7 @@ describe('portal control configuration authorization', () => {
       execute,
       check,
       scanNow,
+      getZones,
       registerDiscoveredDevice,
       persistInstallation,
       persistInstallationEvent,
@@ -47,7 +49,7 @@ describe('portal control configuration authorization', () => {
       listIdentityEvidence,
       controller: new PortalController(
         { getState } as unknown as PortalStateService,
-        { scanNow } as unknown as DeviceLanDiscoveryService,
+        { scanNow, getZones } as unknown as DeviceLanDiscoveryService,
         {} as PortalDeviceProxyService,
         { configure, execute } as unknown as DeviceControlService,
         {} as DeviceMqttIngestService,
@@ -75,11 +77,21 @@ describe('portal control configuration authorization', () => {
   it('requires authorization before scanning or registering channels', async () => {
     const { controller, scanNow, registerDiscoveredDevice } = setup();
     await expect(
-      controller.scanNetwork({ method: 'GET', url: '/', headers: {} }),
+      controller.scanNetwork({ scopeIds: ['home-lan'], fullSubnetConfirmed: true }, { method: 'POST', url: '/', headers: {} }),
     ).rejects.toThrow(UnauthorizedException);
     expect(scanNow).not.toHaveBeenCalled();
     expect(registerDiscoveredDevice).not.toHaveBeenCalled();
   });
+  it('rejects an unconfirmed full-subnet scan before invoking LAN discovery', async () => {
+    const { controller, scanNow, registerDiscoveredDevice } = setup()
+    await expect(controller.scanNetwork(
+      { scopeIds: ['home-lan'], fullSubnetConfirmed: false },
+      { method: 'POST', url: '/', headers: { authorization: 'Bearer unit-only' } },
+    )).rejects.toThrow('explicit operator confirmation')
+    expect(scanNow).not.toHaveBeenCalled()
+    expect(registerDiscoveredDevice).not.toHaveBeenCalled()
+  })
+
   it('requires Portal authorization before approving a diagnostic probe', async () => {
     const { controller } = setup();
     await expect(controller.executeInvestigationAction(
@@ -288,8 +300,8 @@ describe('portal control configuration authorization', () => {
         { id: 'camera', vendor: 'Ring', status: 'online' },
       ],
     });
-    await controller.scanNetwork({
-      method: 'GET',
+    await controller.scanNetwork({ scopeIds: ['home-lan'], fullSubnetConfirmed: true }, {
+      method: 'POST',
       url: '/',
       headers: { authorization: 'Bearer unit-only' },
     });

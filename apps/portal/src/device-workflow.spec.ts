@@ -51,6 +51,7 @@ const network = {
 let page: VueWrapper | undefined;
 beforeEach(() => {
   vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+  vi.spyOn(window, 'confirm').mockReturnValue(true);
   localStorage.setItem('energrid.portal.token', 'unit-only');
   localStorage.setItem(
     'energrid.portal.user',
@@ -79,6 +80,22 @@ function data(devices: unknown[] = []) {
     executionTraces: [],
   };
 }
+function scanResult(devices: any[], zones: ReturnType<typeof data>['networkZones']) {
+  const now = '2026-10-21T10:00:00.000Z';
+  const selectedZones = zones || [];
+  return {
+    zones: selectedZones,
+    devices,
+    snapshot: {
+      schemaVersion: 1, scanId: `scan-${devices.length}`, startedAt: now, completedAt: now,
+      collector: { id: 'test-host/en0', host: 'test-host', interfaces: ['en0'] },
+      scopes: selectedZones.map(zone => ({ id: zone.id, name: zone.name, cidr: zone.cidr, complete: true, gatewayIpsObserved: [] })),
+      methods: ['neighbor_table'], successes: devices.length, failures: [], limitations: [], rawEvidence: [], rawEvidenceOmitted: 0,
+      endpoints: devices, topology: { relationships: [] },
+    },
+    comparison: null,
+  };
+}
 function enrollmentsFor(state: ReturnType<typeof data>) {
   return state.devices.flatMap((value: any) => value.trustStatus === 'approved' ? [{
     tenantId: value.tenantId, siteId: value.siteId, deviceId: value.id, status: 'enrolled',
@@ -89,7 +106,12 @@ function button(text: string) {
 }
 async function render(path: string, fetch: unknown) {
   history.replaceState({}, '', path);
-  vi.stubGlobal('fetch', fetch);
+  const mockedFetch = fetch as (input: RequestInfo | URL, init?: RequestInit) => Promise<any>;
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith('/portal/network/snapshots')) return { ok: true, json: async () => ({ snapshots: [] }) };
+    return mockedFetch(input, init);
+  });
   page = mount(App, { global: { stubs: { ExecutionSimulator: true } } });
   await flushPromises();
 }
@@ -328,11 +350,11 @@ describe('device onboarding page workflow with mocked services', () => {
       metadata: { physicalId: network.id, channel: 0, component: 'switch:0' },
       control: { status: 'needs-setup', binding: null, reason: 'No route' },
     };
-    const state = data([mqttRelay]);
+    const state = { ...data([mqttRelay]), networkZones: [{ id: 'lan', name: 'LAN', cidr: '192.168.7.0/24', seedIps: [] }] };
     const fetch = vi.fn(async (url: string) => {
       if (url === '/portal/network/scan') {
         state.networkDevices = [network];
-        return { ok: true, json: async () => ({ devices: [network], zones: [] }) };
+        return { ok: true, json: async () => scanResult([network], state.networkZones) };
       }
       return { ok: true, json: async () => url.endsWith('/portal/state') ? structuredClone(state) : url.includes('/devices/enrollments') ? { enrollments: enrollmentsFor(state) } : { runs: [] } };
     });
@@ -368,7 +390,7 @@ describe('device onboarding page workflow with mocked services', () => {
         state.devices = [relay];
         return {
           ok: true,
-          json: async () => ({ devices: state.networkDevices, zones: state.networkZones }),
+          json: async () => scanResult(state.networkDevices as any[], state.networkZones),
         };
       }
       if (url.endsWith('/approve')) {
@@ -407,6 +429,8 @@ describe('device onboarding page workflow with mocked services', () => {
       };
     });
     await render('/discovery/', fetch);
+    await button('Discover selected networks').trigger('click');
+    await flushPromises();
     expect(button('All devices').attributes('aria-pressed')).toBe('true');
     expect(page!.text()).toContain('Ring');
     expect(page!.text()).toContain('Adapter needed');

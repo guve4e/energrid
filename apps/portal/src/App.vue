@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import NetworkDiscoveryCard from './components/discovery/NetworkDiscoveryCard.vue';
+import NetworkIntelligencePanel from './components/discovery/NetworkIntelligencePanel.vue';
 import PendingEnrollmentList from './components/discovery/PendingEnrollmentList.vue';
 import { buildPendingEnrollmentCards } from './components/discovery/pending-enrollment';
 import './discovery.css';
@@ -165,6 +166,7 @@ type PortalState = {
     networkZoneId: string;
     networkZoneName: string;
     macAddress?: string;
+    deviceReportedMacAddress?: string;
     identityConflict?: {
       reason: 'multiple_macs_for_endpoint';
       macAddresses: string[];
@@ -182,7 +184,7 @@ type PortalState = {
     discoveredAt: string;
     reason: string;
     observations?: Array<{
-      source: 'icmp' | 'dns' | 'tcp';
+      source: 'icmp' | 'dns' | 'tcp' | 'http_rpc';
       attribute: string;
       value: string | number | boolean;
       observedAt: string;
@@ -316,6 +318,26 @@ type VoiceConfig = {
 
 type PortalDevice = NonNullable<PortalState['devices']>[number];
 type NetworkDevice = NonNullable<PortalState['networkDevices']>[number];
+type NetworkSnapshot = {
+  scanId: string; schemaVersion: number; startedAt: string; completedAt: string;
+  collector: { id: string; host: string; interfaces: string[] };
+  scopes: Array<{ id: string; name: string; cidr?: string; interfaceName?: string; complete: boolean; gatewayIpsObserved: string[] }>;
+  methods: string[]; successes: number; failures: string[]; limitations: string[]; endpoints: NetworkDevice[];
+  topology: { relationships: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }> };
+};
+type NetworkSnapshotDiff = {
+  fromScanId: string; toScanId: string; comparableScopes: string[]; incompleteScopes: string[];
+  addedEndpoints: Array<{ scopeId: string; ipAddress: string; macAddress?: string }>;
+  notDetectedEndpoints: Array<{ scopeId: string; ipAddress: string; macAddress?: string }>;
+  verifiedAddressChanges: Array<{ identity: string; from: string; to: string }>;
+  ipReuse: Array<{ scopeId: string; ipAddress: string; previousIdentity?: string; currentIdentity?: string }>;
+  serviceChanges: Array<{ scopeId: string; ipAddress: string; added: string[]; removed: string[] }>;
+  scopeChanges: Array<{ scopeId: string; previousCidr?: string; currentCidr?: string; previousInterface?: string; currentInterface?: string }>;
+  macChanges: Array<{ identity: string; previousObservedMac?: string; currentObservedMac?: string; previousDeviceReportedMac?: string; currentDeviceReportedMac?: string }>;
+  gatewayChanges: Array<{ scopeId: string; previous: string[]; current: string[] }>;
+  identityChanges: Array<{ scopeId: string; ipAddress: string; previous: string; current: string }>;
+  topologyChanges: { added: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }>; removed: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }> };
+};
 
 
 function deviceHasSsh(device: NetworkDevice): boolean {
@@ -467,6 +489,10 @@ const discoveryMemory = ref<DiscoveryMemoryResponse | null>(null);
 const discoveryMemoryLoading = ref(false);
 const discoveryMemoryError = ref('');
 const discoveryMemoryExpanded = ref(false);
+const networkSnapshots = ref<NetworkSnapshot[]>([]);
+const latestNetworkSnapshot = ref<NetworkSnapshot | null>(null);
+const networkSnapshotComparison = ref<NetworkSnapshotDiff | null>(null);
+const networkSnapshotsError = ref('');
 const discoveryDecisionBusy = ref<Record<string, string>>({});
 const findingHttpPageByDeviceId = ref<Record<string, boolean>>({});
 const discoveryView = ref<'capable' | 'all'>('all');
@@ -1662,6 +1688,40 @@ async function loadDiscoveryMemory() {
     discoveryMemoryLoading.value = false;
   }
 }
+
+async function loadNetworkSnapshots() {
+  if (!accessToken.value) {
+    networkSnapshots.value = [];
+    latestNetworkSnapshot.value = null;
+    networkSnapshotComparison.value = null;
+    return;
+  }
+  networkSnapshotsError.value = '';
+  try {
+    const response = await fetch(`${apiBase}/portal/network/snapshots`, {
+      headers: { Authorization: `Bearer ${accessToken.value}` },
+    });
+    if (!response.ok) throw new Error(`Network snapshots unavailable (${response.status})`);
+    const result = await response.json() as { snapshots: NetworkSnapshot[] };
+    networkSnapshots.value = result.snapshots;
+    latestNetworkSnapshot.value = result.snapshots[0] || null;
+    networkSnapshotComparison.value = null;
+    if (result.snapshots.length > 1 && latestNetworkSnapshot.value) {
+      const latest = latestNetworkSnapshot.value;
+      const previous = result.snapshots.find(snapshot => snapshot.scanId !== latest.scanId &&
+        snapshot.scopes.some(oldScope => latest.scopes.some(scope => scope.id === oldScope.id && scope.cidr === oldScope.cidr)));
+      if (previous) {
+        const comparisonResponse = await fetch(`${apiBase}/portal/network/snapshots/${encodeURIComponent(previous.scanId)}/compare/${encodeURIComponent(latest.scanId)}`, {
+          headers: { Authorization: `Bearer ${accessToken.value}` },
+        });
+        if (comparisonResponse.ok) networkSnapshotComparison.value = await comparisonResponse.json() as NetworkSnapshotDiff;
+      }
+    }
+  } catch (error) {
+    networkSnapshotsError.value = error instanceof Error ? error.message : 'Network snapshots unavailable';
+  }
+}
+
 const energridCapableNetworkDevices = computed(() =>
   networkDevices.value.filter((device) =>
     isEnergridCapableNetworkDevice(device),
@@ -2084,53 +2144,52 @@ function renamePendingCandidate(candidateId: string) {
   if (device) logDiscoveryDecision(device, 'rename');
 }
 
-async function scanNetwork() {
+async function scanNetwork(scopeIds?: string[]) {
   if (scanningNetwork.value) return;
+  const availableScopes = state.value?.networkZones || [];
+  const selectedScopeIds = scopeIds?.length ? scopeIds : availableScopes.map(scope => scope.id);
+  const selectedScopes = availableScopes.filter(scope => selectedScopeIds.includes(scope.id));
+  if (!selectedScopeIds.length || selectedScopes.length !== new Set(selectedScopeIds).size) {
+    stateError.value = 'Choose one or more configured network scopes before scanning.';
+    return;
+  }
+  const fullSubnetConfirmed = selectedScopes.some(scope => !!scope.cidr);
+  if (fullSubnetConfirmed && !window.confirm(`This will scan the selected subnet(s): ${selectedScopes.filter(scope => scope.cidr).map(scope => `${scope.name} ${scope.cidr}`).join(', ')}. The scan is bounded to 254 hosts per subnet. Continue?`)) return;
   scanningNetwork.value = true;
   scanStartedAt.value = Date.now();
   scanElapsedSeconds.value = 0;
   scanFeedback.value = '';
   if (scanTimer) clearInterval(scanTimer);
   scanTimer = setInterval(() => {
-    scanElapsedSeconds.value = Math.floor(
-      (Date.now() - scanStartedAt.value) / 1000
-    );
+    scanElapsedSeconds.value = Math.floor((Date.now() - scanStartedAt.value) / 1000);
   }, 1000);
   stateError.value = '';
   try {
-    appendLog('[discovery] scanning local network');
+    appendLog('[discovery] scanning selected networks');
     const response = await fetch(`${apiBase}/portal/network/scan`, {
-      headers: { Authorization: `Bearer ${accessToken.value}` },
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken.value}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scopeIds: selectedScopeIds, fullSubnetConfirmed }),
     });
     if (!response.ok) throw new Error('Network scan unavailable');
-    const result = (await response.json()) as {
-      zones?: NonNullable<PortalState['networkZones']>;
-      devices: NetworkDevice[];
+    const result = await response.json() as {
+      zones?: NonNullable<PortalState['networkZones']>; devices: NetworkDevice[];
+      snapshot: NetworkSnapshot; comparison: NetworkSnapshotDiff | null;
     };
-    if (state.value) {
-      state.value = {
-        ...state.value,
-        networkZones: result.zones || state.value.networkZones,
-        networkDevices: result.devices,
-      };
-    }
-    scanFeedback.value =
-      `Scan complete · ${result.devices.length} devices found · ` +
-      `${result.zones?.length ?? networkZones.value.length} networks`;
-    appendLog(
-      `[discovery] scan complete; ${result.devices.length} devices visible`,
-    );
+    if (state.value) state.value = { ...state.value, networkZones: result.zones || state.value.networkZones, networkDevices: result.devices };
+    latestNetworkSnapshot.value = result.snapshot;
+    networkSnapshotComparison.value = result.comparison;
+    networkSnapshots.value = [result.snapshot, ...networkSnapshots.value.filter(snapshot => snapshot.scanId !== result.snapshot.scanId)];
+    scanFeedback.value = `Scan complete · ${result.devices.length} endpoints found · ${result.zones?.length ?? networkZones.value.length} networks`;
+    appendLog(`[discovery] snapshot ${result.snapshot.scanId} saved; ${result.devices.length} endpoints visible`);
     await loadState();
     await loadDiscoveryMemory();
   } catch (error) {
-    stateError.value =
-      error instanceof Error ? error.message : 'Network scan unavailable';
+    stateError.value = error instanceof Error ? error.message : 'Network scan unavailable';
     scanFeedback.value = `Scan failed: ${stateError.value}`;
     appendLog(`[discovery] scan failed: ${stateError.value}`);
   } finally {
-    scanElapsedSeconds.value = Math.floor(
-      (Date.now() - scanStartedAt.value) / 1000
-    );
+    scanElapsedSeconds.value = Math.floor((Date.now() - scanStartedAt.value) / 1000);
     if (scanTimer) clearInterval(scanTimer);
     scanTimer = undefined;
     scanningNetwork.value = false;
@@ -2140,7 +2199,7 @@ async function scanNetwork() {
 async function refreshDiscovery() {
   await loadState();
   await loadDiscoveryMemory();
-  if (!stateError.value && !liveNetworkDevices.value.length && !discoveryMemory.value?.devices.length) void scanNetwork();
+  await loadNetworkSnapshots();
 }
 
 async function reviewNetworkDevice(device: NetworkDevice) {
@@ -4632,15 +4691,17 @@ onBeforeUnmount(() => {
                 only the devices that belong here.</span
               >
             </div>
-            <button
-              class="primary"
-              type="button"
-              :disabled="scanningNetwork"
-              @click="scanNetwork"
-            >
-              {{ scanningNetwork ? 'Scanning...' : 'Scan networks' }}
-            </button>
           </div>
+
+          <NetworkIntelligencePanel
+            :scopes="state?.networkZones || []"
+            :snapshots="networkSnapshots"
+            :latest="latestNetworkSnapshot"
+            :comparison="networkSnapshotComparison"
+            :busy="scanningNetwork"
+            :error="networkSnapshotsError || stateError"
+            @scan="scanNetwork"
+          />
 
           <nav class="discovery-jump-links" aria-label="Discovery sections">
             <a href="#discovery-memory">Memory <span>{{ discoveryMemory?.summary.known ?? '—' }}</span></a>
