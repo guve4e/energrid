@@ -129,6 +129,32 @@ describe('NetworkIntelligencePanel', () => {
     panel.unmount();
   });
 
+  it('selects historical saved evidence and investigates that exact snapshot', async () => {
+    const historical = {
+      ...snapshot,
+      scanId: 'eero-saved-2026-10-20',
+      completedAt: '2026-10-20T10:00:05Z',
+      endpoints: [{
+        id: 'unknown-192.168.7.48', ipAddress: '192.168.7.48', networkZoneId: 'eero', networkZoneName: 'Eero',
+        protocol: 'unknown', status: 'unknown', discoveredAt: '2026-10-20T10:00:03Z', reason: 'TCP 80 responded',
+        observations: [{ source: 'tcp', attribute: 'port.80.open', value: true, observedAt: '2026-10-20T10:00:03Z' }],
+      }],
+    };
+    const panel = mount(NetworkIntelligencePanel, { props: {
+      scopes, snapshots: [snapshot, historical], latest: snapshot, comparison: null,
+    } });
+
+    await panel.get('select[aria-label="Select saved network snapshot"]').setValue(historical.scanId);
+    expect(panel.text()).toContain('192.168.7.48');
+    expect(panel.text()).toContain('10/20/2026');
+    expect(panel.findAll('button.ni-device-row')).toHaveLength(1);
+    await panel.get('.ni-investigate-button').trigger('click');
+    expect(panel.emitted('investigateEndpoint')).toEqual([[
+      { scanId: historical.scanId, scopeId: 'eero', ipAddress: '192.168.7.48', endpointId: 'unknown-192.168.7.48' },
+    ]]);
+    panel.unmount();
+  });
+
   it('opens endpoint details as a mobile drawer and keeps the list keyboard reachable', async () => {
     vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn() }));
     Object.defineProperty(window, 'matchMedia', { configurable: true, value: () => ({ matches: true, addEventListener: vi.fn() }) });

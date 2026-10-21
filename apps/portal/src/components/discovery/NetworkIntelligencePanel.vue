@@ -71,6 +71,7 @@ const emit = defineEmits<{
 }>();
 
 const selectedScopeId = ref('');
+const selectedScanId = ref('');
 const selectedEndpointKey = ref('');
 const search = ref('');
 const identityFilter = ref<'all' | 'verified' | 'unidentified'>('all');
@@ -98,10 +99,18 @@ const availableScopes = computed<Scope[]>(() => props.scopes.length
   ? props.scopes
   : (props.latest?.scopes || []).map(scope => ({ id: scope.id, name: scope.name, cidr: scope.cidr })));
 
-watch([availableScopes, () => props.latest?.scanId], () => {
-  const validIds = new Set(availableScopes.value.map(scope => scope.id));
+const selectedSnapshot = computed(() => props.snapshots.find(snapshot => snapshot.scanId === selectedScanId.value) || props.latest);
+
+watch([() => props.latest?.scanId, () => props.snapshots.map(snapshot => snapshot.scanId).join(',')], () => {
+  if (!selectedScanId.value || !props.snapshots.some(snapshot => snapshot.scanId === selectedScanId.value)) {
+    selectedScanId.value = props.latest?.scanId || '';
+  }
+}, { immediate: true });
+
+watch([availableScopes, () => selectedSnapshot.value?.scanId], () => {
+  const validIds = new Set((selectedSnapshot.value?.scopes || []).map(scope => scope.id));
   if (!validIds.has(selectedScopeId.value)) {
-    selectedScopeId.value = props.latest?.scopes[0]?.id || availableScopes.value[0]?.id || '';
+    selectedScopeId.value = selectedSnapshot.value?.scopes[0]?.id || availableScopes.value[0]?.id || '';
   }
 }, { immediate: true });
 
@@ -127,9 +136,10 @@ function endpointServices(endpoint: Endpoint): string[] {
   }))];
 }
 
-const selectedScope = computed(() => availableScopes.value.find(scope => scope.id === selectedScopeId.value) || null);
-const scopeSnapshot = computed(() => props.latest?.scopes.find(scope => scope.id === selectedScopeId.value) || null);
-const endpoints = computed(() => (props.latest?.endpoints || []).filter(endpoint => endpoint.networkZoneId === selectedScopeId.value));
+const selectedScope = computed(() => availableScopes.value.find(scope => scope.id === selectedScopeId.value)
+  || selectedSnapshot.value?.scopes.find(scope => scope.id === selectedScopeId.value) || null);
+const scopeSnapshot = computed(() => selectedSnapshot.value?.scopes.find(scope => scope.id === selectedScopeId.value) || null);
+const endpoints = computed(() => (selectedSnapshot.value?.endpoints || []).filter(endpoint => endpoint.networkZoneId === selectedScopeId.value));
 const verifiedCount = computed(() => endpoints.value.filter(verifiedIdentity).length);
 const unidentifiedCount = computed(() => Math.max(0, endpoints.value.length - verifiedCount.value));
 const recentChangeCount = computed(() => {
@@ -143,8 +153,8 @@ const recentChangeCount = computed(() => {
     + diff.identityChanges.filter(item => item.scopeId === selectedScopeId.value).length;
 });
 const selectedEndpoint = computed(() => endpoints.value.find(endpoint => endpointKey(endpoint) === selectedEndpointKey.value) || null);
-const selectedInvestigationKey = computed(() => selectedEndpoint.value && props.latest
-  ? networkEndpointInvestigationKey(props.latest.scanId, selectedEndpoint.value.networkZoneId, selectedEndpoint.value.ipAddress, selectedEndpoint.value.id)
+const selectedInvestigationKey = computed(() => selectedEndpoint.value && selectedSnapshot.value
+  ? networkEndpointInvestigationKey(selectedSnapshot.value.scanId, selectedEndpoint.value.networkZoneId, selectedEndpoint.value.ipAddress, selectedEndpoint.value.id)
   : '');
 const selectedInvestigation = computed(() => selectedInvestigationKey.value
   ? props.endpointInvestigations?.[selectedInvestigationKey.value] || null
@@ -160,17 +170,17 @@ const visibleEndpoints = computed(() => {
   });
 });
 const coverageLabel = computed(() => {
-  if (!props.latest) return 'No scan yet';
+  if (!selectedSnapshot.value) return 'No scan yet';
   if (!scopeSnapshot.value) return 'No observation for this scope';
   const incomplete = !scopeSnapshot.value.complete
-    || props.latest.failures.length > 0
-    || props.comparison?.incompleteScopes.includes(selectedScopeId.value);
+    || selectedSnapshot.value.failures.length > 0
+    || (props.comparison?.toScanId === selectedSnapshot.value.scanId && props.comparison.incompleteScopes.includes(selectedScopeId.value));
   return incomplete ? 'Partial coverage' : 'Scan complete';
 });
-const lastScanLabel = computed(() => props.latest ? new Date(props.latest.completedAt).toLocaleString() : 'Awaiting first scan');
+const lastScanLabel = computed(() => selectedSnapshot.value ? new Date(selectedSnapshot.value.completedAt).toLocaleString() : 'Awaiting first scan');
 const identityName = (endpoint: Endpoint) => endpoint.hostname || [endpoint.vendor, endpoint.model || endpoint.app].filter(Boolean).join(' ') || 'Unidentified endpoint';
 
-watch(() => props.latest?.scanId, () => {
+watch(() => selectedSnapshot.value?.scanId, () => {
   if (endpoints.value.length && !endpoints.value.some(endpoint => endpointKey(endpoint) === selectedEndpointKey.value)) {
     selectedEndpointKey.value = endpointKey(endpoints.value.find(verifiedIdentity) || endpoints.value[0]);
   }
@@ -224,9 +234,9 @@ function runScan() {
 }
 
 function investigateSelectedEndpoint() {
-  if (!selectedEndpoint.value || !props.latest || verifiedIdentity(selectedEndpoint.value) || selectedEndpoint.value.identityConflict) return;
+  if (!selectedEndpoint.value || !selectedSnapshot.value || verifiedIdentity(selectedEndpoint.value) || selectedEndpoint.value.identityConflict) return;
   emit('investigateEndpoint', {
-    scanId: props.latest.scanId,
+    scanId: selectedSnapshot.value.scanId,
     scopeId: selectedEndpoint.value.networkZoneId,
     ipAddress: selectedEndpoint.value.ipAddress,
     endpointId: selectedEndpoint.value.id,
@@ -267,6 +277,14 @@ function date(value?: string) {
             <option v-if="availableScopes.length === 0" value="">No configured scopes</option>
           </select>
         </label>
+        <label v-if="snapshots.length > 1" class="ni-scope-select ni-snapshot-select">
+          <span>Saved scan</span>
+          <select v-model="selectedScanId" aria-label="Select saved network snapshot">
+            <option v-for="snapshot in snapshots" :key="snapshot.scanId" :value="snapshot.scanId">
+              {{ snapshot.scopes.map(scope => scope.name).join(', ') || 'Network scan' }} · {{ date(snapshot.completedAt) }}{{ snapshot.scanId === latest?.scanId ? ' · Latest' : '' }}
+            </option>
+          </select>
+        </label>
         <button v-if="busy" type="button" class="ni-button ni-button-secondary" @click="emit('cancel')">Cancel scan</button>
         <button v-else type="button" class="ni-button ni-button-primary" :disabled="!selectedScopeId" @click="runScan">Scan network</button>
       </div>
@@ -290,14 +308,14 @@ function date(value?: string) {
       <span v-if="enrollmentStateAvailable === false" class="ni-lifecycle-unavailable" role="status">Enrollment data is unavailable; endpoint lifecycle links are limited.</span>
     </nav>
 
-    <section v-if="latest" class="ni-metrics" aria-label="Selected network summary">
+    <section v-if="selectedSnapshot" class="ni-metrics" aria-label="Selected network summary">
       <article><strong>{{ endpoints.length }}</strong><span>Observed endpoints</span></article>
       <article><strong>{{ verifiedCount }}</strong><span>Verified identities</span></article>
       <article><strong>{{ unidentifiedCount }}</strong><span>Unidentified</span></article>
       <article><strong>{{ recentChangeCount }}</strong><span>Recent changes</span></article>
     </section>
 
-    <section v-if="latest" class="ni-overview" aria-labelledby="ni-overview-title">
+    <section v-if="selectedSnapshot" class="ni-overview" aria-labelledby="ni-overview-title">
       <div class="ni-section-heading">
         <div><h2 id="ni-overview-title">{{ selectedScope?.name || 'Network' }} overview</h2><p>{{ selectedScope?.cidr || scopeSnapshot?.cidr || 'Configured scope' }}<template v-if="scopeSnapshot?.interfaceName"> · observed from {{ scopeSnapshot.interfaceName }}</template></p></div>
         <span>{{ endpoints.length }} {{ endpoints.length === 1 ? 'endpoint' : 'endpoints' }}</span>
@@ -312,9 +330,9 @@ function date(value?: string) {
           <span class="ni-node-name">{{ identityName(endpoint) }} · {{ lifecycleLabel(endpointLifecycle(endpoint)) }}</span>
         </button>
       </div>
-      <div v-else class="ni-empty-scope"><strong>No endpoints are recorded for this network in the latest snapshot.</strong><span>This means no endpoints were detected in this run; it does not establish that the network has no devices.</span></div>
+      <div v-else class="ni-empty-scope"><strong>No endpoints are recorded for this network in the selected snapshot.</strong><span>This means no endpoints were detected in this run; it does not establish that the network has no devices.</span></div>
       <p class="ni-note">Grouped by observed network. Physical links and wired or Wi-Fi attachment are not established by this view.</p>
-      <div v-if="comparison && comparison.comparableScopes.includes(selectedScopeId)" class="ni-change-summary" aria-label="Changes since previous comparable scan">
+      <div v-if="comparison && comparison.toScanId === selectedSnapshot.scanId && comparison.comparableScopes.includes(selectedScopeId)" class="ni-change-summary" aria-label="Changes since previous comparable scan">
         <strong>Since the previous scan</strong>
         <span>{{ comparison.addedEndpoints.filter(item => item.scopeId === selectedScopeId).length }} new</span>
         <span>{{ comparison.notDetectedEndpoints.filter(item => item.scopeId === selectedScopeId).length }} not detected <small>· not necessarily offline</small></span>
@@ -323,7 +341,7 @@ function date(value?: string) {
       </div>
     </section>
 
-    <section v-if="latest" class="ni-inventory" aria-labelledby="ni-inventory-title">
+    <section v-if="selectedSnapshot" class="ni-inventory" aria-labelledby="ni-inventory-title">
       <div class="ni-section-heading ni-inventory-heading">
         <div><h2 id="ni-inventory-title">Devices and endpoints</h2><p>Choose an item to inspect its evidence.</p></div>
         <label class="ni-search"><span class="sr-only">Search devices and endpoints</span><input v-model="search" type="search" placeholder="Search name, IP, or identity" /></label>
@@ -374,7 +392,7 @@ function date(value?: string) {
             <div v-if="selectedEndpoint.deviceReportedMacAddress"><dt>Device-reported MAC</dt><dd>{{ selectedEndpoint.deviceReportedMacAddress }}</dd></div>
             <div><dt>Services</dt><dd>{{ endpointServices(selectedEndpoint).join(', ') || 'No services identified' }}</dd></div>
             <div><dt>Last observed</dt><dd>{{ date(selectedEndpoint.discoveredAt) }}</dd></div>
-            <div><dt>Collector</dt><dd>{{ latest.collector.host }} · {{ latest.collector.interfaces.join(', ') || 'interface unknown' }}</dd></div>
+            <div><dt>Collector</dt><dd>{{ selectedSnapshot.collector.host }} · {{ selectedSnapshot.collector.interfaces.join(', ') || 'interface unknown' }}</dd></div>
           </dl>
           <p class="ni-detail-reason">{{ selectedEndpoint.reason }}</p>
           <section v-if="!verifiedIdentity(selectedEndpoint)" class="ni-endpoint-investigation" aria-label="AI device investigation">
@@ -437,9 +455,9 @@ function date(value?: string) {
         <section><h3>Routes</h3><ul><li v-for="route in observer.routes" :key="`${route.destination}:${route.interfaceName}:${route.gateway}`"><strong>{{ route.destination }}</strong><span>{{ route.gateway ? `via ${route.gateway}` : 'gateway not reported' }} · {{ route.interfaceName || 'interface unknown' }}</span><small>{{ route.evidence }}</small></li></ul></section>
         <section><h3>Configured scopes</h3><ul><li v-for="scope in observer.configuredScopes" :key="scope.id"><strong>{{ scope.name }} · {{ scope.cidr || 'unscoped' }}</strong><span>{{ scope.reachability.replace('_', ' ') }} · {{ scope.boundedScanEligible ? 'eligible for approved bounded scan' : 'not eligible' }}</span><small>{{ scope.reason }}</small></li></ul></section>
         <section><h3>Collector capabilities</h3><ul><li v-for="capability in observer.capabilities" :key="capability.id"><strong>{{ capability.id }} · {{ capability.available ? 'available' : 'unavailable' }}</strong><span>{{ capability.detail }}</span></li></ul><p v-if="nmapCapability">Nmap {{ nmapCapability.available ? `${nmapCapability.version || 'version unknown'} available` : `unavailable · ${nmapCapability.reason || 'not detected'}` }} · {{ nmapCapability.enabled ? 'scanning enabled' : 'scanning disabled' }}</p></section>
-        <section v-if="latest"><h3>Snapshot collection</h3><p>Schema v{{ latest.schemaVersion }} · {{ latest.scanId }} · {{ latest.methods.join(', ') }}</p><p>{{ latest.successes }} successful collection result(s) · {{ latest.failures.length }} failure(s)</p><ul v-if="latest.failures.length"><li v-for="failure in latest.failures" :key="failure">{{ failure }}</li></ul></section>
-        <section v-if="latest?.limitations.length"><h3>Coverage limitations</h3><ul><li v-for="limitation in latest.limitations" :key="limitation">{{ limitation }}</li></ul></section>
-        <section v-if="latest"><h3>Snapshot history</h3><p>{{ snapshots.length }} immutable scan{{ snapshots.length === 1 ? '' : 's' }} preserved</p><p>Topology links: {{ latest.topology.relationships.length ? `${latest.topology.relationships.length} evidence-backed relationship(s)` : 'none established' }}</p></section>
+        <section v-if="selectedSnapshot"><h3>Snapshot collection</h3><p>Schema v{{ selectedSnapshot.schemaVersion }} · {{ selectedSnapshot.scanId }} · {{ selectedSnapshot.methods.join(', ') }}</p><p>{{ selectedSnapshot.successes }} successful collection result(s) · {{ selectedSnapshot.failures.length }} failure(s)</p><ul v-if="selectedSnapshot.failures.length"><li v-for="failure in selectedSnapshot.failures" :key="failure">{{ failure }}</li></ul></section>
+        <section v-if="selectedSnapshot?.limitations.length"><h3>Coverage limitations</h3><ul><li v-for="limitation in selectedSnapshot.limitations" :key="limitation">{{ limitation }}</li></ul></section>
+        <section v-if="selectedSnapshot"><h3>Snapshot history</h3><p>{{ snapshots.length }} immutable scan{{ snapshots.length === 1 ? '' : 's' }} preserved</p><p>Topology links: {{ selectedSnapshot.topology.relationships.length ? `${selectedSnapshot.topology.relationships.length} evidence-backed relationship(s)` : 'none established' }}</p></section>
       </div>
       <p v-else class="ni-diagnostics-empty">Observer diagnostics have not been loaded.</p>
     </details>
