@@ -63,13 +63,14 @@ describe('device switch control', () => {
       props: { device, error: 'Broker unavailable' },
     });
     expect(page.get('[role="alert"]').text()).toBe('Broker unavailable');
-    await page.setProps({
+    const failedProps = {
       error: '',
       device: {
         ...device,
         state: { values: {}, command: { status: 'no_ack' } },
       },
-    });
+    };
+    await page.setProps(failedProps as Parameters<typeof page.setProps>[0]);
     expect(page.get('[role="alert"]').text()).toContain('not confirmed');
   });
 });

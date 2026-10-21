@@ -49,7 +49,12 @@ describe('DeviceCommissioning', () => {
     });
     expect(page.text()).toContain('Physical result: not confirmed');
     expect(page.find('button.secondary').exists()).toBe(false);
-    await page.setProps({ device: { ...baseDevice, state: { command: { status: 'acked' } } } });
+    const acknowledgedProps = {
+      device: { ...baseDevice, state: { command: { status: 'acked' } } },
+    };
+    await page.setProps(
+      acknowledgedProps as Parameters<typeof page.setProps>[0],
+    );
     await page.get('button.secondary').trigger('click');
     await flushPromises();
 

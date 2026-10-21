@@ -109,10 +109,13 @@ describe('selected forecast day', () => {
 
   it('removes previous hours and statistics when moving to a daily-only day', async () => {
     const wrapper = mount(ForecastDayDetail, { props: { day, detail } });
-    await wrapper.setProps({
+    const dailyOnlyProps = {
       day: { ...day, date: '2026-10-15' },
       detail: undefined,
-    });
+    };
+    await wrapper.setProps(
+      dailyOnlyProps as Parameters<typeof wrapper.setProps>[0],
+    );
     expect(wrapper.text()).toContain('October 15');
     expect(wrapper.text()).toContain('Hourly details unavailable');
     expect(wrapper.text()).not.toContain('1009 hPa');
