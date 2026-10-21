@@ -4,6 +4,7 @@ import { AppModule } from './app/app.module';
 import { WsAdapter } from '@nestjs/platform-ws';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { PortalDeviceProxyService } from './app/modules/portal/portal-device-proxy.service';
+import { apiListenHost } from './server-listen-config';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 
@@ -65,7 +66,8 @@ async function bootstrap() {
   setupSwagger(app);
 
   const port = process.env.PORT || 3000;
-  await app.listen(port, '0.0.0.0');
+  const host = apiListenHost();
+  await app.listen(port, host);
   const deviceProxy = app.get(PortalDeviceProxyService);
   const httpServer = app.getHttpServer();
   const upgradeListeners = httpServer.listeners('upgrade');
@@ -79,7 +81,7 @@ async function bootstrap() {
   });
 
   console.log(`Energrid API running on port ${port}`);
-  console.log(`Energrid API docs available at http://localhost:${port}/api/docs`);
+  console.log(`Energrid API docs available at http://${host}:${port}/api/docs`);
 }
 
 bootstrap();
