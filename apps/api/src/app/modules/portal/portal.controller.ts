@@ -275,7 +275,7 @@ export class PortalController {
   @Get('network/capabilities')
   async networkCapabilities(@Req() request: DeviceProxyRequest) {
     assertPortalControlToken(request)
-    return { nmap: await this.lanDiscovery.getNmapCapability() }
+    return this.lanDiscovery.getRuntimeCapabilities()
   }
 
   @Get('network/snapshots/:fromScanId/compare/:toScanId')

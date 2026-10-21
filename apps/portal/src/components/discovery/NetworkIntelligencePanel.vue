@@ -14,6 +14,7 @@ type Snapshot = {
   scopes: Array<{ id: string; name: string; cidr?: string; interfaceName?: string; complete: boolean; gatewayIpsObserved: string[] }>;
   methods: string[]; successes: number; failures: string[]; limitations: string[]; endpoints: Endpoint[];
   topology: { relationships: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }> };
+  runtime?: Observer;
 };
 type Diff = {
   fromScanId: string; toScanId: string; comparableScopes: string[]; incompleteScopes: string[];
@@ -28,10 +29,21 @@ type Diff = {
   identityChanges: Array<{ scopeId: string; ipAddress: string; previous: string; current: string }>;
   topologyChanges: { added: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }>; removed: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }> };
 };
+type Observer = {
+  observedAt: string;
+  observer: { id: string; host: string; platform: string };
+  interfaces: Array<{ name: string; internal: boolean; macAddress?: string; addresses: Array<{ family: string; address: string; netmask?: string; prefixLength?: number; cidr?: string }> }>;
+  routes: Array<{ destination: string; family: string; gateway?: string; interfaceName?: string; sourceAddress?: string; evidence: string }>;
+  localScopes: Array<{ cidr: string; interfaceName: string }>;
+  configuredScopes: Array<{ id: string; name: string; cidr?: string; interfaceName?: string; reachability: string; boundedScanEligible: boolean; reason: string }>;
+  capabilities: Array<{ id: string; available: boolean; detail: string }>;
+  limitations: string[];
+};
 
 const props = defineProps<{
   scopes: Scope[]; snapshots: Snapshot[]; latest: Snapshot | null; comparison: Diff | null;
   nmapCapability?: { available: boolean; enabled: boolean; version?: string; reason?: string } | null;
+  observer?: Observer | null;
   busy?: boolean; error?: string;
 }>();
 const emit = defineEmits<{ scan: [scopeIds: string[]]; cancel: [] }>();
@@ -70,9 +82,31 @@ const date = (value: string) => new Date(value).toLocaleString();
       </div>
     </div>
     <p class="section-help" role="status">
-      Nmap {{ nmapCapability?.available ? `available · ${nmapCapability.version || 'version unknown'}` : `unavailable · ${nmapCapability?.reason || 'status not checked'}` }} ·
-      {{ nmapCapability?.enabled ? 'scanning enabled' : 'scanning disabled' }}. Service checks still require an operator-confirmed scan.
+      Nmap executable {{ nmapCapability?.available ? `verified · ${nmapCapability.version || 'version unknown'}` : `unavailable · ${nmapCapability?.reason || 'status not checked'}` }} · collector supported ·
+      {{ nmapCapability?.enabled ? 'scanning enabled' : 'scanning disabled' }}. Actual Nmap collection appears in completed snapshot methods and endpoint evidence; service checks require operator confirmation.
     </p>
+    <div v-if="observer" class="runtime-observer" aria-label="Current local observer capabilities">
+      <strong>Current observer · {{ observer.observer.host }} · {{ observer.observer.platform }}</strong>
+      <small>Inspected {{ date(observer.observedAt) }}. A route indicates a configured path, not proven endpoint reachability.</small>
+      <div><span>Interfaces</span><span v-for="networkInterface in observer.interfaces" :key="networkInterface.name">
+        {{ networkInterface.name }}: {{ networkInterface.addresses.map(address => `${address.address}${address.prefixLength !== undefined ? `/${address.prefixLength}` : ''}`).join(', ') || 'no addresses reported' }}
+      </span></div>
+      <div><span>Routes</span><span v-for="route in observer.routes" :key="`${route.family}:${route.destination}:${route.interfaceName}`">
+        {{ route.destination }}{{ route.gateway ? ` via ${route.gateway}` : '' }}{{ route.interfaceName ? ` · ${route.interfaceName}` : '' }}
+      </span><span v-if="observer.routes.length === 0">No routes reported</span></div>
+      <div><span>Locally connected scopes</span><span v-for="scope in observer.localScopes" :key="`${scope.cidr}:${scope.interfaceName}`">
+        {{ scope.cidr }} · {{ scope.interfaceName }}
+      </span><span v-if="observer.localScopes.length === 0">No IPv4 scopes inferred from local interfaces</span></div>
+      <div><span>Configured scope visibility</span><span v-for="scope in observer.configuredScopes" :key="scope.id">
+        {{ scope.name }} {{ scope.cidr || 'unscoped' }} · {{ scope.reachability.replace('_', ' ') }} · {{ scope.boundedScanEligible ? 'within bounded scan limit' : 'not eligible for bounded scan' }}
+        <small>{{ scope.reason }}</small>
+      </span><span v-if="observer.configuredScopes.length === 0">No scan scopes configured</span></div>
+      <div><span>Capabilities</span><span v-for="capability in observer.capabilities" :key="capability.id">
+        {{ capability.id }}: {{ capability.available ? 'available' : 'unavailable' }}
+        <small>{{ capability.detail }}</small>
+      </span></div>
+      <p v-for="limitation in observer.limitations" :key="limitation">Visibility limitation: {{ limitation }}</p>
+    </div>
     <fieldset class="network-scope-picker">
       <legend>Choose scan scope</legend>
       <label v-for="scope in scopes" :key="scope.id">
@@ -87,7 +121,7 @@ const date = (value: string) => new Date(value).toLocaleString();
       <div class="section-row"><div><strong>Latest snapshot</strong><span class="section-help">{{ latest.scanId }} · schema v{{ latest.schemaVersion }}</span></div><span>{{ latest.endpoints.length }} endpoints</span></div>
       <dl>
         <div><dt>Completed</dt><dd>{{ date(latest.completedAt) }}</dd></div>
-        <div><dt>Observed from</dt><dd>{{ latest.collector.host }} · {{ latest.collector.interfaces.join(', ') || 'interface not identified' }}</dd></div>
+        <div><dt>Observed from</dt><dd>{{ latest.collector.host }} · {{ latest.collector.interfaces.join(', ') || 'interface not identified' }}<template v-if="latest.runtime"> · {{ latest.runtime.observer.platform }}</template></dd></div>
         <div><dt>Methods</dt><dd>{{ latest.methods.join(', ') }}</dd></div>
         <div><dt>Snapshot history</dt><dd>{{ snapshots.length }} immutable scans available</dd></div>
         <div><dt>Topology</dt><dd>{{ latest.topology.relationships.length ? `${latest.topology.relationships.length} evidenced relationships` : 'No link relationships established' }}</dd></div>
@@ -135,6 +169,10 @@ const date = (value: string) => new Date(value).toLocaleString();
 
 <style scoped>
 .network-intelligence-panel { display: grid; gap: 16px; }
+.runtime-observer { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--discovery-border, #d8e0ec); border-radius: 8px; }
+.runtime-observer > div { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.runtime-observer > div > span:first-child { font-weight: 600; }
+.runtime-observer small, .runtime-observer p { color: var(--muted, #65717c); margin: 0; }
 .network-scope-picker { display: flex; flex-wrap: wrap; gap: 12px 20px; border: 1px solid var(--discovery-border, #d8e0ec); border-radius: 8px; padding: 12px; }
 .network-scope-picker legend { padding: 0 6px; font-weight: 600; }
 .network-scope-picker label { display: flex; gap: 8px; align-items: flex-start; }

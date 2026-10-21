@@ -324,6 +324,7 @@ type NetworkSnapshot = {
   scopes: Array<{ id: string; name: string; cidr?: string; interfaceName?: string; complete: boolean; gatewayIpsObserved: string[] }>;
   methods: string[]; successes: number; failures: string[]; limitations: string[]; endpoints: NetworkDevice[];
   topology: { relationships: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }> };
+  runtime?: NetworkRuntime;
 };
 type NetworkSnapshotDiff = {
   fromScanId: string; toScanId: string; comparableScopes: string[]; incompleteScopes: string[];
@@ -339,6 +340,16 @@ type NetworkSnapshotDiff = {
   topologyChanges: { added: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }>; removed: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }> };
 };
 type NmapCapability = { available: boolean; enabled: boolean; version?: string; reason?: string };
+type NetworkRuntime = {
+  observedAt: string;
+  observer: { id: string; host: string; platform: string };
+  interfaces: Array<{ name: string; internal: boolean; macAddress?: string; addresses: Array<{ family: string; address: string; netmask?: string; prefixLength?: number; cidr?: string }> }>;
+  routes: Array<{ destination: string; family: string; gateway?: string; interfaceName?: string; sourceAddress?: string; evidence: string }>;
+  localScopes: Array<{ cidr: string; interfaceName: string }>;
+  configuredScopes: Array<{ id: string; name: string; cidr?: string; interfaceName?: string; reachability: string; boundedScanEligible: boolean; reason: string }>;
+  capabilities: Array<{ id: string; available: boolean; detail: string }>;
+  limitations: string[];
+};
 
 
 function deviceHasSsh(device: NetworkDevice): boolean {
@@ -496,6 +507,7 @@ const latestNetworkSnapshot = ref<NetworkSnapshot | null>(null);
 const networkSnapshotComparison = ref<NetworkSnapshotDiff | null>(null);
 const networkSnapshotsError = ref('');
 const nmapCapability = ref<NmapCapability | null>(null);
+const networkRuntime = ref<NetworkRuntime | null>(null);
 const discoveryDecisionBusy = ref<Record<string, string>>({});
 const findingHttpPageByDeviceId = ref<Record<string, boolean>>({});
 const discoveryView = ref<'capable' | 'all'>('all');
@@ -1697,6 +1709,7 @@ async function loadNetworkSnapshots() {
     networkSnapshots.value = [];
     latestNetworkSnapshot.value = null;
     networkSnapshotComparison.value = null;
+    networkRuntime.value = null;
     return;
   }
   networkSnapshotsError.value = '';
@@ -1710,8 +1723,9 @@ async function loadNetworkSnapshots() {
       headers: { Authorization: `Bearer ${accessToken.value}` },
     });
     if (capabilityResponse.ok) {
-      const capability = await capabilityResponse.json() as { nmap: NmapCapability };
+      const capability = await capabilityResponse.json() as { nmap: NmapCapability; observer?: NetworkRuntime };
       nmapCapability.value = capability.nmap;
+      networkRuntime.value = capability.observer || null;
     }
     networkSnapshots.value = result.snapshots;
     latestNetworkSnapshot.value = result.snapshots[0] || null;
@@ -4718,6 +4732,7 @@ onBeforeUnmount(() => {
             :latest="latestNetworkSnapshot"
             :comparison="networkSnapshotComparison"
             :nmap-capability="nmapCapability"
+            :observer="networkRuntime"
             :busy="scanningNetwork"
             :error="networkSnapshotsError || stateError"
             @scan="scanNetwork"

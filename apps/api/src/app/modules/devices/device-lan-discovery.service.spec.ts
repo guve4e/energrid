@@ -21,6 +21,7 @@ import { DeviceDiscoveryMemoryStore } from './device-discovery-memory.store'
 import { DeviceRegistryService } from './device-registry.service'
 import type { NetworkDiscoveredDevice } from './device-registry.types'
 import { NmapNetworkEvidenceAdapter, type NmapCommandRunner } from './adapters/outbound/network/nmap-network-evidence.adapter'
+import type { LocalNetworkRuntimeAdapter, LocalNetworkRuntimeReport } from './adapters/outbound/network/local-network-runtime.adapter'
 
 jest.mock('node:child_process', () => ({
   execFile: jest.fn((_command, _args, _options, callback) => callback(new Error('mocked'))),
@@ -91,6 +92,16 @@ describe('LAN discovery evidence persistence', () => {
     expect(await memory.listIdentityEvidence()).toEqual([])
   })
 
+  it('does not treat discovered interface scopes as configured or authorized scan scopes', async () => {
+    delete process.env.HOME_NETWORK_ZONES_JSON
+    delete process.env.HOME_LAN_SCAN_SUBNETS
+    const service = new DeviceLanDiscoveryService(memory, {} as DeviceRegistryService, new DeviceLanNetworkEvidenceCollector())
+
+    expect(service.getZones()).toEqual([])
+    await expect(service.scanNow()).rejects.toThrow('No network scan scopes are configured')
+    expect(await memory.listSnapshots()).toEqual([])
+  })
+
   it('scans only selected scopes and discards router evidence that belongs to another configured scope', async () => {
     process.env.HOME_NETWORK_ZONES_JSON = JSON.stringify({ zones: [
       { id: 'eero', name: 'Eero', cidr: '192.168.7.0/24' },
@@ -141,6 +152,33 @@ describe('LAN discovery evidence persistence', () => {
       source: 'nmap', scopeId: 'home-lan',
       evidence: expect.objectContaining({ observations: expect.arrayContaining([expect.objectContaining({ method: 'nmap_tcp_connect_service_scan' })]) }),
     }))
+  })
+
+  it('persists normalized local observer capabilities in a version 2 immutable snapshot', async () => {
+    process.env.HOME_NMAP_ENABLED = 'false'
+    const runner: NmapCommandRunner = async () => ({ stdout: 'Nmap version 7.95', stderr: '' })
+    const runtime: LocalNetworkRuntimeReport = {
+      observedAt: '2026-10-21T00:00:00.000Z',
+      observer: { id: 'test-observer/linux', host: 'test-observer', platform: 'linux' },
+      interfaces: [{ name: 'eth0', internal: false, addresses: [{ family: 'IPv4', address: '10.42.6.35', netmask: '255.255.255.192', prefixLength: 26, cidr: '10.42.6.0/26' }] }],
+      routes: [{ destination: '10.42.6.0/26', family: 'IPv4', interfaceName: 'eth0', evidence: 'ip_route_table' }],
+      localScopes: [{ cidr: '10.42.6.0/26', interfaceName: 'eth0' }],
+      configuredScopes: [{ id: 'eth0-local', name: 'Local', cidr: '10.42.6.0/26', interfaceName: 'eth0', reachability: 'on_link', boundedScanEligible: true, reason: 'Direct route.' }],
+      capabilities: [], limitations: [],
+    }
+    const runtimeAdapter = { inspect: jest.fn().mockResolvedValue(runtime) } as unknown as LocalNetworkRuntimeAdapter
+    const collector = new DeviceLanNetworkEvidenceCollector(
+      new NmapNetworkEvidenceAdapter(runner),
+      runtimeAdapter,
+    )
+    const service = new DeviceLanDiscoveryService(memory, {} as DeviceRegistryService, collector)
+
+    const result = await service.scanNow({ scopeIds: ['home-lan'], fullSubnetConfirmed: true })
+    const saved = await memory.getSnapshot(result.snapshot.scanId)
+
+    expect(result.snapshot.schemaVersion).toBe(2)
+    expect(saved?.runtime).toMatchObject({ observer: runtime.observer, localScopes: runtime.localScopes })
+    expect(saved?.runtime?.capabilities.map(capability => capability.id)).toEqual(expect.arrayContaining(['nmap', 'active_probing']))
   })
 
   it('persists each same-scan MAC identity before projecting the ambiguous endpoint', async () => {

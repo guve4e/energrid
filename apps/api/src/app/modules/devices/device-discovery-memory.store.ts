@@ -463,7 +463,7 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
 function isNetworkDiscoverySnapshot(value: unknown): value is NetworkDiscoverySnapshot {
   if (!value || typeof value !== 'object') return false;
   const snapshot = value as Partial<NetworkDiscoverySnapshot>;
-  return snapshot.schemaVersion === 1 &&
+  return (snapshot.schemaVersion === 1 || snapshot.schemaVersion === 2) &&
     typeof snapshot.scanId === 'string' &&
     typeof snapshot.startedAt === 'string' &&
     typeof snapshot.completedAt === 'string' &&

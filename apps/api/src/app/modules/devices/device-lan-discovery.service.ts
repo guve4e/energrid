@@ -26,6 +26,11 @@ import { shellyLanCandidates } from './adapters/inbound/shelly/shelly-lan-candid
 import { readOnlyShellyDeviceInfo } from './adapters/inbound/shelly/read-only-shelly-rpc'
 import { compareNetworkSnapshots, type NetworkDiscoverySnapshot, type NetworkDiscoverySnapshotDiff } from './network-discovery-snapshot'
 import { NmapNetworkEvidenceAdapter, type NmapCapability, type NmapScanResult } from './adapters/outbound/network/nmap-network-evidence.adapter'
+import {
+  inferConfiguredIpv4Scopes,
+  LocalNetworkRuntimeAdapter,
+  type LocalNetworkRuntimeReport,
+} from './adapters/outbound/network/local-network-runtime.adapter'
 
 const execFileAsync = promisify(execFile)
 const activeScanConcurrency = 24
@@ -57,7 +62,10 @@ export type NetworkCandidate = {
 
 @Injectable()
 export class DeviceLanNetworkEvidenceCollector {
-  constructor(@Optional() private readonly nmapAdapter?: NmapNetworkEvidenceAdapter) {}
+  constructor(
+    @Optional() private readonly nmapAdapter?: NmapNetworkEvidenceAdapter,
+    @Optional() private readonly runtimeAdapter?: LocalNetworkRuntimeAdapter,
+  ) {}
 
   async getNmapCapability(): Promise<NmapCapability & { enabled: boolean }> {
     const capability = await (this.nmapAdapter || new NmapNetworkEvidenceAdapter()).getCapability()
@@ -67,6 +75,7 @@ export class DeviceLanNetworkEvidenceCollector {
   async collectEvidence(zones: NetworkDiscoveryZone[], signal?: AbortSignal): Promise<{
     candidates: NetworkCandidate[]
     nmap: NmapScanResult
+    runtime?: LocalNetworkRuntimeReport
   }> {
     const reachableDevices = await activeScanZones(zones)
     const tcpDevices = await tcpDiscoverZones(zones, reachableDevices)
@@ -78,6 +87,21 @@ export class DeviceLanNetworkEvidenceCollector {
       timeoutMs: Number(process.env.HOME_NMAP_TIMEOUT_MS) || 120_000,
       signal,
     })
+    const runtime = this.runtimeAdapter ? await this.runtimeAdapter.inspect(zones) : undefined
+    if (runtime) {
+      runtime.capabilities.push({
+        id: 'nmap',
+        available: nmap.capability.available,
+        detail: nmap.capability.available
+          ? `Nmap ${nmap.capability.version || 'version unknown'} ran successfully; the TCP service collector is supported. Actual scan attempts and results are recorded in this snapshot.`
+          : `${nmap.capability.reason || 'Nmap is unavailable.'} The TCP service collector is supported, but no Nmap evidence was collected.`,
+      })
+      runtime.capabilities.push({
+        id: 'active_probing',
+        available: process.env.HOME_LAN_ACTIVE_SCAN_ENABLED !== 'false',
+        detail: process.env.HOME_LAN_ACTIVE_SCAN_ENABLED === 'false' ? 'Active ICMP/TCP subnet probes are disabled.' : 'Bounded active probes are available and require explicit operator approval.',
+      })
+    }
     const stamp = (candidates: NetworkCandidate[], source: string) => candidates.map(candidate => ({
       ...candidate,
       evidenceSource: candidate.evidenceSource || source,
@@ -110,7 +134,27 @@ export class DeviceLanNetworkEvidenceCollector {
         observations: host.observations,
       }]
     })
-    return { candidates: [...candidates, ...nmapCandidates], nmap }
+    return { candidates: [...candidates, ...nmapCandidates], nmap, ...(runtime ? { runtime } : {}) }
+  }
+
+  async getRuntimeCapabilities(zones: NetworkDiscoveryZone[]): Promise<{ nmap: NmapCapability & { enabled: boolean }; observer?: LocalNetworkRuntimeReport }> {
+    const [nmap, observer] = await Promise.all([
+      this.getNmapCapability(),
+      this.runtimeAdapter?.inspect(zones),
+    ])
+    if (observer) {
+      observer.capabilities.push({
+        id: 'nmap', available: nmap.available,
+        detail: nmap.available
+          ? `Nmap ${nmap.version || 'version unknown'} ran successfully; the TCP service collector is supported${nmap.enabled ? ' and enabled' : ' but disabled'}. Evidence is reported in completed snapshot methods and endpoints.`
+          : `${nmap.reason || 'Nmap is unavailable.'} The TCP service collector is supported, but no Nmap evidence was collected.`,
+      })
+      observer.capabilities.push({
+        id: 'active_probing', available: process.env.HOME_LAN_ACTIVE_SCAN_ENABLED !== 'false',
+        detail: process.env.HOME_LAN_ACTIVE_SCAN_ENABLED === 'false' ? 'Active ICMP/TCP subnet probes are disabled.' : 'Bounded active probes are available and require explicit operator approval.',
+      })
+    }
+    return { nmap, ...(observer ? { observer } : {}) }
   }
 
   async collectCandidates(zones: NetworkDiscoveryZone[]): Promise<NetworkCandidate[]> {
@@ -153,6 +197,10 @@ export class DeviceLanDiscoveryService {
     return this.evidenceCollector.getNmapCapability()
   }
 
+  getRuntimeCapabilities(): ReturnType<DeviceLanNetworkEvidenceCollector['getRuntimeCapabilities']> {
+    return this.evidenceCollector.getRuntimeCapabilities(this.getZones())
+  }
+
   async scanNow(options: { scopeIds?: string[]; fullSubnetConfirmed?: boolean; signal?: AbortSignal } = {}): Promise<{
     scannedAt: string
     zones: NetworkDiscoveryZone[]
@@ -163,6 +211,9 @@ export class DeviceLanDiscoveryService {
     const startedAt = new Date().toISOString()
     const scanId = randomUUID()
     const configuredZones = configuredNetworkZones()
+    if (configuredZones.length === 0) {
+      throw new BadRequestException('No network scan scopes are configured')
+    }
     const zones = selectScanZones(configuredZones, options.scopeIds)
     if (zones.some(zone => zone.cidr) && options.fullSubnetConfirmed !== true) {
       throw new BadRequestException('Full-subnet discovery requires explicit operator confirmation')
@@ -247,7 +298,7 @@ export class DeviceLanDiscoveryService {
     ])].sort()
     const nmapScopeById = new Map(evidence.nmap.scopes.map(scope => [scope.scopeId, scope]))
     const snapshot: NetworkDiscoverySnapshot = {
-      schemaVersion: 1,
+      schemaVersion: evidence.runtime ? 2 : 1,
       scanId,
       startedAt,
       completedAt: new Date().toISOString(),
@@ -282,6 +333,7 @@ export class DeviceLanDiscoveryService {
       rawEvidenceOmitted: boundedEvidence.omitted,
       endpoints: structuredClone(this.lastScan),
       topology: { relationships: [] },
+      ...(evidence.runtime ? { runtime: evidence.runtime } : {}),
     }
     await this.discoveryMemory.recordSnapshot(snapshot)
     const previousSnapshots = await this.discoveryMemory.listSnapshots(100)
@@ -443,28 +495,28 @@ function configuredNetworkZones(): NetworkDiscoveryZone[] {
     .map((item) => item.trim())
     .filter(Boolean)
   const inferredZones = inferNetworkZonesFromInterfaces()
-  const defaultCidrs = cidrs.length > 0
-    ? cidrs
-    : inferredZones.map((zone) => zone.cidr).filter((cidr): cidr is string => !!cidr)
+  if (cidrs.length === 0) {
+    const seedIps = configuredSeedHosts().map(host => host.ipAddress)
+    return seedIps.length > 0 ? [{
+      id: 'configured-endpoints',
+      name: 'Configured endpoints',
+      seedIps,
+      role: 'primary',
+    }] : []
+  }
 
-  return [
-    {
-      id: 'local-lan',
-      name: 'Local LAN',
-      cidr: defaultCidrs[0],
-      interfaceName: inferredZones[0]?.interfaceName,
-      seedIps: configuredSeedHosts().map((host) => host.ipAddress),
-      role: 'primary' as const,
-    },
-    ...defaultCidrs.slice(1).map((cidr, index) => ({
-      id: `network-${index + 2}`,
-      name: `Network ${index + 2}`,
+  return cidrs.map((cidr, index) => {
+    const local = inferredZones.find(zone => zone.cidr === cidr)
+    const fallbackId = index === 0 ? 'local-network' : `network-${index + 1}`
+    return {
+      id: local?.id || fallbackId,
+      name: local?.name || (index === 0 ? 'Local network' : `Network ${index + 1}`),
       cidr,
-      interfaceName: inferredZones[index + 1]?.interfaceName,
-      seedIps: [],
-      role: 'iot' as const,
-    })),
-  ]
+      ...(local?.interfaceName ? { interfaceName: local.interfaceName } : {}),
+      seedIps: index === 0 ? configuredSeedHosts().map(host => host.ipAddress) : [],
+      role: index === 0 ? 'primary' as const : 'iot' as const,
+    }
+  })
 }
 
 function selectScanZones(zones: NetworkDiscoveryZone[], scopeIds?: string[]): NetworkDiscoveryZone[] {
@@ -510,7 +562,7 @@ function discoveryMethods(zones: NetworkDiscoveryZone[]): string[] {
 function scanLimitations(zones: NetworkDiscoveryZone[]): string[] {
   const limitations = [
     'Neighbor-table evidence is local to the collector interface; routed segments require router or on-segment evidence for MAC attribution.',
-    'No remote Raspberry Pi collector is included in this scan.',
+    'No remote network observer is configured; visibility is limited to this runtime and its reachable routes.',
     'Router and neighbor-table source errors are not currently reported separately from empty results.',
     'Physical links and wired/Wi-Fi attachment are not collected; topology relationships remain unknown.',
   ]
@@ -1153,47 +1205,11 @@ async function runPool<T>(
 }
 
 function inferNetworkZonesFromInterfaces(): NetworkDiscoveryZone[] {
-  const byCidr = new Map<string, NetworkDiscoveryZone>()
-
-  for (const [interfaceName, addresses] of Object.entries(networkInterfaces())) {
-    if (!addresses || shouldIgnoreInterface(interfaceName)) continue
-
-    for (const address of addresses) {
-      if (address.family !== 'IPv4' || address.internal || !isUsefulLanIp(address.address)) continue
-      if (!isPrivateIpv4(address.address)) continue
-
-      const cidr = `${address.address.split('.').slice(0, 3).join('.')}.0/24`
-      byCidr.set(cidr, {
-        id: safeZoneId(interfaceName || cidr),
-        name: displayNameFromZoneId(interfaceName || 'Local LAN'),
-        cidr,
-        interfaceName,
-        seedIps: [],
-        role: 'primary',
-      })
-    }
-  }
-
-  return [...byCidr.values()]
-    .sort((a, b) => zoneSortRank(a.cidr || '') - zoneSortRank(b.cidr || ''))
-    .slice(0, configuredActiveScanMaxZones())
-}
-
-function shouldIgnoreInterface(interfaceName: string): boolean {
-  return /^(lo|docker|br-|veth|utun|awdl|llw|bridge|tailscale|zt)/i.test(interfaceName)
-}
-
-function isPrivateIpv4(ipAddress: string): boolean {
-  return /^10\./.test(ipAddress) ||
-    /^192\.168\./.test(ipAddress) ||
-    /^172\.(1[6-9]|2\d|3[0-1])\./.test(ipAddress)
-}
-
-function zoneSortRank(cidr: string): number {
-  if (cidr.startsWith('192.168.')) return 0
-  if (cidr.startsWith('10.')) return 1
-  if (cidr.startsWith('172.')) return 2
-  return 3
+  return inferConfiguredIpv4Scopes(
+    networkInterfaces(),
+    Math.min(configuredActiveScanMaxHosts(), 254),
+    configuredActiveScanMaxZones(),
+  ).map(zone => ({ ...zone, name: displayNameFromZoneId(zone.interfaceName) }))
 }
 
 function configuredActiveScanMaxHosts(): number {

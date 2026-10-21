@@ -158,7 +158,7 @@ export class NmapNetworkEvidenceAdapter {
       capability,
       hosts: [],
       scopes: [],
-      methods: capability.available ? ['nmap_tcp_connect_service_scan'] : [],
+      methods: [],
       failures: [],
       limitations: [],
       cancelled: false,
@@ -206,6 +206,9 @@ export class NmapNetworkEvidenceAdapter {
       const observingInterface = interfaceInfo?.name || routeInfo.interfaceName;
       const observedAt = this.now().toISOString();
       const args = buildNmapArguments(targetInfo.targets, observingInterface);
+      if (!result.methods.includes('nmap_tcp_connect_service_scan')) {
+        result.methods.push('nmap_tcp_connect_service_scan');
+      }
       try {
         const commandResult = await this.runCommand(NMAP_EXECUTABLE, args, {
           timeout: timeoutMs,

@@ -30,6 +30,17 @@ const scope = {
 };
 
 describe('Nmap XML evidence adapter', () => {
+  it('does not report Nmap evidence collection when the scanner is disabled', async () => {
+    const runner: NmapCommandRunner = async () => ({ stdout: 'Nmap version 7.95', stderr: '' });
+    const adapter = new NmapNetworkEvidenceAdapter(runner);
+
+    const result = await adapter.scan([scope], { enabled: false });
+
+    expect(result.capability).toEqual({ available: true, version: '7.95' });
+    expect(result.methods).toEqual([]);
+    expect(result.scopes[0].failure).toContain('disabled');
+  });
+
   it('parses endpoint, hostname and open service evidence without treating assumed-up as reachability', () => {
     const parsed = parseNmapXml(xml, {
       scopeId: 'eero',

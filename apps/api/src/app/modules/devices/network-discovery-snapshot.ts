@@ -1,7 +1,8 @@
 import type { NetworkDiscoveredDevice, NetworkDiscoveryZone } from './device-registry.types';
+import type { LocalNetworkRuntimeReport } from './adapters/outbound/network/local-network-runtime.adapter';
 
 export interface NetworkDiscoverySnapshot {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   scanId: string;
   startedAt: string;
   completedAt: string;
@@ -34,6 +35,7 @@ export interface NetworkDiscoverySnapshot {
     verification: 'verified' | 'inferred' | 'unknown';
     evidence: string[];
   }> };
+  runtime?: LocalNetworkRuntimeReport;
 }
 
 export interface NetworkDiscoverySnapshotDiff {

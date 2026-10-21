@@ -78,6 +78,28 @@ describe('DeviceDiscoveryMemoryStore', () => {
     expect(await store.listSnapshots()).toEqual([snapshot])
   })
 
+  it('preserves version 2 runtime observer evidence across a store restart', async () => {
+    const snapshot: NetworkDiscoverySnapshot = {
+      schemaVersion: 2, scanId: 'scan-runtime-2', startedAt: '2026-10-21T10:00:00.000Z',
+      completedAt: '2026-10-21T10:00:05.000Z', collector: { id: 'observer/linux', host: 'observer', interfaces: ['eth0'] },
+      scopes: [{ id: 'eth0-network', name: 'Local network', cidr: '10.42.6.0/26', interfaceName: 'eth0', complete: false, gatewayIpsObserved: [] }],
+      methods: ['neighbor_table'], successes: 0, failures: [], limitations: [], rawEvidenceOmitted: 0,
+      rawEvidence: [], endpoints: [], topology: { relationships: [] },
+      runtime: {
+        observedAt: '2026-10-21T10:00:00.000Z', observer: { id: 'observer/linux', host: 'observer', platform: 'linux' },
+        interfaces: [{ name: 'eth0', internal: false, addresses: [{ family: 'IPv4', address: '10.42.6.10', netmask: '255.255.255.192', prefixLength: 26, cidr: '10.42.6.0/26' }] }],
+        routes: [{ destination: '10.42.6.0/26', family: 'IPv4', interfaceName: 'eth0', evidence: 'ip_route_table' }],
+        localScopes: [{ cidr: '10.42.6.0/26', interfaceName: 'eth0' }],
+        configuredScopes: [{ id: 'eth0-network', name: 'Local network', cidr: '10.42.6.0/26', interfaceName: 'eth0', reachability: 'on_link', boundedScanEligible: true, reason: 'Direct route observed.' }],
+        capabilities: [{ id: 'route_table', available: true, detail: 'Route table read.' }], limitations: [],
+      },
+    }
+    await store.recordSnapshot(snapshot)
+    await store.onModuleDestroy()
+    store = new DeviceDiscoveryMemoryStore(directory)
+    expect(await store.getSnapshot(snapshot.scanId)).toEqual(snapshot)
+  })
+
   it('retains devices absent from a later scan', async () => {
     await store.recordScan('2026-10-18T10:00:00.000Z', [
       device('192.168.7.21', '78:ee:4c:cf:42:68'),

@@ -22,6 +22,7 @@ import { MqttEvidenceDiscoveryService } from './mqtt/mqtt-evidence-discovery.ser
 import { MqttBrokerAttributionService } from './mqtt/mqtt-broker-attribution.service'
 import { DeviceEnrollmentModule } from './enrollment/device-enrollment.module'
 import { NmapNetworkEvidenceAdapter } from './adapters/outbound/network/nmap-network-evidence.adapter'
+import { LocalNetworkRuntimeAdapter } from './adapters/outbound/network/local-network-runtime.adapter'
 
 @Module({
   imports: [TelemetryModule, DeviceEnrollmentModule],
@@ -35,6 +36,7 @@ import { NmapNetworkEvidenceAdapter } from './adapters/outbound/network/nmap-net
     DeviceHttpPollService,
     DeviceLanNetworkEvidenceCollector,
     NmapNetworkEvidenceAdapter,
+    { provide: LocalNetworkRuntimeAdapter, useFactory: () => new LocalNetworkRuntimeAdapter() },
     DeviceLanDiscoveryService,
     DeviceDiscoveryMemoryStore,
     DeviceControlService,
