@@ -155,6 +155,8 @@ export class NmapNetworkEvidenceAdapter {
   ): Promise<NmapScanResult> {
     const maxHosts = boundedInteger(options.maxHosts, MAX_HOSTS, 1, MAX_HOSTS);
     const timeoutMs = boundedInteger(options.timeoutMs, DEFAULT_TIMEOUT_MS, 1_000, MAX_TIMEOUT_MS);
+    const scanDeadlineMs = Date.now() + timeoutMs;
+    const remainingBudgetMs = () => Math.max(0, scanDeadlineMs - Date.now());
     const plans = scopes.map(scope => ({ scope, ...targetsForScope(scope, maxHosts) }));
     if (plans.length && plans.every(plan => !!plan.failure)) {
       return {
@@ -233,8 +235,12 @@ export class NmapNetworkEvidenceAdapter {
       const hostDiscoveryMethod = 'nmap_host_discovery';
       if (!result.methods.includes(hostDiscoveryMethod)) result.methods.push(hostDiscoveryMethod);
       try {
-        const commandResult = await this.runCommand(NMAP_EXECUTABLE, buildNmapHostDiscoveryArguments(hostDiscoveryTargets, observingInterface), {
-          timeout: timeoutMs,
+        const hostBudgetMs = remainingBudgetMs();
+          if (hostBudgetMs < 1_000) {
+            throw new Error('Nmap shared scan budget timed out before host discovery.');
+          }
+          const commandResult = await this.runCommand(NMAP_EXECUTABLE, buildNmapHostDiscoveryArguments(hostDiscoveryTargets, observingInterface), {
+          timeout: hostBudgetMs,
           maxBuffer: MAX_XML_BYTES + 64 * 1024,
           ...(options.signal ? { signal: options.signal } : {}),
         });
@@ -277,8 +283,12 @@ export class NmapNetworkEvidenceAdapter {
         const serviceStartedAt = Date.now();
         if (!result.methods.includes('nmap_tcp_connect_service_scan')) result.methods.push('nmap_tcp_connect_service_scan');
         try {
+          const serviceBudgetMs = remainingBudgetMs();
+          if (serviceBudgetMs < 1_000) {
+            throw new Error('Nmap shared scan budget timed out before service enrichment.');
+          }
           const commandResult = await this.runCommand(NMAP_EXECUTABLE, buildNmapArguments(serviceTargets, observingInterface), {
-            timeout: timeoutMs,
+            timeout: serviceBudgetMs,
             maxBuffer: MAX_XML_BYTES + 64 * 1024,
             ...(options.signal ? { signal: options.signal } : {}),
           });
