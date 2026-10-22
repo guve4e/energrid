@@ -9,6 +9,7 @@ import PendingEnrollmentList from './components/discovery/PendingEnrollmentList.
 import { buildPendingEnrollmentCards } from './components/discovery/pending-enrollment';
 import './discovery.css';
 import ExecutionTimelineModal from './components/execution/ExecutionTimelineModal.vue';
+import InteractionTraces from './components/observability/InteractionTraces.vue';
 import WeatherDashboard from './components/weather/WeatherDashboard.vue';
 import EnergyDashboard from './components/energy/EnergyDashboard.vue';
 import DeviceControlSetup from './components/devices/DeviceControlSetup.vue';
@@ -581,6 +582,14 @@ const deviceStatusFilter = ref('all');
 const logLevelFilter = ref('all');
 const logSourceFilter = ref('all');
 const logSearch = ref('');
+const assistantTraceRefresh = ref(0);
+const assistantLatestTraceId = ref('');
+
+function handleAssistantTurnCompleted(traceId: string) {
+  assistantLatestTraceId.value = traceId;
+  assistantTraceRefresh.value += 1;
+}
+const logView = ref<'events' | 'interactions'>('events');
 const clientTrace = ref({
   connectStartAt: 0,
   connectedAt: 0,
@@ -4171,6 +4180,43 @@ onBeforeUnmount(() => {
             <span>{{ voiceStatus }}</span>
           </div>
 
+          <section
+            class="assistant-chat-workspace"
+            style="margin: 22px 0 26px"
+          >
+            <div style="margin-bottom: 12px">
+              <h3>Talk to Energrid</h3>
+              <p>
+                One conversation across the Assistant page and
+                floating chat. Interaction timing updates after
+                each response.
+              </p>
+            </div>
+
+            <div
+              style="
+                display: grid;
+                grid-template-columns:
+                  repeat(auto-fit, minmax(min(100%, 440px), 1fr));
+                gap: 18px;
+                align-items: start;
+              "
+            >
+              <div
+                id="energrid-assistant-chat-mount"
+                style="min-width: 0"
+              ></div>
+
+              <InteractionTraces
+                v-if="accessToken"
+                :api-base="apiBase"
+                :access-token="accessToken"
+                :refresh-key="assistantTraceRefresh"
+                :focus-trace-id="assistantLatestTraceId"
+              />
+            </div>
+          </section>
+
           <div class="route-controls">
             <div>
               <span>Network route</span>
@@ -6502,6 +6548,30 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
+          <div
+            style="display: flex; gap: 8px; margin: 18px 0; flex-wrap: wrap"
+            role="group"
+            aria-label="Log views"
+          >
+            <button
+              type="button"
+              :class="logView === 'events' ? 'primary' : ''"
+              :aria-pressed="logView === 'events'"
+              @click="logView = 'events'"
+            >
+              Events
+            </button>
+            <button
+              type="button"
+              :class="logView === 'interactions' ? 'primary' : ''"
+              :aria-pressed="logView === 'interactions'"
+              @click="logView = 'interactions'"
+            >
+              Interactions
+            </button>
+          </div>
+
+          <template v-if="logView === 'events'">
           <div class="network-stat-grid compact-stats log-summary">
             <div v-for="item in logSummary" :key="item.label">
               <span>{{ item.label }}</span>
@@ -6585,6 +6655,13 @@ onBeforeUnmount(() => {
               </tbody>
             </table>
           </div>
+          </template>
+
+          <InteractionTraces
+            v-else
+            :api-base="apiBase"
+            :access-token="accessToken"
+          />
         </section>
 
         <WeatherDashboard v-else-if="activePage === 'weather'" :api-base="apiBase" :access-token="accessToken" />
@@ -6610,6 +6687,12 @@ onBeforeUnmount(() => {
         @recommendation="handleExecutionRecommendation"
       />
     </section>
-    <EnergridChatWidget v-if="accessToken" :api-base="apiBase" :access-token="accessToken" />
+    <EnergridChatWidget
+      v-if="accessToken"
+      :api-base="apiBase"
+      :access-token="accessToken"
+      :embedded="activePage === 'assistant'"
+      @turn-completed="handleAssistantTurnCompleted"
+    />
   </main>
 </template>

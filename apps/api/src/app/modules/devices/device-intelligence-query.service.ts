@@ -1,3 +1,8 @@
+import {
+  resolveDeviceTarget,
+  type DeviceTargetRequest,
+} from './device-intelligence-target-resolver';
+import { randomUUID } from 'node:crypto';
 import { Inject } from '@nestjs/common';
 import { DEVICE_ENROLLMENT_SERVICE } from './enrollment/device-enrollment.module';
 import { Injectable } from '@nestjs/common';
@@ -24,6 +29,8 @@ export interface IntelligenceDeviceDescription {
 
 @Injectable()
 export class DeviceIntelligenceQueryService {
+  private readonly installationDecisionsInProgress = new Set<string>();
+
   constructor(
     private readonly registry: DeviceRegistryService,
     private readonly installations: DeviceInstallationStore,
@@ -87,6 +94,465 @@ export class DeviceIntelligenceQueryService {
       a.displayName.localeCompare(b.displayName) ||
       a.deviceId.localeCompare(b.deviceId)
     );
+  }
+
+  /**
+   * Resolve a device using approved installations and durable enrollment.
+   *
+   * A resolved identity is NOT permission to execute a command.
+   * Core must revalidate permissions immediately before execution.
+   */
+  async resolveTarget(
+    scope: { tenantId: string; siteId: string },
+    request: DeviceTargetRequest,
+  ) {
+    if (!scope.tenantId?.trim() || !scope.siteId?.trim()) {
+      return { status: 'not_found' as const };
+    }
+
+    const installations = await this.installations.list(scope.siteId);
+
+    const scoped = installations.filter(record =>
+      record.device.tenantId === scope.tenantId &&
+      record.device.siteId === scope.siteId
+    );
+
+    const enrollmentResults = await Promise.all(
+      scoped.map(async record => ({
+        deviceId: record.device.id,
+        enrollment: await this.enrollment.find({
+          tenantId: scope.tenantId,
+          siteId: scope.siteId,
+          deviceId: record.device.id,
+        }),
+      }))
+    );
+
+    const enrolledIds = new Set(
+      enrollmentResults
+        .filter(result => result.enrollment?.status === 'enrolled')
+        .map(result => result.deviceId)
+    );
+
+    return resolveDeviceTarget(
+      scoped,
+      enrolledIds,
+      scope,
+      request,
+    );
+  }
+
+  /**
+   * Read-only proposal for an existing enrolled installation.
+   *
+   * Configuration authority is separate from assistant control
+   * permission. This method never writes device state.
+   */
+  async proposeInstallationChange(
+    scope: { tenantId: string; siteId: string },
+    request: {
+      device: string;
+      displayName: string;
+      zoneName: string;
+      loadType?: 'lighting';
+    },
+  ) {
+    if (!scope.tenantId?.trim() || !scope.siteId?.trim())
+      return { status: 'invalid_scope' as const };
+
+    const identifier = request.device?.trim().toLowerCase();
+    const displayName = request.displayName?.trim();
+    const zoneName = request.zoneName?.trim();
+
+    if (
+      !identifier || identifier.length > 160 ||
+      !displayName || displayName.length > 100 ||
+      !zoneName || zoneName.length > 80 ||
+      (request.loadType !== undefined &&
+        request.loadType !== 'lighting')
+    ) {
+      return { status: 'invalid_request' as const };
+    }
+
+    const records = await this.installations.list(scope.siteId);
+
+    const scoped = records.filter(record =>
+      record.schemaVersion === 1 &&
+      record.device.tenantId === scope.tenantId &&
+      record.device.siteId === scope.siteId &&
+      record.device.trustStatus === 'approved'
+    );
+
+    const matches = scoped.filter(record =>
+      record.device.id.toLowerCase() === identifier ||
+      record.device.displayName.toLowerCase() === identifier
+    );
+
+    if (matches.length === 0)
+      return { status: 'not_found' as const };
+
+    if (matches.length > 1)
+      return { status: 'ambiguous' as const };
+
+    const record = matches[0];
+    const device = record.device;
+
+    const enrollment = await this.enrollment.find({
+      tenantId: scope.tenantId,
+      siteId: scope.siteId,
+      deviceId: device.id,
+    });
+
+    if (enrollment?.status !== 'enrolled')
+      return { status: 'not_enrolled' as const };
+
+    if (
+      request.loadType === 'lighting' &&
+      !device.capabilities.some(capability =>
+        capability.kind === 'switch' ||
+        capability.kind === 'light'
+      )
+    ) {
+      return { status: 'capability_missing' as const };
+    }
+
+    return {
+      status: 'proposal' as const,
+      deviceId: device.id,
+      current: {
+        displayName: device.displayName,
+        zoneName: device.zoneName,
+        loadType: device.metadata?.loadType ?? null,
+      },
+      proposed: {
+        displayName,
+        zoneName,
+        loadType: request.loadType ??
+          device.metadata?.loadType ?? null,
+      },
+      requiresPhysicalLoadConfirmation:
+        request.loadType === 'lighting',
+      persisted: false,
+      message:
+        'Preview only. No changes saved. Physical load identification ' +
+        'and authenticated approval are required before applying.',
+    };
+  }
+
+  /**
+   * Create a durable pending proposal.
+   * This does not update the installed device.
+   */
+  async createInstallationProposal(
+    scope: IntelligenceScope,
+    request: {
+      device: string;
+      displayName: string;
+      zoneName: string;
+      loadType?: 'lighting';
+    },
+  ) {
+    const preview = await this.proposeInstallationChange(scope, request);
+
+    if (preview.status !== 'proposal')
+      return preview;
+
+    const installation = await this.installations.get(
+      scope.siteId,
+      preview.deviceId,
+    );
+
+    if (
+      !installation ||
+      installation.device.tenantId !== scope.tenantId ||
+      installation.device.siteId !== scope.siteId ||
+      installation.device.id !== preview.deviceId ||
+      installation.device.trustStatus !== 'approved'
+    ) {
+      return { status: 'installation_changed' as const };
+    }
+
+    const enrollment = await this.enrollment.find({
+      tenantId: scope.tenantId,
+      siteId: scope.siteId,
+      deviceId: preview.deviceId,
+    });
+
+    if (enrollment?.status !== 'enrolled')
+      return { status: 'not_enrolled' as const };
+
+    const createdAt = new Date();
+    const expiresAt = new Date(createdAt.getTime() + 60 * 60 * 1000);
+
+    const proposal = {
+      schemaVersion: 1 as const,
+      id: randomUUID(),
+      tenantId: scope.tenantId,
+      siteId: scope.siteId,
+      deviceId: preview.deviceId,
+      status: 'pending' as const,
+      createdAt: createdAt.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+      installationUpdatedAt: installation.updatedAt,
+      current: {
+        ...preview.current,
+        loadType:
+          typeof preview.current.loadType === 'string'
+            ? preview.current.loadType
+            : null,
+      },
+      proposed: {
+        ...preview.proposed,
+        loadType:
+          typeof preview.proposed.loadType === 'string'
+            ? preview.proposed.loadType
+            : null,
+      },
+    };
+
+    await this.installations.saveProposal(proposal);
+
+    return {
+      ...preview,
+      proposalId: proposal.id,
+      proposalStatus: proposal.status,
+      expiresAt: proposal.expiresAt,
+      persisted: false,
+      message:
+        'Pending proposal saved. Device configuration is unchanged. ' +
+        'An authenticated approval and physical-load confirmation ' +
+        'are required before applying.',
+    };
+  }
+
+  /**
+   * Apply or reject a durable installation proposal.
+   * Never called directly by the LLM.
+   *
+   * The caller must establish authenticated installer authority.
+   */
+  async listInstallationProposals(
+    scope: IntelligenceScope,
+    deviceId: string,
+  ) {
+    if (
+      !scope.tenantId?.trim() ||
+      !scope.siteId?.trim() ||
+      !deviceId?.trim()
+    ) return [];
+
+    await this.registry.ensureInstallationsLoaded();
+
+    const matchingDevices = this.registry.getDevices().filter(device =>
+      device.id === deviceId
+    );
+
+    if (
+      matchingDevices.length !== 1 ||
+      matchingDevices[0].tenantId !== scope.tenantId ||
+      matchingDevices[0].siteId !== scope.siteId ||
+      matchingDevices[0].trustStatus !== 'approved'
+    ) return [];
+
+    const enrollment = await this.enrollment.find({
+      tenantId: scope.tenantId,
+      siteId: scope.siteId,
+      deviceId,
+    });
+
+    if (enrollment?.status !== 'enrolled') return [];
+
+    const installation = await this.installations.get(
+      scope.siteId,
+      deviceId,
+    );
+
+    if (
+      !installation ||
+      installation.device.tenantId !== scope.tenantId ||
+      installation.device.siteId !== scope.siteId ||
+      installation.device.trustStatus !== 'approved'
+    ) return [];
+
+    const proposals =
+      await this.installations.listDeviceProposals(scope.siteId, deviceId);
+
+    return proposals.filter(proposal =>
+      proposal.tenantId === scope.tenantId &&
+      proposal.siteId === scope.siteId &&
+      proposal.deviceId === deviceId
+    );
+  }
+
+  async decideInstallationProposal(
+    scope: IntelligenceScope,
+    proposalId: string,
+    expectedDeviceId: string,
+    decision: 'approve' | 'reject',
+    physicalLoadConfirmed = false,
+  ) {
+    if (
+      !scope.tenantId?.trim() ||
+      !scope.siteId?.trim() ||
+      !expectedDeviceId?.trim() ||
+      !['approve', 'reject'].includes(decision)
+    ) return { status: 'invalid_request' as const };
+
+    const proposal = await this.installations.getProposal(
+      scope.siteId,
+      proposalId,
+    );
+
+    if (
+      !proposal ||
+      proposal.tenantId !== scope.tenantId ||
+      proposal.siteId !== scope.siteId ||
+      proposal.deviceId !== expectedDeviceId
+    ) return { status: 'not_found' as const };
+
+    const lockKey = `${scope.tenantId}:${scope.siteId}:${proposal.deviceId}`;
+
+    if (this.installationDecisionsInProgress.has(lockKey))
+      return { status: 'busy' as const };
+
+    this.installationDecisionsInProgress.add(lockKey);
+
+    try {
+      const latest = await this.installations.getProposal(
+        scope.siteId,
+        proposalId,
+      );
+
+      if (!latest || latest.tenantId !== scope.tenantId ||
+          latest.deviceId !== expectedDeviceId)
+        return { status: 'not_found' as const };
+
+      if (latest.status !== 'pending')
+        return { status: 'already_decided' as const };
+
+      if (decision === 'reject') {
+        await this.installations.saveProposal({
+          ...latest,
+          status: 'rejected',
+          decidedAt: new Date().toISOString(),
+        });
+        return { status: 'rejected' as const, proposalId };
+      }
+
+      const expiry = Date.parse(latest.expiresAt);
+      if (!Number.isFinite(expiry) || Date.now() >= expiry)
+        return { status: 'expired' as const };
+
+      const next = latest.proposed;
+      if (
+        typeof next?.displayName !== 'string' ||
+        !next.displayName.trim() ||
+        next.displayName.length > 100 ||
+        typeof next.zoneName !== 'string' ||
+        !next.zoneName.trim() ||
+        next.zoneName.length > 80 ||
+        ![null, 'lighting'].includes(next.loadType)
+      ) return { status: 'invalid_proposal' as const };
+
+      if (
+        next.loadType === 'lighting' &&
+        latest.current.loadType !== 'lighting' &&
+        !physicalLoadConfirmed
+      ) return { status: 'physical_confirmation_required' as const };
+
+      await this.registry.ensureInstallationsLoaded();
+
+      // Registry updates currently address a device by ID.
+      // Fail closed if an ID appears in more than one scope.
+      const matches = this.registry.getDevices()
+        .filter(device => device.id === expectedDeviceId);
+
+      if (
+        matches.length !== 1 ||
+        matches[0].tenantId !== scope.tenantId ||
+        matches[0].siteId !== scope.siteId ||
+        matches[0].kind !== 'physical' ||
+        matches[0].trustStatus !== 'approved'
+      ) return { status: 'device_not_approved' as const };
+
+      const enrollment = await this.enrollment.find({
+        tenantId: scope.tenantId,
+        siteId: scope.siteId,
+        deviceId: expectedDeviceId,
+      });
+
+      if (enrollment?.status !== 'enrolled')
+        return { status: 'not_enrolled' as const };
+
+      const installation = await this.installations.get(
+        scope.siteId,
+        expectedDeviceId,
+      );
+
+      if (
+        !installation ||
+        installation.device.tenantId !== scope.tenantId ||
+        installation.device.siteId !== scope.siteId ||
+        installation.device.trustStatus !== 'approved' ||
+        installation.updatedAt !== latest.installationUpdatedAt ||
+        installation.device.displayName !== latest.current.displayName ||
+        installation.device.zoneName !== latest.current.zoneName ||
+        (typeof installation.device.metadata?.loadType === 'string'
+          ? installation.device.metadata.loadType
+          : null) !== latest.current.loadType
+      ) return { status: 'stale_proposal' as const };
+
+      if (
+        next.loadType === 'lighting' &&
+        !matches[0].capabilities.some(capability =>
+          capability.kind === 'switch' || capability.kind === 'light'
+        )
+      ) return { status: 'capability_missing' as const };
+
+      const loadTypeChange: 'lighting' | null | undefined =
+        next.loadType === latest.current.loadType
+          ? undefined
+          : next.loadType === 'lighting'
+            ? 'lighting'
+            : null;
+
+      await this.registry.updateInstallationDetails(
+        expectedDeviceId,
+        next.displayName,
+        next.zoneName,
+        undefined,
+        undefined,
+        loadTypeChange,
+      );
+
+      await this.installations.saveProposal({
+        ...latest,
+        status: 'approved',
+        decidedAt: new Date().toISOString(),
+      });
+
+      await this.registry.persistInstallationEvent(
+        expectedDeviceId,
+        'installation_details_saved',
+        {
+          proposalId,
+          update: 'conversational_installation_approval',
+          displayName: next.displayName,
+          zoneName: next.zoneName,
+          loadType: next.loadType,
+          physicalLoadConfirmed,
+        },
+      );
+
+      return {
+        status: 'approved' as const,
+        proposalId,
+        deviceId: expectedDeviceId,
+        applied: next,
+      };
+    } finally {
+      this.installationDecisionsInProgress.delete(lockKey);
+    }
   }
 
   async readObservations(

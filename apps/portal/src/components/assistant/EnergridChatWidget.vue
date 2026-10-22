@@ -4,6 +4,11 @@ import { nextTick, ref } from 'vue';
 const props = defineProps<{
   apiBase: string;
   accessToken: string;
+  embedded?: boolean;
+}>();
+
+const emit = defineEmits<{
+  (event: 'turn-completed', traceId: string): void;
 }>();
 
 type Message = {
@@ -48,6 +53,7 @@ async function send() {
     const result = await response.json() as {
       reply: string;
       conversationId: string;
+      traceId?: string;
     };
 
     conversationId.value = result.conversationId;
@@ -55,6 +61,10 @@ async function send() {
       role: 'assistant',
       text: result.reply || 'I received your message but could not produce a reply.',
     });
+
+    if (typeof result.traceId === 'string' && result.traceId) {
+      emit('turn-completed', result.traceId);
+    }
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Unable to reach Energrid';
     // Preserve the unsent message so it can be retried.
@@ -76,9 +86,13 @@ async function scrollToBottom() {
 </script>
 
 <template>
-  <div class="energrid-chat">
+  <Teleport
+    to="#energrid-assistant-chat-mount"
+    :disabled="!embedded"
+  >
+    <div :class="['energrid-chat', { 'is-embedded': embedded }]">
     <button
-      v-if="!open"
+      v-if="!embedded && !open"
       class="energrid-chat-launcher"
       type="button"
       aria-label="Open Energrid assistant"
@@ -101,7 +115,7 @@ async function scrollToBottom() {
             <small>Your home intelligence</small>
           </div>
         </div>
-        <div class="energrid-chat-window-actions">
+        <div v-if="!embedded" class="energrid-chat-window-actions">
           <button
             type="button"
             :aria-label="expanded ? 'Restore chat size' : 'Expand chat'"
@@ -161,7 +175,8 @@ async function scrollToBottom() {
         Energrid Intelligence · Powered by Letta
       </small>
     </section>
-  </div>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -536,6 +551,31 @@ async function scrollToBottom() {
   .energrid-chat-panel.is-expanded {
     width: calc(100vw - 24px);
     height: min(720px, calc(100dvh - 24px));
+  }
+}
+
+
+/* The same chat instance becomes an inline workspace on Assistant. */
+.energrid-chat.is-embedded {
+  position: relative;
+  right: auto;
+  bottom: auto;
+  z-index: auto;
+  width: 100%;
+  min-width: 0;
+}
+
+.energrid-chat.is-embedded .energrid-chat-panel {
+  width: 100%;
+  height: min(680px, max(440px, 68dvh));
+  max-width: none;
+  border-radius: 14px;
+}
+
+@media (max-width: 640px) {
+  .energrid-chat.is-embedded .energrid-chat-panel {
+    height: min(610px, 65dvh);
+    min-height: 350px;
   }
 }
 

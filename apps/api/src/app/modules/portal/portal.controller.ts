@@ -1,3 +1,13 @@
+import {
+  InteractionTraceSession,
+  type InteractionOutcome,
+} from '../observability/interaction-trace';
+import {
+  FileInteractionTraceStore,
+} from '../observability/file-interaction-trace.store';
+import {
+  runWithInteractionTrace,
+} from '../observability/interaction-trace-context';
 import { probeShellyComponents } from '../devices/device-lan-discovery.service'
 import { readOnlyShellyDeviceInfo } from '../devices/adapters/inbound/shelly/read-only-shelly-rpc'
 import { BlockList, isIP } from 'node:net'
@@ -47,6 +57,7 @@ import { compareNetworkSnapshots } from '../devices/network-discovery-snapshot'
 import { projectNetworkRoles } from '../devices/network-role-evidence'
 import { DeviceMqttIngestService } from '../devices/device-mqtt-ingest.service'
 import { DeviceRegistryService } from '../devices/device-registry.service'
+import { DeviceIntelligenceQueryService } from '../devices/device-intelligence-query.service'
 import { DeviceOnboardingService } from './device-onboarding.service'
 import { DeviceEnrollmentService } from '../devices/enrollment/device-enrollment.service'
 import {
@@ -78,6 +89,9 @@ type DisconnectAwareResponse = {
 export class PortalController {
   @InjectHouseAgent(HOUSE_AGENT)
   private readonly houseAgent!: HouseAgentPort;
+
+  @Inject(DeviceIntelligenceQueryService)
+  private readonly deviceIntelligence!: DeviceIntelligenceQueryService;
 
   constructor(
     private readonly stateService: PortalStateService,
@@ -115,6 +129,25 @@ export class PortalController {
     return portalHtml()
   }
 
+  @Get('assistant/traces')
+  async listAssistantInteractionTraces(
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request);
+
+    // Scope comes from the trusted installation, never the URL.
+    const { tenant, site } = this.deviceRegistry.getSnapshot();
+
+    const store = new FileInteractionTraceStore();
+
+    const traces = await store.list(
+      { tenantId: tenant.id, siteId: site.id },
+      50,
+    );
+
+    return { traces };
+  }
+
   @Post('assistant/chat')
   async chatWithEnergrid(
     @Body() body: { message?: unknown },
@@ -132,17 +165,46 @@ export class PortalController {
       );
     }
 
+    const message = body.message.trim();
     const { tenant, site } = this.deviceRegistry.getSnapshot();
+    const scope = { tenantId: tenant.id, siteId: site.id };
 
-    const result = await this.houseAgent.talk(
-      { tenantId: tenant.id, siteId: site.id },
-      body.message.trim(),
+    const trace = new InteractionTraceSession(
+      scope,
+      'chat',
+      new FileInteractionTraceStore(),
     );
 
-    return {
-      reply: result.text,
-      conversationId: result.conversationId,
-    };
+    let outcome: InteractionOutcome = 'failed';
+
+    try {
+      const result = await runWithInteractionTrace(
+        trace,
+        () => trace.measure(
+          'assistant.turn',
+          () => this.houseAgent.talk(
+            scope,
+            message,
+          ),
+        ),
+      );
+
+      outcome = trace.suggestedOutcome ?? 'succeeded';
+
+      return {
+        reply: result.text,
+        conversationId: result.conversationId,
+        traceId: trace.traceId,
+      };
+    } finally {
+      try {
+        await trace.finish(outcome);
+      } catch {
+        // Observability must not break successful conversations
+        // or overwrite the original request error.
+        console.warn('Energrid interaction trace persistence failed');
+      }
+    }
   }
 
   @Get('state')
@@ -1100,10 +1162,78 @@ export class PortalController {
     return { status: 'confirmed', device: updated }
   }
 
+  @Get('devices/:deviceId/installation-proposals')
+  async listDeviceInstallationProposals(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request);
+
+    await this.deviceRegistry.ensureInstallationsLoaded();
+
+    const matches = this.deviceRegistry.getDevices()
+      .filter(device => device.id === deviceId);
+
+    if (
+      matches.length !== 1 ||
+      matches[0].trustStatus !== 'approved'
+    ) {
+      throw new BadRequestException('Approved device identity is unavailable.');
+    }
+
+    const proposals = await this.deviceIntelligence.listInstallationProposals(
+      {
+        tenantId: matches[0].tenantId,
+        siteId: matches[0].siteId,
+      },
+      deviceId,
+    );
+
+    return { proposals };
+  }
+
+  @Post('devices/:deviceId/installation-proposals/:proposalId/decision')
+  async decideDeviceInstallationProposal(
+    @Param('deviceId') deviceId: string,
+    @Param('proposalId') proposalId: string,
+    @Body() body: {
+      decision?: 'approve' | 'reject';
+      physicalLoadConfirmed?: boolean;
+    },
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalControlToken(request);
+
+    if (
+      body?.decision !== 'approve' &&
+      body?.decision !== 'reject'
+    ) throw new BadRequestException('Choose approve or reject.');
+
+    // The device determines the scope. Never accept arbitrary
+    // tenant/site identifiers from the request body.
+    const devices = this.deviceRegistry.getDevices()
+      .filter(device => device.id === deviceId);
+
+    if (devices.length !== 1 ||
+        devices[0].trustStatus !== 'approved')
+      throw new BadRequestException('Approved device identity is unavailable.');
+
+    return this.deviceIntelligence.decideInstallationProposal(
+      {
+        tenantId: devices[0].tenantId,
+        siteId: devices[0].siteId,
+      },
+      proposalId,
+      deviceId,
+      body.decision,
+      body.physicalLoadConfirmed === true,
+    );
+  }
+
   @Patch('devices/:deviceId/commissioning')
   async updateCommissioningDetails(
     @Param('deviceId') deviceId: string,
-    @Body() body: { displayName?: string; zoneName?: string; assistantEnabled?: boolean; settingsUrl?: string | null },
+    @Body() body: { displayName?: string; zoneName?: string; assistantEnabled?: boolean; settingsUrl?: string | null; loadType?: 'lighting' | null; loadPurposeConfirmed?: boolean },
     @Req() request: DeviceProxyRequest,
   ) {
     assertPortalControlToken(request)
@@ -1111,6 +1241,17 @@ export class PortalController {
     const zoneName = typeof body?.zoneName === 'string' ? body.zoneName.trim() : ''
     if (!displayName || displayName.length > 100 || !zoneName || zoneName.length > 80)
       throw new BadRequestException('Enter a device name and room name within the allowed length.')
+    if (body.loadType !== undefined &&
+        body.loadType !== null &&
+        body.loadType !== 'lighting')
+      throw new BadRequestException('Unsupported controlled-load type.')
+
+    if (body.loadType === 'lighting' &&
+        body.loadPurposeConfirmed !== true)
+      throw new BadRequestException(
+        'Confirm the physical lighting load before assigning it.'
+      )
+
     let device
     try {
       device = await this.deviceRegistry.updateInstallationDetails(
@@ -1119,11 +1260,15 @@ export class PortalController {
         zoneName,
         typeof body.assistantEnabled === 'boolean' ? body.assistantEnabled : undefined,
         typeof body.settingsUrl === 'string' || body.settingsUrl === null ? body.settingsUrl : undefined,
+        body.loadType,
       )
       await this.deviceRegistry.persistInstallationEvent(deviceId, 'installation_details_saved', {
         displayName,
         zoneName,
         assistantEnabled: device.assistantEnabled === true,
+        loadType: typeof device.metadata?.loadType === 'string'
+          ? device.metadata.loadType : null,
+        loadPurposeConfirmed: body.loadType === 'lighting' ? true : null,
         settingsAddressConfigured: typeof body.settingsUrl === 'string' && !!body.settingsUrl.trim(),
         update: 'installation_details',
       })

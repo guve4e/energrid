@@ -1,4 +1,15 @@
-import { Injectable, Logger } from '@nestjs/common'
+import { Inject, Injectable, Logger } from '@nestjs/common'
+import {
+  HOUSE_AGENT,
+  type HouseAgentPort,
+} from '../llm/house-agent.port'
+import { DeviceRegistryService } from '../devices/device-registry.service'
+import {
+  InteractionTraceSession,
+  type InteractionOutcome,
+} from '../observability/interaction-trace'
+import { FileInteractionTraceStore } from '../observability/file-interaction-trace.store'
+import { runWithInteractionTrace } from '../observability/interaction-trace-context'
 import { WebSocket } from 'ws'
 import { randomUUID } from 'crypto'
 import {
@@ -17,6 +28,13 @@ import { HomeAutomationService } from './home-automation.service'
 @Injectable()
 export class VoiceSessionService {
   private readonly logger = new Logger(VoiceSessionService.name)
+
+  // Property injection preserves the existing constructor and its tests.
+  @Inject(HOUSE_AGENT)
+  private readonly houseAgent!: HouseAgentPort
+
+  @Inject(DeviceRegistryService)
+  private readonly deviceRegistry!: DeviceRegistryService
   private readonly sessions = new Map<WebSocket, ActiveVoiceSession>()
   private readonly speechGateRmsDb = Number(
     process.env.VOICE_SPEECH_GATE_RMS_DB || -55,
@@ -659,6 +677,11 @@ export class VoiceSessionService {
   private async generateAssistantReply(
     session: ActiveVoiceSession,
   ): Promise<void> {
+    if (process.env.VOICE_ASSISTANT_PROVIDER === 'letta') {
+      await this.generateLettaReply(session)
+      return
+    }
+
     const automationHandled = await this.tryGenerateAutomationReply(session)
     if (automationHandled) return
 
@@ -703,6 +726,130 @@ export class VoiceSessionService {
     this.trace.appendAssistantFinalTrace(session)
     this.trace.logTurnMetrics(session)
     this.emitter.emitAssistantFinal(session)
+  }
+
+  private async generateLettaReply(
+    session: ActiveVoiceSession,
+  ): Promise<void> {
+    // Derive scope from the installation, not from STT or model output.
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+
+    if (!tenant?.id || !site?.id) {
+      throw new Error('Voice assistant installation scope is unavailable')
+    }
+
+    const scope = {
+      tenantId: tenant.id,
+      siteId: site.id,
+    }
+
+    const interaction = new InteractionTraceSession(
+      scope,
+      'voice',
+      new FileInteractionTraceStore(),
+    )
+
+    let outcome: InteractionOutcome = 'failed'
+
+    try {
+      await runWithInteractionTrace(interaction, async () => {
+        session.timings.llmRequestStartedAt = Date.now()
+
+        // This is the same scoped HouseAgentPort used by text chat.
+        // Do not call the legacy automation planner in this mode.
+        const answer = await interaction.measure(
+          'assistant.turn',
+          () => this.houseAgent.talk(
+            scope,
+            session.finalTranscript,
+          ),
+        )
+
+        session.timings.llmCompletedAt = Date.now()
+        session.timings.llmFirstDeltaAt =
+          session.timings.llmCompletedAt
+
+        // Reuse the existing voice streaming and Bulgarian TTS.
+        // This stage includes text emission and speech generation.
+        const replyText = await interaction.measure(
+          'assistant.respond',
+          () => this.replyStreamer.streamStaticReply(
+            {
+              sessionId: session.id,
+              conversationId: session.conversationId,
+              transcript: session.finalTranscript,
+              replyText: answer.text,
+            },
+            {
+              onTextDelta: (delta, fullText) => {
+                this.markAssistantFirstDelta(session)
+                this.emitter.emitAssistantTextDelta(
+                  session,
+                  delta,
+                  fullText,
+                )
+                this.trace.appendAssistantTextDeltaTrace(
+                  session,
+                  delta,
+                  fullText,
+                )
+              },
+
+              onAudioChunk: ({
+                chunkIndex,
+                isLastChunk,
+                text,
+                format,
+                audioBuffer,
+              }) => {
+                this.markAssistantFirstAudio(session)
+                this.emitter.emitAssistantAudioChunk(session, {
+                  chunkIndex,
+                  isLastChunk,
+                  text,
+                  format,
+                  audioBuffer,
+                })
+              },
+
+              onCompleted: finalReplyText => {
+                session.assistantReply = finalReplyText
+              },
+
+              onMetrics: metrics => {
+                Object.assign(session.timings, metrics)
+              },
+            },
+          ),
+        )
+
+        session.assistantReply = replyText
+        session.assistantFinalAt = Date.now()
+
+        this.logger.log(
+          '[VOICE LETTA] ' +
+          'session=' + session.id +
+          ' trace=' + interaction.traceId +
+          ' replyChars=' + replyText.length,
+        )
+
+        this.trace.appendAssistantFinalTrace(session)
+        this.trace.logTurnMetrics(session)
+        this.emitter.emitAssistantFinal(session)
+      })
+
+      outcome = interaction.suggestedOutcome ?? 'succeeded'
+    } finally {
+      try {
+        await interaction.finish(outcome)
+      } catch {
+        // Never override an assistant result or hardware outcome
+        // because diagnostic persistence failed.
+        this.logger.warn(
+          'Voice interaction trace persistence failed',
+        )
+      }
+    }
   }
 
   private async tryGenerateAutomationReply(

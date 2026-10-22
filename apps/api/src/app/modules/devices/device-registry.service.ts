@@ -584,6 +584,9 @@ export class DeviceRegistryService implements OnModuleInit {
     const record: DeviceInstallationRecord = {
       schemaVersion: 1,
       device,
+      ...(existing?.observationAuthority
+        ? { observationAuthority: existing.observationAuthority }
+        : {}),
       physicalOutcome: existing?.physicalOutcome || {
         status: 'not_confirmed',
         confirmedAt: null,
@@ -646,6 +649,7 @@ export class DeviceRegistryService implements OnModuleInit {
     zoneName: string,
     assistantEnabled?: boolean,
     settingsUrl?: string | null,
+    loadType?: 'lighting' | null,
   ): Promise<RegisteredDevice> {
     const device = this.getDevices().find((item) => item.id === deviceId);
     if (!device || device.trustStatus !== 'approved')
@@ -672,8 +676,13 @@ export class DeviceRegistryService implements OnModuleInit {
     const zoneId = zoneName.toLowerCase().trim()
       .replace(/[^\p{L}\p{N}]+/gu, '-')
       .replace(/^-+|-+$/g, '') || 'unassigned';
+    const metadata = { ...(config.metadata || {}) };
+    if (loadType === null) delete metadata.loadType;
+    else if (loadType !== undefined) metadata.loadType = loadType;
+
     const nextConfig = {
       ...config,
+      metadata,
       displayName,
       zoneName,
       zoneId,

@@ -1,5 +1,13 @@
+import {
+  currentInteractionTrace,
+} from '../observability/interaction-trace-context';
+import {
+  instrumentLocalTools,
+} from '../observability/instrument-local-tools';
 import { DeviceIntelligenceQueryService } from '../devices/device-intelligence-query.service';
-import { Injectable } from '@nestjs/common';
+import { DeviceAssistantLightingService } from '../devices/device-assistant-lighting.service';
+import { Injectable, Logger } from '@nestjs/common';
+import { performance } from 'node:perf_hooks';
 import { LettaAgentClient, type AnyAgentTool } from '@letta-ai/letta-agent-sdk';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -26,6 +34,7 @@ export function houseAgentScopeKey(scope: HouseAgentScope): string {
 
 @Injectable()
 export class LettaHouseAgentAdapter implements HouseAgentPort {
+  private readonly logger = new Logger(LettaHouseAgentAdapter.name);
   private readonly client = new LettaAgentClient({ backend: 'local' });
   private readonly agentPromises = new Map<string, Promise<string>>();
   private readonly queues = new Map<string, Promise<HouseAgentReply>>();
@@ -35,6 +44,7 @@ export class LettaHouseAgentAdapter implements HouseAgentPort {
     private readonly controls: DeviceControlService,
     private readonly observations: ApprovedMqttObservationRuntime,
     private readonly intelligence: DeviceIntelligenceQueryService,
+    private readonly assistantLighting: DeviceAssistantLightingService,
   ) {}
 
   private async agentFor(scope: HouseAgentScope): Promise<string> {
@@ -124,24 +134,40 @@ export class LettaHouseAgentAdapter implements HouseAgentPort {
     scope: HouseAgentScope,
     text: string,
   ): Promise<HouseAgentReply> {
-    const agentId = await this.agentFor(scope);
+    const turnStart = performance.now();
+    const activeTrace = currentInteractionTrace();
+    const agentId = activeTrace?.matchesScope(scope)
+      ? await activeTrace.measure(
+          'assistant.agent_setup',
+          () => this.agentFor(scope),
+        )
+      : await this.agentFor(scope);
 
     // Only scoped Energrid observation and Core control tools are available.
     const session = this.client.resumeSession(agentId, {
       allowedTools: [
           'list_devices',
           'describe_device',
+          'resolve_device_target',
+          'execute_approved_lighting_action',
+          'propose_device_installation',
           'read_device_observation',
           'control_device',
         ],
       toolset: { base: 'none' },
       permissionMode: 'strict',
       skillSources: [],
-      tools: this.deviceTools(scope),
+      tools: instrumentLocalTools(
+        scope,
+        this.deviceTools(scope),
+      ),
       canUseTool: async (toolName) => (
         (
           toolName === 'list_devices' ||
           toolName === 'describe_device' ||
+          toolName === 'resolve_device_target' ||
+          toolName === 'execute_approved_lighting_action' ||
+          toolName === 'propose_device_installation' ||
           toolName === 'read_device_observation'
         )
           ? { behavior: 'allow' as const }
@@ -173,6 +199,10 @@ export class LettaHouseAgentAdapter implements HouseAgentPort {
       throw new Error('Letta conversation ended without a result');
     } finally {
       session.close();
+      this.logger.log(JSON.stringify({
+        event: 'house_agent.turn.latency',
+        totalMs: Math.round(performance.now() - turnStart),
+      }));
     }
   }
 
@@ -225,37 +255,225 @@ export class LettaHouseAgentAdapter implements HouseAgentPort {
         },
       },
       {
-        name: 'read_device_observation',
-        label: 'Read an approved device observation',
-        description: 'Read current values, source, timestamp, and freshness from Energrid Core for an approved and enrolled device. Never infer a value when no authorized observation is available.',
+        name: 'resolve_device_target',
+        label: 'Resolve an Energrid device target',
+        description: 'Resolve a device through deterministic Energrid Core using durable enrollment, approved installation metadata, room, load purpose, and assistant permissions. Use this before interpreting a request such as "kitchen lights". For an exact ID or name use kind=exact and identifier. For kitchen lights use kind=room-load, room=kitchen, loadType=lighting. A resolved target is NOT permission to execute an action. Never guess when resolution returns not_found, blocked or ambiguous.',
         parameters: {
           type: 'object',
-          properties: { device: { type: 'string', description: 'Exact device ID or an unambiguous part of its friendly name.' } },
+          properties: {
+            kind: {
+              type: 'string',
+              enum: ['exact', 'room-load'],
+            },
+            identifier: {
+              type: 'string',
+              description: 'Device ID or friendly name for exact resolution.',
+            },
+            room: {
+              type: 'string',
+              description: 'Room name for room-load resolution.',
+            },
+            loadType: {
+              type: 'string',
+              enum: ['lighting'],
+            },
+          },
+          required: ['kind'],
+          additionalProperties: false,
+        },
+        execute: async (_toolCallId, raw) => {
+          const args = raw && typeof raw === 'object' && !Array.isArray(raw)
+            ? raw as Record<string, unknown>
+            : {};
+
+          if (args.kind === 'exact') {
+            if (
+              typeof args.identifier !== 'string' ||
+              !args.identifier.trim()
+            ) {
+              return toolError('An exact device name or ID is required.');
+            }
+
+            const resolution = await this.intelligence.resolveTarget(
+              scope,
+              { kind: 'exact', identifier: args.identifier },
+            );
+
+            return toolResult(resolution);
+          }
+
+          if (args.kind === 'room-load') {
+            if (
+              typeof args.room !== 'string' ||
+              !args.room.trim() ||
+              args.loadType !== 'lighting'
+            ) {
+              return toolError(
+                'A room and an approved lighting load type are required.',
+              );
+            }
+
+            const resolution = await this.intelligence.resolveTarget(
+              scope,
+              {
+                kind: 'room-load',
+                room: args.room,
+                loadType: 'lighting',
+              },
+            );
+
+            return toolResult(resolution);
+          }
+
+          return toolError('Unsupported device target request.');
+        },
+      },
+      {
+        name: 'propose_device_installation',
+        label: 'Propose device installation changes',
+        description: 'Prepare a read-only installation proposal for an existing enrolled device. Use an exact enrolled device name or ID. Supply the proposed friendly name and room. Optionally classify its controlled load as lighting. Do not claim the load is physically verified. This tool stores a pending proposal but NEVER modifies or approves the device installation.',
+        parameters: {
+          type: 'object',
+          properties: {
+            device: {
+              type: 'string',
+              description: 'Exact enrolled device ID or friendly name.',
+            },
+            displayName: {
+              type: 'string',
+              description: 'New human-friendly device name.',
+            },
+            zoneName: {
+              type: 'string',
+              description: 'Room where the device is installed.',
+            },
+            loadType: {
+              type: 'string',
+              enum: ['lighting'],
+              description: 'Optional proposed controlled-load type.',
+            },
+          },
+          required: ['device', 'displayName', 'zoneName'],
+          additionalProperties: false,
+        },
+        execute: async (_toolCallId, raw) => {
+          const args = raw && typeof raw === 'object' &&
+            !Array.isArray(raw)
+            ? raw as Record<string, unknown>
+            : {};
+
+          if (
+            typeof args.device !== 'string' ||
+            typeof args.displayName !== 'string' ||
+            typeof args.zoneName !== 'string' ||
+            (args.loadType !== undefined &&
+              args.loadType !== 'lighting')
+          ) {
+            return toolError('Invalid installation proposal parameters.');
+          }
+
+          const proposal =
+            await this.intelligence.createInstallationProposal(
+              scope,
+              {
+                device: args.device,
+                displayName: args.displayName,
+                zoneName: args.zoneName,
+                ...(args.loadType === 'lighting'
+                  ? { loadType: 'lighting' as const }
+                  : {}),
+              },
+            );
+
+          return toolResult(proposal);
+        },
+      },
+      {
+        name: 'execute_approved_lighting_action',
+        label: 'Operate an explicitly approved lighting circuit',
+        description: 'Execute an explicit user request to turn an approved light on or off. First resolve the exact device through resolve_device_target. Pass the resolved device ID, never a guessed ID. Energrid Core independently validates site, enrollment, lighting classification, assistant permission, control route and instant-action opt-in. Do not use for heat pumps, boilers, general switches or configuration changes. Report success only when Core returns status=confirmed. This operation can immediately change physical lighting.',
+        parameters: {
+          type: 'object',
+          properties: {
+            deviceId: {
+              type: 'string',
+              description: 'Exact device ID returned by Core resolution.',
+            },
+            action: {
+              type: 'string',
+              enum: ['turn_on', 'turn_off'],
+            },
+          },
+          required: ['deviceId', 'action'],
+          additionalProperties: false,
+        },
+        execute: async (_toolCallId, raw) => {
+          const args = raw && typeof raw === 'object' &&
+            !Array.isArray(raw)
+            ? raw as Record<string, unknown>
+            : {};
+
+          if (
+            typeof args.deviceId !== 'string' ||
+            !args.deviceId.trim() ||
+            (args.action !== 'turn_on' && args.action !== 'turn_off')
+          ) {
+            return toolError('Exact device ID and on/off action required.');
+          }
+
+          try {
+            const result = await this.assistantLighting.executeTraced(
+              scope,
+              args.deviceId,
+              args.action,
+            );
+
+            return toolResult(result);
+          } catch (error) {
+            return toolError(
+              error instanceof Error
+                ? error.message
+                : 'Energrid Core could not complete the lighting action.',
+            );
+          }
+        },
+      },
+      {
+        name: 'read_device_observation',
+        label: 'Read an approved device observation',
+        description: 'Read authorized device measurements through Energrid Core Intelligence. Returns field values, source provenance, timestamps, and freshness. Never infer missing or stale measurements.',
+        parameters: {
+          type: 'object',
+          properties: {
+            device: {
+              type: 'string',
+              description: 'Exact enrolled device ID or unambiguous friendly name.',
+            },
+          },
           required: ['device'],
           additionalProperties: false,
         },
         execute: async (_toolCallId, raw) => {
-          const args = raw && typeof raw === 'object' ? raw as { device?: unknown } : {};
-          if (typeof args.device !== 'string' || !args.device.trim()) return toolError('A device name or ID is required.');
-          const device = this.resolveDevice(scope, args.device);
-          if (!device) return toolError('No unambiguous approved device matched that name.');
-          const state = await this.observations.getAuthorizedObservation(scope, device.id);
-          if (!state) return toolError('No approved observation is available for this device.');
-          const freshnessSeconds = configuredFreshnessSeconds();
-          const fields = Object.fromEntries(Object.entries(state.fields).map(([field, item]) => {
-            const deltaMs = Date.now() - Date.parse(item.receivedAt);
-            const validTime = Number.isFinite(deltaMs) && deltaMs >= 0;
-            const ageSeconds = validTime ? Math.floor(deltaMs / 1000) : null;
-            return [field, {
-              value: item.value,
-              receivedAt: item.receivedAt,
-              ...(item.measuredAt ? { measuredAt: item.measuredAt } : {}),
-              sourceId: item.sourceId,
-              ageSeconds,
-              freshness: !validTime ? 'invalid' : ageSeconds! <= freshnessSeconds ? 'fresh' : 'stale',
-            }];
-          }));
-          return toolResult({ deviceId: device.id, displayName: device.displayName, fields, freshnessLimitSeconds: freshnessSeconds });
+          const args = raw && typeof raw === 'object' && !Array.isArray(raw)
+            ? raw as { device?: unknown }
+            : {};
+
+          if (typeof args.device !== 'string' || !args.device.trim()) {
+            return toolError('A device name or ID is required.');
+          }
+
+          const observation = await this.intelligence.readObservations(
+            scope,
+            args.device,
+          );
+
+          if (!observation) {
+            return toolError(
+              'No authorized Core observation is available for this device.',
+            );
+          }
+
+          return toolResult(observation);
         },
       },
       {

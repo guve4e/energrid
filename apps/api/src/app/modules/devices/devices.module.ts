@@ -2,6 +2,7 @@ import { AuthorizedDeviceObservationReader, ExistingApprovedObservationReader } 
 import { DeviceIntelligenceQueryService } from './device-intelligence-query.service';
 import { Module } from '@nestjs/common'
 import { DeviceControlService } from './device-control.service'
+import { DeviceAssistantLightingService } from './device-assistant-lighting.service'
 import { DeviceDiagnosticsService } from './device-diagnostics.service'
 import { DeviceHttpPollService } from './device-http-poll.service'
 import {
@@ -42,6 +43,7 @@ import { LocalNetworkRuntimeAdapter } from './adapters/outbound/network/local-ne
     DeviceLanDiscoveryService,
     DeviceDiscoveryMemoryStore,
     DeviceControlService,
+    DeviceAssistantLightingService,
     DeviceDiagnosticsService,
     OperationalLogService,
     DeviceObservationService,
@@ -61,6 +63,7 @@ import { LocalNetworkRuntimeAdapter } from './adapters/outbound/network/local-ne
     DeviceLanDiscoveryService,
     DeviceDiscoveryMemoryStore,
     DeviceControlService,
+    DeviceAssistantLightingService,
     DeviceDiagnosticsService,
     OperationalLogService,
     DeviceObservationService,

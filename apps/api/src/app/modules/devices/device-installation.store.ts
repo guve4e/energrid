@@ -25,6 +25,29 @@ export interface DeviceInstallationRecord {
   updatedAt: string;
 }
 
+export interface DeviceInstallationChangeProposal {
+  schemaVersion: 1;
+  id: string;
+  tenantId: string;
+  siteId: string;
+  deviceId: string;
+  status: 'pending' | 'approved' | 'rejected';
+  createdAt: string;
+  expiresAt: string;
+  installationUpdatedAt: string;
+  current: {
+    displayName: string;
+    zoneName: string;
+    loadType: string | null;
+  };
+  proposed: {
+    displayName: string;
+    zoneName: string;
+    loadType: string | null;
+  };
+  decidedAt?: string;
+}
+
 export interface DeviceInstallationEvent {
   id: string;
   deviceId: string;
@@ -86,6 +109,102 @@ export class DeviceInstallationStore implements OnModuleInit, OnModuleDestroy {
   async save(record: DeviceInstallationRecord): Promise<void> {
     await this.ensureOpen();
     await this.db.put(installationKey(record.device.siteId, record.device.id), record);
+  }
+
+  async saveProposal(
+    proposal: DeviceInstallationChangeProposal,
+  ): Promise<void> {
+    if (
+      proposal.schemaVersion !== 1 ||
+      !/^[0-9a-f-]{36}$/i.test(proposal.id) ||
+      !proposal.tenantId.trim() ||
+      !proposal.siteId.trim() ||
+      !proposal.deviceId.trim()
+    ) {
+      throw new Error('Invalid installation proposal.');
+    }
+    await this.ensureOpen();
+    await this.db.put(
+      `installation-proposal:${proposal.siteId}:${proposal.id}`,
+      proposal,
+    );
+  }
+
+  async getProposal(
+    siteId: string,
+    proposalId: string,
+  ): Promise<DeviceInstallationChangeProposal | null> {
+    if (!siteId.trim() || !/^[0-9a-f-]{36}$/i.test(proposalId))
+      return null;
+
+    await this.ensureOpen();
+
+    try {
+      const value: unknown = await this.db.get(
+        `installation-proposal:${siteId}:${proposalId}`,
+      );
+
+      if (!value || typeof value !== 'object') return null;
+
+      const record = value as Partial<DeviceInstallationChangeProposal>;
+
+      return record.schemaVersion === 1 &&
+        record.id === proposalId &&
+        record.siteId === siteId &&
+        typeof record.tenantId === 'string' &&
+        typeof record.deviceId === 'string' &&
+        ['pending', 'approved', 'rejected'].includes(record.status || '') &&
+        typeof record.createdAt === 'string' &&
+        typeof record.expiresAt === 'string' &&
+        typeof record.installationUpdatedAt === 'string' &&
+        !!record.current &&
+        !!record.proposed
+          ? record as DeviceInstallationChangeProposal
+          : null;
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      throw error;
+    }
+  }
+
+  async listDeviceProposals(
+    siteId: string,
+    deviceId: string,
+  ): Promise<DeviceInstallationChangeProposal[]> {
+    if (!siteId.trim() || !deviceId.trim()) return [];
+
+    await this.ensureOpen();
+
+    const prefix = `installation-proposal:${siteId}:`;
+    const results: DeviceInstallationChangeProposal[] = [];
+
+    for await (const [, value] of this.db.iterator({
+      gte: prefix,
+      lt: `${prefix}\uffff`,
+    })) {
+      if (!value || typeof value !== 'object') continue;
+
+      const proposal = value as Partial<DeviceInstallationChangeProposal>;
+
+      if (
+        proposal.schemaVersion !== 1 ||
+        proposal.siteId !== siteId ||
+        proposal.deviceId !== deviceId ||
+        typeof proposal.tenantId !== 'string' ||
+        typeof proposal.id !== 'string' ||
+        typeof proposal.createdAt !== 'string' ||
+        typeof proposal.expiresAt !== 'string' ||
+        proposal.status !== 'pending' ||
+        !proposal.current ||
+        !proposal.proposed
+      ) continue;
+
+      results.push(proposal as DeviceInstallationChangeProposal);
+    }
+
+    return results
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, 20);
   }
 
   async append(event: DeviceInstallationEvent): Promise<void> {
