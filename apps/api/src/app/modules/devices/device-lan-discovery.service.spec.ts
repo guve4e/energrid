@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { execFile } from 'node:child_process'
 import { Logger } from '@nestjs/common'
 import {
   buildNetworkObservations,
@@ -122,9 +123,12 @@ describe('LAN discovery evidence persistence', () => {
 
   it('persists Nmap observations and services through the existing immutable snapshot store', async () => {
     process.env.HOME_NMAP_ENABLED = 'true'
-    const xml = `<nmaprun><host endtime="1792560002"><status state="up"/><address addr="192.168.1.133" addrtype="ipv4"/><ports><port protocol="tcp" portid="80"><state state="open"/><service name="http"/></port></ports></host><runstats><finished exit="success"/><hosts up="1" down="253" total="254"/></runstats></nmaprun>`
+    process.env.HOME_LAN_ACTIVE_SCAN_ENABLED = 'true'
+    jest.mocked(execFile).mockClear()
+    const hostXml = `<nmaprun><host endtime="1792560001"><status state="up"/><address addr="192.168.1.133" addrtype="ipv4"/></host><runstats><finished exit="success"/><hosts up="1" down="253" total="254"/></runstats></nmaprun>`
+    const serviceXml = `<nmaprun><host endtime="1792560002"><status state="up"/><address addr="192.168.1.133" addrtype="ipv4"/><ports><port protocol="tcp" portid="80"><state state="open"/><service name="http"/></port></ports></host><runstats><finished exit="success"/><hosts up="1" down="0" total="1"/></runstats></nmaprun>`
     const runner: NmapCommandRunner = async (_command, args) => ({
-      stdout: args[0] === '--version' ? 'Nmap version 7.95' : xml,
+      stdout: args[0] === '--version' ? 'Nmap version 7.95' : args.includes('-sn') ? hostXml : serviceXml,
       stderr: '',
     })
     const adapter = new NmapNetworkEvidenceAdapter(runner, () => ({}), () => new Date('2026-10-21T00:00:00.000Z'))
@@ -140,7 +144,20 @@ describe('LAN discovery evidence persistence', () => {
     const endpoint = saved?.endpoints.find(item => item.ipAddress === '192.168.1.133')
 
     expect(result.snapshot.methods).toContain('nmap_tcp_connect_service_scan')
-    expect(result.snapshot.scopes[0]).toMatchObject({ id: 'home-lan', complete: true })
+    expect(result.snapshot.methods).toContain('nmap_host_discovery')
+    expect(result.snapshot.schemaVersion).toBe(2)
+    expect(result.snapshot.methods).not.toContain('icmp')
+    expect(result.snapshot.methods).not.toContain('tcp_reachability')
+    expect(jest.mocked(execFile).mock.calls.filter(([command]) => command === 'ping')).toHaveLength(0)
+    expect(result.snapshot.scopes[0]).toMatchObject({
+      id: 'home-lan', complete: true,
+      collectionStages: {
+        hostDiscovery: { complete: true, targetCount: 254, hostsReported: 1 },
+        serviceEnrichment: { complete: true, targetCount: 1, hostsReported: 1 },
+      },
+    })
+    expect(result.snapshot.scopes[0].collectionStages?.hostDiscovery.durationMs).toBeGreaterThanOrEqual(0)
+    expect(result.snapshot.scopes[0].collectionStages?.serviceEnrichment.durationMs).toBeGreaterThanOrEqual(0)
     expect(endpoint?.observations).toContainEqual(expect.objectContaining({
       source: 'tcp', attribute: 'port.80.open', value: true, scopeId: 'home-lan',
       method: 'nmap_tcp_connect_service_scan', observedAt: '2026-10-21T05:20:02.000Z',

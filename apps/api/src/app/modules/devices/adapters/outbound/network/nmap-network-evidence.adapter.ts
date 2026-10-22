@@ -49,7 +49,17 @@ export interface NmapScopeResult {
   complete: boolean;
   targetCount: number;
   hostsReported: number;
+  hostDiscovery: NmapStageCoverage;
+  serviceEnrichment: NmapStageCoverage;
   interfaceName?: string;
+  failure?: string;
+}
+
+export interface NmapStageCoverage {
+  durationMs: number;
+  complete: boolean;
+  targetCount: number;
+  hostsReported: number;
   failure?: string;
 }
 
@@ -75,6 +85,7 @@ export interface NmapParseOptions {
   observedAt: string;
   interfaceName?: string;
   onLink: boolean;
+  stage?: 'host_discovery' | 'service_enrichment';
 }
 
 export interface ParsedNmapXml {
@@ -148,7 +159,10 @@ export class NmapNetworkEvidenceAdapter {
     if (plans.length && plans.every(plan => !!plan.failure)) {
       return {
         capability: { available: false, reason: 'Nmap scopes failed validation.' },
-        hosts: [], scopes: plans.map(plan => ({ scopeId: plan.scope.id, complete: false, targetCount: 0, hostsReported: 0, failure: plan.failure })),
+        hosts: [], scopes: plans.map(plan => ({
+          scopeId: plan.scope.id, complete: false, targetCount: 0, hostsReported: 0, failure: plan.failure,
+          hostDiscovery: incompleteStage(plan.failure!), serviceEnrichment: incompleteStage('Host discovery did not run.'),
+        })),
         methods: [], failures: plans.map(plan => `${plan.scope.id}: ${plan.failure}`),
         limitations: plans.map(plan => `${plan.scope.id}: ${plan.failure}`), cancelled: false,
       };
@@ -169,6 +183,8 @@ export class NmapNetworkEvidenceAdapter {
       result.scopes = plans.map(plan => ({
         scopeId: plan.scope.id, complete: false, targetCount: plan.targets.length, hostsReported: 0,
         ...(plan.failure ? { failure: plan.failure } : { failure: 'Nmap scanning is disabled.' }),
+        hostDiscovery: incompleteStage(plan.failure || 'Nmap scanning is disabled.', plan.targets.length),
+        serviceEnrichment: incompleteStage('Nmap scanning is disabled.'),
       }));
       return result;
     }
@@ -182,6 +198,8 @@ export class NmapNetworkEvidenceAdapter {
         targetCount: 0,
         hostsReported: 0,
         failure: 'Nmap did not run because its executable is unavailable.',
+        hostDiscovery: incompleteStage('Nmap executable is unavailable.'),
+        serviceEnrichment: incompleteStage('Host discovery did not run.'),
       }));
       return result;
     }
@@ -196,7 +214,10 @@ export class NmapNetworkEvidenceAdapter {
       if (plan.failure) {
         result.failures.push(`${scope.id}: ${plan.failure}`);
         result.limitations.push(`${scope.id}: ${plan.failure}`);
-        result.scopes.push({ scopeId: scope.id, complete: false, targetCount: 0, hostsReported: 0, failure: plan.failure });
+        result.scopes.push({
+          scopeId: scope.id, complete: false, targetCount: 0, hostsReported: 0, failure: plan.failure,
+          hostDiscovery: incompleteStage(plan.failure), serviceEnrichment: incompleteStage('Host discovery did not run.'),
+        });
         continue;
       }
 
@@ -204,13 +225,15 @@ export class NmapNetworkEvidenceAdapter {
       const interfaceInfo = localInterfaceForScope(scope, this.readInterfaces());
       const routeInfo = interfaceInfo ? {} : await this.resolveRoute(targetInfo.targets[0]);
       const observingInterface = interfaceInfo?.name || routeInfo.interfaceName;
-      const observedAt = this.now().toISOString();
-      const args = buildNmapArguments(targetInfo.targets, observingInterface);
-      if (!result.methods.includes('nmap_tcp_connect_service_scan')) {
-        result.methods.push('nmap_tcp_connect_service_scan');
-      }
+      const discoveredAt = this.now().toISOString();
+      const hostDiscoveryStartedAt = Date.now();
+      const hostDiscoveryTargets = targetInfo.targets;
+      const discoveredHosts: NmapHostEvidence[] = [];
+      let hostDiscovery: NmapStageCoverage;
+      const hostDiscoveryMethod = 'nmap_host_discovery';
+      if (!result.methods.includes(hostDiscoveryMethod)) result.methods.push(hostDiscoveryMethod);
       try {
-        const commandResult = await this.runCommand(NMAP_EXECUTABLE, args, {
+        const commandResult = await this.runCommand(NMAP_EXECUTABLE, buildNmapHostDiscoveryArguments(hostDiscoveryTargets, observingInterface), {
           timeout: timeoutMs,
           maxBuffer: MAX_XML_BYTES + 64 * 1024,
           ...(options.signal ? { signal: options.signal } : {}),
@@ -218,47 +241,112 @@ export class NmapNetworkEvidenceAdapter {
         const parsed = parseNmapXml(commandResult.stdout, {
           scopeId: scope.id,
           ...(scope.cidr ? { scopeCidr: scope.cidr } : {}),
-          targets: targetInfo.targets,
-          observedAt,
+          targets: hostDiscoveryTargets,
+          observedAt: discoveredAt,
           ...(observingInterface ? { interfaceName: observingInterface } : {}),
           onLink: !!interfaceInfo,
+          stage: 'host_discovery',
         });
-        const complete = parsed.complete && parsed.hostsTotal === targetInfo.targets.length;
-        result.hosts.push(...parsed.hosts);
-        result.scopes.push({
-          scopeId: scope.id,
-          complete,
-          targetCount: targetInfo.targets.length,
-          hostsReported: parsed.hostsTotal || 0,
-          ...(observingInterface ? { interfaceName: observingInterface } : {}),
-          ...(!complete ? { failure: 'Nmap did not report successful results for every selected address.' } : {}),
-        });
-        if (!complete) {
-          result.failures.push(`${scope.id}: Nmap coverage was incomplete.`);
-          result.limitations.push(`${scope.id}: Nmap coverage was incomplete; unreported endpoints remain unknown.`);
-        }
+        discoveredHosts.push(...parsed.hosts);
+        const complete = parsed.complete && parsed.hostsTotal === hostDiscoveryTargets.length;
+        hostDiscovery = {
+          durationMs: elapsedMs(hostDiscoveryStartedAt), complete,
+          targetCount: hostDiscoveryTargets.length, hostsReported: parsed.hosts.length,
+          ...(!complete ? { failure: 'Nmap host discovery did not report successful results for every selected address.' } : {}),
+        };
       } catch (error) {
         const cancelled = options.signal?.aborted === true || isAbortError(error);
-        const failure = cancelled
-          ? 'Nmap scan was cancelled by the operator.'
-          : isTimeoutError(error)
-            ? 'Nmap scan reached its time limit.'
-            : error instanceof Error && error.message === 'Invalid Nmap XML document.'
-              ? error.message
-              : 'Nmap failed before complete structured results were available.';
+        const failure = nmapFailure(error, cancelled);
         result.cancelled ||= cancelled;
-        result.failures.push(`${scope.id}: ${failure}`);
-        result.limitations.push(`${scope.id}: ${failure} Unreported endpoints remain unknown.`);
-        result.scopes.push({
-          scopeId: scope.id,
-          complete: false,
-          targetCount: targetInfo.targets.length,
-          hostsReported: 0,
-          ...(observingInterface ? { interfaceName: observingInterface } : {}),
-          failure,
-        });
-        if (cancelled) break;
+        hostDiscovery = {
+          durationMs: elapsedMs(hostDiscoveryStartedAt), complete: false,
+          targetCount: hostDiscoveryTargets.length, hostsReported: 0, failure,
+        };
       }
+
+      const allowedTargets = new Set(hostDiscoveryTargets);
+      const serviceTargets = [...new Set([
+        ...discoveredHosts.map(host => host.ipAddress),
+        ...scope.seedIps.filter(ip => isIpv4(ip) && allowedTargets.has(ip)),
+      ])].sort(compareIpv4);
+      let serviceEnrichment: NmapStageCoverage = {
+        durationMs: 0, complete: true, targetCount: 0, hostsReported: 0,
+      };
+      const enrichedHosts: NmapHostEvidence[] = [];
+      if (serviceTargets.length && !options.signal?.aborted) {
+        const serviceStartedAt = Date.now();
+        if (!result.methods.includes('nmap_tcp_connect_service_scan')) result.methods.push('nmap_tcp_connect_service_scan');
+        try {
+          const commandResult = await this.runCommand(NMAP_EXECUTABLE, buildNmapArguments(serviceTargets, observingInterface), {
+            timeout: timeoutMs,
+            maxBuffer: MAX_XML_BYTES + 64 * 1024,
+            ...(options.signal ? { signal: options.signal } : {}),
+          });
+          const parsed = parseNmapXml(commandResult.stdout, {
+            scopeId: scope.id,
+            ...(scope.cidr ? { scopeCidr: scope.cidr } : {}),
+            targets: serviceTargets,
+            observedAt: this.now().toISOString(),
+            ...(observingInterface ? { interfaceName: observingInterface } : {}),
+            onLink: !!interfaceInfo,
+            stage: 'service_enrichment',
+          });
+          enrichedHosts.push(...parsed.hosts);
+          const complete = parsed.complete && parsed.hostsTotal === serviceTargets.length;
+          serviceEnrichment = {
+            durationMs: elapsedMs(serviceStartedAt), complete,
+            targetCount: serviceTargets.length, hostsReported: parsed.hosts.length,
+            ...(!complete ? { failure: 'Nmap service enrichment did not report successful results for every selected host.' } : {}),
+          };
+        } catch (error) {
+          const cancelled = options.signal?.aborted === true || isAbortError(error);
+          const failure = nmapFailure(error, cancelled);
+          result.cancelled ||= cancelled;
+          const partial = parsePartialNmapOutput(error, {
+            scopeId: scope.id,
+            ...(scope.cidr ? { scopeCidr: scope.cidr } : {}),
+            targets: serviceTargets,
+            observedAt: this.now().toISOString(),
+            ...(observingInterface ? { interfaceName: observingInterface } : {}),
+            onLink: !!interfaceInfo,
+            stage: 'service_enrichment',
+          });
+          enrichedHosts.push(...partial);
+          serviceEnrichment = {
+            durationMs: elapsedMs(serviceStartedAt), complete: false,
+            targetCount: serviceTargets.length, hostsReported: partial.length, failure,
+          };
+        }
+      } else if (options.signal?.aborted) {
+        result.cancelled = true;
+        serviceEnrichment = {
+          durationMs: 0, complete: false, targetCount: serviceTargets.length, hostsReported: 0,
+          failure: 'Nmap service enrichment was not started because the scan was cancelled.',
+        };
+      }
+
+      result.hosts.push(...mergeNmapHostEvidence(discoveredHosts, enrichedHosts));
+      const scopeFailures = [hostDiscovery.failure, serviceEnrichment.failure].filter((value): value is string => !!value);
+      const complete = hostDiscovery.complete && serviceEnrichment.complete;
+      if (hostDiscovery.failure) {
+        result.failures.push(`${scope.id}: host discovery: ${hostDiscovery.failure}`);
+        result.limitations.push(`${scope.id}: host discovery was incomplete; unreported endpoints remain unknown.`);
+      }
+      if (serviceEnrichment.failure) {
+        result.failures.push(`${scope.id}: service enrichment: ${serviceEnrichment.failure}`);
+        result.limitations.push(`${scope.id}: service enrichment was incomplete; host-discovery observations are retained and unreported services remain unknown.`);
+      }
+      result.scopes.push({
+        scopeId: scope.id,
+        complete,
+        targetCount: hostDiscoveryTargets.length,
+        hostsReported: discoveredHosts.length,
+        hostDiscovery,
+        serviceEnrichment,
+        ...(observingInterface ? { interfaceName: observingInterface } : {}),
+        ...(scopeFailures.length ? { failure: scopeFailures.join(' ') } : {}),
+      });
+      if (result.cancelled) break;
     }
 
     if (result.cancelled) {
@@ -266,7 +354,11 @@ export class NmapNetworkEvidenceAdapter {
       result.limitations.push('Cancelled Nmap scopes are incomplete; absence from this snapshot is not evidence that a host is offline.');
       for (const scope of scopes) {
         if (!result.scopes.some(item => item.scopeId === scope.id)) {
-          result.scopes.push({ scopeId: scope.id, complete: false, targetCount: 0, hostsReported: 0, failure: 'Nmap scope was not started because the scan was cancelled.' });
+          const failure = 'Nmap scope was not started because the scan was cancelled.';
+          result.scopes.push({
+            scopeId: scope.id, complete: false, targetCount: 0, hostsReported: 0, failure,
+            hostDiscovery: incompleteStage(failure), serviceEnrichment: incompleteStage('Host discovery did not run.'),
+          });
         }
       }
     }
@@ -277,6 +369,15 @@ export class NmapNetworkEvidenceAdapter {
 
 export function buildNmapArguments(targets: readonly string[], interfaceName?: string): string[] {
   return createNmapArguments(targets, interfaceName);
+}
+
+export function buildNmapHostDiscoveryArguments(targets: readonly string[], interfaceName?: string): string[] {
+  validateTargets(targets, interfaceName);
+  return [
+    '-oX', '-', '-n', '-sn', '--max-parallelism', '16', '--max-retries', '1', '--max-rate', '100',
+    ...(interfaceName ? ['-e', interfaceName] : []),
+    ...targets,
+  ];
 }
 
 export function parseNmapXml(xml: string, options: NmapParseOptions): ParsedNmapXml {
@@ -359,6 +460,21 @@ function normalizeHost(
   if (!ipAddress || !ipInScope(ipAddress, options.scopeCidr, targetSet)) return null;
   const observedAt = source.observedAt || options.observedAt;
   const observations: NmapHostEvidence['observations'] = [];
+  if (options.stage === 'host_discovery') {
+    if (source.status !== 'up') return null;
+    observations.push(nmapObservation(options, observedAt, 'host.discovered', true, 'nmap', 'nmap_host_discovery'));
+    return {
+      scopeId: options.scopeId,
+      ipAddress,
+      ...(options.onLink && source.observedMacAddress ? { macAddress: source.observedMacAddress } : {}),
+      ...(source.hostname ? { hostname: source.hostname.slice(0, 253) } : {}),
+      status: 'online',
+      observedAt,
+      ...(options.interfaceName ? { interfaceName: options.interfaceName } : {}),
+      reason: 'Nmap received a host-discovery response during the scan.',
+      observations,
+    };
+  }
   for (const port of source.ports) {
     const inRange = port.port >= 1 && port.port <= 65535;
     if (!inRange || !['tcp', 'udp'].includes(port.protocol)) continue;
@@ -390,14 +506,16 @@ function nmapObservation(
   observedAt: string,
   attribute: string,
   value: string | boolean,
+  source: NonNullable<NetworkDiscoveredDevice['observations']>[number]['source'] = 'tcp',
+  method = 'nmap_tcp_connect_service_scan',
 ): NonNullable<NetworkDiscoveredDevice['observations']>[number] {
   return {
-    source: 'tcp',
+    source,
     attribute,
     value,
     observedAt,
     scopeId: options.scopeId,
-    method: 'nmap_tcp_connect_service_scan',
+    method,
     ...(options.interfaceName ? { interfaceName: options.interfaceName } : {}),
   };
 }
@@ -455,10 +573,7 @@ async function defaultRouteInterface(target: string): Promise<RouteInterfaceEvid
 }
 
 function createNmapArguments(targets: readonly string[], interfaceName?: string): string[] {
-  if (!targets.length || targets.length > MAX_HOSTS || new Set(targets).size !== targets.length || targets.some(target => !isIpv4(target))) {
-    throw new Error(`Nmap requires between 1 and ${MAX_HOSTS} unique validated IPv4 targets.`);
-  }
-  if (interfaceName && !/^[a-zA-Z0-9_.:-]{1,32}$/.test(interfaceName)) throw new Error('Nmap interface name is invalid.');
+  validateTargets(targets, interfaceName);
   return [
     '-oX', '-', '-n', '-Pn', '-sT', '-sV', '--version-light',
     '-p', NMAP_TCP_PORTS.join(','), '--max-parallelism', '16',
@@ -466,6 +581,68 @@ function createNmapArguments(targets: readonly string[], interfaceName?: string)
     ...(interfaceName ? ['-e', interfaceName] : []),
     ...targets,
   ];
+}
+
+function validateTargets(targets: readonly string[], interfaceName?: string): void {
+  if (!targets.length || targets.length > MAX_HOSTS || new Set(targets).size !== targets.length || targets.some(target => !isIpv4(target))) {
+    throw new Error(`Nmap requires between 1 and ${MAX_HOSTS} unique validated IPv4 targets.`);
+  }
+  if (interfaceName && !/^[a-zA-Z0-9_.:-]{1,32}$/.test(interfaceName)) throw new Error('Nmap interface name is invalid.');
+}
+
+function incompleteStage(failure: string, targetCount = 0): NmapStageCoverage {
+  return { durationMs: 0, complete: false, targetCount, hostsReported: 0, failure };
+}
+
+function elapsedMs(startedAt: number): number {
+  return Math.max(0, Date.now() - startedAt);
+}
+
+function nmapFailure(error: unknown, cancelled: boolean): string {
+  return cancelled
+    ? 'Nmap scan was cancelled by the operator.'
+    : isTimeoutError(error)
+      ? 'Nmap scan reached its time limit.'
+      : error instanceof Error && error.message === 'Invalid Nmap XML document.'
+        ? error.message
+        : 'Nmap failed before complete structured results were available.';
+}
+
+function parsePartialNmapOutput(error: unknown, options: NmapParseOptions): NmapHostEvidence[] {
+  if (!error || typeof error !== 'object' || !('stdout' in error) || typeof error.stdout !== 'string') return [];
+  try {
+    return parseNmapXml(error.stdout, options).hosts;
+  } catch {
+    return [];
+  }
+}
+
+function mergeNmapHostEvidence(
+  discovered: NmapHostEvidence[],
+  enriched: NmapHostEvidence[],
+): NmapHostEvidence[] {
+  const merged = new Map(discovered.map(host => [host.ipAddress, { ...host, observations: [...host.observations] }]));
+  for (const host of enriched) {
+    const previous = merged.get(host.ipAddress);
+    if (!previous) {
+      merged.set(host.ipAddress, host);
+      continue;
+    }
+    const observations = [...previous.observations];
+    for (const observation of host.observations) {
+      if (!observations.some(item => item.method === observation.method && item.attribute === observation.attribute && item.observedAt === observation.observedAt)) {
+        observations.push(observation);
+      }
+    }
+    merged.set(host.ipAddress, {
+      ...previous,
+      ...host,
+      ...(previous.macAddress && !host.macAddress ? { macAddress: previous.macAddress } : {}),
+      ...(previous.hostname && !host.hostname ? { hostname: previous.hostname } : {}),
+      observations,
+    });
+  }
+  return [...merged.values()].sort((a, b) => compareIpv4(a.ipAddress, b.ipAddress));
 }
 
 function ipInScope(ip: string, cidr?: string, targets?: ReadonlySet<string>): boolean {

@@ -15,6 +15,10 @@ export interface NetworkDiscoverySnapshot {
     role?: NetworkDiscoveryZone['role'];
     complete: boolean;
     gatewayIpsObserved: string[];
+    collectionStages?: {
+      hostDiscovery: { durationMs: number; complete: boolean; targetCount: number; hostsReported: number; failure?: string };
+      serviceEnrichment: { durationMs: number; complete: boolean; targetCount: number; hostsReported: number; failure?: string };
+    };
   }>;
   methods: string[];
   successes: number;

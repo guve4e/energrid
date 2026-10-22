@@ -118,12 +118,78 @@ describe('Nmap XML evidence adapter', () => {
     expect(result.scopes).toEqual([expect.objectContaining({ scopeId: 'eero', complete: true, targetCount: 1 })]);
     expect(result.hosts).toHaveLength(1);
     expect(calls[0]).toMatchObject({ command: 'nmap', args: ['--version'] });
-    expect(calls[1].args).toContain('-oX');
-    expect(calls[1].args).toContain('-sT');
-    expect(calls[1].args).toContain('-sV');
-    expect(calls[1].args).toContain('-e');
-    expect(calls[1].args.at(-1)).toBe('192.168.7.21');
+    expect(calls[1].args).toContain('-sn');
+    expect(calls[1].args).not.toContain('-sT');
+    expect(calls[1].args).not.toContain('-sV');
+    expect(calls[2].args).toContain('-oX');
+    expect(calls[2].args).toContain('-sT');
+    expect(calls[2].args).toContain('-sV');
+    expect(calls[2].args).toContain('-e');
+    expect(calls[2].args.at(-1)).toBe('192.168.7.21');
     expect(calls[1].timeout).toBe(10000);
+    expect(calls[2].timeout).toBe(10000);
+  });
+
+  it('discovers hosts once, then limits service identification to discovered hosts and configured seeds', async () => {
+    const calls: string[][] = [];
+    const discoveryXml = `<nmaprun><host endtime="1792560001"><status state="up"/><address addr="192.168.7.21" addrtype="ipv4"/><address addr="78:ee:4c:cf:42:68" addrtype="mac"/></host><runstats><finished exit="success"/><hosts up="1" down="253" total="254"/></runstats></nmaprun>`;
+    const serviceXml = `<nmaprun><host endtime="1792560002"><status state="up"/><address addr="192.168.7.21" addrtype="ipv4"/><ports><port protocol="tcp" portid="80"><state state="open"/><service name="http"/></port></ports></host><runstats><finished exit="success"/><hosts up="1" down="1" total="2"/></runstats></nmaprun>`;
+    const runner: NmapCommandRunner = async (_command, args) => {
+      calls.push(args);
+      if (args[0] === '--version') return { stdout: 'Nmap version 7.95', stderr: '' };
+      return { stdout: args.includes('-sn') ? discoveryXml : serviceXml, stderr: '' };
+    };
+    const adapter = new NmapNetworkEvidenceAdapter(runner, () => ({
+      en0: [{ address: '192.168.7.10', netmask: '255.255.255.0', family: 'IPv4', mac: '00:00:00:00:00:01', internal: false, cidr: '192.168.7.10/24' }],
+    }), () => new Date('2026-10-21T00:00:00.000Z'));
+
+    const result = await adapter.scan([{ ...scope, seedIps: ['192.168.7.22'] }], { enabled: true, maxHosts: 254 });
+
+    expect(calls).toHaveLength(3); // version, one host-discovery pass, one service pass
+    expect(calls[1]).toContain('-sn');
+    expect(calls[1]).not.toContain('-sT');
+    expect(calls[1]).not.toContain('-sV');
+    expect(calls[1].slice(-254)).toHaveLength(254);
+    expect(calls[2]).toContain('-sT');
+    expect(calls[2]).toContain('-sV');
+    expect(calls[2].slice(-2)).toEqual(['192.168.7.21', '192.168.7.22']);
+    expect(result.hosts).toHaveLength(1);
+    expect(result.hosts[0]).toMatchObject({ ipAddress: '192.168.7.21', macAddress: '78:ee:4c:cf:42:68' });
+    expect(result.hosts[0].observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'nmap', method: 'nmap_host_discovery', attribute: 'host.discovered', value: true }),
+      expect.objectContaining({ method: 'nmap_tcp_connect_service_scan', attribute: 'port.80.open', value: true }),
+    ]));
+    expect(result.scopes[0]).toMatchObject({
+      complete: true,
+      hostDiscovery: { complete: true, targetCount: 254, hostsReported: 1 },
+      serviceEnrichment: { complete: true, targetCount: 2, hostsReported: 1 },
+    });
+    expect(result.scopes[0].hostDiscovery?.durationMs).toBeGreaterThanOrEqual(0);
+    expect(result.scopes[0].serviceEnrichment?.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('preserves host-discovery evidence when service enrichment times out', async () => {
+    const discoveryXml = `<nmaprun><host endtime="1792560001"><status state="up"/><address addr="192.168.7.21" addrtype="ipv4"/></host><runstats><finished exit="success"/><hosts up="1" down="0" total="1"/></runstats></nmaprun>`;
+    const runner: NmapCommandRunner = async (_command, args) => {
+      if (args[0] === '--version') return { stdout: 'Nmap version 7.95', stderr: '' };
+      if (args.includes('-sn')) return { stdout: discoveryXml, stderr: '' };
+      const error = new Error('Command timed out') as Error & { killed: boolean };
+      error.killed = true;
+      throw error;
+    };
+    const adapter = new NmapNetworkEvidenceAdapter(runner, () => ({}), () => new Date('2026-10-21T00:00:00.000Z'));
+
+    const result = await adapter.scan([{ ...scope, cidr: '192.168.7.21/32' }], { enabled: true });
+
+    expect(result.hosts).toHaveLength(1);
+    expect(result.hosts[0]).toMatchObject({ ipAddress: '192.168.7.21', reason: expect.stringContaining('host-discovery response') });
+    expect(result.scopes[0]).toMatchObject({
+      complete: false,
+      hostDiscovery: { complete: true, hostsReported: 1 },
+      serviceEnrichment: { complete: false, failure: 'Nmap scan reached its time limit.' },
+    });
+    expect(result.failures.join(' ')).toContain('time limit');
+    expect(result.limitations.join(' ')).toContain('remain unknown');
   });
 
   it('records the routed egress interface without promoting a remote XML MAC to link evidence', async () => {

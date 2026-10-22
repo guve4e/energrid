@@ -77,17 +77,20 @@ export class DeviceLanNetworkEvidenceCollector {
     nmap: NmapScanResult
     runtime?: LocalNetworkRuntimeReport
   }> {
-    const reachableDevices = await activeScanZones(zones)
-    const tcpDevices = await tcpDiscoverZones(zones, reachableDevices)
-    const arpDevices = await readNeighborTable()
-    const routerClients = await readRouterClientCandidates()
-    const nmap = await (this.nmapAdapter || new NmapNetworkEvidenceAdapter()).scan(zones, {
-      enabled: process.env.HOME_NMAP_ENABLED === 'true',
+    const nmapEnabled = process.env.HOME_NMAP_ENABLED === 'true'
+    const nmapAdapter = this.nmapAdapter || new NmapNetworkEvidenceAdapter()
+    const runtimePromise = this.runtimeAdapter?.inspect(zones)
+    const nmap = await nmapAdapter.scan(zones, {
+      enabled: nmapEnabled,
       maxHosts: Number(process.env.HOME_NMAP_MAX_HOSTS) || 254,
       timeoutMs: Number(process.env.HOME_NMAP_TIMEOUT_MS) || 120_000,
       signal,
     })
-    const runtime = this.runtimeAdapter ? await this.runtimeAdapter.inspect(zones) : undefined
+    const nmapHostDiscoveryUsed = nmapEnabled && nmap.capability.available
+    const reachableDevices = nmapHostDiscoveryUsed ? [] : await activeScanZones(zones)
+    const tcpDevices = nmapHostDiscoveryUsed ? [] : await tcpDiscoverZones(zones, reachableDevices)
+    const [arpDevices, routerClients] = await Promise.all([readNeighborTable(), readRouterClientCandidates()])
+    const runtime = await runtimePromise
     if (runtime) {
       runtime.capabilities.push({
         id: 'nmap',
@@ -219,6 +222,7 @@ export class DeviceLanDiscoveryService {
       throw new BadRequestException('Full-subnet discovery requires explicit operator confirmation')
     }
     const evidence = await this.evidenceCollector.collectEvidence(zones, options.signal)
+    const nmapHostDiscoverySelected = process.env.HOME_NMAP_ENABLED === 'true' && evidence.nmap.capability.available
     const discoveredCandidates = evidence.candidates
     const endpointCandidates = mergeNeighborCandidates(discoveredCandidates)
     const identityCandidates = identityCandidatesForScan(discoveredCandidates)
@@ -298,7 +302,7 @@ export class DeviceLanDiscoveryService {
     ])].sort()
     const nmapScopeById = new Map(evidence.nmap.scopes.map(scope => [scope.scopeId, scope]))
     const snapshot: NetworkDiscoverySnapshot = {
-      schemaVersion: evidence.runtime ? 2 : 1,
+      schemaVersion: 2,
       scanId,
       startedAt,
       completedAt: new Date().toISOString(),
@@ -315,13 +319,18 @@ export class DeviceLanDiscoveryService {
           ? { interfaceName: nmapScopeById.get(zone.id)?.interfaceName || interfaceForZone(zone) }
           : {}),
         ...(zone.role ? { role: zone.role } : {}),
-        complete: evidence.nmap.scopes.some(result => result.scopeId === zone.id && result.complete) ||
-          (process.env.HOME_NMAP_ENABLED !== 'true' && scanScopeComplete(zone)),
+        ...(nmapScopeById.get(zone.id) ? { collectionStages: {
+          hostDiscovery: toSnapshotStage(nmapScopeById.get(zone.id)!.hostDiscovery),
+          serviceEnrichment: toSnapshotStage(nmapScopeById.get(zone.id)!.serviceEnrichment),
+        } } : {}),
+        complete: nmapHostDiscoverySelected
+          ? nmapScopeById.get(zone.id)?.complete === true
+          : scanScopeComplete(zone),
         gatewayIpsObserved: [...new Set(this.lastScan
           .filter(device => device.networkZoneId === zone.id && device.gatewayId && isIpv4Address(device.gatewayId))
           .map(device => device.gatewayId!))].sort(),
       })),
-      methods: [...new Set([...discoveryMethods(zones), ...evidence.nmap.methods])].sort(),
+      methods: [...new Set([...discoveryMethods(zones, !nmapHostDiscoverySelected), ...evidence.nmap.methods])].sort(),
       successes: this.lastScan.length,
       failures: evidence.nmap.failures,
       limitations: [
@@ -551,9 +560,21 @@ function interfacesForZones(zones: NetworkDiscoveryZone[]): string[] {
   return [...new Set(zones.map(interfaceForZone).filter((value): value is string => !!value))].sort()
 }
 
-function discoveryMethods(zones: NetworkDiscoveryZone[]): string[] {
+function toSnapshotStage(stage: {
+  durationMs: number; complete: boolean; targetCount: number; hostsReported: number; failure?: string;
+}): NonNullable<NetworkDiscoverySnapshot['scopes'][number]['collectionStages']>['hostDiscovery'] {
+  return {
+    durationMs: stage.durationMs,
+    complete: stage.complete,
+    targetCount: stage.targetCount,
+    hostsReported: stage.hostsReported,
+    ...(stage.failure ? { failure: stage.failure } : {}),
+  }
+}
+
+function discoveryMethods(zones: NetworkDiscoveryZone[], includeActiveProbes = true): string[] {
   const methods = ['neighbor_table', 'reverse_dns', 'tcp_service_probe', 'shelly_http_rpc']
-  if (process.env.HOME_LAN_ACTIVE_SCAN_ENABLED !== 'false') methods.push('icmp', 'tcp_reachability')
+  if (includeActiveProbes && process.env.HOME_LAN_ACTIVE_SCAN_ENABLED !== 'false') methods.push('icmp', 'tcp_reachability')
   if (process.env.HOME_ROUTER_CLIENTS_JSON || process.env.HOME_ROUTER_CLIENTS_FILE || process.env.HOME_ROUTER_CLIENTS_COMMAND) methods.push('router_clients')
   if (zones.some(zone => zone.seedIps.length > 0)) methods.push('seed_ip')
   return methods.sort()
