@@ -269,8 +269,15 @@ function evaluateConfiguredScope(
   routes: NetworkRouteObservation[],
 ): ConfiguredScopeReachability {
   if (!scope.cidr) return { id: scope.id, name: scope.name, reachability: 'unscoped', boundedScanEligible: false, reason: 'No CIDR is configured for this scope.' };
-  const local = localIpv4Scopes(interfaces).find(item => item.cidr === scope.cidr);
-  const covering = routes.filter(route => route.family === 'IPv4' && routeCoversScope(route.destination, scope.cidr!))
+  const local = localIpv4Scopes(interfaces).find(item =>
+    item.cidr === scope.cidr &&
+    (!scope.interfaceName || item.interfaceName === scope.interfaceName)
+  );
+  const covering = routes.filter(route =>
+    route.family === 'IPv4' &&
+    routeCoversScope(route.destination, scope.cidr!) &&
+    (!scope.interfaceName || route.interfaceName === scope.interfaceName)
+  )
     .sort((a, b) => (prefixOf(b.destination) ?? -1) - (prefixOf(a.destination) ?? -1));
   const route = covering[0];
   const onLink = !!local || (!!route && !route.gateway && interfaces.some(item => !item.internal && item.name === route.interfaceName));
@@ -278,7 +285,7 @@ function evaluateConfiguredScope(
   const prefix = prefixOf(scope.cidr);
   const isSupportedIpv4Cidr = isIpv4(scope.cidr.split('/')[0] || '') && prefix !== null && prefix >= 0 && prefix <= 30;
   const eligible = isSupportedIpv4Cidr && hostCount(scope.cidr) <= IPV4_SCAN_HOST_LIMIT;
-  const interfaceName = scope.interfaceName || local?.interfaceName || route?.interfaceName;
+  const interfaceName = local?.interfaceName || route?.interfaceName || scope.interfaceName;
   return {
     id: scope.id,
     name: scope.name,

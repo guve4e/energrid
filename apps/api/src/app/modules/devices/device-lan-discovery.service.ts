@@ -635,6 +635,7 @@ function buildBoundedRawEvidence(
         model: device.model,
         generation: device.generation,
         components: device.components,
+        observations: device.observations,
       },
     })
   }
@@ -928,7 +929,7 @@ async function enrichNetworkDevice(
     ...(shelly.mac ? [{ source: 'http_rpc' as const, attribute: 'shelly.device_reported_mac', value: shelly.mac, observedAt: rpcObservedAt }] : []),
   ]
 
-  return {
+  const shellyDevice: NetworkDiscoveredDevice = {
     ...base,
     id: shelly.id || base.id,
     vendor: 'Shelly',
@@ -941,12 +942,20 @@ async function enrichNetworkDevice(
     app: shelly.app,
     generation: shelly.gen,
     ...(shelly.mac ? { deviceReportedMacAddress: shelly.mac } : {}),
-    components: shelly.gen && shelly.gen >= 2 && shelly.id
-      ? await probeShellyComponents(candidate.ipAddress)
-      : [],
+    components: [],
     observations: [...(base.observations || []), ...rpcObservations],
     reason: 'Shelly HTTP API responded on the local network.',
   }
+  if (shelly.gen && shelly.gen >= 2 && shelly.id) {
+    const componentEvidence = await probeShellyComponentEvidence(
+      candidate.ipAddress,
+      candidate.networkZoneId,
+      candidate.interfaceName,
+    )
+    shellyDevice.components = componentEvidence.components
+    shellyDevice.observations = [...(shellyDevice.observations || []), ...componentEvidence.observations]
+  }
+  return shellyDevice
 }
 
 function assignNetworkZone(
@@ -1302,37 +1311,125 @@ function normalizeMacAddress(value: unknown): string | undefined {
   return hex.match(/.{2}/g)?.join(':')
 }
 
+type ShellyComponentProbeEvidence = {
+  components: NonNullable<NetworkDiscoveredDevice['components']>
+  observations: NonNullable<NetworkDiscoveredDevice['observations']>
+}
+
+const maxShellyComponents = 32
+const shellyComponentProbeConcurrency = 4
+
 export async function probeShellyComponents(ipAddress: string): Promise<NonNullable<NetworkDiscoveredDevice['components']>> {
+  return (await probeShellyComponentEvidence(ipAddress)).components
+}
+
+async function probeShellyComponentEvidence(
+  ipAddress: string,
+  scopeId?: string,
+  interfaceName?: string,
+): Promise<ShellyComponentProbeEvidence> {
   let baseUrl: string
   try { baseUrl = privateShellyBaseUrl(`http://${ipAddress}`) }
-  catch { return [] }
+  catch { return { components: [], observations: [] } }
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 1500)
   try {
-    const response = await fetch(`${baseUrl}/rpc/Shelly.GetStatus`, {
-      signal: controller.signal,
-      headers: { Accept: 'application/json' },
-      redirect: 'error',
-    })
-    if (!response.ok) return []
-    const body: unknown = await response.json()
-    if (!body || typeof body !== 'object' || Array.isArray(body)) return []
-    const result: NonNullable<NetworkDiscoveredDevice['components']> = []
-    for (const [component, value] of Object.entries(body)) {
-      const match = /^(switch|em1):(\d+)$/.exec(component)
-      if (!match || !value || typeof value !== 'object' || Array.isArray(value)) continue
-      const channel = Number(match[2])
-      const status = value as Record<string, unknown>
-      if (!Number.isInteger(channel) || channel > 31 || status.id !== channel) continue
-      if (match[1] === 'switch' && typeof status.output !== 'boolean') continue
-      result.push({ component, channel })
+    const componentsResponse = await readShellyRpcJson(baseUrl, 'Shelly.GetComponents', controller.signal)
+    const reportedComponents = componentKeysFromComponents(componentsResponse)
+    const statusComponents = reportedComponents === null
+      ? componentKeysFromStatus(componentsResponse)
+      : []
+    const componentKeys = reportedComponents ?? (statusComponents.length > 0
+      ? statusComponents
+      : componentKeysFromStatus(await readShellyRpcJson(baseUrl, 'Shelly.GetStatus', controller.signal)))
+    if (controller.signal.aborted) return { components: [], observations: [] }
+
+    const components = componentKeys.slice(0, maxShellyComponents)
+    const confirmed: ShellyComponentProbeEvidence = { components: [], observations: [] }
+    for (let offset = 0; offset < components.length && !controller.signal.aborted; offset += shellyComponentProbeConcurrency) {
+      const batch = components.slice(offset, offset + shellyComponentProbeConcurrency)
+      const results = await Promise.all(batch.map(async item => {
+        const method = item.component.startsWith('switch:') ? 'Switch.GetStatus' : 'EM1.GetStatus'
+        const body = await readShellyRpcJson(baseUrl, `${method}?id=${item.channel}`, controller.signal)
+        if (!isConfirmedShellyComponentStatus(item, body)) return null
+        return {
+          component: item.component,
+          channel: item.channel,
+          observedAt: new Date().toISOString(),
+          method: `${method}?id=${item.channel}`,
+        }
+      }))
+      for (const result of results) {
+        if (!result) continue
+        confirmed.components.push({ component: result.component, channel: result.channel })
+        confirmed.observations.push({
+          source: 'http_rpc',
+          attribute: 'shelly.component_status',
+          value: result.component,
+          observedAt: result.observedAt,
+          ...(scopeId ? { scopeId } : {}),
+          ...(interfaceName ? { interfaceName } : {}),
+          method: result.method,
+        })
+      }
     }
-    return result
+    return confirmed
   } catch {
-    return []
+    return { components: [], observations: [] }
   } finally {
     clearTimeout(timeout)
   }
+}
+
+async function readShellyRpcJson(
+  baseUrl: string,
+  method: string,
+  signal: AbortSignal,
+): Promise<unknown | null> {
+  try {
+    const response = await fetch(`${baseUrl}/rpc/${method}`, {
+      method: 'GET', signal, headers: { Accept: 'application/json' }, redirect: 'error',
+    })
+    return response.ok ? await response.json() as unknown : null
+  } catch {
+    return null
+  }
+}
+
+function componentKeysFromComponents(value: unknown): Array<{ component: string; channel: number }> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const components = (value as { components?: unknown }).components
+  if (!Array.isArray(components)) return null
+  return components.flatMap(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+    const key = (item as { key?: unknown }).key
+    return typeof key === 'string' ? parsedShellyComponentKey(key) : []
+  }).slice(0, maxShellyComponents)
+}
+
+function componentKeysFromStatus(value: unknown): Array<{ component: string; channel: number }> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return []
+  return Object.keys(value).flatMap(parsedShellyComponentKey).slice(0, maxShellyComponents)
+}
+
+function parsedShellyComponentKey(component: string): Array<{ component: string; channel: number }> {
+  const match = /^(switch|em1):(\d+)$/.exec(component)
+  if (!match) return []
+  const channel = Number(match[2])
+  return Number.isInteger(channel) && channel >= 0 && channel <= 31
+    ? [{ component, channel }]
+    : []
+}
+
+function isConfirmedShellyComponentStatus(
+  component: { component: string; channel: number },
+  value: unknown,
+): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const status = value as Record<string, unknown>
+  if (status.id !== component.channel) return false
+  if (component.component.startsWith('switch:')) return typeof status.output === 'boolean'
+  return typeof status.act_power === 'number' && Number.isFinite(status.act_power)
 }
 
 function vendorFromCandidate(candidate: { macAddress?: string; hostname?: string }): string | undefined {

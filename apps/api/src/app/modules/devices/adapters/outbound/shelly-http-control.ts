@@ -47,6 +47,57 @@ export class ShellyHttpControl {
     return this.call(route, method, method === 'Switch.GetStatus' ? { id: route.channel } : {});
   }
 
+  /**
+   * Read-only, identity-verified switch observation.
+   *
+   * This establishes evidence, not field authority.
+   * Core must separately authorize the source and field
+   * before storing it as an approved observation.
+   */
+  async readVerifiedSwitchStatus(binding: HttpBinding): Promise<{
+    on: boolean;
+    physicalId: string;
+    channel: number;
+    sourceId: 'shelly-http';
+    receivedAt: string;
+  }> {
+    const route = parseDeviceControlBinding(binding) as HttpBinding;
+
+    const identityBefore = await this.readOnly(
+      route,
+      'Shelly.GetDeviceInfo',
+    );
+
+    if (identityBefore['id'] !== route.physicalId)
+      throw new Error('Shelly identity mismatch before status read.');
+
+    const status = await this.readOnly(route, 'Switch.GetStatus');
+    const receivedAt = new Date().toISOString();
+
+    const identityAfter = await this.readOnly(
+      route,
+      'Shelly.GetDeviceInfo',
+    );
+
+    if (identityAfter['id'] !== route.physicalId)
+      throw new Error('Shelly identity changed during status read.');
+
+    if (
+      status['id'] !== route.channel ||
+      typeof status['output'] !== 'boolean'
+    ) {
+      throw new Error('Shelly returned an invalid switch status.');
+    }
+
+    return {
+      on: status['output'],
+      physicalId: route.physicalId,
+      channel: route.channel,
+      sourceId: 'shelly-http',
+      receivedAt,
+    };
+  }
+
   async setSwitch(binding: HttpBinding, on: boolean): Promise<boolean | null> {
     const route = parseDeviceControlBinding(binding) as HttpBinding;
     if (!route.enabled) throw new Error('Switching is disabled.');

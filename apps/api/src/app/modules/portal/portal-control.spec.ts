@@ -290,12 +290,16 @@ describe('portal control configuration authorization', () => {
     scanNow.mockResolvedValue({
       devices: [
         {
-          id: 'shellyplus1-aabbccddeeff',
+          id: 'shellyplus1-8813bfcdc8bc',
           vendor: 'Shelly',
-          ipAddress: '192.168.7.21',
+          ipAddress: '192.168.1.220',
           generation: 2,
+          model: 'SNSW-001X16EU',
+          app: 'Plus1',
+          macAddress: '88:13:bf:cd:c8:bc',
           status: 'online',
-          components: [{ component: 'switch:1', channel: 1 }],
+          discoveredAt: '2026-10-22T12:00:00.000Z',
+          components: [{ component: 'switch:0', channel: 0 }],
         },
         { id: 'camera', vendor: 'Ring', status: 'online' },
       ],
@@ -307,7 +311,16 @@ describe('portal control configuration authorization', () => {
     });
     expect(registerDiscoveredDevice).toHaveBeenCalledTimes(1);
     expect(registerDiscoveredDevice).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'shellyplus1-aabbccddeeff:switch:1' }),
+      expect.objectContaining({
+        id: 'shellyplus1-8813bfcdc8bc:switch:0',
+        protocol: 'http',
+        driver: 'shelly-lan',
+        metadata: expect.objectContaining({
+          physicalId: 'shellyplus1-8813bfcdc8bc',
+          ipAddress: '192.168.1.220',
+          networkObservedAt: '2026-10-22T12:00:00.000Z',
+        }),
+      }),
     );
     expect(configure).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();

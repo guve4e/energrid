@@ -127,6 +127,134 @@ describe('NetworkEndpointInvestigatorService', () => {
     expect(result.summary).toContain('router make and model remain unknown');
   });
 
+  it('combines HouseNet route role, ASUS OUI clue, and saved HTTP response without claiming a model', async () => {
+    const houseNetSnapshot = structuredClone(snapshot);
+    houseNetSnapshot.scanId = 'scan-housenet-pi';
+    houseNetSnapshot.collector = { id: 'pi/eth0', host: 'energrid-pi', interfaces: ['eth0'] };
+    houseNetSnapshot.scopes = [{ id: 'housenet', name: 'HouseNet', cidr: '192.168.1.0/24', interfaceName: 'eth0', complete: true, gatewayIpsObserved: [] }];
+    houseNetSnapshot.runtime!.observer = { id: 'observer/pi', host: 'energrid-pi', platform: 'linux' };
+    houseNetSnapshot.runtime!.routes = [{ destination: '0.0.0.0/0', family: 'IPv4', gateway: '192.168.1.1', interfaceName: 'eth0', evidence: 'ip_route_table' }];
+    houseNetSnapshot.runtime!.localScopes = [{ cidr: '192.168.1.0/24', interfaceName: 'eth0' }];
+    houseNetSnapshot.runtime!.configuredScopes = [{ id: 'housenet', name: 'HouseNet', cidr: '192.168.1.0/24', interfaceName: 'eth0', reachability: 'on_link', boundedScanEligible: true, reason: 'Direct route observed.' }];
+    houseNetSnapshot.endpoints = [{
+      id: 'house-gateway', ipAddress: '192.168.1.1', networkZoneId: 'housenet', networkZoneName: 'HouseNet',
+      macAddress: '00:11:2f:12:34:56', protocol: 'unknown', confidence: 0.5, status: 'online',
+      discoveredAt: '2026-10-21T10:00:40.000Z', reason: 'Responded during Nmap host discovery',
+      observations: [
+        { source: 'nmap', attribute: 'host.discovered', value: true, observedAt: '2026-10-21T10:00:35.000Z', scopeId: 'housenet', interfaceName: 'eth0', method: 'nmap_host_discovery' },
+        { source: 'tcp', attribute: 'port.80.open', value: true, observedAt: '2026-10-21T10:00:40.000Z', scopeId: 'housenet', interfaceName: 'eth0', method: 'nmap_tcp_connect_service_scan' },
+        { source: 'tcp', attribute: 'port.80.service', value: 'http', observedAt: '2026-10-21T10:00:40.000Z', scopeId: 'housenet', interfaceName: 'eth0', method: 'nmap_tcp_connect_service_scan' },
+        { source: 'http_rpc', attribute: 'http.server_header', value: 'ASUS embedded web server', observedAt: '2026-10-21T10:00:40.000Z', scopeId: 'housenet', interfaceName: 'eth0', method: 'read_only_http_identification' },
+        { source: 'http_rpc', attribute: 'http.status_code', value: 200, observedAt: '2026-10-21T10:00:40.000Z', scopeId: 'housenet', interfaceName: 'eth0', method: 'read_only_http_identification' },
+      ],
+    }];
+    houseNetSnapshot.rawEvidence = [{
+      observedAt: '2026-10-21T10:00:35.000Z', source: 'nmap', scopeId: 'housenet',
+      evidence: { ipAddress: '192.168.1.1', macAddress: '00:11:2f:12:34:56' },
+    }];
+    const houseRequest = { scanId: houseNetSnapshot.scanId, scopeId: 'housenet', ipAddress: '192.168.1.1', endpointId: 'house-gateway' };
+    generate.mockImplementation(async (input: { userPrompt: string }) => {
+      const payload = JSON.parse(input.userPrompt);
+      const port = payload.evidence.find((item: { attribute: string }) => item.attribute === 'port.80.open');
+      return { provider: 'test', model: 'test', text: JSON.stringify(answer({ findings: [{
+        kind: 'observed_fact', claim: 'HTTP port 80 responded during the scan.', confidence: 1,
+        supportingEvidenceIds: [port.id], missingEvidence: [],
+      }] })) };
+    });
+
+    const result = await service.investigate(houseNetSnapshot, houseRequest);
+    const payload = JSON.parse(generate.mock.calls[0][0].userPrompt);
+    const asusClue = result.findings.find(item => item.kind === 'manufacturer_clue');
+
+    expect(result.networkRole).toMatchObject({ role: 'default_gateway', ipAddress: '192.168.1.1', observer: { host: 'energrid-pi', interfaceName: 'eth0' } });
+    expect(payload.evidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'nmap', attribute: 'host.discovered', value: true, confidence: 'observed' }),
+      expect.objectContaining({ attribute: 'http.server_header', value: 'ASUS embedded web server', confidence: 'reported' }),
+      expect.objectContaining({ attribute: 'http.status_code', value: 200 }),
+      expect.objectContaining({ attribute: 'mac_oui.interface_vendor_clue', value: 'ASUSTek COMPUTER INC.' }),
+    ]));
+    expect(asusClue?.confidence).toBeLessThanOrEqual(0.7);
+    expect(asusClue?.claim).toContain('network-interface vendor clue');
+    expect(asusClue?.missingEvidence).toEqual(expect.arrayContaining(['Verified router manufacturer and model']));
+    expect(result.findings[0]).toMatchObject({ kind: 'observed_fact', claim: expect.stringContaining('Observed default gateway'), confidence: 1 });
+    expect(result.findings.some(item => item.claim.includes('server header: ASUS embedded web server'))).toBe(true);
+    expect(result.summary).toContain('ASUSTek COMPUTER INC.');
+    expect(result.identification).toMatchObject({ deviceType: null, manufacturer: null, confidence: null });
+  });
+
+
+  it('preserves identity clues when a scan contains many low-value port observations', async () => {
+    const crowded = structuredClone(snapshot);
+    const endpoint = crowded.endpoints[0];
+    endpoint.macAddress = '00:11:2f:12:34:56';
+
+    const observedAt = '2026-10-21T10:00:40.000Z';
+    const noisyObservations = Array.from({ length: 50 }, (_, index) => ({
+      source: 'tcp' as const,
+      attribute: `port.${3000 + index}.open`,
+      value: true,
+      observedAt,
+      scopeId: 'eero',
+    }));
+
+    endpoint.observations = [
+      ...noisyObservations,
+      { source: 'nmap', attribute: 'host.discovered', value: true, observedAt, scopeId: 'eero' },
+      { source: 'http_rpc', attribute: 'http.server_header', value: 'ASUS embedded web server', observedAt, scopeId: 'eero' },
+      ...endpoint.observations!,
+    ];
+
+    generate.mockImplementation(async (input: { userPrompt: string }) => {
+      const payload = JSON.parse(input.userPrompt);
+      const header = payload.evidence.find(
+        (item: { attribute: string }) => item.attribute === 'http.server_header',
+      );
+
+      return {
+        provider: 'test',
+        model: 'test',
+        text: JSON.stringify(answer({
+          findings: [{
+            kind: 'observed_fact',
+            claim: 'HTTP server response was observed.',
+            confidence: 1,
+            supportingEvidenceIds: [header.id],
+            missingEvidence: [],
+          }],
+        })),
+      };
+    });
+
+    const result = await service.investigate(crowded, request);
+    const payload = JSON.parse(generate.mock.calls[0][0].userPrompt);
+
+    expect(payload.evidence.length).toBeLessThanOrEqual(32);
+
+    expect(payload.evidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        attribute: 'mac_oui.interface_vendor_clue',
+        value: 'ASUSTek COMPUTER INC.',
+      }),
+      expect.objectContaining({
+        attribute: 'http.server_header',
+        value: 'ASUS embedded web server',
+      }),
+      expect.objectContaining({
+        attribute: 'host.discovered',
+        value: true,
+      }),
+    ]));
+
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'manufacturer_clue',
+        confidence: 0.7,
+      }),
+    ]));
+
+    expect(result.identification.manufacturer).toBeNull();
+  });
+
   it('carries prior protocol identity history only when the observed MAC also matches', async () => {
     const prior = structuredClone(snapshot);
     prior.scanId = 'scan-prior';

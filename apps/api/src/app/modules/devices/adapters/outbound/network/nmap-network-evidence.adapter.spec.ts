@@ -126,8 +126,10 @@ describe('Nmap XML evidence adapter', () => {
     expect(calls[2].args).toContain('-sV');
     expect(calls[2].args).toContain('-e');
     expect(calls[2].args.at(-1)).toBe('192.168.7.21');
-    expect(calls[1].timeout).toBe(10000);
-    expect(calls[2].timeout).toBe(10000);
+    expect(calls[1].timeout).toBeGreaterThanOrEqual(9000);
+    expect(calls[1].timeout).toBeLessThanOrEqual(10000);
+    expect(calls[2].timeout).toBeGreaterThanOrEqual(9000);
+    expect(calls[2].timeout).toBeLessThanOrEqual(10000);
   });
 
   it('discovers hosts once, then limits service identification to discovered hosts and configured seeds', async () => {

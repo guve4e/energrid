@@ -10,15 +10,21 @@ const identity = {
   deviceId: 'temp-kitchen',
 };
 
-function createHarness(physicalInventory?: unknown, initialMetadata: Record<string, string | number | boolean> = {}) {
+function createHarness(
+  physicalInventory?: unknown,
+  initialMetadata: Record<string, string | number | boolean> = {},
+  deviceId = identity.deviceId,
+  protocol: 'mqtt' | 'http' = 'mqtt',
+) {
+  const candidateIdentity = { ...identity, deviceId };
   let current = {
-    ...identity,
-    id: identity.deviceId,
+    ...candidateIdentity,
+    id: deviceId,
     displayName: 'Kitchen Temperature',
     trustStatus: 'discovered',
     state: { values: {}, observedAt: '2026-10-19T12:00:00.000Z', source: 'mqtt', status: 'online' },
-    adapter: { protocol: 'mqtt', driver: initialMetadata.httpBaseUrl ? 'shelly-lan' : 'mqtt', configured: true },
-    capabilities: [{ kind: 'power', actions: ['read'] }],
+    adapter: { protocol, transport: protocol, driver: initialMetadata.httpBaseUrl ? 'shelly-lan' : protocol, configured: true },
+    capabilities: [{ kind: initialMetadata.component === 'switch:0' ? 'switch' : 'power', actions: ['read'] }],
     metadata: initialMetadata,
   } as unknown as RegisteredDevice;
 
@@ -60,11 +66,11 @@ function createHarness(physicalInventory?: unknown, initialMetadata: Record<stri
     find: jest.fn().mockResolvedValue(null),
 
     enroll: jest.fn().mockResolvedValue({
-      ...identity,
+      ...candidateIdentity,
       status: 'enrolled',
       version: 1,
     }),
-    reenroll: jest.fn().mockResolvedValue({ ...identity, status: 'enrolled', version: 2 }),
+    reenroll: jest.fn().mockResolvedValue({ ...candidateIdentity, status: 'enrolled', version: 2 }),
   };
 
   const service = new DeviceOnboardingService(
@@ -124,6 +130,50 @@ describe('DeviceOnboardingService', () => {
     ).toBeLessThan(
       enrollment.enroll.mock.invocationCallOrder[0],
     );
+  });
+
+  it('onboards a LAN-verified Shelly Plus 1 through the existing installation and enrollment stores', async () => {
+    const deviceId = 'shellyplus1-8813bfcdc8bc:switch:0';
+    const physicalInventory = {
+      discover: jest.fn().mockResolvedValue({ physicalDeviceId: 'physical-plus1' }),
+      forLogicalDevice: jest.fn().mockResolvedValue(null),
+      associateLanIdentity: jest.fn().mockResolvedValue(undefined),
+      assignComponent: jest.fn().mockResolvedValue(undefined),
+    };
+    const { service, registry, enrollment } = createHarness(physicalInventory, {
+      physicalId: 'shellyplus1-8813bfcdc8bc',
+      component: 'switch:0',
+      httpBaseUrl: 'http://192.168.1.220',
+      ipAddress: '192.168.1.220',
+      networkScope: 'gateway-unknown:home-lan',
+      networkObservedAt: '2026-10-22T12:00:00.000Z',
+      macAddress: '88:13:bf:cd:c8:bc',
+    }, deviceId, 'http');
+
+    await service.approve(deviceId);
+
+    expect(registry.approveDiscoveredDevice).toHaveBeenCalledWith(deviceId);
+    expect(registry.persistInstallation).toHaveBeenCalledWith(expect.objectContaining({
+      id: deviceId,
+      adapter: expect.objectContaining({ protocol: 'http', driver: 'shelly-lan' }),
+    }), true);
+    expect(enrollment.enroll).toHaveBeenCalledWith({
+      tenantId: identity.tenantId,
+      siteId: identity.siteId,
+      deviceId,
+      displayName: 'Kitchen Temperature',
+    }, 'portal-control-token');
+    expect(physicalInventory.discover).toHaveBeenCalledWith(expect.objectContaining({
+      identity: { namespace: 'mqtt:shelly-protocol-id', value: 'shellyplus1-8813bfcdc8bc' },
+      evidenceSource: 'lan_discovery_protocol_match',
+      components: [{ key: 'switch:0', capabilities: ['switch'] }],
+      endpoint: { protocol: 'http', kind: 'rpc', address: 'http://192.168.1.220' },
+    }));
+    expect(physicalInventory.associateLanIdentity).toHaveBeenCalledWith(expect.objectContaining({
+      ipAddress: '192.168.1.220', macAddress: '88:13:bf:cd:c8:bc',
+      evidenceSource: 'lan_discovery_protocol_match',
+    }));
+    expect(registry.setEnrollmentStatus).toHaveBeenCalledWith(deviceId, 'enrolled');
   });
 
   it('persists a protocol-identified component only as part of explicit onboarding approval', async () => {

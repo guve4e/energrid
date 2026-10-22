@@ -42,6 +42,45 @@ describe('DeviceDiscoveryMemoryStore', () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+
+  it('persists installer network notes across restarts and isolates installations', async () => {
+    const notes = 'ASUS is the main router. Eero connects behind it.';
+
+    expect(await store.getNetworkInstallerNotes('tenant-a', 'site-a')).toBeNull();
+
+    const saved = await store.saveNetworkInstallerNotes(
+      'tenant-a',
+      'site-a',
+      notes,
+    );
+
+    expect(saved).toMatchObject({
+      schemaVersion: 1,
+      source: 'installer',
+      text: notes,
+    });
+    expect(Number.isNaN(Date.parse(saved.updatedAt))).toBe(false);
+
+    expect(await store.getNetworkInstallerNotes('tenant-a', 'site-b')).toBeNull();
+    expect(await store.getNetworkInstallerNotes('tenant-b', 'site-a')).toBeNull();
+
+    await store.onModuleDestroy();
+    store = new DeviceDiscoveryMemoryStore(directory);
+
+    expect(await store.getNetworkInstallerNotes('tenant-a', 'site-a'))
+      .toEqual(saved);
+
+    const updated = await store.saveNetworkInstallerNotes(
+      'tenant-a',
+      'site-a',
+      'Eero is operating in router mode.',
+    );
+
+    expect(updated.text).toBe('Eero is operating in router mode.');
+    expect(await store.getNetworkInstallerNotes('tenant-a', 'site-a'))
+      .toEqual(updated);
+  });
+
   it('persists devices across store restarts', async () => {
     const timestamp = '2026-10-18T10:00:00.000Z';
 

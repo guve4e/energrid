@@ -379,6 +379,50 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
     await this.db.batch(operations);
   }
 
+  async getNetworkInstallerNotes(tenantId: string, siteId: string): Promise<{
+    schemaVersion: 1;
+    source: 'installer';
+    text: string;
+    updatedAt: string;
+  } | null> {
+    const key = `network:installer-notes:${encodeURIComponent(tenantId)}:${encodeURIComponent(siteId)}`;
+    const value = await this.getOptional(key);
+
+    if (!value || typeof value !== 'object') return null;
+    const record = value as Record<string, unknown>;
+
+    if (record.schemaVersion !== 1 ||
+        record.source !== 'installer' ||
+        typeof record.text !== 'string' ||
+        typeof record.updatedAt !== 'string') {
+      return null;
+    }
+
+    return {
+      schemaVersion: 1,
+      source: 'installer',
+      text: record.text,
+      updatedAt: record.updatedAt,
+    };
+  }
+
+  async saveNetworkInstallerNotes(
+    tenantId: string,
+    siteId: string,
+    text: string,
+  ) {
+    const record = {
+      schemaVersion: 1 as const,
+      source: 'installer' as const,
+      text,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const key = `network:installer-notes:${encodeURIComponent(tenantId)}:${encodeURIComponent(siteId)}`;
+    await this.db.put(key, record);
+    return record;
+  }
+
   async recordSnapshot(snapshot: NetworkDiscoverySnapshot): Promise<void> {
     const snapshotKey = `snapshot:${encodeURIComponent(snapshot.scanId)}`;
     if (await this.getOptional(snapshotKey) !== undefined) {

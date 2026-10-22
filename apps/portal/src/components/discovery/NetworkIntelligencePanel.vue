@@ -67,11 +67,18 @@ const props = withDefaults(defineProps<{
   endpointInvestigations?: Record<string, NetworkEndpointInvestigationState>;
   endpointHttpProbes?: Record<string, NetworkEndpointHttpProbeState>;
   endpointIdentityRefreshes?: Record<string, NetworkEndpointIdentityRefreshState>;
+  onboardingBusy?: boolean;
   busy?: boolean; error?: string;
 }>(), { enrollmentStateAvailable: true });
 const emit = defineEmits<{
   scan: [scopeIds: string[]]; cancel: [];
   openPending: [recordId?: string]; openDevice: [recordId: string];
+  startOnboarding: [request: {
+    scanId: string;
+    scopeId: string;
+    ipAddress: string;
+    endpointId: string;
+  }];
   investigateEndpoint: [request: { scanId: string; scopeId: string; ipAddress: string; endpointId: string }];
   probeEndpoint: [request: { scanId: string; scopeId: string; ipAddress: string; endpointId: string; refreshId: string }];
   refreshEndpointIdentity: [request: { scanId: string; scopeId: string; ipAddress: string; endpointId: string }];
@@ -452,6 +459,20 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
           </div>
           <div v-else-if="endpointLifecycle(selectedEndpoint) === 'identified'" class="ni-lifecycle-context">
             <span>Identity is verified, but no pending or enrolled record is correlated.</span>
+            <button
+              v-if="verifiedIdentity(selectedEndpoint) && selectedEndpoint.vendor === 'Shelly' && !selectedEndpoint.identityConflict && selectedSnapshot"
+              type="button"
+              class="ni-button ni-button-primary"
+              :disabled="busy || onboardingBusy"
+              @click="emit('startOnboarding', {
+                scanId: selectedSnapshot.scanId,
+                scopeId: selectedEndpoint.networkZoneId,
+                ipAddress: selectedEndpoint.ipAddress,
+                endpointId: selectedEndpoint.id,
+              })"
+            >
+              {{ onboardingBusy ? 'Verifying device…' : 'Start onboarding' }}
+            </button>
           </div>
           <div v-else-if="endpointLifecycle(selectedEndpoint) === 'approved'" class="ni-lifecycle-context">
             <span>Energrid approval exists; active enrollment is not confirmed.</span>
@@ -463,7 +484,18 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
             <small>Network role only. Router make, model, and device identity are not established.</small>
           </section>
           <dl class="ni-detail-fields">
-            <div><dt>IP address</dt><dd>{{ selectedEndpoint.ipAddress }}</dd></div>
+            <div>
+              <dt>IP address</dt>
+              <dd>
+                {{ selectedEndpoint.ipAddress }}
+                <a
+                  v-if="selectedEndpoint.vendor === 'Shelly' && verifiedIdentity(selectedEndpoint) && /^\\d{1,3}(?:\\.\\d{1,3}){3}$/.test(selectedEndpoint.ipAddress)"
+                  :href="`http://${selectedEndpoint.ipAddress}/`"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >Open settings ↗</a>
+              </dd>
+            </div>
             <div><dt>Network</dt><dd>{{ selectedEndpoint.networkZoneName }} · {{ selectedEndpoint.networkZoneId }}</dd></div>
             <div><dt>Verified protocol identity</dt><dd>{{ verifiedIdentity(selectedEndpoint) ? selectedEndpoint.id : 'Not established' }}</dd></div>
             <div><dt>Observed MAC</dt><dd>{{ selectedEndpoint.macAddress || 'Not observed' }}</dd></div>

@@ -60,7 +60,7 @@ const SAFE_CHECKS = new Set<NetworkEndpointSafeCheck>([
   'review_dhcp_lease', 'inspect_http_headers', 'verify_read_only_identity',
   'compare_future_snapshot', 'manual_identification',
 ]);
-const SAFE_OBSERVATION_ATTRIBUTES = /^(reachable|hostname|service|service_name|service_port|protocol|port\.\d+\.(open|service)|shelly\.(device_id|device_reported_mac|model|app|generation)|identity\.verified|mac_address|observed_mac)$/i;
+const SAFE_OBSERVATION_ATTRIBUTES = /^(reachable|hostname|service|service_name|service_port|protocol|host\.discovered|port\.\d+\.(open|service)|http\.(server_header|content_type|status_code)|shelly\.(device_id|device_reported_mac|model|app|generation)|identity\.verified|mac_address|observed_mac)$/i;
 const SENSITIVE_ATTRIBUTE = /(payload|body|authorization|password|token|secret|credential|cookie|private.?key)/i;
 const SECRET_TEXT = /(password|token|secret|authorization|api[_-]?key|credential)\s*[:=]\s*[^\s,;]+/gi;
 const SOURCE_MAP: Record<string, string> = {
@@ -219,6 +219,7 @@ export class NetworkEndpointInvestigatorService {
         'An OUI vendor match identifies the registered network-interface/chip vendor only; it is not proof of the device manufacturer or device type. Separate observed facts, vendor clues, hypotheses, and missing evidence.',
         'Historical snapshot evidence describes what was observed then and never proves present reachability.',
         'A network role such as default gateway is an observed route role, not proof of hardware type, make, model, or physical identity.',
+        'An HTTP server header identifies only the server string returned by that endpoint; it is not by itself proof of device manufacturer or model.',
         'Historical address context is correlated only when it carries a matching observed MAC; address-only entries are explicitly unlinked and must not be described as the same device.',
         'An endpoint scan status is scan-time evidence only. Say "responded during the scan" and never "currently online".',
         'Every finding and non-null identification must cite one or more exact supplied evidence IDs. Never invent evidence IDs.',
@@ -232,12 +233,29 @@ export class NetworkEndpointInvestigatorService {
     }, { cloudDataConsent });
 
     const parsed = parseOutput(response.text, evidence);
+    const deterministicFindings: NetworkEndpointInvestigationResult['findings'] = [];
     if (networkRole) {
       const roleClaim = `${networkRole.label} for ${safeText(networkRole.scopeName, 100)} was recorded by ${safeText(networkRole.observer.host, 100)} on ${safeText(networkRole.observer.interfaceName, 64)} at ${networkRole.observedAt}. This is a network role, not a verified device identity; router make and model remain unknown.`;
       parsed.summary = safeText(`${roleClaim} ${parsed.summary}`, 800);
-      parsed.findings = [{ kind: 'observed_fact' as const, claim: roleClaim, confidence: 1, supportingEvidenceIds: [networkRole.id], missingEvidence: ['Router manufacturer and model', 'Verified hardware identity'] },
-        ...parsed.findings.filter(item => !item.supportingEvidenceIds.includes(networkRole.id))].slice(0, 8);
+      deterministicFindings.push({ kind: 'observed_fact', claim: roleClaim, confidence: 1, supportingEvidenceIds: [networkRole.id], missingEvidence: ['Router manufacturer and model', 'Verified hardware identity'] });
     }
+    const ouiEvidence = evidence.find(item => item.attribute === 'mac_oui.interface_vendor_clue');
+    if (ouiEvidence && ouiEvidence.provenance) {
+      const claim = `The observed MAC prefix ${ouiEvidence.provenance.prefix} is assigned to ${safeText(String(ouiEvidence.value), 120)} in ${ouiEvidence.provenance.database} (${ouiEvidence.provenance.version}). This is a network-interface vendor clue, not proof of the device manufacturer or model.`;
+      parsed.summary = safeText(`${claim} ${parsed.summary}`, 800);
+      deterministicFindings.push({ kind: 'manufacturer_clue', claim, confidence: 0.7, supportingEvidenceIds: [ouiEvidence.id], missingEvidence: ['Verified router manufacturer and model'] });
+    }
+    for (const header of evidence.filter(item => item.attribute === 'http.server_header' || item.attribute === 'http.content_type' || item.attribute === 'http.status_code')) {
+      deterministicFindings.push({
+        kind: 'observed_fact',
+        claim: `The saved HTTP identification response reported ${header.attribute.replace('http.', '').replace('_', ' ')}: ${safeText(String(header.value), 120)} at ${header.observedAt}. This describes the response, not verified device identity.`,
+        confidence: 1,
+        supportingEvidenceIds: [header.id],
+        missingEvidence: [],
+      });
+    }
+    const deterministicEvidenceIds = new Set(deterministicFindings.flatMap(item => item.supportingEvidenceIds));
+    parsed.findings = [...deterministicFindings, ...parsed.findings.filter(item => !item.supportingEvidenceIds.some(id => deterministicEvidenceIds.has(id)))].slice(0, 8);
     return {
       schemaVersion: 1,
       scanId: snapshot.scanId,
@@ -280,7 +298,23 @@ function buildEvidence(snapshot: NetworkDiscoverySnapshot, endpoint: NetworkDisc
   if (endpoint.deviceReportedMacAddress) add('http_rpc', 'device_reported_mac', endpoint.deviceReportedMacAddress, endpoint.discoveredAt, 'reported');
   if (endpoint.vendor) add('snapshot_endpoint', 'vendor', endpoint.vendor, endpoint.discoveredAt, 'reported');
   if (endpoint.model) add('snapshot_endpoint', 'model', endpoint.model, endpoint.discoveredAt, 'reported');
-  for (const observation of (endpoint.observations || []).slice(0, 64)) {
+  const macVendor = lookupMacVendor(endpoint.macAddress);
+  if (macVendor.status === 'matched') {
+    add('ieee_oui_database', 'mac_oui.interface_vendor_clue', macVendor.vendor, endpoint.discoveredAt, 'reported', {
+      database: macVendor.source,
+      version: macVendor.databaseVersion,
+      sourceSha256: macVendor.sourceSha256,
+      assignmentType: macVendor.assignmentType,
+      classification: macVendor.classification,
+      prefix: macVendor.prefix,
+    });
+  }
+
+  // Preserve high-value identity observations when a scan produces many port facts.
+  const observations = [...(endpoint.observations || [])].sort((a, b) =>
+    evidencePriority(b.attribute) - evidencePriority(a.attribute)
+  );
+  for (const observation of observations.slice(0, 64)) {
     if (!SAFE_OBSERVATION_ATTRIBUTES.test(observation.attribute) || SENSITIVE_ATTRIBUTE.test(observation.attribute)) continue;
     const source = SOURCE_MAP[observation.source] || 'network_scan';
     const confidence: SafeEvidence['confidence'] = observation.source === 'http_rpc' ? 'reported' : 'observed';
@@ -319,18 +353,15 @@ function buildEvidence(snapshot: NetworkDiscoverySnapshot, endpoint: NetworkDisc
   }
   if (endpoint.hostname && !hasHostnameProvenance) add('snapshot_endpoint', 'hostname', endpoint.hostname, endpoint.discoveredAt, 'reported');
   if (endpoint.macAddress && !hasObservedMacProvenance) add('snapshot_endpoint', 'observed_mac', endpoint.macAddress, endpoint.discoveredAt, 'observed');
-  const macVendor = lookupMacVendor(endpoint.macAddress);
-  if (macVendor.status === 'matched') {
-    add('ieee_oui_database', 'mac_oui.interface_vendor_clue', macVendor.vendor, endpoint.discoveredAt, 'reported', {
-      database: macVendor.source,
-      version: macVendor.databaseVersion,
-      sourceSha256: macVendor.sourceSha256,
-      assignmentType: macVendor.assignmentType,
-      classification: macVendor.classification,
-      prefix: macVendor.prefix,
-    });
-  }
   return evidence;
+}
+
+
+function evidencePriority(attribute: string): number {
+  if (/^http\.(server_header|content_type|status_code)$/i.test(attribute)) return 3;
+  if (/^(hostname|host\.discovered|identity\.verified|shelly\.)/i.test(attribute)) return 2;
+  if (/^port\.\d+\.service$/i.test(attribute)) return 1;
+  return 0;
 }
 
 function parseOutput(text: string, evidence: SafeEvidence[]): Pick<NetworkEndpointInvestigationResult, 'summary' | 'identification' | 'findings' | 'missingEvidence' | 'safeFollowUpChecks'> {

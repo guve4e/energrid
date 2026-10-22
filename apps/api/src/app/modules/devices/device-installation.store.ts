@@ -3,10 +3,20 @@ import { ClassicLevel } from 'classic-level';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { RegisteredDevice } from './device-registry.types';
+import type {
+  ApprovedObservationBinding,
+  ObservationAuthorityPolicy,
+} from '@energrid/domain-devices';
+
+export interface InstallationObservationAuthority {
+  bindings: ApprovedObservationBinding[];
+  policy: ObservationAuthorityPolicy;
+}
 
 export interface DeviceInstallationRecord {
   schemaVersion: 1;
   device: RegisteredDevice;
+  observationAuthority?: InstallationObservationAuthority;
   physicalOutcome: {
     status: 'not_confirmed' | 'confirmed';
     confirmedAt: string | null;

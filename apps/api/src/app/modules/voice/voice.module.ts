@@ -1,3 +1,4 @@
+import { HouseIntelligenceModule } from '../llm/house-intelligence.module'
 import { Module } from '@nestjs/common'
 import { VoiceGateway } from './voice.gateway'
 import { DebugGateway } from './debug.gateway'
@@ -29,7 +30,7 @@ import {
 } from './speech-provider.tokens'
 
 @Module({
-  imports: [DevicesModule],
+  imports: [DevicesModule, HouseIntelligenceModule],
   controllers: [VoiceProtocolController, VoiceClientController],
   providers: [
     VoiceGateway,

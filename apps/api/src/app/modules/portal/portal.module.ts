@@ -1,3 +1,4 @@
+import { HouseIntelligenceModule } from '../llm/house-intelligence.module'
 import { Module } from '@nestjs/common'
 import { LlmGatewayService, OpenAiDeviceLlmProvider } from '../llm/llm-gateway.service'
 import { DeviceAiInvestigationService } from '../llm/device-ai-investigation.service'
@@ -16,7 +17,7 @@ import { DeviceEnrollmentModule } from '../devices/enrollment/device-enrollment.
 import { PortalWeatherController } from './portal-weather.controller'
 
 @Module({
-  imports: [DevicesModule, DeviceEnrollmentModule],
+  imports: [DevicesModule, DeviceEnrollmentModule, HouseIntelligenceModule],
   controllers: [PortalController, PortalWeatherController],
   providers: [
     PortalStateService,

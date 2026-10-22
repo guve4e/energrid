@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import NetworkDiscoveryCard from './components/discovery/NetworkDiscoveryCard.vue';
 import NetworkIntelligencePanel from './components/discovery/NetworkIntelligencePanel.vue';
+import EnergridChatWidget from './components/assistant/EnergridChatWidget.vue';
 import { cloudEvidenceConsentMessage, networkEndpointInvestigationKey, type NetworkEndpointHttpProbeResult, type NetworkEndpointHttpProbeState, type NetworkEndpointIdentityRefreshResult, type NetworkEndpointIdentityRefreshState, type NetworkEndpointInvestigationState, type NetworkEndpointInvestigationResult } from './components/discovery/network-endpoint-investigation';
 import { resolveNetworkEndpointLifecycle } from './components/discovery/network-endpoint-lifecycle';
 import PendingEnrollmentList from './components/discovery/PendingEnrollmentList.vue';
@@ -1329,6 +1330,58 @@ async function probeSnapshotEndpoint(request: {
       ...networkEndpointHttpProbes.value,
       [key]: { loading: false, error: error instanceof Error ? error.message : 'HTTP check failed' },
     };
+  }
+}
+
+const onboardingNetworkEndpoint = ref(false);
+
+async function startNetworkEndpointOnboarding(request: {
+  scanId: string;
+  scopeId: string;
+  ipAddress: string;
+  endpointId: string;
+}): Promise<void> {
+  if (onboardingNetworkEndpoint.value) return;
+  onboardingNetworkEndpoint.value = true;
+  stateError.value = '';
+
+  try {
+    const response = await fetch(
+      `${apiBase}/portal/network/snapshots/${encodeURIComponent(request.scanId)}/scopes/${encodeURIComponent(request.scopeId)}/endpoints/${encodeURIComponent(request.ipAddress)}/${encodeURIComponent(request.endpointId)}/start-onboarding`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken.value}`,
+          'Content-Type': 'application/json',
+        },
+      },
+    );
+
+    const result = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      const message = result.message;
+      throw new Error(
+        typeof message === 'string'
+          ? message
+          : Array.isArray(message)
+            ? message.join(', ')
+            : `Onboarding failed (${response.status})`,
+      );
+    }
+
+    if (!Array.isArray(result.candidates) || !result.candidates.length) {
+      throw new Error('No verified onboarding candidates were returned.');
+    }
+
+    await loadState();
+    setActivePage('discovery');
+  } catch (error) {
+    stateError.value = error instanceof Error
+      ? error.message
+      : 'Could not start onboarding.';
+  } finally {
+    onboardingNetworkEndpoint.value = false;
   }
 }
 
@@ -4886,9 +4939,11 @@ onBeforeUnmount(() => {
             :endpoint-http-probes="networkEndpointHttpProbes"
             :endpoint-identity-refreshes="networkEndpointIdentityRefreshes"
             :busy="scanningNetwork"
+            :onboarding-busy="onboardingNetworkEndpoint"
             :error="networkSnapshotsError || stateError"
             @scan="scanNetwork"
             @cancel="cancelNetworkScan"
+            @start-onboarding="startNetworkEndpointOnboarding"
             @open-pending="openPendingEnrollment"
             @open-device="openEnrolledDevice"
             @investigate-endpoint="investigateSnapshotEndpoint"
@@ -6555,5 +6610,6 @@ onBeforeUnmount(() => {
         @recommendation="handleExecutionRecommendation"
       />
     </section>
+    <EnergridChatWidget v-if="accessToken" :api-base="apiBase" :access-token="accessToken" />
   </main>
 </template>

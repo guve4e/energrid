@@ -1,3 +1,5 @@
+import { AuthorizedDeviceObservationReader, ExistingApprovedObservationReader } from './device-intelligence-observation-reader';
+import { DeviceIntelligenceQueryService } from './device-intelligence-query.service';
 import { Module } from '@nestjs/common'
 import { DeviceControlService } from './device-control.service'
 import { DeviceDiagnosticsService } from './device-diagnostics.service'
@@ -43,13 +45,17 @@ import { LocalNetworkRuntimeAdapter } from './adapters/outbound/network/local-ne
     DeviceDiagnosticsService,
     OperationalLogService,
     DeviceObservationService,
+    DeviceIntelligenceQueryService,
+    { provide: AuthorizedDeviceObservationReader, useClass: ExistingApprovedObservationReader },
     DeviceMatchService,
     DeviceHealthService,
     DeviceInvestigationService,
     DeviceInstallationStore
   ],
   exports: [
+    AuthorizedDeviceObservationReader,
     DeviceRegistryService,
+    ApprovedMqttObservationRuntime,
     DeviceMqttIngestService,
     MqttEvidenceCaptureService,
     DeviceLanDiscoveryService,
@@ -58,6 +64,7 @@ import { LocalNetworkRuntimeAdapter } from './adapters/outbound/network/local-ne
     DeviceDiagnosticsService,
     OperationalLogService,
     DeviceObservationService,
+    DeviceIntelligenceQueryService,
     DeviceMatchService,
     DeviceHealthService,
     DeviceInvestigationService,

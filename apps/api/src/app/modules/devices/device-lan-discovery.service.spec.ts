@@ -21,6 +21,7 @@ import {
 import { DeviceDiscoveryMemoryStore } from './device-discovery-memory.store'
 import { DeviceRegistryService } from './device-registry.service'
 import type { NetworkDiscoveredDevice } from './device-registry.types'
+import { shellyLanCandidates } from './adapters/inbound/shelly/shelly-lan-candidates'
 import { NmapNetworkEvidenceAdapter, type NmapCommandRunner } from './adapters/outbound/network/nmap-network-evidence.adapter'
 import type { LocalNetworkRuntimeAdapter, LocalNetworkRuntimeReport } from './adapters/outbound/network/local-network-runtime.adapter'
 
@@ -340,9 +341,10 @@ describe('LAN discovery evidence persistence', () => {
         app: 'ProEM',
       }) })
       .mockResolvedValueOnce({ ok: true, json: async () => ({
-        'em1:0': { id: 0, act_power: 42 },
-        'em1:1': { id: 1, act_power: 84 },
-      }) }) as unknown as typeof fetch
+        components: [{ key: 'em1:0' }, { key: 'em1:1' }],
+      }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 0, act_power: 42 }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 1, act_power: 84 }) }) as unknown as typeof fetch
     const registry = {
       getSnapshot: jest.fn(() => ({ tenant: { id: 'tenant-test' }, site: { id: 'site-test' } })),
       registerDiscoveredDevice: jest.fn(),
@@ -389,6 +391,92 @@ describe('LAN discovery evidence persistence', () => {
     expect(registry.registerDiscoveredDevice).not.toHaveBeenCalled()
   })
 
+  it('discovers and timestamps a Gen2 switch only after its component RPC confirms it', async () => {
+    process.env.HOME_NMAP_ENABLED = 'false'
+    process.env.HOME_ROUTER_CLIENTS_JSON = JSON.stringify([{
+      ipAddress: '192.168.1.220',
+      macAddress: '88:13:bf:cd:c8:bc',
+    }])
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({
+        id: 'shellyplus1-8813bfcdc8bc', gen: 2, app: 'Plus1', model: 'SNSW-001X16EU',
+      }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ components: [
+        { key: 'switch:0', status: { id: 0 } },
+      ] }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 0, output: false }) }) as unknown as typeof fetch
+    const registry = {
+      getSnapshot: jest.fn(() => ({ tenant: { id: 'tenant-test' }, site: { id: 'site-test' } })),
+    }
+    const inventory = {
+      discover: jest.fn().mockResolvedValue({ physicalDeviceId: 'physical-plus1' }),
+      refreshNetworkObservations: jest.fn().mockResolvedValue(undefined),
+    }
+    const service = new DeviceLanDiscoveryService(
+      memory, registry as never, new DeviceLanNetworkEvidenceCollector(), inventory as never,
+    )
+
+    const result = await service.scanNow({ scopeIds: ['home-lan'], fullSubnetConfirmed: true })
+    const shelly = result.devices.find(device => device.id === 'shellyplus1-8813bfcdc8bc')!
+    const candidate = shellyLanCandidates(shelly)
+    const componentObservation = shelly.observations?.find(item =>
+      item.attribute === 'shelly.component_status' && item.value === 'switch:0',
+    )
+
+    expect(shelly).toMatchObject({
+      id: 'shellyplus1-8813bfcdc8bc',
+      ipAddress: '192.168.1.220',
+      macAddress: '88:13:bf:cd:c8:bc',
+      vendor: 'Shelly',
+      generation: 2,
+      model: 'SNSW-001X16EU',
+      app: 'Plus1',
+      components: [{ component: 'switch:0', channel: 0 }],
+    })
+    expect(componentObservation).toEqual(expect.objectContaining({
+      source: 'http_rpc', value: 'switch:0', scopeId: 'home-lan',
+      method: 'Switch.GetStatus?id=0', observedAt: expect.any(String),
+    }))
+    expect(Date.parse(componentObservation!.observedAt)).not.toBeNaN()
+    expect(result.snapshot.rawEvidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: 'shelly_http_rpc',
+        evidence: expect.objectContaining({
+          protocolId: 'shellyplus1-8813bfcdc8bc',
+          observations: expect.arrayContaining([expect.objectContaining({
+            attribute: 'shelly.component_status',
+            value: 'switch:0',
+            method: 'Switch.GetStatus?id=0',
+            observedAt: componentObservation!.observedAt,
+          })]),
+        }),
+      }),
+    ]))
+    const identityHistory = await memory.listIdentityEvidence()
+    expect(identityHistory.find(record => record.device.id === 'shellyplus1-8813bfcdc8bc')?.device.observations)
+      .toContainEqual(expect.objectContaining({
+        attribute: 'shelly.component_status', value: 'switch:0', observedAt: componentObservation!.observedAt,
+      }))
+    expect(candidate).toHaveLength(1)
+    expect(candidate[0]).toMatchObject({
+      id: 'shellyplus1-8813bfcdc8bc:switch:0',
+      protocol: 'http', transport: 'http', driver: 'shelly-lan',
+      capabilities: ['switch'],
+      metadata: {
+        physicalId: 'shellyplus1-8813bfcdc8bc',
+        component: 'switch:0', channel: 0,
+        ipAddress: '192.168.1.220',
+        networkObservedAt: shelly.discoveredAt,
+      },
+    })
+    expect(inventory.discover).toHaveBeenCalledWith(expect.objectContaining({
+      identity: { namespace: 'mqtt:shelly-protocol-id', value: 'shellyplus1-8813bfcdc8bc' },
+      components: [{ key: 'switch:0', capabilities: ['switch'] }],
+      evidenceSource: 'lan_discovery_protocol_identity',
+    }))
+    expect(registry).not.toHaveProperty('approveDiscoveredDevice')
+  })
+
   it('retains Discovery Memory evidence and rejects the scan when physical persistence fails', async () => {
     process.env.HOME_ROUTER_CLIENTS_JSON = JSON.stringify([{
       ipAddress: '192.168.1.204', macAddress: '08:F9:E0:E8:49:13', vendor: 'Shelly',
@@ -398,8 +486,9 @@ describe('LAN discovery evidence persistence', () => {
         id: 'shellyproem50-08f9e0e84910', mac: '08:F9:E0:E8:49:10', gen: 2,
       }) })
       .mockResolvedValueOnce({ ok: true, json: async () => ({
-        'em1:0': { id: 0, act_power: 42 },
-      }) }) as unknown as typeof fetch
+        components: [{ key: 'em1:0' }],
+      }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 0, act_power: 42 }) }) as unknown as typeof fetch
     const inventory = {
       discover: jest.fn().mockRejectedValue(new Error('inventory unavailable')),
       refreshNetworkObservations: jest.fn(),

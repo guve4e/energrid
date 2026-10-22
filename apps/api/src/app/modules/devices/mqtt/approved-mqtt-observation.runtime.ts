@@ -14,6 +14,7 @@ import {
 import { Inject } from '@nestjs/common';
 import { DEVICE_ENROLLMENT_SERVICE } from '../enrollment/device-enrollment.module';
 import type { DeviceEnrollmentService } from '../enrollment/device-enrollment.service';
+import type { DeviceObservationState } from '@energrid/domain-devices';
 
 /**
  * Runtime owner of explicitly configured MQTT observation profiles.
@@ -29,12 +30,13 @@ export class ApprovedMqttObservationRuntime
   readonly route?: ApprovedMqttObservationRoute;
 
   private readonly store?: DeviceObservationStateStore;
+  private readonly configs: ApprovedMqttObservationConfig[] = [];
 
   constructor(
     private readonly registry: DeviceRegistryService,
-    installations: DeviceInstallationStore,
+    private readonly installations: DeviceInstallationStore,
     @Inject(DEVICE_ENROLLMENT_SERVICE)
-    enrollment: DeviceEnrollmentService,
+    private readonly enrollment: DeviceEnrollmentService,
   ) {
     const raw = process.env.HOME_OBSERVATION_BINDINGS_JSON?.trim();
 
@@ -61,6 +63,7 @@ export class ApprovedMqttObservationRuntime
     }
 
     const configs = parsed as ApprovedMqttObservationConfig[];
+    this.configs.push(...configs);
 
     this.store = new DeviceObservationStateStore(directory);
 
@@ -78,6 +81,34 @@ export class ApprovedMqttObservationRuntime
 
     await this.registry.ensureInstallationsLoaded();
     await this.route.recover();
+  }
+
+  /** Read only persisted fields covered by an active, approved MQTT binding. */
+  async getAuthorizedObservation(scope: { tenantId: string; siteId: string }, deviceId: string): Promise<DeviceObservationState | null> {
+    const config = this.configs.find(item => item.binding.deviceId === deviceId &&
+      item.scope.tenantId === scope.tenantId && item.scope.siteId === scope.siteId);
+    if (!config || !this.store) return null;
+    const device = this.registry.getDevices().find(item =>
+      item.id === deviceId && item.tenantId === scope.tenantId &&
+      item.siteId === scope.siteId && item.kind === 'physical' &&
+      item.trustStatus === 'approved');
+    if (!device) return null;
+    if (this.enrollment) {
+      const enrollment = await this.enrollment.find({ ...scope, deviceId });
+      if (!enrollment || enrollment.status !== 'enrolled') return null;
+    }
+    const installation = await this.installations.get(scope.siteId, deviceId);
+    if (!installation || installation.schemaVersion !== 1 ||
+      installation.device.id !== deviceId || installation.device.tenantId !== scope.tenantId ||
+      installation.device.siteId !== scope.siteId || installation.device.trustStatus !== 'approved') return null;
+
+    const state = await this.store.getState(scope, deviceId);
+    if (!state) return null;
+    const allowedFields = Object.keys(config.binding.fields).filter(field =>
+      config.policy.allowedSourcesByField?.[field]?.includes(config.binding.sourceId));
+    const fields = Object.fromEntries(Object.entries(state.fields).filter(([field, observation]) =>
+      allowedFields.includes(field) && observation.sourceId === config.binding.sourceId));
+    return Object.keys(fields).length ? { ...state, fields } : null;
   }
 
   async onModuleDestroy(): Promise<void> {

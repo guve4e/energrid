@@ -103,6 +103,42 @@ describe('Shelly LAN onboarding candidates', () => {
       process.env = env;
     }
   });
+  it('merges the same MQTT and verified LAN switch identity into one pending HTTP review candidate', () => {
+    const env = process.env;
+    process.env = {
+      PORTAL_APPROVED_DEVICES_JSON: '[]',
+      PORTAL_DISCOVERED_DEVICES_JSON: '[]',
+    };
+    try {
+      const registry = new DeviceRegistryService();
+      const plusOne: NetworkDiscoveredDevice = {
+        ...device,
+        id: 'shellyplus1-8813bfcdc8bc',
+        ipAddress: '192.168.1.220',
+        model: 'SNSW-001X16EU',
+        app: 'Plus1',
+        macAddress: '88:13:bf:cd:c8:bc',
+        components: [{ component: 'switch:0', channel: 0 }],
+      };
+      registry.registerDiscoveredShellyDevice(plusOne.id, 'switch:0', 0, 'shellyplus1-8813bfcdc8bc/rpc');
+      const lanCandidate = shellyLanCandidates(plusOne)[0];
+      expect(registry.registerDiscoveredDevice(lanCandidate)).toBe(true);
+
+      const candidates = registry.getDevices().filter(item => item.id === lanCandidate.id);
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0]).toMatchObject({
+        id: 'shellyplus1-8813bfcdc8bc:switch:0',
+        trustStatus: 'discovered',
+        adapter: { protocol: 'http', transport: 'http', driver: 'shelly-lan' },
+        metadata: {
+          physicalId: 'shellyplus1-8813bfcdc8bc', component: 'switch:0', channel: 0,
+          mqttCommandTopic: 'shellyplus1-8813bfcdc8bc/rpc', ipAddress: '192.168.1.220',
+        },
+      });
+    } finally {
+      process.env = env;
+    }
+  });
 });
 
 describe('read-only Shelly component probing', () => {
@@ -111,28 +147,69 @@ describe('read-only Shelly component probing', () => {
     global.fetch = originalFetch;
     jest.restoreAllMocks();
   });
-  it('only reads GetStatus and accepts valid relays and meters', async () => {
-    const fetch = jest.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        'switch:0': { id: 0, output: false },
-        'switch:1': { id: 1, output: true },
-        'em1:0': { id: 0, act_power: 100 },
-        'input:0': { id: 0, state: false },
-        'switch:2': { id: 3, output: true },
-        'switch:32': { id: 32, output: true },
-        'switch:4': { id: 4, output: 'on' },
-        'switch:5': [],
-      }),
-    });
+  it('confirms advertised Gen2 switch components with their read-only status RPC', async () => {
+    const fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ components: [
+        { key: 'switch:0', status: { id: 0 } },
+      ] }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 0, output: false }) });
+    global.fetch = fetch;
+
+    await expect(probeShellyComponents('192.168.1.220')).resolves.toEqual([
+      { component: 'switch:0', channel: 0 },
+    ]);
+    expect(fetch).toHaveBeenNthCalledWith(1,
+      'http://192.168.1.220/rpc/Shelly.GetComponents',
+      expect.objectContaining({ method: 'GET', redirect: 'error' }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(2,
+      'http://192.168.1.220/rpc/Switch.GetStatus?id=0',
+      expect.objectContaining({ method: 'GET', redirect: 'error' }),
+    );
+  });
+  it('does not record a component when its status RPC reports a different id or no response', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ components: [
+        { key: 'switch:0', status: { id: 0 } },
+      ] }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 1, output: false }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ components: [
+        { key: 'switch:0', status: { id: 0 } },
+      ] }) })
+      .mockResolvedValueOnce({ ok: false, status: 503 });
+
+    await expect(probeShellyComponents('192.168.1.220')).resolves.toEqual([]);
+    await expect(probeShellyComponents('192.168.1.220')).resolves.toEqual([]);
+  });
+  it('uses bounded read-only RPCs and accepts only confirmed relay and meter components', async () => {
+    const fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ error: 'Method not found' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({
+        'switch:0': {}, 'switch:1': {}, 'em1:0': {}, 'input:0': {},
+        'switch:2': {}, 'switch:32': {}, 'switch:4': {}, 'switch:5': [],
+      }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 0, output: false }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 1, output: true }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 0, act_power: 100 }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 3, output: true }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 4, output: 'on' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => [] });
     global.fetch = fetch;
     expect(await probeShellyComponents(device.ipAddress)).toEqual(
       device.components,
     );
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(8);
+    expect(fetch).toHaveBeenCalledWith(
+      'http://192.168.7.21/rpc/Shelly.GetComponents',
+      expect.objectContaining({ method: 'GET', redirect: 'error' }),
+    );
     expect(fetch).toHaveBeenCalledWith(
       'http://192.168.7.21/rpc/Shelly.GetStatus',
-      expect.objectContaining({ redirect: 'error' }),
+      expect.objectContaining({ method: 'GET', redirect: 'error' }),
+    );
+    expect(fetch).toHaveBeenCalledWith(
+      'http://192.168.7.21/rpc/Switch.GetStatus?id=0',
+      expect.objectContaining({ method: 'GET', redirect: 'error' }),
     );
   });
   it.each([null, [], 42, { error: 'Authentication required' }])(
