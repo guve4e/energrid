@@ -17,6 +17,7 @@ import { DeviceObservationService } from './device-observation.service'
 import { DeviceMatchService } from './device-match.service'
 import { DeviceInvestigationService } from './device-investigation.service'
 import { DeviceInstallationStore } from './device-installation.store'
+import { DeviceFirmwareDiagnosticsService } from './device-firmware-diagnostics'
 import { DeviceDiscoveryMemoryStore } from './device-discovery-memory.store'
 import { TelemetryModule } from '../telemetry/telemetry.module'
 import { ApprovedMqttObservationRuntime } from './mqtt/approved-mqtt-observation.runtime'
@@ -54,7 +55,8 @@ import { EnergridHttpIdentityAdapter } from './adapters/outbound/network/energri
     DeviceMatchService,
     DeviceHealthService,
     DeviceInvestigationService,
-    DeviceInstallationStore
+    DeviceInstallationStore,
+    DeviceFirmwareDiagnosticsService,
   ],
   exports: [
     AuthorizedDeviceObservationReader,
@@ -73,7 +75,8 @@ import { EnergridHttpIdentityAdapter } from './adapters/outbound/network/energri
     DeviceMatchService,
     DeviceHealthService,
     DeviceInvestigationService,
-    DeviceInstallationStore
+    DeviceInstallationStore,
+    DeviceFirmwareDiagnosticsService,
   ],
 })
 export class DevicesModule {}

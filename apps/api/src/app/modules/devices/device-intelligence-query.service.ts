@@ -15,6 +15,7 @@ import {
 import { DeviceRegistryService } from './device-registry.service';
 import { DeviceInstallationStore } from './device-installation.store';
 import { DeviceEnrollmentService } from './enrollment/device-enrollment.service';
+import { CORE_MEASUREMENT_DEFINITIONS } from '@energrid/domain-telemetry';
 
 export interface IntelligenceScope {
   tenantId: string;
@@ -576,6 +577,69 @@ export class DeviceIntelligenceQueryService {
     );
   }
 
+  /** Resolve a room inside the authenticated site and return one approved metric. */
+  async readRoomMeasurement(
+    scope: IntelligenceScope,
+    roomQuery: string,
+    metricQuery: string,
+  ) {
+    const room = normalizeRoom(roomQuery);
+    const metric = metricQuery.trim().toLowerCase();
+    const definition = CORE_MEASUREMENT_DEFINITIONS.find(item => item.metric === metric);
+    if (!room || !['temperature', 'humidity'].includes(metric) || !definition) {
+      return { status: 'not_found' as const };
+    }
+
+    // listDevices is the existing approved-installation + durable-enrollment
+    // boundary. Use installation metadata only to resolve its room name.
+    const devices = await this.listDevices(scope);
+    if (!devices.length) return { status: 'not_found' as const };
+    const approvedIds = new Set(devices.map(device => device.deviceId));
+    const installations = await this.installations.list(scope.siteId);
+    const matches = installations.filter(record =>
+      record.schemaVersion === 1 &&
+      record.device.tenantId === scope.tenantId &&
+      record.device.siteId === scope.siteId &&
+      record.device.trustStatus === 'approved' &&
+      approvedIds.has(record.device.id) &&
+      normalizeRoom(record.device.zoneName) === room
+    );
+
+    if (!matches.length) return { status: 'not_found' as const };
+    if (matches.length > 1) return {
+      status: 'ambiguous' as const,
+      deviceIds: matches.map(record => record.device.id).sort(),
+    };
+
+    const device = matches[0].device;
+    const observation = await this.readObservations(scope, device.id);
+    const field = observation?.fields[metric];
+    if (!field || typeof field.value !== 'number' || !Number.isFinite(field.value)) {
+      return {
+        status: 'unavailable' as const,
+        deviceId: device.id,
+        displayName: device.displayName,
+        room: device.zoneName,
+        metric,
+      };
+    }
+
+    return {
+      status: 'measurement' as const,
+      deviceId: device.id,
+      displayName: device.displayName,
+      room: device.zoneName,
+      metric,
+      value: field.value,
+      unit: definition.unit,
+      sourceId: field.sourceId,
+      observedAt: field.measuredAt ?? field.receivedAt,
+      freshness: field.freshness,
+      ageSeconds: field.ageSeconds,
+      freshnessLimitSeconds: observation!.freshnessLimitSeconds,
+    };
+  }
+
   async describeDevice(
     scope: IntelligenceScope,
     query: string,
@@ -596,4 +660,19 @@ export class DeviceIntelligenceQueryService {
 
     return matches.length === 1 ? matches[0] : null;
   }
+}
+
+function normalizeRoom(value: string): string {
+  if (typeof value !== 'string') return '';
+  const normalized = value.normalize('NFKC').toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '');
+  // Bulgarian room names and their common Latin transliteration resolve to
+  // the canonical room name already stored on the installation.
+  if (
+    ['кухня', 'кухнята', 'kuhnq', 'kuhnqta', 'kuhnia', 'kuhnya']
+      .includes(normalized)
+  ) {
+    return 'kitchen';
+  }
+  return normalized;
 }

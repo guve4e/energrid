@@ -152,6 +152,7 @@ export class LettaHouseAgentAdapter implements HouseAgentPort {
           'execute_approved_lighting_action',
           'propose_device_installation',
           'read_device_observation',
+          'read_room_measurement',
           'control_device',
         ],
       toolset: { base: 'none' },
@@ -168,7 +169,8 @@ export class LettaHouseAgentAdapter implements HouseAgentPort {
           toolName === 'resolve_device_target' ||
           toolName === 'execute_approved_lighting_action' ||
           toolName === 'propose_device_installation' ||
-          toolName === 'read_device_observation'
+          toolName === 'read_device_observation' ||
+          toolName === 'read_room_measurement'
         )
           ? { behavior: 'allow' as const }
           : {
@@ -436,6 +438,35 @@ export class LettaHouseAgentAdapter implements HouseAgentPort {
                 : 'Energrid Core could not complete the lighting action.',
             );
           }
+        },
+      },
+      {
+        name: 'read_room_measurement',
+        label: 'Read a room measurement from Core',
+        description: 'For a user asking the current temperature or humidity in a room, call this tool. Supply the room as named by the user (including Bulgarian names such as кухнята or Latin transliteration kuhnqta) and metric=temperature or humidity. Core resolves the room within the authenticated tenant/site, requires exactly one approved enrolled device, and returns the authorized Core measurement with unit, source timestamp and freshness. Never answer from memory, registry display state or PostgreSQL history. If status is stale, report the value as stale with its timestamp; if unavailable, explain that Core has no currently authorized reading.',
+        parameters: {
+          type: 'object',
+          properties: {
+            room: { type: 'string', description: 'Room named by the user, e.g. кухнята, kuhnqta, or kitchen.' },
+            metric: { type: 'string', enum: ['temperature', 'humidity'] },
+          },
+          required: ['room', 'metric'],
+          additionalProperties: false,
+        },
+        execute: async (_toolCallId, raw) => {
+          const args = raw && typeof raw === 'object' && !Array.isArray(raw)
+            ? raw as { room?: unknown; metric?: unknown }
+            : {};
+          if (typeof args.room !== 'string' ||
+              (args.metric !== 'temperature' && args.metric !== 'humidity')) {
+            return toolError('A room and either temperature or humidity are required.');
+          }
+          const result = await this.intelligence.readRoomMeasurement(
+            scope,
+            args.room,
+            args.metric,
+          );
+          return toolResult(result);
         },
       },
       {

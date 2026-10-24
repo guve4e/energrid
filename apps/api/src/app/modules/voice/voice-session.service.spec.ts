@@ -2,6 +2,64 @@ import { VoiceSessionService } from './voice-session.service'
 import type { ActiveVoiceSession } from './voice-session.types'
 
 describe('VoiceSessionService home automation fast path', () => {
+  it('answers explicit room measurements from authorized Core state before legacy home context', async () => {
+    const streamStaticReply = jest.fn(async input => input.replyText)
+    const replyStreamer = { streamStaticReply }
+    const trace = {
+      appendAssistantFinalTrace: jest.fn(),
+      appendAssistantTextDeltaTrace: jest.fn(),
+      logTurnMetrics: jest.fn(),
+    }
+    const emitter = {
+      emitAssistantTextDelta: jest.fn(),
+      emitAssistantAudioChunk: jest.fn(),
+      emitAssistantFinal: jest.fn(),
+    }
+    const homeAutomation = { getHomeContext: jest.fn() }
+    const service = new VoiceSessionService(
+      {} as any,
+      replyStreamer as any,
+      trace as any,
+      emitter as any,
+      homeAutomation as any,
+    ) as any
+    service.deviceRegistry = {
+      getSnapshot: () => ({
+        tenant: { id: 'tenant-demo' },
+        site: { id: 'site-home' },
+      }),
+    }
+    service.deviceIntelligence = {
+      readRoomMeasurement: jest.fn().mockResolvedValue({
+        status: 'measurement',
+        room: 'Kitchen',
+        metric: 'temperature',
+        value: 7.1,
+        freshness: 'fresh',
+        observedAt: '2026-10-24T07:13:00.000Z',
+      }),
+    }
+    const session = {
+      id: 'voice-measurement',
+      conversationId: 'voice-measurement-conversation',
+      finalTranscript: 'Здрасти, Енергрид. Каква е температурата в кухнята?',
+      timings: {},
+    } as any
+
+    await service.generateAssistantReply(session)
+
+    expect(service.deviceIntelligence.readRoomMeasurement).toHaveBeenCalledWith(
+      { tenantId: 'tenant-demo', siteId: 'site-home' },
+      'кухнята',
+      'temperature',
+    )
+    expect(homeAutomation.getHomeContext).not.toHaveBeenCalled()
+    expect(session.assistantReply).toContain('7,1')
+    expect(session.assistantReply).toContain('Измерването е актуално')
+    expect(session.assistantReply).not.toContain('22,4')
+    expect(emitter.emitAssistantFinal).toHaveBeenCalledWith(session)
+  })
+
   it('executes a device action only after its one-time approval is confirmed', async () => {
     const sttService = {}
     const replyStreamer = {

@@ -85,6 +85,7 @@ import { PortalStateService } from './portal-state.service'
 import { AccessJwtGuard, PublicRoute, RequireRoles, RoleGuard } from '../auth/auth.guard'
 import { AuthConfig } from '../auth/auth-config'
 import { PortalDeviceMeasurementsService } from './portal-device-measurements.service'
+import { DeviceFirmwareDiagnosticsService } from '../devices/device-firmware-diagnostics'
 
 type DisconnectAwareResponse = {
   writableEnded: boolean;
@@ -174,6 +175,8 @@ export class PortalController {
     private readonly installerNotesLlm?: LlmGatewayService,
     @Optional()
     private readonly authConfig?: AuthConfig,
+    @Optional()
+    private readonly firmwareDiagnostics?: DeviceFirmwareDiagnosticsService,
   ) {}
 
   @Get()
@@ -397,6 +400,26 @@ export class PortalController {
     return this.deviceMeasurements.history(
       { tenantId: tenant.id, siteId: site.id }, deviceId, metric, from, to, limit,
     )
+  }
+
+  @Get('devices/:deviceId/firmware-diagnostics')
+  async getDeviceFirmwareDiagnostics(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalAdministrator(request)
+    if (!this.firmwareDiagnostics) throw new ServiceUnavailableException('Firmware diagnostics are unavailable')
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+    const enrolled = this.deviceRegistry.getDevices().find(device => {
+      const physicalId = String(device.metadata?.physicalId || '').toLowerCase()
+      const networkScope = String(device.metadata?.networkScope || '')
+      return device.id === deviceId && device.tenantId === tenant.id && device.siteId === site.id &&
+        device.trustStatus === 'approved' && device.adapter.driver === 'energrid-esp8266' &&
+        /^esp8266:[0-9a-f]{6}$/.test(physicalId) && device.id === `device:${networkScope}:${physicalId}`
+    })
+    if (!enrolled) throw new NotFoundException('Approved Energrid device was not found in this site')
+    const result = await this.firmwareDiagnostics.get({ tenantId: tenant.id, siteId: site.id }, deviceId)
+    return result ?? { deviceId, available: false, events: [], restartCount10m: 0 }
   }
 
   @Post('devices/:deviceId/component-assignment')

@@ -19,6 +19,7 @@ import DeviceConnectionDiagnostics from './components/devices/DeviceConnectionDi
 import DeviceNetworkIdentityPanel from './components/devices/DeviceNetworkIdentityPanel.vue';
 import DeviceCommissioning from './components/devices/DeviceCommissioning.vue';
 import DeviceMeasurementHistory from './components/devices/DeviceMeasurementHistory.vue';
+import DeviceFirmwareDiagnostics from './components/devices/DeviceFirmwareDiagnostics.vue';
 import {
   microphoneRequestError,
   microphoneSetupError,
@@ -4162,34 +4163,19 @@ onBeforeUnmount(() => {
             <div style="margin-bottom: 12px">
               <h3>Talk to Energrid</h3>
               <p>
-                One conversation across the Assistant page and
-                floating chat. Interaction timing updates after
+                Open Ask Energrid in the lower-right corner to type, or hold
+                the button below to speak. Interaction timing updates after
                 each response.
               </p>
             </div>
 
-            <div
-              style="
-                display: grid;
-                grid-template-columns:
-                  repeat(auto-fit, minmax(min(100%, 440px), 1fr));
-                gap: 18px;
-                align-items: start;
-              "
-            >
-              <div
-                id="energrid-assistant-chat-mount"
-                style="min-width: 0"
-              ></div>
-
-              <InteractionTraces
-                v-if="accessToken"
-                :api-base="apiBase"
-                :access-token="accessToken"
-                :refresh-key="assistantTraceRefresh"
-                :focus-trace-id="assistantLatestTraceId"
-              />
-            </div>
+            <InteractionTraces
+              v-if="accessToken"
+              :api-base="apiBase"
+              :access-token="accessToken"
+              :refresh-key="assistantTraceRefresh"
+              :focus-trace-id="assistantLatestTraceId"
+            />
           </section>
 
           <div class="route-controls">
@@ -4692,6 +4678,13 @@ onBeforeUnmount(() => {
                     :access-token="accessToken"
                     @retired="handleDeviceRetired"
                     @reenrolled="handleDeviceReenrolled"
+                  />
+                  <DeviceFirmwareDiagnostics
+                    v-if="selectedDevice.adapter.driver === 'energrid-esp8266' && selectedDevice.trustStatus === 'approved'"
+                    :key="selectedDevice.id"
+                    :device-id="selectedDevice.id"
+                    :api-base="apiBase"
+                    :access-token="accessToken"
                   />
                   <DeviceConnectionDiagnostics v-if="canToggleDevice(selectedDevice)" :key="selectedDevice.id" :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" />
                   <DeviceControlSetup :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" :network-devices="networkDevices" :finding-address="scanningNetwork" :address-search-error="stateError" @find-address="scanNetwork" @saved="loadState" />
@@ -6577,7 +6570,6 @@ onBeforeUnmount(() => {
       v-if="accessToken"
       :api-base="apiBase"
       :access-token="accessToken"
-      :embedded="activePage === 'assistant'"
       @turn-completed="handleAssistantTurnCompleted"
     />
   </main>

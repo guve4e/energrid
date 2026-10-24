@@ -4,6 +4,7 @@ import {
   type HouseAgentPort,
 } from '../llm/house-agent.port'
 import { DeviceRegistryService } from '../devices/device-registry.service'
+import { DeviceIntelligenceQueryService } from '../devices/device-intelligence-query.service'
 import {
   InteractionTraceSession,
   type InteractionOutcome,
@@ -35,6 +36,8 @@ export class VoiceSessionService {
 
   @Inject(DeviceRegistryService)
   private readonly deviceRegistry!: DeviceRegistryService
+  @Inject(DeviceIntelligenceQueryService)
+  private readonly deviceIntelligence!: DeviceIntelligenceQueryService
   private readonly sessions = new Map<WebSocket, ActiveVoiceSession>()
   private readonly speechGateRmsDb = Number(
     process.env.VOICE_SPEECH_GATE_RMS_DB || -55,
@@ -677,6 +680,8 @@ export class VoiceSessionService {
   private async generateAssistantReply(
     session: ActiveVoiceSession,
   ): Promise<void> {
+    if (await this.tryGenerateMeasurementReply(session)) return
+
     if (process.env.VOICE_ASSISTANT_PROVIDER === 'letta') {
       await this.generateLettaReply(session)
       return
@@ -726,6 +731,61 @@ export class VoiceSessionService {
     this.trace.appendAssistantFinalTrace(session)
     this.trace.logTurnMetrics(session)
     this.emitter.emitAssistantFinal(session)
+  }
+
+  private async tryGenerateMeasurementReply(
+    session: ActiveVoiceSession,
+  ): Promise<boolean> {
+    const query = parseVoiceMeasurementQuery(session.finalTranscript)
+    if (!query) return false
+
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+    if (!tenant?.id || !site?.id) {
+      throw new Error('Voice assistant installation scope is unavailable')
+    }
+
+    const result = await this.deviceIntelligence.readRoomMeasurement(
+      { tenantId: tenant.id, siteId: site.id },
+      query.room,
+      query.metric,
+    )
+    const replyText = formatVoiceMeasurementReply(result)
+    const reply = await this.replyStreamer.streamStaticReply(
+      {
+        sessionId: session.id,
+        conversationId: session.conversationId,
+        transcript: session.finalTranscript,
+        replyText,
+      },
+      {
+        onTextDelta: (delta, fullText) => {
+          this.markAssistantFirstDelta(session)
+          this.emitter.emitAssistantTextDelta(session, delta, fullText)
+          this.trace.appendAssistantTextDeltaTrace(session, delta, fullText)
+        },
+        onAudioChunk: ({ chunkIndex, isLastChunk, text, format, audioBuffer }) => {
+          this.markAssistantFirstAudio(session)
+          this.emitter.emitAssistantAudioChunk(session, {
+            chunkIndex,
+            isLastChunk,
+            text,
+            format,
+            audioBuffer,
+          })
+        },
+        onCompleted: finalReplyText => {
+          session.assistantReply = finalReplyText
+        },
+        onMetrics: metrics => Object.assign(session.timings, metrics),
+      },
+    )
+
+    session.assistantReply = reply
+    session.assistantFinalAt = Date.now()
+    this.trace.appendAssistantFinalTrace(session)
+    this.trace.logTurnMetrics(session)
+    this.emitter.emitAssistantFinal(session)
+    return true
   }
 
   private async generateLettaReply(
@@ -1025,6 +1085,53 @@ function actionApprovalWindowMs(): number {
   const configured = Number(process.env.VOICE_ACTION_APPROVAL_MS)
   if (!Number.isFinite(configured)) return 15_000
   return Math.max(5_000, Math.min(60_000, Math.floor(configured)))
+}
+
+function parseVoiceMeasurementQuery(
+  transcript: string,
+): { room: string; metric: 'temperature' | 'humidity' } | null {
+  const text = transcript.normalize('NFKC').toLocaleLowerCase()
+  const asksQuestion = /[?؟]|колко|каква|какво|what|how/u.test(text)
+  if (!asksQuestion) return null
+
+  const room = text.match(/кухнята?|kitchen|kuhnqta?|kuhnia|kuhnya/u)?.[0]
+  if (!room) return null
+
+  if (/влажност|humid/u.test(text)) return { room, metric: 'humidity' }
+  if (/температур|градус|топл|студен|temperature|\bwarm\b|\bhot\b/u.test(text)) {
+    return { room, metric: 'temperature' }
+  }
+  return null
+}
+
+function formatVoiceMeasurementReply(result: Awaited<ReturnType<DeviceIntelligenceQueryService['readRoomMeasurement']>>): string {
+  if (result.status === 'ambiguous') {
+    return 'В това помещение има повече от едно одобрено устройство с измервания. Не мога да определя кое показание имате предвид.'
+  }
+  if (result.status !== 'measurement') {
+    return 'Нямам налично одобрено Core измерване за това помещение в момента.'
+  }
+
+  const metricName = result.metric === 'temperature' ? 'температурата' : 'влажността'
+  const value = new Intl.NumberFormat('bg-BG', { maximumFractionDigits: 1 }).format(result.value)
+  const measuredAt = formatBulgarianMeasurementTime(result.observedAt)
+  const unit = result.metric === 'temperature' ? 'градуса по Целзий' : 'процента относителна влажност'
+  const freshness = result.freshness === 'fresh'
+    ? 'Измерването е актуално.'
+    : 'Последното измерване е остаряло и може да не отразява текущите условия.'
+  return result.freshness === 'fresh'
+    ? `В ${result.room} ${metricName} е ${value} ${unit}. Последно измерено ${measuredAt}. ${freshness}`
+    : `Последното одобрено измерване за ${result.room}: ${metricName} ${value} ${unit}, измерено ${measuredAt}. ${freshness}`
+}
+
+function formatBulgarianMeasurementTime(value: string): string {
+  const timestamp = Date.parse(value)
+  if (!Number.isFinite(timestamp)) return 'времето на измерването е неизвестно'
+  return new Intl.DateTimeFormat('bg-BG', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    timeZone: 'Europe/Sofia',
+  }).format(timestamp)
 }
 
 function formatSttDiagnostic(

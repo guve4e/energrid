@@ -5,7 +5,6 @@ import { nextTick, ref } from 'vue';
 const props = defineProps<{
   apiBase: string;
   accessToken: string;
-  embedded?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -87,13 +86,9 @@ async function scrollToBottom() {
 </script>
 
 <template>
-  <Teleport
-    to="#energrid-assistant-chat-mount"
-    :disabled="!embedded"
-  >
-    <div :class="['energrid-chat', { 'is-embedded': embedded }]">
+  <div class="energrid-chat">
     <button
-      v-if="!embedded && !open"
+      v-if="!open"
       class="energrid-chat-launcher"
       type="button"
       aria-label="Open Energrid assistant"
@@ -116,7 +111,7 @@ async function scrollToBottom() {
             <small>Your home intelligence</small>
           </div>
         </div>
-        <div v-if="!embedded" class="energrid-chat-window-actions">
+        <div class="energrid-chat-window-actions">
           <button
             type="button"
             :aria-label="expanded ? 'Restore chat size' : 'Expand chat'"
@@ -176,8 +171,7 @@ async function scrollToBottom() {
         Energrid Intelligence · Powered by Letta
       </small>
     </section>
-    </div>
-  </Teleport>
+  </div>
 </template>
 
 <style scoped>
@@ -555,29 +549,5 @@ async function scrollToBottom() {
   }
 }
 
-
-/* The same chat instance becomes an inline workspace on Assistant. */
-.energrid-chat.is-embedded {
-  position: relative;
-  right: auto;
-  bottom: auto;
-  z-index: auto;
-  width: 100%;
-  min-width: 0;
-}
-
-.energrid-chat.is-embedded .energrid-chat-panel {
-  width: 100%;
-  height: min(680px, max(440px, 68dvh));
-  max-width: none;
-  border-radius: 14px;
-}
-
-@media (max-width: 640px) {
-  .energrid-chat.is-embedded .energrid-chat-panel {
-    height: min(610px, 65dvh);
-    min-height: 350px;
-  }
-}
 
 </style>
