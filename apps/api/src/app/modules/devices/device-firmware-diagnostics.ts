@@ -78,7 +78,7 @@ export interface FirmwareDiagnosticsView {
 export function parseFirmwareDiagnosticSample(value: unknown, expectedDeviceId: string): FirmwareDiagnosticSample | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const root = value as Record<string, unknown>;
-  if (root.schemaVersion !== 1 || root.deviceId !== expectedDeviceId ||
+  if (root.schemaVersion !== 1 || typeof root.deviceId !== 'string' || root.deviceId.toLowerCase() !== expectedDeviceId.toLowerCase() ||
       typeof root.firmwareVersion !== 'string' || root.firmwareVersion.length < 1 || root.firmwareVersion.length > 40 ||
       typeof root.bootSessionId !== 'string' || !/^esp8266-[0-9a-f]{6}-[0-9a-f]{8}$/i.test(root.bootSessionId) ||
       !isSafeCounter(root.uptimeMs)) return null;
@@ -101,7 +101,7 @@ export function parseFirmwareDiagnosticSample(value: unknown, expectedDeviceId: 
       rssiDbm === undefined || (wifi.connected && rssiDbm === null) || (!wifi.connected && rssiDbm !== null)) return null;
   return {
     schemaVersion: 1,
-    deviceId: expectedDeviceId,
+    deviceId: expectedDeviceId.toLowerCase(),
     firmwareVersion: root.firmwareVersion,
     bootSessionId: root.bootSessionId,
     uptimeMs: Number(root.uptimeMs),
@@ -185,10 +185,14 @@ export function deriveFirmwareHealthEvents(
   const created: FirmwareHealthEvent[] = [];
   const reset = current.reset.reasonCode;
 
-  if (previous && previous.current.bootSessionId !== current.bootSessionId) {
+  const sessionChanged = previous && previous.current.bootSessionId !== current.bootSessionId;
+  const uptimeReset = previous && current.uptimeMs < previous.current.uptimeMs;
+  if (sessionChanged || uptimeReset) {
     created.push(event('reboot-detected', current, observedAt,
       'A new firmware boot session was detected.',
-      'The device-reported boot session changed since the previous verified diagnostics poll.'));
+      sessionChanged
+        ? 'The device-reported boot session changed since the previous verified diagnostics poll.'
+        : 'Device uptime decreased since the previous verified diagnostics poll; the boot session identifier remained unchanged.'));
   }
 
   if (reset === 1 || reset === 3) {

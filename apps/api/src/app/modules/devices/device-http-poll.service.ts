@@ -270,6 +270,10 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     const now = performance.now();
     const lastPoll = this.diagnosticsPollAt.get(device.id) ?? Number.NEGATIVE_INFINITY;
     if (now - lastPoll < firmwareDiagnosticsIntervalMs()) return;
+    if (!this.diagnosticsPollAt.has(device.id) && this.diagnosticsPollAt.size >= 512) {
+      const oldest = this.diagnosticsPollAt.keys().next().value;
+      if (oldest) this.diagnosticsPollAt.delete(oldest);
+    }
     this.diagnosticsPollAt.set(device.id, now);
 
     const controller = new AbortController();

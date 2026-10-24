@@ -27,9 +27,11 @@ describe('firmware diagnostics', () => {
   it('parses only the expected bounded physical identity and preserves reset evidence', () => {
     const source = sample({ reset: { reason: 'Hardware Watchdog', reasonCode: 1, exception: null } });
     expect(parseFirmwareDiagnosticSample(source, source.deviceId)).toEqual(source);
+    expect(parseFirmwareDiagnosticSample({ ...source, deviceId: 'ESP8266:324864' }, source.deviceId)?.deviceId).toBe(source.deviceId);
     expect(parseFirmwareDiagnosticSample({ ...source, deviceId: 'esp8266:ffffff' }, source.deviceId)).toBeNull();
     expect(parseFirmwareDiagnosticSample({ ...source, uptimeMs: Number.MAX_SAFE_INTEGER + 1 }, source.deviceId)).toBeNull();
     expect(parseFirmwareDiagnosticSample({ ...source, bootSessionId: 'new-session' }, source.deviceId)).toBeNull();
+    expect(parseFirmwareDiagnosticSample({ ...source, wifi: { ...source.wifi, connected: false, rssiDbm: null } }, source.deviceId)?.wifi.rssiDbm).toBeNull();
   });
 
   it('classifies watchdog, exception, unknown resets and repeated boot sessions without claiming a power fault', () => {
@@ -43,10 +45,16 @@ describe('firmware diagnostics', () => {
       .find(item => item.kind === 'reset-cause-unknown');
     expect(unknown?.confidence).toBe('possible');
     expect(unknown?.explanation).toContain('do not establish a power-supply fault');
+    expect(deriveFirmwareHealthEvents(null, sample({
+      memory: { freeHeapBytes: 7000, heapFragmentationPct: 55, largestFreeBlockBytes: 2000 },
+      wifi: { connected: false, rssiDbm: null, disconnectCount: 3, reconnectCount: 2 },
+    }), at).map(item => item.kind)).toEqual(expect.arrayContaining(['memory-warning', 'wifi-instability']));
     const previous = { current: sample(), deviceId, tenantId: scope.tenantId, siteId: scope.siteId,
       sampledAt: at, events: [], restartCount10m: 0, connectivity: 'connected' as const };
     const next = sample({ bootSessionId: 'esp8266-324864-1234abce', uptimeMs: 100 });
     expect(deriveFirmwareHealthEvents(previous, next, at).map(item => item.kind)).toContain('reboot-detected');
+    expect(deriveFirmwareHealthEvents(previous, sample({ uptimeMs: 100 }), at)
+      .find(item => item.kind === 'reboot-detected')?.explanation).toContain('uptime decreased');
     const rebootEvents = [
       { id: '1', kind: 'reboot-detected' as const, observedAt: at, bootSessionId: '1', confidence: 'confirmed' as const, summary: '', explanation: '' },
       { id: '2', kind: 'reboot-detected' as const, observedAt: at, bootSessionId: '2', confidence: 'confirmed' as const, summary: '', explanation: '' },
