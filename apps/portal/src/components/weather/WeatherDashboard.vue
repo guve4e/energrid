@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { authFetch } from '../../auth/auth-client';
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import ForecastDayDetail from './ForecastDayDetail.vue';
 import DailyVerification, { type DailyPerformance, type ObservationCollection } from './DailyVerification.vue';
@@ -107,7 +108,7 @@ async function refresh() {
   const timeout = setTimeout(() => controller?.abort(), 25000);
   try {
     const results = await Promise.allSettled(['dashboard','performance','river-performance'].map(async endpoint => {
-      const response = await fetch(`${props.apiBase}/portal/weather/${endpoint}`, {
+      const response = await authFetch(`${props.apiBase}/portal/weather/${endpoint}`, {
         headers: { Authorization: `Bearer ${props.accessToken}` }, signal: controller!.signal,
       });
       if (!response.ok) throw new Error(await weatherErrorMessage(response));

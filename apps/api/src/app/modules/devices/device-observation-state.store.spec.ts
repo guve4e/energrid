@@ -85,6 +85,90 @@ describe('Persistent Device Observation State', () => {
     expect(state?.fields.temperature.sourceId).toBe('approved-mqtt');
   });
 
+  it('keeps HTTP source sample identities stable across API restarts and advances only on a device counter reset', async () => {
+    const source = 'energrid-http-status';
+    const sample = {
+      uptimeMs: 12_000, sampleCount: 6, lastSampleUptimeMs: 10_000,
+      observedAt: '2026-10-01T00:00:02.000Z', apiUptimeMs: 102_000,
+    };
+    const first = await store.sourceSampleEvidenceId(scope, 'esp8266-device', source, sample);
+    expect(await store.sourceSampleEvidenceId(scope, 'esp8266-device', source, sample)).toBe(first);
+
+    await store.close();
+    store = new DeviceObservationStateStore(directory, 3);
+    expect(await store.sourceSampleEvidenceId(scope, 'esp8266-device', source, sample)).toBe(first);
+
+    const afterDeviceRestart = await store.sourceSampleEvidenceId(scope, 'esp8266-device', source, {
+      uptimeMs: 4_000, sampleCount: 2, lastSampleUptimeMs: 2_000,
+      observedAt: '2026-10-01T00:00:04.000Z', apiUptimeMs: 104_000,
+    });
+    expect(afterDeviceRestart).not.toBe(first);
+    expect(afterDeviceRestart).toContain('boot-1:sample-2-2000');
+  });
+
+  it('defers an ambiguous sample after a long interruption instead of inventing a boot session', async () => {
+    const source = 'energrid-http-status';
+    const first = await store.sourceSampleEvidenceId(scope, 'esp8266-device', source, {
+      uptimeMs: 100_000, sampleCount: 50, lastSampleUptimeMs: 98_000,
+      observedAt: '2026-10-01T00:00:00.000Z', apiUptimeMs: 500_000,
+    });
+    // Wall and host clocks agree on a day, but firmware uptime advanced by only
+    // 100 seconds and its counters did not reset. This could be an unexplained
+    // source discontinuity, so it cannot safely identify a new boot.
+    await expect(store.sourceSampleEvidenceId(scope, 'esp8266-device', source, {
+      uptimeMs: 200_000, sampleCount: 100, lastSampleUptimeMs: 198_000,
+      observedAt: '2026-10-02T00:00:00.000Z', apiUptimeMs: 86_900_000,
+    })).rejects.toThrow('source_sample_session_ambiguous');
+    expect(first).toContain('boot-0:');
+  });
+
+  it('keeps the same boot session across a long polling interruption when all monotonic clocks agree', async () => {
+    const source = 'energrid-http-status';
+    await store.sourceSampleEvidenceId(scope, 'esp8266-device', source, {
+      uptimeMs: 100_000, sampleCount: 50, lastSampleUptimeMs: 98_000,
+      observedAt: '2026-10-01T00:00:00.000Z', apiUptimeMs: 500_000,
+    });
+    const afterLongGap = await store.sourceSampleEvidenceId(scope, 'esp8266-device', source, {
+      uptimeMs: 86_500_000, sampleCount: 43_250, lastSampleUptimeMs: 86_498_000,
+      observedAt: '2026-10-02T00:00:00.000Z', apiUptimeMs: 86_900_000,
+    });
+    expect(afterLongGap).toContain('boot-0:sample-43250-86498000');
+  });
+
+  it('defers partial counter regressions rather than treating one reset counter as a reboot', async () => {
+    const source = 'energrid-http-status';
+    await store.sourceSampleEvidenceId(scope, 'esp8266-device', source, {
+      uptimeMs: 100_000, sampleCount: 50, lastSampleUptimeMs: 98_000,
+      observedAt: '2026-10-01T00:00:00.000Z', apiUptimeMs: 500_000,
+    });
+    await expect(store.sourceSampleEvidenceId(scope, 'esp8266-device', source, {
+      // Uptime fell, but the per-boot sample count did not reset.
+      uptimeMs: 4_000, sampleCount: 51, lastSampleUptimeMs: 2_000,
+      observedAt: '2026-10-01T00:00:02.000Z', apiUptimeMs: 502_000,
+    })).rejects.toThrow('source_sample_session_ambiguous');
+  });
+
+  it.each([
+    ['forward', '2026-10-01T01:00:02.000Z'],
+    ['backward', '2026-09-30T23:00:02.000Z'],
+  ])('rejects a %s wall-clock jump and recovers without changing sample session', async (_direction, jumpedAt) => {
+    const source = 'energrid-http-status';
+    const first = await store.sourceSampleEvidenceId(scope, 'esp8266-device', source, {
+      uptimeMs: 100_000, sampleCount: 50, lastSampleUptimeMs: 98_000,
+      observedAt: '2026-10-01T00:00:00.000Z', apiUptimeMs: 500_000,
+    });
+    await expect(store.sourceSampleEvidenceId(scope, 'esp8266-device', source, {
+      uptimeMs: 102_000, sampleCount: 51, lastSampleUptimeMs: 100_000,
+      observedAt: jumpedAt, apiUptimeMs: 502_000,
+    })).rejects.toThrow('source_sample_session_ambiguous');
+    const recovered = await store.sourceSampleEvidenceId(scope, 'esp8266-device', source, {
+      uptimeMs: 102_000, sampleCount: 51, lastSampleUptimeMs: 100_000,
+      observedAt: '2026-10-01T00:00:02.000Z', apiUptimeMs: 502_000,
+    });
+    expect(recovered).toContain('boot-0:sample-51-100000');
+    expect(recovered).not.toBe(first);
+  });
+
   it('serializes simultaneous observations', async () => {
     const results = await Promise.all([
       store.process(

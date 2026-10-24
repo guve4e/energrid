@@ -26,6 +26,7 @@ import { MqttBrokerAttributionService } from './mqtt/mqtt-broker-attribution.ser
 import { DeviceEnrollmentModule } from './enrollment/device-enrollment.module'
 import { NmapNetworkEvidenceAdapter } from './adapters/outbound/network/nmap-network-evidence.adapter'
 import { LocalNetworkRuntimeAdapter } from './adapters/outbound/network/local-network-runtime.adapter'
+import { EnergridHttpIdentityAdapter } from './adapters/outbound/network/energrid-http-identity.adapter'
 
 @Module({
   imports: [TelemetryModule, DeviceEnrollmentModule],
@@ -39,6 +40,7 @@ import { LocalNetworkRuntimeAdapter } from './adapters/outbound/network/local-ne
     DeviceHttpPollService,
     DeviceLanNetworkEvidenceCollector,
     NmapNetworkEvidenceAdapter,
+    EnergridHttpIdentityAdapter,
     { provide: LocalNetworkRuntimeAdapter, useFactory: () => new LocalNetworkRuntimeAdapter() },
     DeviceLanDiscoveryService,
     DeviceDiscoveryMemoryStore,

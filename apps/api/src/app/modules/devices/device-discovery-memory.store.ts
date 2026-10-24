@@ -264,6 +264,11 @@ function dedupeKnownRecords(records: KnownNetworkDevice[]): KnownNetworkDevice[]
 }
 
 export function networkDiscoveryIdentity(device: NetworkDiscoveredDevice): string {
+  const stableDeviceId = verifiedDeviceIdentity(device)
+  if (stableDeviceId) {
+    return `device:${device.networkZoneId}:${stableDeviceId}`
+  }
+
   const mac = device.macAddress?.trim().toLowerCase();
 
   if (mac && mac !== 'ff:ff:ff:ff:ff:ff') {
@@ -275,6 +280,18 @@ export function networkDiscoveryIdentity(device: NetworkDiscoveredDevice): strin
   }
 
   return networkEndpointIdentity(device);
+}
+
+function verifiedDeviceIdentity(device: NetworkDiscoveredDevice): string | null {
+  const verified = device.observations?.some(observation =>
+    observation.source === 'http_identity' &&
+    observation.attribute === 'identity.verified' &&
+    observation.value === true,
+  )
+  const id = device.observations?.find(observation =>
+    observation.source === 'http_identity' && observation.attribute === 'identity.device_id',
+  )?.value
+  return verified && typeof id === 'string' && id === device.id ? id.toLowerCase() : null
 }
 
 function key(identity: string): string {
@@ -337,6 +354,7 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
     devices: NetworkDiscoveredDevice[],
   ): Promise<void> {
     const recordsByKey = new Map<string, KnownNetworkDevice>();
+    const endpointAliasesToDelete = new Set<string>();
     for (const device of devices) {
       const identity = networkDiscoveryIdentity(device);
       const databaseKey = key(identity);
@@ -358,17 +376,28 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
       };
 
       recordsByKey.set(databaseKey, record);
+
+      const endpointIdentity = networkEndpointIdentity(device)
+      const endpointKey = key(endpointIdentity)
+      if (!verifiedDeviceIdentity(device)) continue
+      const endpointValue = await this.getOptional(endpointKey)
+      if (isKnownDevice(endpointValue) && endpointValue.identity === endpointIdentity &&
+          !verifiedDeviceIdentity(endpointValue.device)) {
+        endpointAliasesToDelete.add(endpointKey)
+      }
     }
 
-    const operations: Array<{
-      type: 'put';
-      key: string;
-      value: unknown;
-    }> = [...recordsByKey].map(([databaseKey, record]) => ({
+    const operations: Array<
+      { type: 'put'; key: string; value: unknown } | { type: 'del'; key: string }
+    > = [...recordsByKey].map(([databaseKey, record]) => ({
       type: 'put',
       key: databaseKey,
       value: record,
     }));
+
+    for (const endpointKey of endpointAliasesToDelete) {
+      if (!recordsByKey.has(endpointKey)) operations.push({ type: 'del', key: endpointKey });
+    }
 
     operations.push({
       type: 'put',

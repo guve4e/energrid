@@ -23,7 +23,13 @@ function createHarness(
     displayName: 'Kitchen Temperature',
     trustStatus: 'discovered',
     state: { values: {}, observedAt: '2026-10-19T12:00:00.000Z', source: 'mqtt', status: 'online' },
-    adapter: { protocol, transport: protocol, driver: initialMetadata.httpBaseUrl ? 'shelly-lan' : protocol, configured: true },
+    adapter: {
+      protocol, transport: protocol, driver: initialMetadata.httpBaseUrl ? 'shelly-lan' : protocol,
+      configured: true,
+      ...(typeof initialMetadata.httpBaseUrl === 'string'
+        ? { target: `${initialMetadata.httpBaseUrl}/api/v1/status` }
+        : {}),
+    },
     capabilities: [{ kind: initialMetadata.component === 'switch:0' ? 'switch' : 'power', actions: ['read'] }],
     metadata: initialMetadata,
   } as unknown as RegisteredDevice;
@@ -100,7 +106,7 @@ describe('DeviceOnboardingService', () => {
     expect(enrollment.reenroll).toHaveBeenCalledWith(
       identity,
       'Kitchen Temperature',
-      'portal-control-token',
+      'portal-admin',
     );
     expect(registry.setEnrollmentStatus).toHaveBeenCalledWith(identity.deviceId, 'enrolled');
   });
@@ -122,7 +128,7 @@ describe('DeviceOnboardingService', () => {
           ...identity,
           displayName: 'Kitchen Temperature',
         },
-        'portal-control-token',
+        'portal-admin',
       );
 
     expect(
@@ -130,6 +136,17 @@ describe('DeviceOnboardingService', () => {
     ).toBeLessThan(
       enrollment.enroll.mock.invocationCallOrder[0],
     );
+  });
+
+  it('enrolls a candidate into the operator-selected room while retaining the active tenant and site scope', async () => {
+    const { service, registry, enrollment } = createHarness();
+    await service.approve(identity.deviceId, { zoneId: 'office', zoneName: 'Office' });
+    expect(registry.approveDiscoveredDevice).toHaveBeenCalledWith(identity.deviceId, {
+      zoneId: 'office', zoneName: 'Office',
+    });
+    expect(enrollment.enroll).toHaveBeenCalledWith({
+      ...identity, displayName: 'Kitchen Temperature',
+    }, 'portal-admin');
   });
 
   it('onboards a LAN-verified Shelly Plus 1 through the existing installation and enrollment stores', async () => {
@@ -162,7 +179,7 @@ describe('DeviceOnboardingService', () => {
       siteId: identity.siteId,
       deviceId,
       displayName: 'Kitchen Temperature',
-    }, 'portal-control-token');
+    }, 'portal-admin');
     expect(physicalInventory.discover).toHaveBeenCalledWith(expect.objectContaining({
       identity: { namespace: 'mqtt:shelly-protocol-id', value: 'shellyplus1-8813bfcdc8bc' },
       evidenceSource: 'lan_discovery_protocol_match',
@@ -174,6 +191,34 @@ describe('DeviceOnboardingService', () => {
       evidenceSource: 'lan_discovery_protocol_match',
     }));
     expect(registry.setEnrollmentStatus).toHaveBeenCalledWith(deviceId, 'enrolled');
+  });
+
+  it('records Energrid firmware identity and the observed IP in existing physical inventory only after enrollment', async () => {
+    const physicalInventory = {
+      discover: jest.fn().mockResolvedValue({ physicalDeviceId: 'physical-esp8266' }),
+      forLogicalDevice: jest.fn().mockResolvedValue(null),
+      associateLanIdentity: jest.fn().mockResolvedValue(undefined),
+      assignComponent: jest.fn(),
+    };
+    const deviceId = 'device:upstream-lan:esp8266:324864';
+    const metadata = {
+      physicalId: 'esp8266:324864', identityEvidenceSource: 'bounded GET /api/v1/identity',
+      httpBaseUrl: 'http://192.168.1.198',
+      firmwareVersion: '0.2.0', ipAddress: '192.168.1.198', networkScope: 'upstream-lan',
+      networkObservedAt: '2026-10-23T12:14:20.245Z',
+    };
+    const { service, enrollment } = createHarness(physicalInventory, metadata, deviceId, 'http');
+    await service.approve(deviceId, { zoneId: 'office', zoneName: 'Office' });
+    expect(enrollment.enroll).toHaveBeenCalledTimes(1);
+    expect(physicalInventory.discover).toHaveBeenCalledWith(expect.objectContaining({
+      identity: { namespace: 'energrid:firmware-device-id:upstream-lan', value: 'esp8266:324864' },
+      evidenceSource: 'bounded_http_identity', components: [],
+      endpoint: { protocol: 'http', kind: 'status', address: 'http://192.168.1.198/api/v1/status' },
+    }));
+    expect(physicalInventory.associateLanIdentity).toHaveBeenCalledWith(expect.objectContaining({
+      physicalDeviceId: 'physical-esp8266', ipAddress: '192.168.1.198', networkScope: 'upstream-lan',
+    }));
+    expect(physicalInventory.assignComponent).not.toHaveBeenCalled();
   });
 
   it('persists a protocol-identified component only as part of explicit onboarding approval', async () => {
@@ -202,7 +247,7 @@ describe('DeviceOnboardingService', () => {
       device: identity,
       physicalDeviceId: 'physical-proem',
       componentKey: 'em1:0',
-      actor: 'portal-control-token',
+      actor: 'portal-admin',
     }));
   });
 
@@ -237,7 +282,7 @@ describe('DeviceOnboardingService', () => {
       ipAddress: '192.168.1.204',
       macAddress: '00:11:22:33:44:55',
       evidenceSource: 'lan_discovery_protocol_match',
-      actor: 'portal-control-token',
+      actor: 'portal-admin',
     }));
   });
 
@@ -251,7 +296,7 @@ describe('DeviceOnboardingService', () => {
     expect(enrollment.reenroll).toHaveBeenCalledWith(
       identity,
       'Kitchen Temperature',
-      'portal-control-token',
+      'portal-admin',
     );
     expect(registry.approveDiscoveredDevice).toHaveBeenCalledTimes(1);
   });

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { authFetch } from '../../auth/auth-client';
 import { onMounted, ref, watch } from 'vue';
 type IdentityEvidence = {
   ipAddress: string;
@@ -57,7 +58,7 @@ async function load() {
   busy.value = true;
   error.value = '';
   try {
-    const response = await fetch(
+    const response = await authFetch(
       `${props.apiBase}/portal/devices/${encodeURIComponent(props.deviceId)}/network-identity`,
       { headers: { Authorization: `Bearer ${props.accessToken}` } },
     );
@@ -80,7 +81,7 @@ async function saveRole() {
   busy.value = true;
   error.value = '';
   try {
-    const response = await fetch(
+    const response = await authFetch(
       `${props.apiBase}/portal/devices/${encodeURIComponent(props.deviceId)}/component-assignment`,
       {
         method: 'POST',
@@ -111,7 +112,7 @@ async function retire() {
   busy.value = true;
   error.value = '';
   try {
-    const response = await fetch(
+    const response = await authFetch(
       `${props.apiBase}/portal/devices/${encodeURIComponent(props.deviceId)}/retire`,
       {
         method: 'POST',
@@ -132,7 +133,7 @@ async function reenroll() {
   busy.value = true;
   error.value = '';
   try {
-    const response = await fetch(
+    const response = await authFetch(
       `${props.apiBase}/portal/devices/${encodeURIComponent(props.deviceId)}/reenroll`,
       { method: 'POST', headers: { Authorization: `Bearer ${props.accessToken}` } },
     );

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { authFetch } from '../../auth/auth-client';
 import { computed, ref, watch } from 'vue';
 
 type CommissioningEvent = {
@@ -139,7 +140,7 @@ async function request(
   method: string,
   body?: unknown,
 ): Promise<unknown> {
-  const response = await fetch(`${props.apiBase}${path}`, {
+  const response = await authFetch(`${props.apiBase}${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${props.accessToken}`,

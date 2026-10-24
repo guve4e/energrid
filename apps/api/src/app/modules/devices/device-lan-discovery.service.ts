@@ -23,6 +23,7 @@ import {
 import type { PhysicalDeviceInventoryService } from './enrollment/physical-device-inventory.service'
 import type { PhysicalLanObservation } from './enrollment/physical-device-inventory.repository'
 import { shellyLanCandidates } from './adapters/inbound/shelly/shelly-lan-candidates'
+import { energridDiscoveryCandidate } from './adapters/inbound/energrid/energrid-discovery-candidate'
 import { readOnlyShellyDeviceInfo } from './adapters/inbound/shelly/read-only-shelly-rpc'
 import { compareNetworkSnapshots, type NetworkDiscoverySnapshot, type NetworkDiscoverySnapshotDiff } from './network-discovery-snapshot'
 import { NmapNetworkEvidenceAdapter, type NmapCapability, type NmapScanResult } from './adapters/outbound/network/nmap-network-evidence.adapter'
@@ -31,6 +32,7 @@ import {
   LocalNetworkRuntimeAdapter,
   type LocalNetworkRuntimeReport,
 } from './adapters/outbound/network/local-network-runtime.adapter'
+import { EnergridHttpIdentityAdapter } from './adapters/outbound/network/energrid-http-identity.adapter'
 
 const execFileAsync = promisify(execFile)
 const activeScanConcurrency = 24
@@ -65,6 +67,7 @@ export class DeviceLanNetworkEvidenceCollector {
   constructor(
     @Optional() private readonly nmapAdapter?: NmapNetworkEvidenceAdapter,
     @Optional() private readonly runtimeAdapter?: LocalNetworkRuntimeAdapter,
+    @Optional() private readonly energridIdentityAdapter: EnergridHttpIdentityAdapter = new EnergridHttpIdentityAdapter(),
   ) {}
 
   async getNmapCapability(): Promise<NmapCapability & { enabled: boolean }> {
@@ -168,8 +171,9 @@ export class DeviceLanNetworkEvidenceCollector {
     candidate: NetworkCandidate & { networkZoneId: string; networkZoneName: string },
     observedAt: string,
     allowEndpointEnrichment: boolean,
+    allowIdentityProbe = true,
   ): Promise<NetworkDiscoveredDevice> {
-    return enrichNetworkDevice(candidate, observedAt, allowEndpointEnrichment)
+    return enrichNetworkDevice(candidate, observedAt, allowEndpointEnrichment, this.energridIdentityAdapter, allowIdentityProbe)
   }
 }
 
@@ -230,12 +234,15 @@ export class DeviceLanDiscoveryService {
       .filter(candidate => (candidate.macEvidence || []).length > 1)
       .map(candidate => `${candidate.networkZoneId}:${candidate.ipAddress}`))
     const devices = await Promise.all(
-      identityCandidates.map(async (candidate) =>
-        this.evidenceCollector.enrichCandidate(candidate as NetworkCandidate & {
+      identityCandidates.map(async (candidate) => {
+        const matchesExplicitScope = candidateMatchesExplicitScope(candidate, zones)
+        return this.evidenceCollector.enrichCandidate(candidate as NetworkCandidate & {
           networkZoneId: string
           networkZoneName: string
-        }, startedAt, !conflictingEndpoints.has(`${candidate.networkZoneId}:${candidate.ipAddress}`)),
-      ),
+        }, startedAt,
+        !conflictingEndpoints.has(`${candidate.networkZoneId}:${candidate.ipAddress}`) && matchesExplicitScope,
+        matchesExplicitScope)
+      }),
     )
 
     this.lastZones = configuredZones
@@ -283,6 +290,28 @@ export class DeviceLanDiscoveryService {
             networkScope: `${device.gatewayId || 'gateway-unknown'}:${device.networkZoneId}`,
             observedAt: device.discoveredAt,
             evidenceSource: 'lan_discovery_protocol_match',
+          })
+        }
+        const registeredDevices = this.registry.getSnapshot().devices
+        for (const device of this.lastScan) {
+          const candidate = energridDiscoveryCandidate(device)
+          if (!candidate) continue
+          const enrolled = registeredDevices.find(item =>
+            item.id === candidate.id && item.trustStatus === 'approved' &&
+            item.metadata?.identityEvidenceSource === 'bounded GET /api/v1/identity',
+          )
+          if (!enrolled) continue
+          const physical = await this.physicalInventory.forLogicalDevice(scope, enrolled.id)
+          if (!physical) continue
+          observations.push({
+            physicalDeviceId: physical.physicalDeviceId,
+            ipAddress: device.ipAddress,
+            ...(device.macAddress ? { macAddress: device.macAddress } : {}),
+            ...(device.hostname ? { hostname: device.hostname } : {}),
+            ...(device.gatewayId ? { gatewayId: device.gatewayId } : {}),
+            networkScope: String(candidate.metadata?.networkScope || device.networkZoneId),
+            observedAt: String(candidate.metadata?.networkObservedAt || device.discoveredAt),
+            evidenceSource: 'bounded_http_identity',
           })
         }
         await this.physicalInventory.refreshNetworkObservations(
@@ -873,6 +902,8 @@ async function enrichNetworkDevice(
   },
   discoveredAt: string,
   allowEndpointEnrichment = true,
+  energridIdentityAdapter: EnergridHttpIdentityAdapter = new EnergridHttpIdentityAdapter(),
+  allowIdentityProbe = true,
 ): Promise<NetworkDiscoveredDevice> {
   const base: NetworkDiscoveredDevice = {
     id: candidate.macAddress || candidate.ipAddress,
@@ -917,6 +948,28 @@ async function enrichNetworkDevice(
     networkEvidenceObservedAt,
   ))
   base.discoveredAt = networkEvidenceObservedAt
+
+  if (allowEndpointEnrichment && allowIdentityProbe && evidence.services.includes('http')) {
+    const identity = await energridIdentityAdapter.identify(candidate.ipAddress)
+    if (identity) {
+      base.id = identity.id
+      base.vendor = 'Energrid'
+      base.protocol = 'http'
+      base.confidence = 0.95
+      base.status = 'online'
+      base.model = identity.model
+      base.firmwareVersion = identity.firmwareVersion
+      base.reason = 'Energrid firmware identity was verified over the read-only HTTP identity endpoint.'
+      base.observations = mergeNetworkObservations(base.observations || [], [
+        { source: 'http_identity', attribute: 'identity.verified', value: true, observedAt: networkEvidenceObservedAt, scopeId: candidate.networkZoneId, method: 'GET /api/v1/identity' },
+        { source: 'http_identity', attribute: 'identity.device_id', value: identity.id, observedAt: networkEvidenceObservedAt, scopeId: candidate.networkZoneId, method: 'GET /api/v1/identity' },
+        { source: 'http_identity', attribute: 'device.model', value: identity.model, observedAt: networkEvidenceObservedAt, scopeId: candidate.networkZoneId, method: 'GET /api/v1/identity' },
+        { source: 'http_identity', attribute: 'firmware.version', value: identity.firmwareVersion, observedAt: networkEvidenceObservedAt, scopeId: candidate.networkZoneId, method: 'GET /api/v1/identity' },
+        ...identity.capabilities.map(capability => ({ source: 'http_identity' as const, attribute: 'device.capability', value: capability, observedAt: networkEvidenceObservedAt, scopeId: candidate.networkZoneId, method: 'GET /api/v1/identity' })),
+      ])
+      return base
+    }
+  }
 
   const shelly = allowEndpointEnrichment
     ? await probeShelly(candidate.ipAddress)
@@ -985,6 +1038,17 @@ function assignNetworkZone(
     networkZoneId: zone?.id || 'unassigned',
     networkZoneName: zone?.name || 'Unassigned scope',
   }
+}
+
+function candidateMatchesExplicitScope(
+  candidate: Pick<NetworkCandidate, 'ipAddress' | 'networkZoneId'>,
+  zones: NetworkDiscoveryZone[],
+): boolean {
+  const zone = zones.find(item => item.id === candidate.networkZoneId)
+  if (!zone) return false
+  return zone.cidr
+    ? ipInCidr(candidate.ipAddress, zone.cidr)
+    : zone.seedIps.includes(candidate.ipAddress)
 }
 
 export function candidateBelongsToConfiguredZone(

@@ -9,6 +9,9 @@ import { EstimatorLocalModule } from './app/estimator-local.module';
 dotenv.config({
   path: path.resolve(process.cwd(), '.env'),
 });
+if (process.env.NODE_ENV !== 'production') {
+  dotenv.config({ path: path.resolve(process.cwd(), '.env.auth.local'), override: true, quiet: true });
+}
 
 async function bootstrap() {
   const localEstimator = process.env.LOCAL_ESTIMATOR_ONLY === 'true';

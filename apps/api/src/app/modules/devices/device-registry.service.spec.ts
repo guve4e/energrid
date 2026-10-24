@@ -229,6 +229,38 @@ describe('DeviceRegistryService', () => {
     expect(snapshot.summary.discovered).toBe(0);
   });
 
+  it('keeps Energrid measurements unauthorized after explicit inventory enrollment', () => {
+    const registry = new DeviceRegistryService();
+    registry.registerDiscoveredDevice({
+      id: 'device:upstream-lan:esp8266:324864',
+      displayName: 'Energrid ESP8266 DHT22',
+      protocol: 'http', transport: 'http', driver: 'energrid-esp8266',
+      target: 'http://192.168.1.198/api/v1/status',
+      capabilities: ['temperature', 'humidity'],
+      metadata: { physicalId: 'esp8266:324864', observationApprovalRequired: true },
+    });
+    const approved = registry.approveDiscoveredDevice('device:upstream-lan:esp8266:324864', {
+      zoneId: 'office', zoneName: 'Office',
+    });
+    expect(approved).toEqual(expect.objectContaining({ trustStatus: 'approved', zoneId: 'office', zoneName: 'Office' }));
+    expect(approved?.capabilities).toEqual([]);
+  });
+
+  it('updates a repeated scoped Energrid discovery record instead of creating duplicate candidates', () => {
+    const registry = new DeviceRegistryService();
+    const id = 'device:upstream-lan:esp8266:324864';
+    const candidate = (ipAddress: string) => ({
+      id, displayName: 'Energrid ESP8266 DHT22', protocol: 'http' as const, driver: 'energrid-esp8266',
+      target: `http://${ipAddress}/api/v1/status`, capabilities: ['temperature' as const, 'humidity' as const],
+      metadata: { physicalId: 'esp8266:324864', ipAddress, networkScope: 'upstream-lan', observationApprovalRequired: true },
+    });
+    registry.registerDiscoveredDevice(candidate('192.168.1.198'));
+    registry.registerDiscoveredDevice(candidate('192.168.1.211'));
+    const matches = registry.getSnapshot().devices.filter(device => device.id === id);
+    expect(matches).toHaveLength(1);
+    expect(matches[0].adapter.target).toBe('http://192.168.1.211/api/v1/status');
+  });
+
   it('restores an approved installation and its assigned room after a restart', async () => {
     process.env.HOME_DISCOVERED_DEVICES_JSON = JSON.stringify([{
       id: 'shellyplus1-installed:switch:0',

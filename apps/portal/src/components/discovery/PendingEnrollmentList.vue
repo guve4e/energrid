@@ -5,15 +5,17 @@ import type { PendingEnrollmentCardModel } from './pending-enrollment';
 defineProps<{
   cards: PendingEnrollmentCardModel[];
   busyByCandidateId: Readonly<Record<string, string>>;
+  zones: Array<{ id: string; name: string }>;
 }>();
 
 const emit = defineEmits<{
   review: [candidateId: string];
-  decide: [candidateId: string, action: 'approve' | 'block'];
+  decide: [candidateId: string, action: 'approve' | 'block', zoneId?: string];
   rename: [candidateId: string];
 }>();
 
 const expandedCardKey = ref<string | null>(null);
+const selectedZoneByCandidate = ref<Record<string, string>>({});
 
 function formatObservationTime(value: string): string {
   const timestamp = Date.parse(value);
@@ -101,8 +103,14 @@ function toggleReview(cardKey: string) {
               <span>{{ item.componentId || 'Component not identified' }} · {{ item.capabilities.join(' · ') || 'Capabilities not reported' }}</span>
             </div>
             <div class="pending-secondary-actions">
-              <button type="button" :disabled="!!busyByCandidateId[item.candidateId]" @click="emit('decide', item.candidateId, 'approve')">
-                {{ busyByCandidateId[item.candidateId] === 'approve' ? 'Approving…' : item.retired ? 'Approve reenrollment' : 'Approve' }}
+              <label v-if="item.requiresEnrollmentPlacement" class="pending-room-choice">
+                <span>Enroll into room</span>
+                <select v-model="selectedZoneByCandidate[item.candidateId]" aria-label="Choose room for Energrid device">
+                  <option v-for="zone in zones" :key="zone.id" :value="zone.id">{{ zone.name }}</option>
+                </select>
+              </label>
+              <button type="button" :disabled="!!busyByCandidateId[item.candidateId] || (item.requiresEnrollmentPlacement && !zones.length)" @click="emit('decide', item.candidateId, 'approve', item.requiresEnrollmentPlacement ? (selectedZoneByCandidate[item.candidateId] || zones[0]?.id) : undefined)">
+                {{ busyByCandidateId[item.candidateId] === 'approve' ? 'Enrolling…' : item.requiresEnrollmentPlacement ? 'Enroll device' : item.retired ? 'Approve reenrollment' : 'Approve' }}
               </button>
               <button type="button" :disabled="!!busyByCandidateId[item.candidateId]" @click="emit('rename', item.candidateId)">Rename</button>
               <button type="button" :disabled="!!busyByCandidateId[item.candidateId]" @click="emit('decide', item.candidateId, 'block')">
@@ -159,6 +167,8 @@ function toggleReview(cardKey: string) {
 .pending-secondary-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .pending-secondary-actions button { min-height: 34px; padding: 5px 10px; border: 1px solid var(--discovery-border); border-radius: 7px; background: transparent; color: var(--discovery-text); font-size: 11px; cursor: pointer; }
 .pending-secondary-actions button:disabled { opacity: 0.55; cursor: wait; }
+.pending-room-choice { display: grid; gap: 3px; color: var(--discovery-muted); font-size: 10px; }
+.pending-room-choice select { min-height: 34px; border: 1px solid var(--discovery-border); border-radius: 7px; background: var(--discovery-surface); color: var(--discovery-text); padding: 4px 8px; }
 .pending-channel-detail dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 18px; margin: 12px 0 0; }
 .pending-channel-detail dl > div { display: grid; grid-template-columns: minmax(110px, 0.34fr) minmax(0, 1fr); gap: 8px; min-width: 0; }
 .pending-channel-detail dt { color: var(--discovery-muted); font-size: 10px; }

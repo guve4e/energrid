@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import App from './App.vue';
+import { clearAuthenticatedSession, setAuthenticatedSession } from './auth/auth-client';
 
 const id = 'shellyplus1-aabbccddeeff:switch:0';
 const relay = {
@@ -61,6 +62,7 @@ beforeEach(() => {
 afterEach(() => {
   page?.unmount();
   page = undefined;
+  clearAuthenticatedSession(false);
   localStorage.clear();
   history.replaceState({}, '', '/');
   vi.unstubAllGlobals();
@@ -104,11 +106,14 @@ function enrollmentsFor(state: ReturnType<typeof data>) {
 function button(text: string) {
   return page!.findAll('button').find((b) => b.text() === text)!;
 }
-async function render(path: string, fetch: unknown) {
+async function render(path: string, fetch: unknown, authenticated = true) {
   history.replaceState({}, '', path);
+  if (authenticated) setAuthenticatedSession({ accessToken: 'unit-token', expiresIn: 900,
+    user: { id: 'admin', email: 'unit@test', name: 'Admin', role: 'admin' } });
   const mockedFetch = fetch as (input: RequestInfo | URL, init?: RequestInit) => Promise<any>;
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url.endsWith('/auth/me')) return { ok: true, json: async () => ({ user: { id: 'admin', email: 'unit@test', name: 'Admin', role: 'admin' } }) };
     if (url.endsWith('/portal/network/snapshots')) return { ok: true, json: async () => ({ snapshots: [] }) };
     return mockedFetch(input, init);
   });
@@ -126,7 +131,7 @@ describe('device onboarding page workflow with mocked services', () => {
       if (url === '/portal/network/capabilities') return { ok: true, json: async () => ({ nmap: { available: true, enabled: true }, observer: null }) };
       return { ok: true, json: async () => ({}) };
     });
-    await render('/network-intelligence/', fetch);
+    await render('/network-intelligence/', fetch, false);
     await page!.get('#email').setValue('unit@test');
     await page!.get('#password').setValue('test-password');
     await button('Sign in').trigger('click');
@@ -467,7 +472,7 @@ describe('device onboarding page workflow with mocked services', () => {
       true,
     );
     expect(page!.text()).toContain('Approval required');
-    expect(page!.findAll('a').find(link => link.text() === 'Open settings')?.attributes('href')).toBe('http://192.168.7.21');
+    expect(page!.findAll('a').some(link => link.text().includes('settings'))).toBe(false);
     await button('Approve device').trigger('click');
     await flushPromises();
     expect(page!.find('.device-switch-control').exists()).toBe(false);

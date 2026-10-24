@@ -1,88 +1,41 @@
-import { HttpException } from '@nestjs/common'
+import { GoneException } from '@nestjs/common'
+import { GUARDS_METADATA } from '@nestjs/common/constants'
+import { PortalController } from './portal.controller'
 import { PortalDeviceProxyService } from './portal-device-proxy.service'
-import type { NetworkDiscoveredDevice } from '../devices/device-registry.types'
+import { AccessJwtGuard, RoleGuard } from '../auth/auth.guard'
 
-describe('PortalDeviceProxyService', () => {
-  const originalFetch = global.fetch
+describe('Portal device web proxy retirement', () => {
+  afterEach(() => jest.restoreAllMocks())
 
-  afterEach(() => {
-    global.fetch = originalFetch
-    jest.restoreAllMocks()
-  })
+  it.each([
+    ['unknown vendor GET command', 'cm', '/cm?cmnd=Power%20On', 'GET'],
+    ['encoded command path', '%63m', '/%63m?cmnd=Power%20On', 'GET'],
+    ['double-encoded command parameter', 'cm', '/cm?cmnd=Power%2520On', 'GET'],
+    ['case-varied command path', 'CM', '/CM?CMND=POWER%20ON', 'GET'],
+    ['redirect-shaped request', 'redirect', '/redirect', 'GET'],
+    ['non-read method', 'relay/0', '/relay/0?turn=on', 'POST'],
+  ])('never forwards %s to a device', async (_caseName, path, url, method) => {
+    const fetch = jest.spyOn(global, 'fetch')
+    const service = new PortalDeviceProxyService()
 
-  function createService(devices: NetworkDiscoveredDevice[]) {
-    return new PortalDeviceProxyService({
-      getLastScan: () => devices,
-    } as never)
-  }
-
-  function device(overrides: Partial<NetworkDiscoveredDevice> = {}): NetworkDiscoveredDevice {
-    return {
-      id: 'shellyplus1-test',
-      ipAddress: '192.168.7.51',
-      networkZoneId: 'local-lan',
-      networkZoneName: 'Local LAN',
-      protocol: 'http',
-      confidence: 0.9,
-      status: 'online',
-      discoveredAt: new Date().toISOString(),
-      reason: 'test',
-      ...overrides,
-    }
-  }
-
-  function responseMock() {
-    return {
+    await expect(Promise.resolve().then(() => service.proxy('device-id', path, {
+      method,
+      headers: {},
+      url,
+    }, {
       status: jest.fn().mockReturnThis(),
       setHeader: jest.fn(),
       send: jest.fn(),
       end: jest.fn(),
-    }
-  }
+    }))).rejects.toBeInstanceOf(GoneException)
 
-  it('blocks devices outside the latest discovery scan', async () => {
-    const service = createService([])
-
-    await expect(
-      service.proxy('missing-device', '/', { method: 'GET', headers: {}, url: '/' } as never, responseMock() as never),
-    ).rejects.toBeInstanceOf(HttpException)
+    expect(fetch).not.toHaveBeenCalled()
   })
 
-  it('blocks non-private addresses', async () => {
-    const service = createService([device({ ipAddress: '8.8.8.8' })])
-
-    await expect(
-      service.proxy('shellyplus1-test', '/', { method: 'GET', headers: {}, url: '/' } as never, responseMock() as never),
-    ).rejects.toBeInstanceOf(HttpException)
-  })
-
-  it('proxies a discovered private device and rewrites html base', async () => {
-    global.fetch = jest.fn().mockResolvedValue(
-      new Response('<html><head><title>Shelly</title></head><body>OK</body></html>', {
-        status: 200,
-        headers: { 'content-type': 'text/html' },
-      }),
-    )
-    const res = responseMock()
-    const service = createService([device()])
-
-    await service.proxy('shellyplus1-test', '/', { method: 'GET', headers: {}, url: '/' } as never, res as never)
-
-    expect(global.fetch).toHaveBeenCalledWith(
-      new URL('http://192.168.7.51/'),
-      expect.objectContaining({ method: 'GET' }),
-    )
-    expect(res.status).toHaveBeenCalledWith(200)
-    expect(res.send).toHaveBeenCalledWith(
-      expect.stringContaining('<base href="/portal/device-proxy/shellyplus1-test/">'),
-    )
-  })
-
-  it('blocks writes unless installer proxy write mode is enabled', async () => {
-    const service = createService([device()])
-
-    await expect(
-      service.proxy('shellyplus1-test', '/', { method: 'POST', headers: {}, url: '/' } as never, responseMock() as never),
-    ).rejects.toBeInstanceOf(HttpException)
+  it('keeps the retired Portal route behind authenticated administrator guards', () => {
+    expect(Reflect.getMetadata(GUARDS_METADATA, PortalController))
+      .toEqual([AccessJwtGuard, RoleGuard])
+    expect(Reflect.getMetadata('energrid.auth.roles', PortalController))
+      .toEqual(['admin'])
   })
 })

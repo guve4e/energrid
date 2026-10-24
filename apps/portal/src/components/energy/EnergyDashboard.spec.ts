@@ -5,6 +5,7 @@ import {
   recentPowerRange,
   type EnergyDashboard as Dashboard,
 } from './energy-types';
+import { setAuthenticatedSession } from '../../auth/auth-client';
 
 const asset = {
   id: 'boiler',
@@ -68,7 +69,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 function responses(result: Dashboard = dashboard) {
-  return vi.fn(async (url: string) => ({
+  return vi.fn(async (url: string, _init?: RequestInit) => ({
     ok: true,
     json: async () =>
       url.endsWith('/assets')
@@ -83,6 +84,7 @@ function responses(result: Dashboard = dashboard) {
   }));
 }
 async function render(fetch: unknown = responses()) {
+  setAuthenticatedSession({ accessToken: 'unit-token', expiresIn: 900, user: { id: 'u1', email: 'admin@example.test', name: 'Admin', role: 'admin' } });
   vi.stubGlobal('fetch', fetch);
   wrapper = mount(EnergyDashboard, {
     props: { apiBase: '', accessToken: 'test' },
@@ -118,10 +120,9 @@ describe('energy dashboard', () => {
     const fetch = responses();
     const page = await render(fetch);
     expect(fetch.mock.calls[0][0]).toBe('/portal/energy/assets');
-    expect(fetch).toHaveBeenCalledWith(
-      expect.stringContaining('/assets/boiler/history?'),
-      expect.objectContaining({ headers: { Authorization: 'Bearer test' } }),
-    );
+    const historyCall = fetch.mock.calls.find(([url]) => String(url).includes('/assets/boiler/history?'));
+    expect(historyCall).toBeDefined();
+    expect(new Headers(historyCall?.[1]?.headers).get('Authorization')).toBe('Bearer unit-token');
     expect(page.text()).toContain('80 L tank');
     expect(page.text()).toContain('04:00–06:00');
     expect(page.text()).toContain('Estimated energy');

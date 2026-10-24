@@ -1,10 +1,13 @@
+import { Logger } from '@nestjs/common';
 import type { DeviceRegistryService } from './device-registry.service';
 import type { DeviceInstallationStore } from './device-installation.store';
 import type { DeviceEnrollmentService } from './enrollment/device-enrollment.service';
 import type {
   DeviceObservationStateStore,
 } from './device-observation-state.store';
+import type { DeviceObservationState } from '@energrid/domain-devices';
 import { resolveInstallationObservationAuthority } from './device-observation-installation-authority';
+import type { GenericMeasurementHistoryWriter, HistoryWriteResult } from '../telemetry/generic-measurements/generic-measurement-history-writer';
 
 export interface TrustedObservationInput {
   scope: {
@@ -35,6 +38,8 @@ export type ObservationIngressOutcome =
       reason: string;
       updatedKeys: string[];
       rejectedFields: string[];
+      state: DeviceObservationState | null;
+      historyWrites?: HistoryWriteResult[];
     };
 
 /**
@@ -48,6 +53,7 @@ export type ObservationIngressOutcome =
  * The durable observation engine performs acceptance.
  */
 export class DeviceIntelligenceObservationIngress {
+  private readonly logger = new Logger(DeviceIntelligenceObservationIngress.name);
   constructor(
     private readonly registry: Pick<
       DeviceRegistryService,
@@ -56,6 +62,7 @@ export class DeviceIntelligenceObservationIngress {
     private readonly installations: Pick<DeviceInstallationStore, 'get'>,
     private readonly enrollment: Pick<DeviceEnrollmentService, 'find'>,
     private readonly store: Pick<DeviceObservationStateStore, 'process'>,
+    private readonly history?: Pick<GenericMeasurementHistoryWriter, 'persistAccepted'>,
   ) {}
 
   async ingest(
@@ -143,6 +150,47 @@ export class DeviceIntelligenceObservationIngress {
       payload: input.payload,
     });
 
+    let historyWrites: HistoryWriteResult[] | undefined;
+    if (
+      this.history &&
+      result.state &&
+      input.evidenceId &&
+      (result.accepted || result.reason === 'duplicate_evidence')
+    ) {
+      const acceptedKeys = result.accepted
+        ? result.updatedKeys
+        : Object.entries(result.state.fields)
+            .filter(([, field]) => field.sourceId === sourceId && field.evidenceId === input.evidenceId)
+            .map(([key]) => key);
+      const fields = acceptedKeys.flatMap(fieldName => {
+        const field = result.state!.fields[fieldName];
+        return field && field.sourceId === sourceId && field.evidenceId === input.evidenceId &&
+          typeof field.value === 'number' && Number.isFinite(field.value)
+          ? [{
+              field: fieldName,
+              value: field.value,
+              observedAt: field.measuredAt ?? field.receivedAt,
+              receivedAt: field.receivedAt,
+            }]
+          : [];
+      });
+      if (fields.length) {
+        try {
+          historyWrites = await this.history.persistAccepted({
+            ...scope,
+            deviceId,
+            sourceId,
+            selector,
+            evidenceId: input.evidenceId,
+            fields,
+          });
+        } catch (error) {
+          this.logger.error(`History sink failed after accepted observation (device=${deviceId}).`);
+          historyWrites = fields.map(({ field }) => ({ field, outcome: 'failed' }));
+        }
+      }
+    }
+
     return {
       outcome: 'processed',
       accepted: result.accepted,
@@ -150,6 +198,8 @@ export class DeviceIntelligenceObservationIngress {
       reason: result.reason,
       updatedKeys: result.updatedKeys,
       rejectedFields: result.rejectedFields,
+      state: result.state,
+      ...(historyWrites ? { historyWrites } : {}),
     };
   }
 }

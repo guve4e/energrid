@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { authFetch } from '../../auth/auth-client';
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import type { DeviceConnectionReport } from '@energrid/domain-devices';
 import type { ControlSetupDevice } from './device-control';
@@ -56,7 +57,7 @@ async function check() {
   clearTimeout(expires);
   const timeout = setTimeout(() => controller.abort(), 25000);
   try {
-    const response = await fetch(
+    const response = await authFetch(
       `${props.apiBase}/portal/devices/${encodeURIComponent(deviceId)}/diagnostics`,
       {
         method: 'POST',

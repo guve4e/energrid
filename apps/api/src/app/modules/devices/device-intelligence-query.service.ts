@@ -9,6 +9,7 @@ import { Injectable } from '@nestjs/common';
 import { AuthorizedDeviceObservationReader } from './device-intelligence-observation-reader';
 import {
   projectAuthorizedObservations,
+  observationFreshnessLimitSeconds,
   type IntelligenceObservationResult,
 } from './device-intelligence-observation';
 import { DeviceRegistryService } from './device-registry.service';
@@ -570,14 +571,9 @@ export class DeviceIntelligenceQueryService {
     );
     if (!state || state.deviceId !== device.deviceId) return null;
 
-    const configured = Number(
-      process.env.HOME_OBSERVATION_FRESHNESS_SECONDS || 60,
+    return projectAuthorizedObservations(
+      state, observationFreshnessLimitSeconds(),
     );
-    const freshnessSeconds = Number.isFinite(configured)
-      ? Math.min(86400, Math.max(1, Math.floor(configured)))
-      : 60;
-
-    return projectAuthorizedObservations(state, freshnessSeconds);
   }
 
   async describeDevice(

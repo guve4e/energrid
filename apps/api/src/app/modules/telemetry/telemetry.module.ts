@@ -12,6 +12,8 @@ import { TelemetryStore } from './telemetry.store';
 import { TelemetryIngestService } from './telemetry-ingest.service';
 import { TelemetryRollupService } from './telemetry-rollup.service';
 import { TelemetrySpool } from './telemetry-spool';
+import { PostgresGenericMeasurementRepository } from './generic-measurements/postgres-generic-measurement.repository';
+import { GenericMeasurementHistoryWriter } from './generic-measurements/generic-measurement-history-writer';
 
 @Module({
   providers: [
@@ -46,12 +48,24 @@ import { TelemetrySpool } from './telemetry-spool';
         return pool;
       },
     },
+    {
+      provide: PostgresGenericMeasurementRepository,
+      inject: [TELEMETRY_POOL],
+      useFactory: (pool: Pool | null) =>
+        pool ? new PostgresGenericMeasurementRepository(pool) : null,
+    },
+    {
+      provide: GenericMeasurementHistoryWriter,
+      inject: [PostgresGenericMeasurementRepository, TELEMETRY_CONFIG],
+      useFactory: (repository: PostgresGenericMeasurementRepository | null, config: TelemetryConfig) =>
+        new GenericMeasurementHistoryWriter(repository, config.historyEnabled, config.historyPolicies),
+    },
     TelemetryStore,
     TelemetrySpool,
     TelemetryIngestService,
     TelemetryRollupService,
   ],
-  exports: [TELEMETRY_CONFIG, TelemetryStore, TelemetryIngestService],
+  exports: [TELEMETRY_CONFIG, TelemetryStore, TelemetryIngestService, GenericMeasurementHistoryWriter, PostgresGenericMeasurementRepository],
 })
 export class TelemetryModule implements OnModuleDestroy {
   constructor(

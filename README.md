@@ -109,3 +109,7 @@ that a device is offline.
 
 For configuration and routed-network examples, see
 `docs/site-gateway-bootstrap.md`.
+
+## Portal authentication
+
+Portal accounts, local setup, API routes, authorization boundaries, and the safe production migration procedure are documented in `docs/portal-authentication.md`.

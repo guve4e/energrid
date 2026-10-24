@@ -14,6 +14,7 @@ export interface PendingCandidateInput {
     reason: string;
   };
   metadata?: Record<string, string | number | boolean>;
+  zoneId?: string;
 }
 
 export interface PendingIdentityInput {
@@ -66,6 +67,7 @@ export interface PendingCandidateDetails {
   networkAddressStatus: 'current' | 'historical' | 'reused' | null;
   reason: string;
   retired: boolean;
+  requiresEnrollmentPlacement: boolean;
   brokerObservedPeerIpAddress: string | null;
   brokerObservedAt: string | null;
   brokerIdentityVerification: string | null;
@@ -224,6 +226,7 @@ function detail(
     networkAddressStatus: identity?.networkAddressStatus ?? null,
     reason: identity?.reason || 'Backend identity evidence is unavailable.',
     retired: candidate.metadata?.previouslyEnrolledRetired === true,
+    requiresEnrollmentPlacement: candidate.metadata?.observationApprovalRequired === true,
     brokerObservedPeerIpAddress: identity?.brokerObservedPeerIpAddress ?? null,
     brokerObservedAt: identity?.brokerObservedAt ?? null,
     brokerIdentityVerification: identity?.brokerIdentityVerification ?? null,

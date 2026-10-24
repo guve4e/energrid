@@ -296,6 +296,13 @@ describe('telemetry configuration', () => {
     expect(telemetryConfig({})).toEqual({
       enabled: false,
       databaseUrl: null,
+      historyEnabled: false,
+      historyPolicies: {
+        temperature: { meaningfulChange: 0.3, maxHeartbeatMs: 900_000 },
+        humidity: { meaningfulChange: 2, maxHeartbeatMs: 900_000 },
+        pressure: { meaningfulChange: 1, maxHeartbeatMs: 900_000 },
+        power: { meaningfulChange: 5, maxHeartbeatMs: 300_000 },
+      },
       rollupIntervalMs: 300000,
       maxPendingWrites: 100_000,
       spoolDirectory: null,

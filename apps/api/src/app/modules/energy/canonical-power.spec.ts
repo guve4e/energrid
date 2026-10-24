@@ -41,7 +41,6 @@ beforeEach(() => {
     ...saved,
     PORTAL_TENANT_ID: 'tenant-demo',
     PORTAL_SITE_ID: 'site-home',
-    PORTAL_CONTROL_TOKEN: 'test-token',
   };
 });
 afterEach(() => {
@@ -266,6 +265,7 @@ describe('history status and rollup authorization', () => {
     ({
       headers: token ? { authorization: `Bearer ${token}` } : {},
       url: '/',
+      ...(token === 'test-token' ? { user: { userId: 'u1', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 's1', sessionVersion: 0 } } : {}),
     }) as DeviceProxyRequest;
   it('requires the portal token for both endpoints', async () => {
     const controller = new TelemetryHistoryController(

@@ -1,13 +1,26 @@
 #!/bin/bash
 
 BASE="http://localhost:3000"
+if [ -z "$AUTH_ACCESS_TOKEN" ]; then
+  echo "Set AUTH_ACCESS_TOKEN to a current short-lived administrator access JWT." >&2
+  exit 1
+fi
+auth_config=$(mktemp)
+chmod 600 "$auth_config"
+trap 'rm -f "$auth_config"' EXIT
+printf 'header = "Authorization: Bearer %s"\n' "$AUTH_ACCESS_TOKEN" > "$auth_config"
+unset AUTH_ACCESS_TOKEN
+
+auth_curl() {
+  curl -s --config "$auth_config" "$@"
+}
 
 echo "===== DEVICE SUMMARY ====="
-curl -s "$BASE/portal/state" | jq '.deviceSummary // .summary'
+auth_curl "$BASE/portal/state" | jq '.deviceSummary // .summary'
 
 echo
 echo "===== ALL DEVICES ====="
-curl -s "$BASE/portal/state" | jq '.devices[] | {
+auth_curl "$BASE/portal/state" | jq '.devices[] | {
 id,
 displayName,
 trustStatus,
@@ -19,7 +32,7 @@ capabilities
 
 echo
 echo "===== DISCOVERED DEVICES ====="
-curl -s "$BASE/portal/state" | jq '.devices[] 
+auth_curl "$BASE/portal/state" | jq '.devices[]
 | select(.trustStatus=="discovered") 
 | {
 id,
@@ -32,7 +45,7 @@ discovery
 
 echo
 echo "===== NETWORK SCAN ====="
-curl -s "$BASE/portal/network/scan" | jq '.devices[] | {
+auth_curl "$BASE/portal/network/scan" | jq '.devices[] | {
 id,
 ipAddress,
 vendor,
@@ -44,5 +57,4 @@ confidence
 
 echo
 echo "===== MQTT DEBUG ====="
-curl -s "$BASE/portal/bus/mqtt?token=dev-token-admin" | jq
-
+auth_curl "$BASE/portal/bus/mqtt" | jq

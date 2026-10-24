@@ -3,8 +3,11 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app/app.module';
 import { WsAdapter } from '@nestjs/platform-ws';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import { PortalDeviceProxyService } from './app/modules/portal/portal-device-proxy.service';
 import { apiListenHost } from './server-listen-config';
+import { config as loadDotenv } from 'dotenv';
+import { resolve } from 'node:path';
+import { AuthConfig } from './app/modules/auth/auth-config';
+import helmet from 'helmet';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 
@@ -17,7 +20,7 @@ function setupSwagger(app: Awaited<ReturnType<typeof NestFactory.create>>) {
         '',
         'Voice WebSocket protocol:',
         '- connect to ws://<host>:<port>/voice',
-        '- send { "type": "authenticate", "token": "<PORTAL_CONTROL_TOKEN>" } first',
+        '- send { "type": "authenticate", "token": "<15-minute access JWT>" } first',
         '- send 16kHz mono PCM16 binary audio chunks',
         '- send { "type": "end_of_turn" } after VAD detects silence',
         '- receive JSON events: session_start, stt_partial, stt_final, assistant_text_delta, assistant_audio_chunk, assistant_final, turn_end, error',
@@ -43,23 +46,23 @@ function setupSwagger(app: Awaited<ReturnType<typeof NestFactory.create>>) {
 }
 
 async function bootstrap() {
+  if (process.env.NODE_ENV !== 'production') {
+    loadDotenv({ path: resolve(process.cwd(), '.env.auth.local'), override: true, quiet: true });
+  }
   const app = await NestFactory.create(AppModule, {
     logger: ['log', 'warn', 'error'],
   });
+  app.use(helmet({ contentSecurityPolicy: false }));
+  app.getHttpAdapter().getInstance().disable('x-powered-by');
 
   app.useWebSocketAdapter(new WsAdapter(app));
 
+  const authConfig = app.get(AuthConfig);
   app.enableCors({
-    origin: [
-      'http://localhost:5173',
-      'http://127.0.0.1:5173',
-      'http://localhost:4173',
-      'http://localhost:4200',
-      'http://127.0.0.1:4173',
-    ],
+    origin: Array.from(authConfig.value.trustedOrigins),
     methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: false,
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token'],
+    credentials: true,
     optionsSuccessStatus: 204,
   });
 
@@ -68,12 +71,17 @@ async function bootstrap() {
   const port = process.env.PORT || 3000;
   const host = apiListenHost();
   await app.listen(port, host);
-  const deviceProxy = app.get(PortalDeviceProxyService);
   const httpServer = app.getHttpServer();
   const upgradeListeners = httpServer.listeners('upgrade');
   httpServer.removeAllListeners('upgrade');
   httpServer.on('upgrade', (request: IncomingMessage, socket: Duplex, head: Buffer) => {
-    if (deviceProxy.handleWebSocketUpgrade(request, socket, head)) return;
+    let pathname = '';
+    try { pathname = new URL(request.url || '/', 'http://localhost').pathname; } catch { socket.destroy(); return; }
+    if (pathname === '/portal/device-proxy' || pathname.startsWith('/portal/device-proxy/')) {
+      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      socket.destroy();
+      return;
+    }
 
     for (const listener of upgradeListeners) {
       listener.call(httpServer, request, socket, head);

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { authFetch } from '../../auth/auth-client';
 import { computed, ref, watch } from 'vue';
 import {
   privateShellyBaseUrl,
@@ -179,7 +180,7 @@ async function save() {
   busy.value = true;
   const deviceId = props.device.id;
   try {
-    const response = await fetch(
+    const response = await authFetch(
       `${props.apiBase}/portal/devices/${encodeURIComponent(deviceId)}/control`,
       {
         method: 'POST',

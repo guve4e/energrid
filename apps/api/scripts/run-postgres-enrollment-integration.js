@@ -78,6 +78,7 @@ async function main() {
     '--runTestsByPath',
     'src/app/modules/devices/enrollment/postgres-device-enrollment.integration.spec.ts',
     'src/app/modules/devices/enrollment/postgres-physical-device-inventory.integration.spec.ts',
+    'src/app/modules/telemetry/generic-measurements/postgres-generic-measurement.integration.spec.ts',
   ], {
     cwd: apiRoot,
     env: { ...process.env, ENERGRID_ENROLLMENT_TEST_DATABASE_URL: connectionString },

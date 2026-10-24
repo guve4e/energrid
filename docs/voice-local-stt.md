@@ -45,15 +45,18 @@ active mode and selected model/provider.
 
 ## Access And Privacy
 
-WebSocket clients must send an initial JSON message containing the configured
-`PORTAL_CONTROL_TOKEN` before the server creates a voice session:
+WebSocket clients must send an initial JSON message containing a short-lived
+access JWT from an authenticated account session before the server creates a
+voice session. For CLI replay, set `AUTH_ADMIN_EMAIL`, `AUTH_ADMIN_PASSWORD`,
+and (when required) `AUTH_CLIENT_ORIGIN` in the private environment; the tool
+logs in, uses a short-lived access JWT, then revokes its session:
 
 ```json
-{"type":"authenticate","token":"<PORTAL_CONTROL_TOKEN>"}
+{"type":"authenticate","token":"<short-lived access JWT>"}
 ```
 
 Use TLS/WSS outside localhost. Voice debug sockets are disabled unless
-`VOICE_DEBUG_ENABLED=true` and require the same token. Voice run persistence and
+`VOICE_DEBUG_ENABLED=true` and require an administrator access JWT. Voice run persistence and
 file tracing are opt-in (`VOICE_RUNS_ENABLED=true` and
 `VOICE_TRACE_ENABLED=true`). Persisted transcripts contain household data, so
 enable them only for deliberate diagnostics and apply an explicit retention

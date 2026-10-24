@@ -379,17 +379,12 @@ The proxy is intentionally narrow:
 - the device must be present in the latest local discovery scan
 - the target IP must be private LAN address space
 - the gateway only talks HTTP to the device
-- write methods are blocked unless installer write mode is explicitly enabled
+- device proxy writes are always blocked; use the authorized device-control workflow for commands
 
-Read-only browsing is enabled by default. To allow POST/PUT/PATCH/DELETE from
-device admin pages during a supervised installer session:
-
-```sh
-PORTAL_DEVICE_PROXY_WRITE_ENABLED=true
-```
-
-This should only be enabled for trusted admin/install sessions because it gives
-the portal a controlled window into local device configuration pages.
+The proxy allows read-only HTTP browsing and blocks HTTP write methods plus known
+legacy GET command forms such as Shelly relay `turn=on|off|toggle`. Device commands
+must go through Energrid’s explicit control authorization and safety workflow. The
+proxy does not support installer write mode.
 
 This publishes under:
 

@@ -2,7 +2,7 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { fileURLToPath, URL } from 'node:url'
 
-const apiProxyTarget = process.env.PORTAL_API_PROXY_TARGET || 'http://192.168.1.60:3000'
+const apiProxyTarget = process.env.PORTAL_API_PROXY_TARGET || 'http://localhost:3000'
 const voiceProxyTarget = apiProxyTarget.replace(/^http/, 'ws')
 const backendLabel =
   process.env.VITE_BACKEND_LABEL ||

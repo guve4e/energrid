@@ -27,6 +27,20 @@ function identity(candidateId: string, componentId: string, extra: Partial<Pendi
 }
 
 describe('Pending Enrollment presentation', () => {
+  it('marks an Energrid candidate for explicit room enrollment with separate measurement approval', () => {
+    const device: PendingCandidateInput = {
+      id: 'device:upstream-lan:esp8266:324864', tenantId: 'tenant-a', siteId: 'site-a',
+      displayName: 'Energrid ESP8266 DHT22', trustStatus: 'discovered', kind: 'physical',
+      capabilities: [{ kind: 'temperature', actions: ['read'] }, { kind: 'humidity', actions: ['read'] }],
+      adapter: { protocol: 'http', target: 'http://192.168.1.198/api/v1/status' },
+      discovery: { source: 'http', confidence: 1, reason: 'Verified firmware identity' },
+      metadata: { observationApprovalRequired: true },
+    };
+    const [card] = buildPendingEnrollmentCards([device], {});
+    expect(card.capabilities).toEqual(['temperature', 'humidity']);
+    expect(card.details[0].requiresEnrollmentPlacement).toBe(true);
+  });
+
   it('groups Shelly ProEM channels with shared historical network identity', () => {
     const first = candidate(`${physicalId}:em1:0`, 'em1:0', 'Shelly ProEM');
     const second = candidate(`${physicalId}:em1:1`, 'em1:1', 'Shelly ProEM');

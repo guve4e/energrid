@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { authFetch } from '../../auth/auth-client';
 import { computed, onMounted, ref, watch } from 'vue';
 
 type TraceOutcome = 'succeeded' | 'denied' | 'failed';
@@ -114,7 +115,7 @@ async function loadTraces() {
   try {
     const base = props.apiBase.replace(/\/$/, '');
 
-    const response = await fetch(
+    const response = await authFetch(
       `${base}/portal/assistant/traces`,
       {
         headers: {

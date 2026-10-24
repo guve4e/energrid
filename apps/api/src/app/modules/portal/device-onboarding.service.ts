@@ -31,7 +31,11 @@ export class DeviceOnboardingService {
     private readonly physicalInventory?: PhysicalDeviceInventoryService,
   ) {}
 
-  async approve(deviceId: string): Promise<RegisteredDevice> {
+  async approve(
+    deviceId: string,
+    placement?: { zoneId: string; zoneName: string },
+    actor = 'portal-admin',
+  ): Promise<RegisteredDevice> {
     const { tenant, site } = this.registry.getSnapshot();
 
     const candidate = this.registry.getDevices().find(
@@ -78,7 +82,9 @@ export class DeviceOnboardingService {
     }
 
     const approved = pending
-      ? this.registry.approveDiscoveredDevice(candidate.id)
+      ? placement
+        ? this.registry.approveDiscoveredDevice(candidate.id, placement)
+        : this.registry.approveDiscoveredDevice(candidate.id)
       : candidate;
 
     if (!approved) {
@@ -100,19 +106,56 @@ export class DeviceOnboardingService {
           ...identity,
           displayName: approved.displayName,
         },
-        'portal-control-token',
+        actor,
       );
     } else if (existing.status === 'retired') {
       await this.enrollment.reenroll(
         identity,
         approved.displayName,
-        'portal-control-token',
+        actor,
       );
     }
     this.registry.setEnrollmentStatus(candidate.id, 'enrolled');
 
     const physicalId = approved.metadata?.physicalId;
     const componentKey = approved.metadata?.component;
+    const isEnergridFirmwareIdentity =
+      approved.metadata?.identityEvidenceSource === 'bounded GET /api/v1/identity';
+    if (this.physicalInventory && isEnergridFirmwareIdentity && typeof physicalId === 'string') {
+      const observedAt = String(approved.metadata?.networkObservedAt || approved.state.observedAt || new Date().toISOString());
+      const networkScope = String(approved.metadata?.networkScope || '');
+      const ipAddress = String(approved.metadata?.ipAddress || '');
+      const physical = await this.physicalInventory.discover({
+        scope: identity,
+        identity: {
+          namespace: `energrid:firmware-device-id:${networkScope || 'network-unknown'}`,
+          value: physicalId,
+        },
+        vendor: 'Energrid',
+        hardwareModel: approved.displayName,
+        firmwareVersion: String(approved.metadata?.firmwareVersion || ''),
+        evidenceSource: 'bounded_http_identity',
+        observedAt,
+        components: [],
+        ...(typeof approved.adapter.target === 'string'
+          ? { endpoint: { protocol: 'http' as const, kind: 'status', address: approved.adapter.target } }
+          : {}),
+      });
+      if (ipAddress && networkScope) {
+        await this.physicalInventory.associateLanIdentity({
+          device: identity,
+          physicalDeviceId: physical.physicalDeviceId,
+          ipAddress,
+          networkScope,
+          observedAt,
+          evidenceSource: 'bounded_http_identity',
+          actor,
+          ...(typeof approved.metadata?.macAddress === 'string' ? { macAddress: approved.metadata.macAddress } : {}),
+          ...(typeof approved.metadata?.hostname === 'string' ? { hostname: approved.metadata.hostname } : {}),
+          ...(typeof approved.metadata?.gatewayId === 'string' ? { gatewayId: approved.metadata.gatewayId } : {}),
+        });
+      }
+    }
     if (this.physicalInventory && typeof physicalId === 'string' && typeof componentKey === 'string') {
       const observedAt = approved.state.observedAt || new Date().toISOString();
       const mqttCommandTopic = approved.metadata?.mqttCommandTopic;
@@ -150,7 +193,7 @@ export class DeviceOnboardingService {
           networkScope,
           observedAt: networkObservedAt,
           evidenceSource: 'lan_discovery_protocol_match',
-          actor: 'portal-control-token',
+          actor,
           ...(typeof approved.metadata?.macAddress === 'string'
             ? { macAddress: approved.metadata.macAddress }
             : {}),
@@ -166,7 +209,7 @@ export class DeviceOnboardingService {
         device: identity,
         physicalDeviceId: discovered.physicalDeviceId,
         componentKey,
-        actor: 'portal-control-token',
+        actor,
       });
     }
 

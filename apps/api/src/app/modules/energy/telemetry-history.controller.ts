@@ -5,13 +5,17 @@ import {
   Param,
   Query,
   Req,
+  UseGuards,
 } from '@nestjs/common';
-import { assertPortalControlToken } from '../portal/portal.controller';
+import { assertPortalAdministrator } from '../portal/portal.controller';
 import type { DeviceProxyRequest } from '../portal/portal-device-proxy.service';
 import { TelemetryIngestService } from '../telemetry/telemetry-ingest.service';
 import { CanonicalPowerHistoryReader } from './canonical-power-history.reader';
+import { AccessJwtGuard, RequireRoles, RoleGuard } from '../auth/auth.guard';
 
 @Controller('portal/energy/telemetry')
+@UseGuards(AccessJwtGuard, RoleGuard)
+@RequireRoles('admin')
 export class TelemetryHistoryController {
   constructor(
     private readonly ingest: TelemetryIngestService,
@@ -20,7 +24,7 @@ export class TelemetryHistoryController {
 
   @Get('status')
   status(@Req() request: DeviceProxyRequest) {
-    assertPortalControlToken(request);
+    assertPortalAdministrator(request);
     return this.ingest.status();
   }
 
@@ -31,7 +35,7 @@ export class TelemetryHistoryController {
     @Query('from') from: unknown,
     @Query('to') to: unknown,
   ) {
-    assertPortalControlToken(request);
+    assertPortalAdministrator(request);
     try {
       return await this.history.summaries(id, from, to);
     } catch (error) {

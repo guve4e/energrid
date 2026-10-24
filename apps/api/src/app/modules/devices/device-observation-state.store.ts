@@ -1,5 +1,6 @@
 import { ClassicLevel } from 'classic-level';
 import { createHash } from 'node:crypto';
+import { uptime } from 'node:os';
 
 import {
   processObservationPipeline,
@@ -57,6 +58,38 @@ interface StoredEvidenceIndex {
   schemaVersion: 1;
   sequence: number;
   fingerprint: string;
+}
+
+interface StoredSourceCursor {
+  schemaVersion: 1;
+  session: number;
+  uptimeMs: number;
+  sampleCount: number;
+  lastSampleUptimeMs: number;
+  receivedAt: string;
+  /** Host monotonic uptime survives API process restarts and ignores wall-clock changes. */
+  apiUptimeMs?: number;
+}
+
+const wallClockToleranceMs = 30_000;
+
+function continuityToleranceMs(elapsedMs: number): number {
+  return Math.max(wallClockToleranceMs, elapsedMs * 0.001);
+}
+
+function wallClockJump(
+  previous: StoredSourceCursor,
+  currentApiUptimeMs: number,
+  currentObservedAt: string,
+): boolean {
+  const previousTime = Date.parse(previous.receivedAt);
+  const currentTime = Date.parse(currentObservedAt);
+  if (!Number.isFinite(previousTime) || !Number.isSafeInteger(currentTime) ||
+      !Number.isSafeInteger(previous.apiUptimeMs) || currentApiUptimeMs < previous.apiUptimeMs!) return true;
+  const elapsedWallMs = currentTime - previousTime;
+  const elapsedApiMs = currentApiUptimeMs - previous.apiUptimeMs!;
+  return elapsedWallMs < 0 ||
+    Math.abs(elapsedWallMs - elapsedApiMs) > continuityToleranceMs(elapsedApiMs);
 }
 
 export type ObservationStoreResult =
@@ -182,6 +215,122 @@ export class DeviceObservationStateStore {
       `${scopePrefix(scope)}evidence:${encodeURIComponent(deviceId)}:` +
       encodeURIComponent(evidenceId)
     );
+  }
+
+  private sourceCursorKey(
+    scope: ObservationScope,
+    deviceId: string,
+    sourceId: string,
+  ): string {
+    return (
+      `${scopePrefix(scope)}source-cursor:${encodeURIComponent(deviceId)}:` +
+      encodeURIComponent(sourceId)
+    );
+  }
+
+  /**
+   * Build a retry-stable identity for a source sample whose counters are
+   * monotonic only for one device boot. A counter reset starts a new session.
+   * Cursor state is durable so API restarts do not make a repeated HTTP poll
+   * look like a new sample.
+   */
+  sourceSampleEvidenceId(
+    scope: ObservationScope,
+    deviceId: string,
+    sourceId: string,
+    sample: {
+      uptimeMs: number;
+      sampleCount: number;
+      lastSampleUptimeMs: number;
+      observedAt?: string;
+      apiUptimeMs?: number;
+    },
+  ): Promise<string> {
+    return this.serialize(async () => {
+      if (!deviceId?.trim() || !sourceId?.trim() ||
+        !Number.isSafeInteger(sample.uptimeMs) || sample.uptimeMs < 0 ||
+        !Number.isSafeInteger(sample.sampleCount) || sample.sampleCount < 1 ||
+        !Number.isSafeInteger(sample.lastSampleUptimeMs) || sample.lastSampleUptimeMs < 0) {
+        throw new Error('Invalid source sample cursor');
+      }
+      const observedAt = sample.observedAt || new Date().toISOString();
+      if (!Number.isFinite(Date.parse(observedAt))) throw new Error('Invalid source sample observation time');
+      const apiUptimeMs = sample.apiUptimeMs ?? Math.floor(uptime() * 1000);
+      if (!Number.isSafeInteger(apiUptimeMs) || apiUptimeMs < 0) {
+        throw new Error('Invalid API monotonic uptime');
+      }
+
+      const key = this.sourceCursorKey(scope, deviceId, sourceId);
+      let previous: StoredSourceCursor | undefined;
+      try {
+        previous = await this.db.get(key) as StoredSourceCursor;
+      } catch (error) {
+        if (!error || typeof error !== 'object' || !('code' in error) ||
+          error.code !== 'LEVEL_NOT_FOUND') throw error;
+      }
+
+      if (previous && (previous.schemaVersion !== 1 ||
+        !Number.isSafeInteger(previous.session) || previous.session < 0 ||
+        !Number.isSafeInteger(previous.uptimeMs) || previous.uptimeMs < 0 ||
+        !Number.isSafeInteger(previous.sampleCount) || previous.sampleCount < 0 ||
+        !Number.isSafeInteger(previous.lastSampleUptimeMs) || previous.lastSampleUptimeMs < 0 ||
+        !Number.isFinite(Date.parse(previous.receivedAt)) ||
+        (previous.apiUptimeMs !== undefined &&
+          (!Number.isSafeInteger(previous.apiUptimeMs) || previous.apiUptimeMs < 0)))) {
+        throw new Error('Invalid persisted source sample cursor');
+      }
+
+      const uptimeReset = previous && sample.uptimeMs < previous.uptimeMs;
+      const sampleCountReset = previous && sample.sampleCount < previous.sampleCount;
+      const sampleTimeReset = previous && sample.lastSampleUptimeMs < previous.lastSampleUptimeMs;
+      // Treat a boot as proven only when firmware uptime and both per-boot
+      // sample counters reset together. Partial regressions can be corruption,
+      // rollover, or an inconsistent response, and cannot mint a new identity.
+      const countersReset = !!(uptimeReset && sampleCountReset && sampleTimeReset);
+      const partialCounterReset = !!(uptimeReset || sampleCountReset || sampleTimeReset) && !countersReset;
+
+      if (previous) {
+        // Never infer a firmware boot from wall time. Reject discontinuities
+        // until the API host clock and monotonic clock agree again.
+        if (previous.apiUptimeMs !== undefined && wallClockJump(previous, apiUptimeMs, observedAt)) {
+          throw new Error('source_sample_session_ambiguous');
+        }
+
+        // A persisted cursor from the earlier format has no monotonic anchor.
+        // A direct device-counter reset is still reliable; otherwise fail closed.
+        if (previous.apiUptimeMs === undefined && !countersReset) {
+          throw new Error('source_sample_session_ambiguous');
+        }
+
+        if (partialCounterReset) {
+          throw new Error('source_sample_session_ambiguous');
+        }
+
+        if (!countersReset) {
+          const elapsedApiMs = apiUptimeMs - previous.apiUptimeMs!;
+          const elapsedDeviceMs = sample.uptimeMs - previous.uptimeMs;
+          if (Math.abs(elapsedDeviceMs - elapsedApiMs) > continuityToleranceMs(elapsedApiMs)) {
+            throw new Error('source_sample_session_ambiguous');
+          }
+        }
+      }
+
+      const reset = countersReset;
+      const session = previous ? previous.session + (reset ? 1 : 0) : 0;
+      if (!Number.isSafeInteger(session)) throw new Error('Source session exhausted');
+
+      await this.db.put(key, {
+        schemaVersion: 1,
+        session,
+        uptimeMs: sample.uptimeMs,
+        sampleCount: sample.sampleCount,
+        lastSampleUptimeMs: sample.lastSampleUptimeMs,
+        receivedAt: observedAt,
+        apiUptimeMs,
+      } satisfies StoredSourceCursor, { sync: true });
+
+      return `${sourceId}:${deviceId}:boot-${session}:sample-${sample.sampleCount}-${sample.lastSampleUptimeMs}`;
+    });
   }
 
   private decisionKey(

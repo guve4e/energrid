@@ -10,9 +10,6 @@ import type { DeviceDiagnosticsService } from '../devices/device-diagnostics.ser
 
 describe('portal control configuration authorization', () => {
   const originalEnv = process.env;
-  beforeEach(() => {
-    process.env = { PORTAL_CONTROL_TOKEN: 'unit-only' };
-  });
   afterAll(() => {
     process.env = originalEnv;
   });
@@ -27,6 +24,7 @@ describe('portal control configuration authorization', () => {
       .fn()
       .mockResolvedValue({ devices: [], zones: [], scannedAt: 'now' });
     const getZones = jest.fn(() => [{ id: 'home-lan', name: 'Home LAN', cidr: '192.168.7.0/24', seedIps: [] }]);
+    const getLastScan = jest.fn(() => []);
     const registerDiscoveredDevice = jest.fn();
     const persistInstallation = jest.fn().mockResolvedValue(undefined);
     const persistInstallationEvent = jest.fn().mockResolvedValue(undefined);
@@ -40,6 +38,7 @@ describe('portal control configuration authorization', () => {
       check,
       scanNow,
       getZones,
+      getLastScan,
       registerDiscoveredDevice,
       persistInstallation,
       persistInstallationEvent,
@@ -49,7 +48,7 @@ describe('portal control configuration authorization', () => {
       listIdentityEvidence,
       controller: new PortalController(
         { getState } as unknown as PortalStateService,
-        { scanNow, getZones } as unknown as DeviceLanDiscoveryService,
+        { scanNow, getZones, getLastScan } as unknown as DeviceLanDiscoveryService,
         {} as PortalDeviceProxyService,
         { configure, execute } as unknown as DeviceControlService,
         {} as DeviceMqttIngestService,
@@ -57,7 +56,7 @@ describe('portal control configuration authorization', () => {
           setEnrollmentStatus,
           getSnapshot: () => ({ tenant: { id: 'tenant-demo' }, site: { id: 'site-home' } }) } as unknown as DeviceRegistryService,
         { check } as unknown as DeviceDiagnosticsService,
-        {} as never,
+        { investigate: jest.fn() } as never,
         {} as never,
         {} as never,
         { listIdentityEvidence } as never,
@@ -69,7 +68,7 @@ describe('portal control configuration authorization', () => {
     const { controller, check, configure, execute } = setup();
     expect(() => controller.checkDeviceConnection('relay', { method: 'POST', url: '/', headers: {} })).toThrow(UnauthorizedException);
     expect(check).not.toHaveBeenCalled();
-    controller.checkDeviceConnection('relay', { method: 'POST', url: '/', headers: { authorization: 'Bearer unit-only' } });
+    controller.checkDeviceConnection('relay', { method: 'POST', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 } });
     expect(check).toHaveBeenCalledWith('relay');
     expect(execute).not.toHaveBeenCalled();
     expect(configure).not.toHaveBeenCalled();
@@ -86,7 +85,7 @@ describe('portal control configuration authorization', () => {
     const { controller, scanNow, registerDiscoveredDevice } = setup()
     await expect(controller.scanNetwork(
       { scopeIds: ['home-lan'], fullSubnetConfirmed: false },
-      { method: 'POST', url: '/', headers: { authorization: 'Bearer unit-only' } },
+      { method: 'POST', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 } },
     )).rejects.toThrow('explicit operator confirmation')
     expect(scanNow).not.toHaveBeenCalled()
     expect(registerDiscoveredDevice).not.toHaveBeenCalled()
@@ -99,13 +98,85 @@ describe('portal control configuration authorization', () => {
       { method: 'POST', url: '/', headers: {} },
     )).rejects.toThrow(UnauthorizedException);
   });
+  it('keeps recognized Energrid identity out of the LLM investigation path', async () => {
+    const { controller, getLastScan } = setup();
+    const observedAt = new Date().toISOString();
+    getLastScan.mockReturnValue([{
+      id: 'esp8266:324864', ipAddress: '192.168.1.198', networkZoneId: 'upstream-lan', networkZoneName: 'Upstream LAN',
+      protocol: 'http', confidence: 1, status: 'online', discoveredAt: observedAt, reason: 'Verified firmware identity',
+      observations: [
+        { source: 'http_identity', attribute: 'identity.verified', value: true, observedAt },
+        { source: 'http_identity', attribute: 'identity.device_id', value: 'esp8266:324864', observedAt },
+        { source: 'http_identity', attribute: 'device.model', value: 'Energrid ESP8266 DHT22', observedAt },
+        { source: 'http_identity', attribute: 'firmware.version', value: '0.2.0', observedAt },
+        { source: 'http_identity', attribute: 'device.capability', value: 'temperature', observedAt },
+        { source: 'http_identity', attribute: 'device.capability', value: 'humidity', observedAt },
+      ],
+    }]);
+    await expect(controller.investigateNetworkDeviceWithAi('esp8266:324864', {}, {
+      method: 'POST', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 },
+    })).rejects.toThrow('LLM investigation is disabled');
+  });
   it('requires a bearer token to read portal state and rejects query-string tokens', async () => {
     const { controller, getState } = setup();
     await expect(controller.getState({ method: 'GET', url: '/', headers: {} })).rejects.toThrow(UnauthorizedException);
     await expect(controller.getState({ method: 'GET', url: '/?token=unit-only', headers: {} })).rejects.toThrow(UnauthorizedException);
     expect(getState).not.toHaveBeenCalled();
-    await expect(controller.getState({ method: 'GET', url: '/', headers: { authorization: 'Bearer unit-only' } }))
-      .resolves.toEqual({ site: { id: 'site-home' }, pendingDeviceIdentities: {} });
+    await expect(controller.getState({ method: 'GET', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 } }))
+      .resolves.toEqual({ site: { id: 'site-home' }, devices: [], pendingDeviceIdentities: {} });
+  });
+
+  it('rebuilds the physical Energrid pending candidate from persisted discovery memory after API restart', async () => {
+    const observedAt = new Date().toISOString();
+    const record = {
+      schemaVersion: 1, identity: 'device:upstream-lan:esp8266:324864', firstSeenAt: observedAt,
+      lastSeenAt: observedAt, lastScanId: 'scan-1', device: {
+        id: 'esp8266:324864', ipAddress: '192.168.1.198', networkZoneId: 'upstream-lan', networkZoneName: 'Upstream LAN',
+        protocol: 'http', confidence: 1, status: 'online', discoveredAt: observedAt, reason: 'Verified identity',
+        observations: [
+          { source: 'http_identity', attribute: 'identity.verified', value: true, observedAt },
+          { source: 'http_identity', attribute: 'identity.device_id', value: 'esp8266:324864', observedAt },
+          { source: 'http_identity', attribute: 'device.model', value: 'Energrid ESP8266 DHT22', observedAt },
+          { source: 'http_identity', attribute: 'firmware.version', value: '0.2.0', observedAt },
+          { source: 'http_identity', attribute: 'device.capability', value: 'temperature', observedAt },
+          { source: 'http_identity', attribute: 'device.capability', value: 'humidity', observedAt },
+        ],
+      },
+    };
+    const createController = () => {
+      const candidateConfigs = new Map<string, any>();
+      const registry = {
+        registerDiscoveredDevice: jest.fn(config => { candidateConfigs.set(config.id, config); return true; }),
+        getSnapshot: jest.fn(() => ({
+          tenant: { id: 'tenant-demo' }, site: { id: 'site-home' },
+          devices: [...candidateConfigs.values()].map(config => ({
+            ...config, tenantId: 'tenant-demo', siteId: 'site-home', siteName: 'Home', zoneId: 'home', zoneName: 'Home',
+            trustStatus: 'discovered', kind: 'physical', capabilities: config.capabilities.map((kind: string) => ({ kind, actions: ['read'] })),
+            adapter: { protocol: config.protocol, target: config.target, driver: config.driver },
+            state: { values: {}, observedAt: null, source: 'registry', status: 'unknown' },
+          })),
+        })),
+      };
+      const controller = new PortalController(
+        { getState: () => ({ devices: [] }) } as never, {} as never, {} as never, {} as never, {} as never,
+        registry as never, {} as never, {} as never, {} as never, {} as never,
+        { listIdentityEvidence: jest.fn().mockResolvedValue([record]) } as never,
+      );
+      return { controller, registry };
+    };
+    // A second controller has an empty in-memory registry, simulating API restart.
+    const { controller, registry } = createController();
+    const result = await controller.getState({ method: 'GET', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 } });
+    expect(registry.registerDiscoveredDevice).toHaveBeenCalledTimes(1);
+    expect(result.devices).toEqual(expect.arrayContaining([expect.objectContaining({
+      id: 'device:upstream-lan:esp8266:324864', displayName: 'Energrid ESP8266 DHT22', trustStatus: 'discovered',
+    })]));
+    expect(result.pendingDeviceIdentities).toMatchObject({
+      'device:upstream-lan:esp8266:324864': {
+        physicalHardwareId: 'esp8266:324864', ipAddress: '192.168.1.198',
+        evidenceSource: 'bounded GET /api/v1/identity', verificationStatus: 'verified',
+      },
+    });
   });
 
   it('projects a pending Shelly candidate from scoped inventory plus an exact current LAN protocol match', async () => {
@@ -140,7 +211,7 @@ describe('portal control configuration authorization', () => {
     );
 
     const result = await controller.getState({
-      method: 'GET', url: '/', headers: { authorization: 'Bearer unit-only' },
+      method: 'GET', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 },
     });
     expect(inventoryList).toHaveBeenCalledWith({ tenantId: 'tenant-demo', siteId: 'site-home' });
     expect(result.pendingDeviceIdentities).toMatchObject({
@@ -169,11 +240,11 @@ describe('portal control configuration authorization', () => {
     };
     const { controller, setEnrollmentStatus } = setup(enrollment);
     await expect(controller.retireDevice('temp-kitchen', {
-      method: 'POST', url: '/', headers: { authorization: 'Bearer unit-only' },
+      method: 'POST', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 },
     })).resolves.toMatchObject({ status: 'retired' });
     expect(enrollment.retire).toHaveBeenCalledWith({
       tenantId: 'tenant-demo', siteId: 'site-home', deviceId: 'temp-kitchen',
-    }, 'portal-control-token');
+    }, 'admin@example.test');
     expect(setEnrollmentStatus).toHaveBeenCalledWith('temp-kitchen', 'retired');
   });
   it('returns persisted identity without requiring a live Discovery scan', async () => {
@@ -208,7 +279,7 @@ describe('portal control configuration authorization', () => {
     );
 
     await expect(controller.getDeviceNetworkIdentity('temp-kitchen', {
-      method: 'GET', url: '/', headers: { authorization: 'Bearer unit-only' },
+      method: 'GET', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 },
     })).resolves.toMatchObject({
       association: expect.objectContaining({ ipAddress: '192.168.1.204' }),
       physicalDevice,
@@ -257,7 +328,7 @@ describe('portal control configuration authorization', () => {
         list: jest.fn().mockResolvedValue([physicalDevice]),
       } as never,
     );
-    const request = { method: 'GET', url: '/', headers: { authorization: 'Bearer unit-only' } };
+    const request = { method: 'GET', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 } };
 
     const [boiler, oven] = await Promise.all([
       controller.getDeviceNetworkIdentity('boiler-power', request),
@@ -307,7 +378,7 @@ describe('portal control configuration authorization', () => {
     await controller.scanNetwork({ scopeIds: ['home-lan'], fullSubnetConfirmed: true }, {
       method: 'POST',
       url: '/',
-      headers: { authorization: 'Bearer unit-only' },
+      headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 },
     });
     expect(registerDiscoveredDevice).toHaveBeenCalledTimes(1);
     expect(registerDiscoveredDevice).toHaveBeenCalledWith(
@@ -322,6 +393,26 @@ describe('portal control configuration authorization', () => {
         }),
       }),
     );
+    expect(configure).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+  it('keeps verified Energrid HTTP identities in Discovery without registering or approving them', async () => {
+    const { controller, scanNow, registerDiscoveredDevice, configure, execute } = setup();
+    scanNow.mockResolvedValue({ devices: [{
+      id: 'esp8266:324864', vendor: 'Energrid', protocol: 'http', status: 'online',
+      ipAddress: '192.168.1.198', networkZoneId: 'home-lan', networkZoneName: 'Home LAN',
+      model: 'Energrid ESP8266 DHT22',
+      observations: [
+        { source: 'http_identity', attribute: 'identity.verified', value: true, observedAt: '2026-10-23T12:00:00.000Z' },
+        { source: 'http_identity', attribute: 'identity.device_id', value: 'esp8266:324864', observedAt: '2026-10-23T12:00:00.000Z' },
+      ],
+    }], zones: [] });
+
+    await controller.scanNetwork({ scopeIds: ['home-lan'], fullSubnetConfirmed: true }, {
+      method: 'POST', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 },
+    });
+
+    expect(registerDiscoveredDevice).not.toHaveBeenCalled();
     expect(configure).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
   });
@@ -354,7 +445,7 @@ describe('portal control configuration authorization', () => {
         {
           method: 'POST',
           url: '/',
-          headers: { authorization: 'Bearer unit-only' },
+          headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 },
         },
       ),
     ).resolves.toEqual({ device: expect.objectContaining({ id: 'relay' }), persistence: 'local' });
@@ -367,7 +458,7 @@ describe('portal control configuration authorization', () => {
   it('records command evidence after the control service returns', async () => {
     const { controller, execute, persistInstallationEvent } = setup();
     await controller.executeDeviceAction('relay', { action: 'turn_on' }, {
-      method: 'POST', url: '/', headers: { authorization: 'Bearer unit-only' },
+      method: 'POST', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 },
     });
     expect(execute).toHaveBeenCalledWith('relay', 'turn_on');
     expect(persistInstallationEvent.mock.calls).toEqual([
@@ -381,7 +472,7 @@ describe('portal control configuration authorization', () => {
     const { controller, execute, persistInstallationEvent } = setup();
     execute.mockRejectedValue(new Error('route is unavailable'));
     await expect(controller.executeDeviceAction('relay', { action: 'turn_on' }, {
-      method: 'POST', url: '/', headers: { authorization: 'Bearer unit-only' },
+      method: 'POST', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 },
     })).rejects.toThrow('route is unavailable');
     expect(persistInstallationEvent).toHaveBeenLastCalledWith('relay', 'command', expect.objectContaining({
       stage: 'result', status: 'failed', failureType: 'Error',

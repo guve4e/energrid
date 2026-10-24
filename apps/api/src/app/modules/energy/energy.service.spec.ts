@@ -42,7 +42,6 @@ beforeEach(() => {
   saved = { ...process.env };
   process.env.PORTAL_TENANT_ID = 'test-tenant';
   process.env.PORTAL_SITE_ID = 'test-site';
-  process.env.PORTAL_CONTROL_TOKEN = 'test-token';
 });
 afterEach(() => {
   process.env = saved;
@@ -141,6 +140,7 @@ describe('read-only energy endpoints', () => {
     ({
       headers: token ? { authorization: `Bearer ${token}` } : {},
       url: '/portal/energy/assets',
+      ...(token === 'test-token' ? { user: { userId: 'u1', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 's1', sessionVersion: 0 } } : {}),
     }) as DeviceProxyRequest;
   it.each([undefined, 'wrong-token'])(
     'requires authorization for assets and history (%s)',

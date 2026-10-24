@@ -15,7 +15,13 @@ export interface IntelligenceObservedField {
 
 export interface IntelligenceObservationResult {
   deviceId: string;
+  freshnessLimitSeconds: number;
   fields: Record<string, IntelligenceObservedField>;
+}
+
+export function observationFreshnessLimitSeconds(value = process.env.HOME_OBSERVATION_FRESHNESS_SECONDS): number {
+  const configured = Number(value || 60);
+  return Number.isFinite(configured) ? Math.min(86400, Math.max(1, Math.floor(configured))) : 60;
 }
 
 export function projectAuthorizedObservations(
@@ -74,6 +80,7 @@ export function projectAuthorizedObservations(
 
   return {
     deviceId: state.deviceId,
+    freshnessLimitSeconds,
     fields,
   };
 }

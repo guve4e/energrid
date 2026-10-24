@@ -12,6 +12,7 @@ import { TelemetryModule } from '../telemetry/telemetry.module';
 import { TELEMETRY_POOL } from '../telemetry/telemetry.config';
 import { TelemetryStore } from '../telemetry/telemetry.store';
 import { TelemetryIngestService } from '../telemetry/telemetry-ingest.service';
+import { AccessJwtGuard, RoleGuard } from '../auth/auth.guard';
 
 describe('history source composition and safe defaults', () => {
   let original: NodeJS.ProcessEnv;
@@ -33,7 +34,10 @@ describe('history source composition and safe defaults', () => {
   it('composes a legacy reader with native recording disabled and no PostgreSQL pool', async () => {
     const app = await Test.createTestingModule({
       imports: [EnergyModule, TelemetryModule],
-    }).compile();
+    })
+      .overrideGuard(AccessJwtGuard).useValue({ canActivate: () => true })
+      .overrideGuard(RoleGuard).useValue({ canActivate: () => true })
+      .compile();
     expect(app.get(POWER_HISTORY_READER)).toBeInstanceOf(
       LegacyMongoPowerAdapter,
     );
@@ -48,7 +52,10 @@ describe('history source composition and safe defaults', () => {
     process.env.ENERGY_HISTORY_SOURCE = 'telemetry';
     const app = await Test.createTestingModule({
       imports: [EnergyModule],
-    }).compile();
+    })
+      .overrideGuard(AccessJwtGuard).useValue({ canActivate: () => true })
+      .overrideGuard(RoleGuard).useValue({ canActivate: () => true })
+      .compile();
     expect(app.get(POWER_HISTORY_READER)).toBeInstanceOf(
       CanonicalPowerHistoryReader,
     );
@@ -65,7 +72,10 @@ describe('history source composition and safe defaults', () => {
       'postgres://test:test@127.0.0.1:1/not-connected';
     const app = await Test.createTestingModule({
       imports: [EnergyModule],
-    }).compile();
+    })
+      .overrideGuard(AccessJwtGuard).useValue({ canActivate: () => true })
+      .overrideGuard(RoleGuard).useValue({ canActivate: () => true })
+      .compile();
     expect(app.get(POWER_HISTORY_READER)).toBeInstanceOf(
       LegacyMongoPowerAdapter,
     );
@@ -82,7 +92,10 @@ describe('history source composition and safe defaults', () => {
       'postgres://test:test@127.0.0.1:1/not-connected';
     const app = await Test.createTestingModule({
       imports: [EnergyModule],
-    }).compile();
+    })
+      .overrideGuard(AccessJwtGuard).useValue({ canActivate: () => true })
+      .overrideGuard(RoleGuard).useValue({ canActivate: () => true })
+      .compile();
     expect(app.get<PowerAssetCatalog>(POWER_ASSET_CATALOG).configured).toBe(
       true,
     );

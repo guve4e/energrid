@@ -9,6 +9,7 @@ import type {
   NetworkDiscoveredDevice,
 } from './device-registry.types';
 import type { NetworkDiscoverySnapshot } from './network-discovery-snapshot';
+import { isNetworkObservationFresh } from './network-observation-freshness';
 
 function device(
   ipAddress: string,
@@ -26,6 +27,18 @@ function device(
     discoveredAt: '2026-10-18T10:00:00.000Z',
     reason: 'Test observation',
   };
+}
+
+function verifiedEnergridDevice(ipAddress: string, observedAt: string, scope = 'upstream-lan'): NetworkDiscoveredDevice {
+  return {
+    id: 'esp8266:324864', ipAddress, networkZoneId: scope, networkZoneName: 'Upstream LAN',
+    vendor: 'Energrid', model: 'Energrid ESP8266 DHT22', firmwareVersion: '0.2.0', protocol: 'http',
+    confidence: 0.95, status: 'online', discoveredAt: observedAt, reason: 'Verified firmware identity.',
+    observations: [
+      { source: 'http_identity', attribute: 'identity.verified', value: true, observedAt, scopeId: scope, method: 'GET /api/v1/identity' },
+      { source: 'http_identity', attribute: 'identity.device_id', value: 'esp8266:324864', observedAt, scopeId: scope, method: 'GET /api/v1/identity' },
+    ],
+  }
 }
 
 describe('DeviceDiscoveryMemoryStore', () => {
@@ -97,6 +110,39 @@ describe('DeviceDiscoveryMemoryStore', () => {
     expect(records).toHaveLength(1);
     expect(records[0].firstSeenAt).toBe(timestamp);
     expect(records[0].lastSeenAt).toBe(timestamp);
+  });
+
+  it('persists a re-verified Energrid identity and provenance across store restarts', async () => {
+    const initialAt = '2026-10-23T12:00:00.000Z';
+    const refreshedAt = '2026-10-23T12:10:00.000Z';
+    const initial = verifiedEnergridDevice('192.168.1.198', initialAt);
+    await store.recordIdentityObservation(initialAt, initial);
+    await store.recordIdentityObservation(refreshedAt, {
+      ...initial,
+      discoveredAt: refreshedAt,
+      reason: 'Re-verified by the bounded HTTP poller.',
+      observations: [
+        ...(initial.observations || []),
+        { source: 'http_identity', attribute: 'identity.verified', value: true, observedAt: refreshedAt, scopeId: 'upstream-lan', method: 'GET /api/v1/identity' },
+        { source: 'http_identity', attribute: 'identity.device_id', value: 'esp8266:324864', observedAt: refreshedAt, scopeId: 'upstream-lan', method: 'GET /api/v1/identity' },
+      ],
+    });
+
+    await store.onModuleDestroy();
+    store = new DeviceDiscoveryMemoryStore(directory);
+
+    const record = (await store.listIdentityEvidence()).find(item => item.identity === 'device:upstream-lan:esp8266:324864');
+    expect(record).toMatchObject({
+      lastSeenAt: refreshedAt,
+      lastScanId: `identity:${refreshedAt}`,
+      device: {
+        id: 'esp8266:324864', ipAddress: '192.168.1.198', networkZoneId: 'upstream-lan',
+        observations: expect.arrayContaining([
+          expect.objectContaining({ source: 'http_identity', attribute: 'identity.verified', value: true, scopeId: 'upstream-lan', method: 'GET /api/v1/identity', observedAt: refreshedAt }),
+          expect.objectContaining({ source: 'http_identity', attribute: 'identity.device_id', value: 'esp8266:324864', scopeId: 'upstream-lan', method: 'GET /api/v1/identity', observedAt: refreshedAt }),
+        ]),
+      },
+    });
   });
 
   it('stores immutable scan snapshots across store restarts and rejects replacing an existing scan ID', async () => {
@@ -183,6 +229,68 @@ describe('DeviceDiscoveryMemoryStore', () => {
     expect(records[0].device.endpoints).toContainEqual(expect.objectContaining({
       ipAddress: '192.168.7.99',
     }));
+  });
+
+  it('correlates a verified firmware ID across DHCP changes and restarts while keeping scope boundaries', async () => {
+    const firstSeen = '2026-10-23T12:00:00.000Z';
+    const lastSeen = '2026-10-23T12:10:00.000Z';
+    await store.recordScan(firstSeen, [verifiedEnergridDevice('192.168.1.198', firstSeen)]);
+    await store.recordScan(lastSeen, [verifiedEnergridDevice('192.168.1.205', lastSeen)]);
+
+    let records = await store.list();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      identity: 'device:upstream-lan:esp8266:324864', firstSeenAt: firstSeen, lastSeenAt: lastSeen,
+      device: { id: 'esp8266:324864', ipAddress: '192.168.1.205', status: 'online' },
+    });
+    expect(records[0].device.endpoints?.map(endpoint => endpoint.ipAddress).sort())
+      .toEqual(['192.168.1.198', '192.168.1.205']);
+
+    await store.onModuleDestroy();
+    store = new DeviceDiscoveryMemoryStore(directory);
+    records = await store.list();
+    expect(records).toHaveLength(1);
+    expect(records[0].lastSeenAt).toBe(lastSeen);
+
+    await store.recordScan('2026-10-23T12:20:00.000Z', [
+      verifiedEnergridDevice('192.168.1.205', '2026-10-23T12:20:00.000Z', 'other-routed-lan'),
+    ]);
+    expect(await store.list()).toHaveLength(2);
+  });
+
+  it('replaces an unverified endpoint-only alias with the verified canonical firmware identity', async () => {
+    const firstSeen = '2026-10-23T12:00:00.000Z';
+    await store.recordScan(firstSeen, [{
+      ...device('192.168.1.198', 'ff:ff:ff:ff:ff:ff'),
+      id: '192.168.1.198', networkZoneId: 'upstream-lan', networkZoneName: 'Upstream LAN',
+    }]);
+    await store.recordScan('2026-10-23T12:01:00.000Z', [verifiedEnergridDevice('192.168.1.198', '2026-10-23T12:01:00.000Z')]);
+
+    const records = await store.list();
+    expect(records).toHaveLength(1);
+    expect(records[0].identity).toBe('device:upstream-lan:esp8266:324864');
+  });
+
+  it('deduplicates repeated verified identity evidence within one scan', async () => {
+    const observedAt = '2026-10-23T12:00:00.000Z';
+    const candidate = verifiedEnergridDevice('192.168.1.198', observedAt);
+    await store.recordScan(observedAt, [candidate, structuredClone(candidate)]);
+
+    const records = await store.list();
+    expect(records).toHaveLength(1);
+    expect(records[0].device.endpoints).toHaveLength(1);
+    expect(records[0].device.observations?.filter(item => item.attribute === 'identity.verified')).toHaveLength(1);
+  });
+
+  it('keeps a missed device as historical evidence and marks it absent from the latest scan', async () => {
+    await store.recordScan('2026-10-23T12:00:00.000Z', [verifiedEnergridDevice('192.168.1.198', '2026-10-23T12:00:00.000Z')]);
+    await store.recordScan('2026-10-23T12:05:00.000Z', []);
+
+    const [record] = await store.list();
+    expect(record.lastScanId).toBe('2026-10-23T12:00:00.000Z');
+    expect(record.device.status).toBe('online');
+    expect(isNetworkObservationFresh(record.device.discoveredAt, Date.parse('2026-10-23T12:05:00.000Z'))).toBe(false);
+    expect(await store.summary()).toMatchObject({ known: 1, observedInLatestScan: 0, notObservedInLatestScan: 1 });
   });
 
   it('retains all same-scan endpoint addresses under one scoped observed identity', async () => {

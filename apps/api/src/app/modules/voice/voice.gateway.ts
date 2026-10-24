@@ -1,14 +1,15 @@
 import { WebSocketGateway, OnGatewayConnection } from '@nestjs/websockets'
 import { WebSocket } from 'ws'
 import { VoiceSessionService } from './voice-session.service'
-import { isValidVoiceToken } from './voice-auth'
+import { authenticateVoiceToken } from './voice-auth'
+import { AuthService } from '../auth/auth.service'
 
 @WebSocketGateway({ path: '/voice', maxPayload: 64 * 1024 })
 export class VoiceGateway implements OnGatewayConnection {
   private readonly clients = new Set<WebSocket>()
   private readonly maxConnections = 16
 
-  constructor(private readonly voiceSessionService: VoiceSessionService) {}
+  constructor(private readonly voiceSessionService: VoiceSessionService, private readonly auth: AuthService) {}
 
   async handleConnection(client: WebSocket) {
     if (this.clients.size >= this.maxConnections) {
@@ -18,6 +19,7 @@ export class VoiceGateway implements OnGatewayConnection {
 
     this.clients.add(client)
     let authenticated = false
+    let accessToken = ''
     const authTimeout = setTimeout(() => {
       if (!authenticated) client.close(1008, 'Authentication required')
     }, 5000)
@@ -31,11 +33,13 @@ export class VoiceGateway implements OnGatewayConnection {
 
         try {
           const message = JSON.parse(data.toString())
-          if (message?.type !== 'authenticate' || !isValidVoiceToken(message.token)) {
+          const principal = message?.type === 'authenticate' ? await authenticateVoiceToken(this.auth, message.token) : null
+          if (!principal) {
             client.close(1008, 'Invalid voice credentials')
             return
           }
 
+          accessToken = message.token
           authenticated = true
           clearTimeout(authTimeout)
           await this.voiceSessionService.openSession(client)
@@ -43,6 +47,11 @@ export class VoiceGateway implements OnGatewayConnection {
         } catch {
           client.close(1008, 'Invalid authentication message')
         }
+        return
+      }
+
+      if (!await authenticateVoiceToken(this.auth, accessToken)) {
+        client.close(1008, 'Authentication expired')
         return
       }
 

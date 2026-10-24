@@ -3,7 +3,7 @@ import { describe, it, expect } from 'vitest';
 import NetworkDiscoveryCard from './NetworkDiscoveryCard.vue';
 
 const device = { id: 'lan-host', hostname: 'kitchen.local', ipAddress: '192.168.1.20', vendor: 'Shelly', model: 'Plus 1', protocol: 'http', networkZoneName: 'Home', networkZoneId: 'home', status: 'online', reason: 'HTTP response', settingsUrl: 'http://192.168.1.20' };
-const props = { device, badge: 'gateway ready', badgeClass: 'approved', hasSsh: true, hasChannels: true, proxyUrl: '/portal/device-proxy/lan-host' };
+const props = { device, badge: 'HTTP observed', badgeClass: 'discovered', hasSsh: true, hasChannels: true };
 
 describe('network discovery card', () => {
   it('keeps identity and connectivity visible with secondary details initially collapsed', () => {
@@ -17,7 +17,7 @@ describe('network discovery card', () => {
     card.unmount();
   });
 
-  it('forwards every action separately and preserves link destinations', async () => {
+  it('forwards review actions without exposing device HTTP pages or a proxy URL', async () => {
     const card = mount(NetworkDiscoveryCard, { props });
     const click = async (text: string) => card.findAll('button').find(b => b.text() === text)!.trigger('click');
     await click('Review intelligence');
@@ -27,16 +27,16 @@ describe('network discovery card', () => {
     await click('Review channels');
     await click('Copy SSH');
     for (const event of ['investigate', 'channels', 'copySsh']) expect(card.emitted(event)).toHaveLength(1);
-    expect(card.findAll('a').map(a => a.attributes('href'))).toEqual(['ssh://192.168.1.20', 'http://192.168.1.20', '/portal/device-proxy/lan-host']);
+    expect(card.findAll('a').map(a => a.attributes('href'))).toEqual(['ssh://192.168.1.20']);
     card.unmount();
   });
 
   it('retains unavailable-action states and disables repeat AI investigation', () => {
-    const card = mount(NetworkDiscoveryCard, { props: { ...props, hasSsh: false, hasChannels: false, proxyUrl: undefined, investigating: true } });
+    const card = mount(NetworkDiscoveryCard, { props: { ...props, hasSsh: false, hasChannels: false, investigating: true } });
     expect(card.text()).toContain('Channels unavailable');
     expect(card.text()).not.toContain('Copy SSH');
     expect(card.findAll('button').find(b => b.text() === 'Investigating…')!.attributes('disabled')).toBeDefined();
-    expect(card.findAll('a')).toHaveLength(1);
+    expect(card.findAll('a')).toHaveLength(0);
     card.unmount();
   });
 

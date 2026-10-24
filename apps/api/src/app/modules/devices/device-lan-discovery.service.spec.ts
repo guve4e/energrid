@@ -24,6 +24,9 @@ import type { NetworkDiscoveredDevice } from './device-registry.types'
 import { shellyLanCandidates } from './adapters/inbound/shelly/shelly-lan-candidates'
 import { NmapNetworkEvidenceAdapter, type NmapCommandRunner } from './adapters/outbound/network/nmap-network-evidence.adapter'
 import type { LocalNetworkRuntimeAdapter, LocalNetworkRuntimeReport } from './adapters/outbound/network/local-network-runtime.adapter'
+import { EnergridHttpIdentityAdapter, type EnergridIdentityTransport } from './adapters/outbound/network/energrid-http-identity.adapter'
+
+let mockReachableTcpPorts = new Set<number>()
 
 jest.mock('node:child_process', () => ({
   execFile: jest.fn((_command, _args, _options, callback) => callback(new Error('mocked'))),
@@ -39,8 +42,10 @@ jest.mock('node:net', () => ({
       return this
     }
     setTimeout() { return this }
-    connect() {
-      queueMicrotask(() => this.listeners.get('error')?.(new Error('mocked')))
+    connect(port: number) {
+      queueMicrotask(() => mockReachableTcpPorts.has(port)
+        ? this.listeners.get('connect')?.()
+        : this.listeners.get('error')?.(new Error('mocked')))
       return this
     }
     destroy() {}
@@ -54,6 +59,7 @@ describe('LAN discovery evidence persistence', () => {
   let memory: DeviceDiscoveryMemoryStore
 
   beforeEach(async () => {
+    mockReachableTcpPorts = new Set()
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined)
     directory = await mkdtemp(join(tmpdir(), 'energrid-lan-evidence-'))
     memory = new DeviceDiscoveryMemoryStore(directory)
@@ -83,6 +89,7 @@ describe('LAN discovery evidence persistence', () => {
     await rm(directory, { recursive: true, force: true })
     process.env = originalEnv
     global.fetch = originalFetch
+    mockReachableTcpPorts = new Set()
     jest.restoreAllMocks()
   })
 
@@ -102,6 +109,55 @@ describe('LAN discovery evidence persistence', () => {
     expect(service.getZones()).toEqual([])
     await expect(service.scanNow()).rejects.toThrow('No network scan scopes are configured')
     expect(await memory.listSnapshots()).toEqual([])
+  })
+
+  it('verifies Energrid firmware identity from a bounded HTTP host and scopes its evidence', async () => {
+    mockReachableTcpPorts = new Set([80])
+    const transport: EnergridIdentityTransport = {
+      get: jest.fn().mockResolvedValue({
+        schemaVersion: 1, id: 'esp8266:324864', model: 'Energrid ESP8266 DHT22',
+        firmwareVersion: '0.2.0', capabilities: ['temperature', 'humidity'],
+      }),
+    }
+    const identityAdapter = new EnergridHttpIdentityAdapter(transport)
+    const collector = new DeviceLanNetworkEvidenceCollector(undefined, undefined, identityAdapter)
+    const device = await collector.enrichCandidate({
+      ipAddress: '192.168.1.198', networkZoneId: 'upstream-lan', networkZoneName: 'Upstream LAN',
+      status: 'online', reason: 'Host responded to an active ICMP probe.',
+    }, '2026-10-23T12:00:00.000Z', true)
+
+    expect(transport.get).toHaveBeenCalledWith('192.168.1.198', 2_000, 4_096)
+    expect(device).toMatchObject({
+      id: 'esp8266:324864', vendor: 'Energrid', model: 'Energrid ESP8266 DHT22',
+      firmwareVersion: '0.2.0', protocol: 'http', status: 'online',
+    })
+    expect(device.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'http_identity', attribute: 'identity.verified', value: true, scopeId: 'upstream-lan', method: 'GET /api/v1/identity' }),
+      expect.objectContaining({ source: 'http_identity', attribute: 'identity.device_id', value: 'esp8266:324864' }),
+      expect.objectContaining({ source: 'http_identity', attribute: 'device.capability', value: 'temperature' }),
+      expect.objectContaining({ source: 'http_identity', attribute: 'device.capability', value: 'humidity' }),
+    ]))
+  })
+
+  it('does not enrich a router-reported address outside the configured CIDR even when it carries the zone label', async () => {
+    process.env.HOME_ROUTER_CLIENTS_JSON = JSON.stringify([{
+      ipAddress: '10.42.1.9', networkZoneId: 'home-lan', networkZoneName: 'Home LAN',
+    }])
+    mockReachableTcpPorts = new Set([80])
+    const transport: EnergridIdentityTransport = {
+      get: jest.fn().mockResolvedValue({
+        schemaVersion: 1, id: 'esp8266:324864', model: 'Energrid ESP8266 DHT22',
+        firmwareVersion: '0.2.0', capabilities: ['temperature', 'humidity'],
+      }),
+    }
+    const service = new DeviceLanDiscoveryService(
+      memory, {} as DeviceRegistryService,
+      new DeviceLanNetworkEvidenceCollector(undefined, undefined, new EnergridHttpIdentityAdapter(transport)),
+    )
+
+    await service.scanNow({ fullSubnetConfirmed: true })
+
+    expect(transport.get).not.toHaveBeenCalled()
   })
 
   it('scans only selected scopes and discards router evidence that belongs to another configured scope', async () => {

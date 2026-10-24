@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushPromises, mount } from '@vue/test-utils';
 import DeviceCommissioning from './DeviceCommissioning.vue';
+import { setAuthenticatedSession } from '../../auth/auth-client';
 
 const baseDevice = {
   id: 'shellyplus1-aabbcc:switch:0',
@@ -12,6 +13,7 @@ const baseDevice = {
 };
 
 afterEach(() => vi.unstubAllGlobals());
+beforeEach(() => setAuthenticatedSession({ accessToken: 'unit-token', expiresIn: 900, user: { id: 'u1', email: 'admin@example.test', name: 'Admin', role: 'admin' } }));
 
 describe('DeviceCommissioning', () => {
   it('saves the installer-assigned name and room through the authenticated API', async () => {
@@ -25,19 +27,18 @@ describe('DeviceCommissioning', () => {
     await page.get('form').trigger('submit');
     await flushPromises();
 
-    expect(fetch).toHaveBeenCalledWith(
-      `/portal/devices/${encodeURIComponent(baseDevice.id)}/commissioning`,
-      expect.objectContaining({
+    const patchCall = fetch.mock.calls.find(([url, options]) => url === `/portal/devices/${encodeURIComponent(baseDevice.id)}/commissioning` && options?.method === 'PATCH');
+    expect(patchCall).toBeDefined();
+    expect(patchCall?.[1]).toMatchObject({
         method: 'PATCH',
-        headers: expect.objectContaining({ Authorization: 'Bearer unit-token' }),
         body: JSON.stringify({
           displayName: 'Hall light',
           zoneName: 'Hall',
           settingsUrl: null,
           assistantEnabled: false,
         }),
-      }),
-    );
+      });
+    expect(new Headers(patchCall?.[1]?.headers).get('Authorization')).toBe('Bearer unit-token');
     expect(page.emitted('saved')).toHaveLength(1);
   });
 
@@ -47,7 +48,7 @@ describe('DeviceCommissioning', () => {
     const page = mount(DeviceCommissioning, {
       props: { device: baseDevice, apiBase: '', accessToken: 'unit-token' },
     });
-    expect(page.text()).toContain('Physical result: not confirmed');
+    expect(page.text()).toContain('Physical command result: not confirmed');
     expect(page.find('button.secondary').exists()).toBe(false);
     const acknowledgedProps = {
       device: { ...baseDevice, state: { command: { status: 'acked' } } },
@@ -109,7 +110,7 @@ describe('DeviceCommissioning', () => {
   });
 
   it('rejects non-HTTP settings addresses before sending them to the API', async () => {
-    const fetch = vi.fn();
+    const fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ events: [] }) });
     vi.stubGlobal('fetch', fetch);
     const page = mount(DeviceCommissioning, {
       props: {

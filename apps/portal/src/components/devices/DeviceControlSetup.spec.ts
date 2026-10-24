@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
 import DeviceControlSetup from './DeviceControlSetup.vue';
+import { setAuthenticatedSession } from '../../auth/auth-client';
 import {
   canSwitchDevice,
   controlRouteLabel,
@@ -45,6 +46,7 @@ function fetchMock(
   }));
 }
 function render(value = device, fetch = fetchMock()) {
+  setAuthenticatedSession({ accessToken: 'unit-token', expiresIn: 900, user: { id: 'u1', email: 'admin@example.test', name: 'Admin', role: 'admin' } });
   vi.stubGlobal('fetch', fetch);
   page = mount(DeviceControlSetup, {
     props: { device: value, apiBase: '', accessToken: 'unit-only' },
@@ -362,10 +364,8 @@ describe('explicit device control UI', () => {
     expect(url).toBe(
       `/portal/devices/${encodeURIComponent(device.id)}/control`,
     );
-    expect(options.headers).toEqual({
-      Authorization: 'Bearer unit-only',
-      'Content-Type': 'application/json',
-    });
+    expect(new Headers(options.headers).get('Authorization')).toBe('Bearer unit-token');
+    expect(new Headers(options.headers).get('Content-Type')).toBe('application/json');
     expect(JSON.parse(String(options.body))).toEqual({
       binding: {
         kind: 'shelly-mqtt',

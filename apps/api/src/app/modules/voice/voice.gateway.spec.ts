@@ -19,7 +19,7 @@ let sessions: {
   let gateway: VoiceGateway
 
   beforeEach(() => {
-    process.env = { ...original, NODE_ENV: 'production', PORTAL_CONTROL_TOKEN: 'voice-test-token' }
+    process.env = { ...original, NODE_ENV: 'test' }
     sessions = {
       openSession: jest.fn().mockResolvedValue(undefined),
       closeSession: jest.fn().mockResolvedValue(undefined),
@@ -28,7 +28,8 @@ let sessions: {
       confirmPendingAction: jest.fn().mockResolvedValue(undefined),
       cancelPendingAction: jest.fn(),
     }
-    gateway = new VoiceGateway(sessions as never)
+    const auth = { authenticateAccessToken: jest.fn().mockResolvedValue({ userId: 'u', email: 'a@b.test', name: 'A', role: 'admin', sessionId: 's', sessionVersion: 1 }) }
+    gateway = new VoiceGateway(sessions as never, auth as never)
   })
 
   afterAll(() => {
@@ -50,7 +51,7 @@ let sessions: {
     await gateway.handleConnection(socket as never)
     socket.emit(
       'message',
-      Buffer.from(JSON.stringify({ type: 'authenticate', token: 'voice-test-token' })),
+      Buffer.from(JSON.stringify({ type: 'authenticate', token: 'signed-access-jwt' })),
       false,
     )
     await new Promise((resolve) => setImmediate(resolve))
@@ -64,7 +65,7 @@ let sessions: {
     await gateway.handleConnection(socket as never)
     socket.emit(
       'message',
-      Buffer.from(JSON.stringify({ type: 'authenticate', token: 'voice-test-token' })),
+      Buffer.from(JSON.stringify({ type: 'authenticate', token: 'signed-access-jwt' })),
       false,
     )
     await new Promise((resolve) => setImmediate(resolve))

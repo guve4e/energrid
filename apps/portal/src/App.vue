@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
+import { authFetch, clearAuthenticatedSession, getAccessToken, logoutRequest, onAuthState, restoreSession, setAuthenticatedSession } from './auth/auth-client';
 import NetworkDiscoveryCard from './components/discovery/NetworkDiscoveryCard.vue';
 import NetworkIntelligencePanel from './components/discovery/NetworkIntelligencePanel.vue';
 import EnergridChatWidget from './components/assistant/EnergridChatWidget.vue';
@@ -17,6 +18,7 @@ import DeviceSwitchControl from './components/devices/DeviceSwitchControl.vue';
 import DeviceConnectionDiagnostics from './components/devices/DeviceConnectionDiagnostics.vue';
 import DeviceNetworkIdentityPanel from './components/devices/DeviceNetworkIdentityPanel.vue';
 import DeviceCommissioning from './components/devices/DeviceCommissioning.vue';
+import DeviceMeasurementHistory from './components/devices/DeviceMeasurementHistory.vue';
 import {
   microphoneRequestError,
   microphoneSetupError,
@@ -32,10 +34,12 @@ import { pageFromPath, pathForPage } from './portal-route';
 
 type LoginResponse = {
   accessToken: string;
+  expiresIn: number;
   user: {
     id: string;
     email: string;
     name: string;
+    role: 'admin' | 'installer' | 'viewer';
   };
 };
 
@@ -463,8 +467,6 @@ type VoiceRunRecord = {
   errors?: string[];
 };
 
-const tokenKey = 'energrid.portal.token';
-const userKey = 'energrid.portal.user';
 const themeKey = 'energrid.portal.theme.v2';
 const endpointModeKey = 'energrid.portal.endpointMode';
 
@@ -489,12 +491,9 @@ const isLocalLivePreview =
 const email = ref('');
 const password = ref('');
 const loginError = ref('');
-const accessToken = ref(localStorage.getItem(tokenKey) || '');
-const user = ref<LoginResponse['user'] | null>(
-  localStorage.getItem(userKey)
-    ? JSON.parse(localStorage.getItem(userKey) || 'null')
-    : null,
-);
+const accessToken = ref('');
+const user = ref<LoginResponse['user'] | null>(null);
+const isAuthRestoring = ref(true);
 const state = ref<PortalState | null>(null);
 const loadingState = ref(false);
 const stateError = ref('');
@@ -518,7 +517,6 @@ const networkEndpointIdentityRefreshes = ref<Record<string, NetworkEndpointIdent
 const nmapCapability = ref<NmapCapability | null>(null);
 const networkRuntime = ref<NetworkRuntime | null>(null);
 const discoveryDecisionBusy = ref<Record<string, string>>({});
-const findingHttpPageByDeviceId = ref<Record<string, boolean>>({});
 const discoveryView = ref<'capable' | 'all'>('all');
 const mqttTopicFilter = ref('');
 const mqttPublishTopic = ref('');
@@ -1216,7 +1214,7 @@ async function loadAiHistory(deviceId: string): Promise<void> {
   delete aiHistoryErrors.value[deviceId];
 
   try {
-    const response = await fetch(
+    const response = await authFetch(
       `${apiBase}/portal/network/${encodeURIComponent(deviceId)}/investigations`,
       {
         headers: {
@@ -1263,7 +1261,7 @@ type LlmProviderAvailability = {
 const llmProviderAvailability = ref<LlmProviderAvailability | null>(null);
 
 async function loadLlmProviderAvailability(): Promise<LlmProviderAvailability> {
-  const response = await fetch(`${apiBase}/portal/investigations/availability`, {
+  const response = await authFetch(`${apiBase}/portal/investigations/availability`, {
     headers: { Authorization: `Bearer ${accessToken.value}` },
   });
   if (!response.ok) throw new Error(`Provider status unavailable (${response.status})`);
@@ -1290,7 +1288,7 @@ async function investigateSnapshotEndpoint(request: {
     const endpointUrl = [request.scanId, request.scopeId, request.ipAddress, request.endpointId]
       .map(encodeURIComponent).join('/');
     const [scanId, scopeId, ipAddress, endpointId] = endpointUrl.split('/');
-    const response = await fetch(`${apiBase}/portal/network/snapshots/${scanId}/scopes/${scopeId}/endpoints/${ipAddress}/${endpointId}/investigate`, {
+    const response = await authFetch(`${apiBase}/portal/network/snapshots/${scanId}/scopes/${scopeId}/endpoints/${ipAddress}/${endpointId}/investigate`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${accessToken.value}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ cloudDataConsent: provider.cloudDataConsentRequired }),
@@ -1323,7 +1321,7 @@ async function probeSnapshotEndpoint(request: {
     const endpointUrl = [request.scanId, request.scopeId, request.ipAddress, request.endpointId]
       .map(encodeURIComponent).join('/');
     const [scanId, scopeId, ipAddress, endpointId] = endpointUrl.split('/');
-    const response = await fetch(`${apiBase}/portal/network/snapshots/${scanId}/scopes/${scopeId}/endpoints/${ipAddress}/${endpointId}/probe-http`, {
+    const response = await authFetch(`${apiBase}/portal/network/snapshots/${scanId}/scopes/${scopeId}/endpoints/${ipAddress}/${endpointId}/probe-http`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${accessToken.value}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ approved: true, refreshId: request.refreshId }),
@@ -1355,7 +1353,7 @@ async function startNetworkEndpointOnboarding(request: {
   stateError.value = '';
 
   try {
-    const response = await fetch(
+    const response = await authFetch(
       `${apiBase}/portal/network/snapshots/${encodeURIComponent(request.scanId)}/scopes/${encodeURIComponent(request.scopeId)}/endpoints/${encodeURIComponent(request.ipAddress)}/${encodeURIComponent(request.endpointId)}/start-onboarding`,
       {
         method: 'POST',
@@ -1404,7 +1402,7 @@ async function refreshSnapshotEndpointIdentity(request: {
     const endpointUrl = [request.scanId, request.scopeId, request.ipAddress, request.endpointId]
       .map(encodeURIComponent).join('/');
     const [scanId, scopeId, ipAddress, endpointId] = endpointUrl.split('/');
-    const response = await fetch(`${apiBase}/portal/network/snapshots/${scanId}/scopes/${scopeId}/endpoints/${ipAddress}/${endpointId}/refresh-identity`, {
+    const response = await authFetch(`${apiBase}/portal/network/snapshots/${scanId}/scopes/${scopeId}/endpoints/${ipAddress}/${endpointId}/refresh-identity`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${accessToken.value}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ approved: true }),
@@ -1460,7 +1458,7 @@ async function investigateNetworkDeviceWithAi(device: NetworkDevice) {
     const provider = await loadLlmProviderAvailability();
     if (!provider.available) throw new Error(`Investigation provider unavailable (${provider.reasonCode || 'unavailable'}).`);
     if (!(await confirmCloudEvidence(provider))) return;
-    const response = await fetch(
+    const response = await authFetch(
       `${apiBase}/portal/network/${encodeURIComponent(device.id)}/investigate`,
       {
         method: 'POST',
@@ -1517,7 +1515,7 @@ async function executeInvestigationProposal(proposal: AiInvestigationProposal): 
     const provider = await loadLlmProviderAvailability();
     if (!provider.available) throw new Error(`Reassessment provider unavailable (${provider.reasonCode || 'unavailable'}).`);
     if (!(await confirmCloudEvidence(provider))) return;
-    const response = await fetch(
+    const response = await authFetch(
       `${apiBase}/portal/network/${encodeURIComponent(deviceId)}/investigations/${encodeURIComponent(report.investigationId)}/actions/${encodeURIComponent(proposal.id)}/execute`,
       {
         method: 'POST',
@@ -1581,7 +1579,7 @@ async function loadKitchenCaptureStatus(): Promise<void> {
   kitchenCaptureError.value = null;
 
   try {
-    const response = await fetch(
+    const response = await authFetch(
       `${apiBase}/portal/mqtt/evidence/temp-kitchen/status`,
       {
         headers: {
@@ -1611,7 +1609,7 @@ async function loadMqttProfileHistory(deviceId: string): Promise<void> {
   delete mqttProfileErrors.value[deviceId];
 
   try {
-    const response = await fetch(
+    const response = await authFetch(
       `${apiBase}/portal/network/${encodeURIComponent(deviceId)}/profile-investigations`,
       {
         headers: {
@@ -1714,7 +1712,7 @@ async function investigateMqttProfile(deviceId: string): Promise<void> {
     const provider = await loadLlmProviderAvailability();
     if (!provider.available) throw new Error(`Investigation provider unavailable (${provider.reasonCode || 'unavailable'}).`);
     if (!(await confirmCloudEvidence(provider))) return;
-    const response = await fetch(
+    const response = await authFetch(
       `${apiBase}/portal/network/${encodeURIComponent(deviceId)}/profile-investigations`,
       {
         method: 'POST',
@@ -1869,7 +1867,7 @@ async function loadDiscoveryMemory() {
   discoveryMemoryError.value = '';
 
   try {
-    const response = await fetch(`${apiBase}/portal/network/memory`, {
+    const response = await authFetch(`${apiBase}/portal/network/memory`, {
       headers: { Authorization: `Bearer ${accessToken.value}` },
     });
 
@@ -1897,12 +1895,12 @@ async function loadNetworkSnapshots() {
   }
   networkSnapshotsError.value = '';
   try {
-    const response = await fetch(`${apiBase}/portal/network/snapshots`, {
+    const response = await authFetch(`${apiBase}/portal/network/snapshots`, {
       headers: { Authorization: `Bearer ${accessToken.value}` },
     });
     if (!response.ok) throw new Error(`Network snapshots unavailable (${response.status})`);
     const result = await response.json() as { snapshots: NetworkSnapshot[] };
-    const capabilityResponse = await fetch(`${apiBase}/portal/network/capabilities`, {
+    const capabilityResponse = await authFetch(`${apiBase}/portal/network/capabilities`, {
       headers: { Authorization: `Bearer ${accessToken.value}` },
     });
     if (capabilityResponse.ok) {
@@ -1918,7 +1916,7 @@ async function loadNetworkSnapshots() {
       const previous = result.snapshots.find(snapshot => snapshot.scanId !== latest.scanId &&
         snapshot.scopes.some(oldScope => latest.scopes.some(scope => scope.id === oldScope.id && scope.cidr === oldScope.cidr)));
       if (previous) {
-        const comparisonResponse = await fetch(`${apiBase}/portal/network/snapshots/${encodeURIComponent(previous.scanId)}/compare/${encodeURIComponent(latest.scanId)}`, {
+        const comparisonResponse = await authFetch(`${apiBase}/portal/network/snapshots/${encodeURIComponent(previous.scanId)}/compare/${encodeURIComponent(latest.scanId)}`, {
           headers: { Authorization: `Bearer ${accessToken.value}` },
         });
         if (comparisonResponse.ok) networkSnapshotComparison.value = await comparisonResponse.json() as NetworkSnapshotDiff;
@@ -1969,8 +1967,6 @@ const visibleNetworkDevices = computed(() => {
 const networkDeviceSummary = computed(() => ({
   total: networkDevices.value.length,
   capable: energridCapableNetworkDevices.value.length,
-  proxyable: networkDevices.value.filter((device) => canProxyDevice(device))
-    .length,
   unknown: networkDevices.value.filter(
     (device) => !isEnergridCapableNetworkDevice(device),
   ).length,
@@ -1989,11 +1985,6 @@ const networkStats = computed(() => {
       label: 'Live reachable',
       value: `${devices.length}`,
       detail: 'from site brain',
-    },
-    {
-      label: 'Gateway ready',
-      value: `${networkDeviceSummary.value.proxyable}`,
-      detail: `${formatPercent(networkDeviceSummary.value.proxyable, devices.length)} proxyable`,
     },
     {
       label: 'Energrid capable',
@@ -2316,6 +2307,7 @@ function handlePortalRouteChange() {
 async function applyDiscoveryDecision(
   device: PortalDevice,
   action: 'approve' | 'block',
+  zoneId?: string,
 ) {
   if (discoveryDecisionBusy.value[device.id]) return;
 
@@ -2326,11 +2318,15 @@ async function applyDiscoveryDecision(
   appendLog(`[discovery] ${action} requested for ${device.displayName}`);
 
   try {
-    const response = await fetch(
+    const response = await authFetch(
       `${apiBase}/portal/discovery/${encodeURIComponent(device.id)}/${action}`,
       {
         method: 'POST',
-        headers: { Authorization: `Bearer ${accessToken.value}` },
+        headers: {
+          Authorization: `Bearer ${accessToken.value}`,
+          ...(zoneId ? { 'Content-Type': 'application/json' } : {}),
+        },
+        ...(zoneId ? { body: JSON.stringify({ zoneId }) } : {}),
       },
     );
     const result = await response.json().catch(() => null);
@@ -2362,9 +2358,9 @@ function logDiscoveryDecision(device: PortalDevice, action: string) {
   appendLog(`[discovery] ${action} requested for ${device.displayName}`);
 }
 
-function applyPendingDecision(candidateId: string, action: 'approve' | 'block') {
+function applyPendingDecision(candidateId: string, action: 'approve' | 'block', zoneId?: string) {
   const device = discoveredDevices.value.find(candidate => candidate.id === candidateId);
-  if (device) void applyDiscoveryDecision(device, action);
+  if (device) void applyDiscoveryDecision(device, action, zoneId);
 }
 
 function renamePendingCandidate(candidateId: string) {
@@ -2395,7 +2391,7 @@ async function scanNetwork(scopeIds?: string[]) {
   try {
     appendLog('[discovery] scanning selected networks');
     networkScanAbortController = new AbortController();
-    const response = await fetch(`${apiBase}/portal/network/scan`, {
+    const response = await authFetch(`${apiBase}/portal/network/scan`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${accessToken.value}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ scopeIds: selectedScopeIds, fullSubnetConfirmed }),
@@ -2457,46 +2453,12 @@ async function reviewNetworkDevice(device: NetworkDevice) {
   selectDevice(channel);
 }
 
-async function findApprovedDeviceHttpPage(device: PortalDevice) {
-  if (findingHttpPageByDeviceId.value[device.id]) return;
-
-  findingHttpPageByDeviceId.value = {
-    ...findingHttpPageByDeviceId.value,
-    [device.id]: true,
-  };
-  stateError.value = '';
-  appendLog(`[discovery] finding HTTP page for ${device.displayName}`);
-
-  try {
-    await scanNetwork();
-    const refreshed =
-      deviceCards.value.find((candidate) => candidate.id === device.id) ||
-      device;
-    const url =
-      approvedDeviceSettingsUrl(refreshed) || approvedDeviceProxyUrl(refreshed);
-
-    if (url) {
-      appendLog(`[discovery] HTTP page matched for ${device.displayName}`);
-      window.open(url, '_blank', 'noreferrer');
-      return;
-    }
-
-    const message = `No HTTP page found for ${device.displayName}. It may be MQTT-only, offline, or not reachable from the site brain scan.`;
-    stateError.value = message;
-    appendLog(`[discovery] ${message}`);
-  } finally {
-    const next = { ...findingHttpPageByDeviceId.value };
-    delete next[device.id];
-    findingHttpPageByDeviceId.value = next;
-  }
-}
-
 async function loadMqttBus(options: { silent?: boolean } = {}) {
   if (mqttBusLoading.value) return;
   mqttBusLoading.value = true;
   stateError.value = '';
   try {
-    const response = await fetch(`${apiBase}/portal/bus/mqtt`, {
+    const response = await authFetch(`${apiBase}/portal/bus/mqtt`, {
       headers: { Authorization: `Bearer ${accessToken.value}` },
     });
     if (!response.ok) throw new Error('MQTT debug state unavailable');
@@ -2592,7 +2554,7 @@ async function publishMqttDebugMessage() {
   mqttPublishError.value = '';
   try {
     const payload = parseMqttPayload(mqttPublishPayload.value);
-    const response = await fetch(`${apiBase}/portal/bus/mqtt/publish`, {
+    const response = await authFetch(`${apiBase}/portal/bus/mqtt/publish`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${accessToken.value}`,
@@ -2904,7 +2866,7 @@ async function sendDeviceAction(
   appendLog(`[device] ${action} requested for ${device.displayName}`);
 
   try {
-    const response = await fetch(
+    const response = await authFetch(
       `${apiBase}/portal/devices/${encodeURIComponent(device.id)}/actions`,
       {
         method: 'POST',
@@ -2960,48 +2922,13 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function deviceProxyUrl(device: NetworkDevice) {
-  return `${apiBase}/portal/device-proxy/${encodeURIComponent(device.id)}`;
-}
-
-function canProxyDevice(device: NetworkDevice) {
-  return device.status === 'online' && device.protocol === 'http';
-}
-
 function openApprovedDevice(device: PortalDevice) {
   setActivePage('devices');
   selectDevice(device);
 }
 
-function openApprovedOnboardingTarget(device: PortalDevice) {
-  const url = approvedDeviceProxyUrl(device) || approvedDeviceSettingsUrl(device);
-  if (url) {
-    window.open(url, '_blank', 'noreferrer');
-    return;
-  }
-  openApprovedDevice(device);
-}
-
 function approvedDeviceNetworkMatch(device: PortalDevice) {
   return matchNetworkDevice(device, liveNetworkDevices.value);
-}
-
-function approvedDeviceSettingsUrl(device: PortalDevice) {
-  if (device.settingsUrl) return device.settingsUrl;
-  const scanned = approvedDeviceNetworkMatch(device)?.settingsUrl;
-  if (scanned) return scanned;
-  if (typeof device.metadata?.httpBaseUrl === 'string') return device.metadata.httpBaseUrl;
-  if (device.adapter.protocol === 'http' && device.adapter.target?.startsWith('http')) {
-    return device.adapter.target;
-  }
-  return approvedDeviceNetworkMatch(device)?.settingsUrl || '';
-}
-
-function approvedDeviceProxyUrl(device: PortalDevice) {
-  const networkDevice = approvedDeviceNetworkMatch(device);
-  return networkDevice && canProxyDevice(networkDevice)
-    ? deviceProxyUrl(networkDevice)
-    : '';
 }
 
 function isEnergridCapableNetworkDevice(device: NetworkDevice) {
@@ -3016,14 +2943,14 @@ function isEnergridCapableNetworkDevice(device: NetworkDevice) {
 }
 
 function networkDeviceClass(device: NetworkDevice) {
-  if (canProxyDevice(device)) return 'approved';
+  if (device.status === 'online' && device.protocol === 'http') return 'discovered';
   if (isEnergridCapableNetworkDevice(device)) return 'discovered';
   return 'unknown';
 }
 
 function networkDeviceBadge(device: NetworkDevice) {
-  const integration = canProxyDevice(device)
-    ? 'gateway ready'
+  const integration = device.status === 'online' && device.protocol === 'http'
+    ? 'HTTP observed'
     : isEnergridCapableNetworkDevice(device)
       ? 'capable'
       : 'network only';
@@ -3078,36 +3005,42 @@ function formatMqttTime(value: string) {
 
 async function login() {
   loginError.value = '';
-  const response = await fetch(`${apiBase}/auth/login`, {
+  const response = await window.fetch(`${apiBase}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
     body: JSON.stringify({ email: email.value, password: password.value }),
   });
 
   if (!response.ok) {
-    loginError.value = 'Invalid credentials';
+    loginError.value = response.status === 429
+      ? 'Too many sign-in attempts. Wait a little and try again.'
+      : response.status === 401
+        ? 'Email or password is incorrect.'
+        : 'Sign-in is temporarily unavailable.';
     return;
   }
 
   const data = (await response.json()) as LoginResponse;
+  setAuthenticatedSession(data);
   accessToken.value = data.accessToken;
   user.value = data.user;
-  localStorage.setItem(tokenKey, data.accessToken);
-  localStorage.setItem(userKey, JSON.stringify(data.user));
   if (activePage.value === 'network-intelligence') await refreshNetworkIntelligence();
   else await loadState();
 }
 
-function logout() {
-  disconnectVoice();
-  userMenuOpen.value = false;
-  notificationsOpen.value = false;
-  mobileMenuOpen.value = false;
-  accessToken.value = '';
-  user.value = null;
-  state.value = null;
-  localStorage.removeItem(tokenKey);
-  localStorage.removeItem(userKey);
+async function logout() {
+  try { await logoutRequest(); }
+  finally {
+    disconnectVoice();
+    userMenuOpen.value = false;
+    notificationsOpen.value = false;
+    mobileMenuOpen.value = false;
+    clearAuthenticatedSession();
+    accessToken.value = '';
+    user.value = null;
+    state.value = null;
+  }
 }
 
 function setEndpointMode(mode: string) {
@@ -3144,7 +3077,7 @@ async function loadEnrollmentMembership() {
   enrollmentError.value = '';
 
   try {
-    const response = await fetch(
+    const response = await authFetch(
       `${apiBase}/portal/devices/enrollments`,
       {
         headers: {
@@ -3221,7 +3154,7 @@ async function loadState() {
   stateError.value = '';
   try {
     appendLog(`[portal] loading state from ${serverLabel.value}`);
-    const response = await fetch(`${apiBase}/portal/state`, {
+    const response = await authFetch(`${apiBase}/portal/state`, {
       headers: { Authorization: `Bearer ${accessToken.value}` },
     });
     if (response.status === 404) {
@@ -3248,7 +3181,7 @@ async function loadState() {
 
 async function loadVoiceOnlyState() {
   appendLog('[portal] /portal/state missing, using /voice/config fallback');
-  const response = await fetch(`${apiBase}/voice/config`);
+  const response = await authFetch(`${apiBase}/voice/config`);
   if (!response.ok) throw new Error('Voice config unavailable');
   const config = (await response.json()) as VoiceConfig;
 
@@ -3342,7 +3275,7 @@ async function loadVoiceRuns() {
   voiceRunsError.value = '';
 
   try {
-    const response = await fetch(`${apiBase}/voice/runs?limit=8`, {
+    const response = await authFetch(`${apiBase}/voice/runs?limit=8`, {
       headers: { Authorization: `Bearer ${accessToken.value}` },
     });
     if (!response.ok) throw new Error('Voice runs unavailable');
@@ -3904,6 +3837,42 @@ function delta(start: number, end: number) {
   return start && end ? `${Math.round(end - start)}ms` : '--';
 }
 
+const unsubscribeAuth = onAuthState((profile) => {
+  accessToken.value = getAccessToken();
+  user.value = profile;
+  if (!profile) {
+    state.value = null;
+    disconnectVoice();
+  }
+});
+
+async function restorePortalSession() {
+  try {
+    const profile = await restoreSession();
+    if (profile) {
+      accessToken.value = getAccessToken();
+      user.value = profile;
+      setEndpointMode(endpointMode.value);
+      if (activePage.value === 'discovery') void refreshDiscovery();
+      else if (activePage.value === 'network-intelligence') void refreshNetworkIntelligence();
+      else void loadState();
+      loadVoiceRuns();
+    }
+  } catch {
+    clearAuthenticatedSession();
+    accessToken.value = '';
+    user.value = null;
+  } finally { isAuthRestoring.value = false; }
+}
+
+function handleAuthExpired() {
+  clearAuthenticatedSession();
+  accessToken.value = '';
+  user.value = null;
+}
+window.addEventListener('energrid:auth-expired', handleAuthExpired);
+void restorePortalSession();
+
 if (accessToken.value && user.value) {
   setEndpointMode(endpointMode.value);
   if (activePage.value === 'discovery') void refreshDiscovery();
@@ -3915,7 +3884,9 @@ if (accessToken.value && user.value) {
 window.addEventListener('popstate', handlePortalRouteChange);
 
 onBeforeUnmount(() => {
+  unsubscribeAuth();
   window.removeEventListener('popstate', handlePortalRouteChange);
+  window.removeEventListener('energrid:auth-expired', handleAuthExpired);
   stopMqttBusStream();
   disconnectVoice();
   cleanupAudio();
@@ -3923,7 +3894,11 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main v-if="!accessToken" :class="['login-screen', `theme-${theme}`]">
+  <main v-if="isAuthRestoring" :class="['login-screen', `theme-${theme}`]">
+    <section class="login-panel" aria-live="polite">Restoring secure session…</section>
+  </main>
+
+  <main v-else-if="!accessToken" :class="['login-screen', `theme-${theme}`]">
     <section class="login-panel">
       <div class="brand-lockup large">
         <img class="brand-logo" src="/images/energrid-logo-symbol.png" alt="" />
@@ -4675,55 +4650,13 @@ onBeforeUnmount(() => {
                 </span>
               </div>
 
-              <div
-                v-if="
-                  typeof selectedDevice.state.values.temperature === 'number' ||
-                  typeof selectedDevice.state.values.humidity === 'number'
-                "
-                class="device-observation-grid"
-              >
-                <div
-                  v-if="typeof selectedDevice.state.values.temperature === 'number'"
-                  class="device-observation-metric"
-                >
-                  <span>Temperature</span>
-                  <strong>
-                    {{ formatNumber(selectedDevice.state.values.temperature) }}°C
-                  </strong>
-                </div>
-
-                <div
-                  v-if="typeof selectedDevice.state.values.humidity === 'number'"
-                  class="device-observation-metric"
-                >
-                  <span>Humidity</span>
-                  <strong>
-                    {{ formatNumber(selectedDevice.state.values.humidity) }}%
-                  </strong>
-                </div>
-              </div>
-
-              <p v-else class="device-observation-empty">
-                No temperature or humidity readings available yet.
-              </p>
-
-              <div class="device-observation-footer">
-                <span>
-                  {{
-                    selectedDevice.state.observedAt
-                      ? `Last observation: ${new Date(selectedDevice.state.observedAt).toLocaleString()}`
-                      : 'No observation timestamp'
-                  }}
-                </span>
-
-                <span>
-                  {{
-                    selectedDevice.state.source === 'approved-observation'
-                      ? 'Approved observation source'
-                      : `Reported source: ${selectedDevice.state.source || 'unknown'}`
-                  }}
-                </span>
-              </div>
+              <DeviceMeasurementHistory
+                :key="selectedDevice.id"
+                :device-id="selectedDevice.id"
+                :device-status="selectedDevice.state.status"
+                :api-base="apiBase"
+                :access-token="accessToken"
+              />
 
               <p
                 v-if="selectedDevice.adapter.protocol === 'mqtt'"
@@ -4745,11 +4678,6 @@ onBeforeUnmount(() => {
                 <button v-for="id in selectedDevice.memberDeviceIds" :key="id" type="button" class="ghost" :disabled="!deviceCards.some(device => device.id === id)" @click="selectMemberDevice(id)">{{ deviceCards.find(device => device.id === id)?.displayName || id }}</button>
               </div>
               <DeviceSwitchControl v-if="canSwitchDevice(selectedDevice)" :device="selectedDevice" :busy="deviceActionBusy[selectedDevice.id]" :error="deviceActionError[selectedDevice.id]" @action="sendDeviceAction(selectedDevice, $event)" />
-              <div class="network-actions">
-                <a v-if="approvedDeviceProxyUrl(selectedDevice)" class="ghost-link" :href="approvedDeviceProxyUrl(selectedDevice)">Via gateway</a>
-                <a v-if="approvedDeviceSettingsUrl(selectedDevice)" class="ghost-link" :href="approvedDeviceSettingsUrl(selectedDevice)" target="_blank" rel="noreferrer">Open settings</a>
-              </div>
-
               <details class="device-detail-disclosure">
                 <summary>Connection & diagnostics</summary>
                 <div class="device-detail-disclosure-content">
@@ -5044,10 +4972,6 @@ onBeforeUnmount(() => {
                 <span>Source of truth</span>
                 <strong>site brain network view</strong>
               </div>
-              <div>
-                <span>Gateway proxy</span>
-                <strong>{{ networkDeviceSummary.proxyable }} ready</strong>
-              </div>
             </div>
             <div class="section-row">
               <div>
@@ -5160,7 +5084,6 @@ onBeforeUnmount(() => {
                     :has-ssh="deviceHasSsh(device)"
                     :has-channels="!!device.components?.length || deviceCards.some(candidate => candidate.metadata?.physicalId === device.id)"
                     :identity-conflict="device.identityConflict"
-                    :proxy-url="canProxyDevice(device) ? deviceProxyUrl(device) : undefined"
                     @review="openDeviceIntelligenceOnly(device.id)"
                     @investigate="investigateNetworkDeviceWithAi(device)"
                     @channels="reviewNetworkDevice(device)"
@@ -5950,9 +5873,13 @@ onBeforeUnmount(() => {
             v-else
             :cards="pendingEnrollmentCards"
             :busy-by-candidate-id="discoveryDecisionBusy"
+            :zones="state?.zones || []"
             @decide="applyPendingDecision"
             @rename="renamePendingCandidate"
           />
+          <p v-if="discoveredDevices.some(device => device.metadata?.observationApprovalRequired === true)" class="discovery-empty compact">
+            Enrollment uses the current {{ state?.tenant.name }} / {{ state?.site.name }} scope. Sensor measurements require a separate approval after enrollment.
+          </p>
 
           </details>
 
@@ -5979,8 +5906,8 @@ onBeforeUnmount(() => {
               class="discovery-card approved-discovery-card"
               role="button"
               tabindex="0"
-              @click="openApprovedOnboardingTarget(device)"
-              @keydown.enter="openApprovedOnboardingTarget(device)"
+              @click="openApprovedDevice(device)"
+              @keydown.enter="openApprovedDevice(device)"
             >
               <div>
                 <span class="discovery-source approved">approved</span>
@@ -6005,16 +5932,6 @@ onBeforeUnmount(() => {
                     }}
                   </dd>
                 </div>
-                <div>
-                  <dt>HTTP page</dt>
-                  <dd>
-                    {{
-                      approvedDeviceSettingsUrl(device)
-                        ? 'available'
-                        : 'run scan to match'
-                    }}
-                  </dd>
-                </div>
               </dl>
               <div class="discovery-actions">
                 <button
@@ -6023,37 +5940,6 @@ onBeforeUnmount(() => {
                   @click.stop="openApprovedDevice(device)"
                 >
                   Open in Devices
-                </button>
-                <a
-                  v-if="approvedDeviceSettingsUrl(device)"
-                  class="ghost-link"
-                  :href="approvedDeviceSettingsUrl(device)"
-                  target="_blank"
-                  rel="noreferrer"
-                  @click.stop
-                >
-                  Open settings
-                </a>
-                <a
-                  v-if="approvedDeviceProxyUrl(device)"
-                  class="ghost-link"
-                  :href="approvedDeviceProxyUrl(device)"
-                  @click.stop
-                >
-                  Via gateway
-                </a>
-                <button
-                  v-if="!approvedDeviceSettingsUrl(device)"
-                  class="ghost"
-                  type="button"
-                  :disabled="!!findingHttpPageByDeviceId[device.id]"
-                  @click.stop="findApprovedDeviceHttpPage(device)"
-                >
-                  {{
-                    findingHttpPageByDeviceId[device.id]
-                      ? 'Finding...'
-                      : 'Find HTTP page'
-                  }}
                 </button>
               </div>
             </article>

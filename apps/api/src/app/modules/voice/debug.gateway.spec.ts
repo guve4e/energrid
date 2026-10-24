@@ -24,26 +24,29 @@ describe('DebugGateway', () => {
     expect(events.addClient).not.toHaveBeenCalled()
   })
 
-  it('only subscribes a debug client after portal-token authentication', () => {
+  it('only subscribes a debug client after access-token authentication', async () => {
     process.env = {
       ...original,
       NODE_ENV: 'production',
-      PORTAL_CONTROL_TOKEN: 'debug-test-token',
+      NODE_ENV: 'test',
       VOICE_DEBUG_ENABLED: 'true',
     }
     const events = { addClient: jest.fn(), removeClient: jest.fn() }
     const socket = new TestSocket()
 
-    new DebugGateway(events as never).handleConnection(socket as never)
+    const auth = { authenticateAccessToken: jest.fn().mockResolvedValue({ userId: 'u', email: 'a@b.test', name: 'A', role: 'admin', sessionId: 's', sessionVersion: 1 }) }
+    new DebugGateway(events as never, auth as never).handleConnection(socket as never)
     socket.emit(
       'message',
-      Buffer.from(JSON.stringify({ type: 'authenticate', token: 'debug-test-token' })),
+      Buffer.from(JSON.stringify({ type: 'authenticate', token: 'signed-access-jwt' })),
       false,
     )
 
+    await new Promise((resolve) => setImmediate(resolve))
     expect(events.addClient).toHaveBeenCalledWith(socket)
     expect(socket.send).toHaveBeenCalledWith(
       JSON.stringify({ type: 'debug_authenticated' }),
     )
+    socket.emit('close')
   })
 })

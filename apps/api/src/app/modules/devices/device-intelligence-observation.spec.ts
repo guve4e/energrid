@@ -24,6 +24,7 @@ describe('Intelligence observation projection', () => {
     }, 60, now);
 
     expect(result.fields.on.freshness).toBe('fresh');
+    expect(result.freshnessLimitSeconds).toBe(60);
     expect(result.fields.on.sourceId).toBe('shelly-http');
     expect(result.fields.on.evidenceId).toBe('rpc-readback-1');
 

@@ -1,6 +1,7 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, Post, UseGuards } from '@nestjs/common';
 import { ApiBody, ApiOkResponse, ApiOperation, ApiProperty, ApiTags } from '@nestjs/swagger';
 import { PanelService } from './panel.service';
+import { AccessJwtGuard, RequireRoles, RoleGuard } from '../auth/auth.guard';
 
 class PanelRequestDto {
   @ApiProperty({
@@ -41,6 +42,8 @@ const panelDiagnosticsResponse = {
 
 @ApiTags('panel')
 @Controller('panel')
+@UseGuards(AccessJwtGuard, RoleGuard)
+@RequireRoles('admin')
 export class PanelController {
   constructor(private readonly panelService: PanelService) {}
 

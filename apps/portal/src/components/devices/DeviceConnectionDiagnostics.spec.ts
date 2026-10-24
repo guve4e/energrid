@@ -2,6 +2,7 @@ import { mount, flushPromises } from '@vue/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import DeviceConnectionDiagnostics from './DeviceConnectionDiagnostics.vue';
 import type { DeviceConnectionReport } from '@energrid/domain-devices';
+import { setAuthenticatedSession } from '../../auth/auth-client';
 
 const device = {
   id: 'shelly:switch:0',
@@ -49,6 +50,7 @@ function setup(overrides = {}) {
   return page;
 }
 beforeEach(() => {
+  setAuthenticatedSession({ accessToken: 'unit-token', expiresIn: 900, user: { id: 'u1', email: 'admin@example.test', name: 'Admin', role: 'admin' } });
   fetchMock = vi
     .fn()
     .mockResolvedValue({ ok: true, json: async () => structuredClone(result) });
@@ -71,10 +73,8 @@ describe('connection diagnostic UI', () => {
     expect(fetchMock.mock.calls[0][0]).toBe(
       '/api/portal/devices/shelly%3Aswitch%3A0/diagnostics',
     );
-    expect(fetchMock.mock.calls[0][1]).toMatchObject({
-      method: 'POST',
-      headers: { Authorization: 'Bearer unit-token' },
-    });
+    expect(fetchMock.mock.calls[0][1].method).toBe('POST');
+    expect(new Headers(fetchMock.mock.calls[0][1].headers).get('Authorization')).toBe('Bearer unit-token');
     expect(page.text()).toContain('MQTT is disabled');
     expect(page.text()).toContain('Next step');
     expect(page.text()).toContain('Relay at check time: Off');

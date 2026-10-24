@@ -726,7 +726,10 @@ export class DeviceRegistryService implements OnModuleInit {
       .map((device) => device.id);
   }
 
-  approveDiscoveredDevice(deviceId: string): RegisteredDevice | null {
+  approveDiscoveredDevice(
+    deviceId: string,
+    placement?: { zoneId: string; zoneName: string },
+  ): RegisteredDevice | null {
     const id = safeId(deviceId);
     if (!id) return null;
 
@@ -747,8 +750,8 @@ export class DeviceRegistryService implements OnModuleInit {
       siteName: discovered.siteName,
       gatewayId: discovered.gatewayId,
       kind: discovered.kind,
-      zoneId: discovered.zoneId,
-      zoneName: discovered.discovery?.suggestedRoom || discovered.zoneName,
+      zoneId: placement?.zoneId || discovered.zoneId,
+      zoneName: placement?.zoneName || discovered.discovery?.suggestedRoom || discovered.zoneName,
       protocol: discovered.adapter.protocol,
       transport: discovered.adapter.transport,
       driver: discovered.adapter.driver,
@@ -756,8 +759,11 @@ export class DeviceRegistryService implements OnModuleInit {
       bridge: discovered.adapter.bridge,
       configured:
         discovered.adapter.protocol !== 'none' &&
+        discovered.metadata?.observationApprovalRequired !== true &&
         discovered.metadata?.mqttEvidenceCandidate !== true,
-      capabilities,
+      // Discovery-reported sensor capabilities are not observation authority.
+      // A separate approval workflow must grant measurement access.
+      capabilities: discovered.metadata?.observationApprovalRequired === true ? [] : capabilities,
       values: discovered.state.values,
       state: {
         values: discovered.state.values,
@@ -2501,7 +2507,9 @@ function normalizeApprovedDevice(item: unknown): RegisteredDevice | null {
   };
   const zoneName =
     raw.zoneName || raw.location || inferZoneName(id, raw.groups);
-  const capabilities = inferCapabilities(raw);
+  const capabilities = raw.metadata?.observationApprovalRequired === true
+    ? []
+    : inferCapabilities(raw);
   const protocol = inferProtocol(raw);
   const transport = inferTransport(raw, protocol);
   const target = raw.target || raw.physicalId || raw.dst || id;

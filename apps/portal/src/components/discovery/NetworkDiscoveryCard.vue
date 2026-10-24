@@ -7,14 +7,13 @@ const props = defineProps<{
     model?: string; app?: string; protocol: string; macAddress?: string;
     networkZoneName: string; networkZoneId: string; status: string;
     identityConflict?: { reason: 'multiple_macs_for_endpoint'; macAddresses: string[] };
-    reason: string; settingsUrl?: string;
+    reason: string;
   };
   badge: string;
   badgeClass: string;
   investigating?: boolean;
   hasSsh?: boolean;
   hasChannels?: boolean;
-  proxyUrl?: string;
 }>();
 defineEmits<{ review: []; investigate: []; channels: []; copySsh: [] }>();
 const name = computed(() => props.device.hostname || props.device.vendor || 'Network device');
@@ -53,8 +52,6 @@ function closeActions() {
             <a :href="`ssh://${device.ipAddress}`" title="Open SSH using your system’s registered SSH handler">SSH ↗</a>
             <button type="button" class="secondary" @click="$emit('copySsh')">Copy SSH</button>
           </template>
-          <a v-if="device.settingsUrl" :href="device.settingsUrl" target="_blank" rel="noreferrer">Open settings ↗</a>
-          <a v-if="proxyUrl" :href="proxyUrl">Via gateway</a>
         </div>
         <dl class="network-device-details">
           <div><dt>Device ID</dt><dd>{{ device.id }}</dd></div>

@@ -391,6 +391,7 @@ async function main() {
     `[replay] ${resolvedWavPath} seconds=${(pcm.length / 2 / fmt.sampleRate).toFixed(2)} chunks=${chunks.length} ws=${args.wsUrl}`,
   )
 
+  const machineSession = await loginToApi(args.wsUrl)
   const ws = new WebSocket(args.wsUrl)
   const state = createReplayState()
   const logMessage = createMessageLogger(args, outputBaseName, state)
@@ -402,9 +403,7 @@ async function main() {
     ws.once('error', reject)
   })
 
-  const token = process.env.PORTAL_CONTROL_TOKEN ||
-    (process.env.NODE_ENV === 'production' ? '' : 'dev-token-admin')
-  if (!token) throw new Error('Set PORTAL_CONTROL_TOKEN in the API environment before replaying audio.')
+  const token = machineSession.accessToken
   await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => finish(new Error('Voice authentication timed out.')), 5000)
     const onMessage = (raw) => {
@@ -459,6 +458,34 @@ async function main() {
   ws.close()
   assertReplay(args, state)
   printSummary(state)
+  await revokeCliSession(machineSession).catch(() => console.error('[replay] Could not revoke the temporary CLI session; it expires automatically.'))
+}
+
+async function loginToApi(wsUrl) {
+  const ws = new URL(wsUrl)
+  const apiBase = process.env.AUTH_API_URL || `${ws.protocol === 'wss:' ? 'https:' : 'http:'}//${ws.host}`
+  const email = process.env.AUTH_ADMIN_EMAIL
+  const password = process.env.AUTH_ADMIN_PASSWORD
+  if (!email || !password) throw new Error('Set AUTH_ADMIN_EMAIL and AUTH_ADMIN_PASSWORD in the private local environment for voice replay.')
+  const origin = process.env.AUTH_CLIENT_ORIGIN || 'http://localhost:4300'
+  const response = await fetch(new URL('/auth/login', apiBase), {
+    method: 'POST', headers: { 'content-type': 'application/json', origin },
+    body: JSON.stringify({ email, password }),
+  })
+  if (!response.ok) throw new Error('Voice replay sign-in failed; check the account and trusted client origin.')
+  const body = await response.json()
+  const cookies = response.headers.getSetCookie?.() || []
+  const refreshCookie = cookies.map((line) => line.split(';', 1)[0]).find((line) => line.startsWith('__Host-energrid_refresh=') || line.startsWith('energrid_refresh='))
+  const csrfCookie = cookies.map((line) => line.split(';', 1)[0]).find((line) => line.startsWith('__Host-energrid_csrf=') || line.startsWith('energrid_csrf='))
+  if (!refreshCookie || !csrfCookie || typeof body.accessToken !== 'string') throw new Error('Voice replay sign-in returned an incomplete session.')
+  return { accessToken: body.accessToken, apiBase, origin, cookie: `${refreshCookie}; ${csrfCookie}`, csrf: decodeURIComponent(csrfCookie.slice(csrfCookie.indexOf('=') + 1)) }
+}
+
+async function revokeCliSession(session) {
+  await fetch(new URL('/auth/logout', session.apiBase), {
+    method: 'POST', headers: { origin: session.origin, cookie: session.cookie,
+      authorization: `Bearer ${session.accessToken}`, 'x-csrf-token': session.csrf },
+  })
 }
 
 function assertReplay(args, state) {

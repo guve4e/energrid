@@ -4,7 +4,7 @@ describe('VoiceProtocolController', () => {
   const original = process.env
 
   beforeEach(() => {
-    process.env = { ...original, NODE_ENV: 'production', PORTAL_CONTROL_TOKEN: 'voice-api-token' }
+    process.env = { ...original, NODE_ENV: 'test' }
     delete process.env.OPENAI_STT_STREAM_MODEL
   })
 
@@ -12,21 +12,14 @@ describe('VoiceProtocolController', () => {
     process.env = original
   })
 
-  it('requires portal authorization before returning persisted voice runs', () => {
+  it('returns persisted voice runs to the controller after the access-token guard', () => {
     const store = {
       getInfo: jest.fn(() => ({ enabled: true, file: 'private-runs.jsonl' })),
       listRecent: jest.fn(() => []),
     }
     const controller = new VoiceProtocolController(store as never)
 
-    expect(() => controller.getRuns(undefined, { headers: {} })).toThrow(
-      'Voice access requires portal authorization.',
-    )
-    expect(
-      controller.getRuns(undefined, {
-        headers: { authorization: 'Bearer voice-api-token' },
-      }),
-    ).toEqual({ storage: { enabled: true, file: 'private-runs.jsonl' }, runs: [] })
+    expect(controller.getRuns(undefined)).toEqual({ storage: { enabled: true, file: 'private-runs.jsonl' }, runs: [] })
   })
 
   it('reports buffered defaults and the selected streaming configuration', () => {

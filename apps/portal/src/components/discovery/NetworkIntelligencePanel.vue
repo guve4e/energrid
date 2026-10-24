@@ -488,12 +488,6 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
               <dt>IP address</dt>
               <dd>
                 {{ selectedEndpoint.ipAddress }}
-                <a
-                  v-if="selectedEndpoint.vendor === 'Shelly' && verifiedIdentity(selectedEndpoint) && /^\\d{1,3}(?:\\.\\d{1,3}){3}$/.test(selectedEndpoint.ipAddress)"
-                  :href="`http://${selectedEndpoint.ipAddress}/`"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >Open settings ↗</a>
               </dd>
             </div>
             <div><dt>Network</dt><dd>{{ selectedEndpoint.networkZoneName }} · {{ selectedEndpoint.networkZoneId }}</dd></div>

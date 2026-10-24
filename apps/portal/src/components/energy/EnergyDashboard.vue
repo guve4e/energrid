@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { authFetch } from '../../auth/auth-client';
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import type { PowerAsset } from '@energrid/domain-telemetry';
 import { recentPowerRange, type EnergyDashboard } from './energy-types';
@@ -62,7 +63,7 @@ const hourLabel = (value: string) =>
   }).format(new Date(value));
 
 async function read(path: string, signal: AbortSignal) {
-  const response = await fetch(`${props.apiBase}/portal/energy/${path}`, {
+  const response = await authFetch(`${props.apiBase}/portal/energy/${path}`, {
     headers: { Authorization: `Bearer ${props.accessToken}` },
     signal,
   });

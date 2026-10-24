@@ -15,9 +15,11 @@ import { DeviceOnboardingService } from './device-onboarding.service'
 import { DevicesModule } from '../devices/devices.module'
 import { DeviceEnrollmentModule } from '../devices/enrollment/device-enrollment.module'
 import { PortalWeatherController } from './portal-weather.controller'
+import { PortalDeviceMeasurementsService } from './portal-device-measurements.service'
+import { TelemetryModule } from '../telemetry/telemetry.module'
 
 @Module({
-  imports: [DevicesModule, DeviceEnrollmentModule, HouseIntelligenceModule],
+  imports: [DevicesModule, DeviceEnrollmentModule, HouseIntelligenceModule, TelemetryModule],
   controllers: [PortalController, PortalWeatherController],
   providers: [
     PortalStateService,
@@ -39,6 +41,7 @@ import { PortalWeatherController } from './portal-weather.controller'
     { provide: NetworkEndpointIdentityRefresh, useFactory: () => new NetworkEndpointIdentityRefresh(refreshLocalNeighborIdentity) },
     DeviceInvestigationWorkflowService,
     DeviceInvestigationHistoryStore,
+    PortalDeviceMeasurementsService,
   ],
 })
 export class PortalModule {}

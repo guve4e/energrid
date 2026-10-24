@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { authFetch } from '../../auth/auth-client';
 import { nextTick, ref } from 'vue';
 
 const props = defineProps<{
@@ -37,7 +38,7 @@ async function send() {
   await scrollToBottom();
 
   try {
-    const response = await fetch(`${props.apiBase}/portal/assistant/chat`, {
+    const response = await authFetch(`${props.apiBase}/portal/assistant/chat`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${props.accessToken}`,

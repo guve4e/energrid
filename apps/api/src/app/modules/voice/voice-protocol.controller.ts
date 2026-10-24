@@ -1,7 +1,7 @@
-import { Controller, Get, Query, Req } from '@nestjs/common'
+import { Controller, Get, Query, UseGuards } from '@nestjs/common'
 import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger'
 import { VoiceRunStoreService } from './voice-run-store.service'
-import { assertVoiceAuthorization } from './voice-auth'
+import { AccessJwtGuard, PublicRoute, RequireRoles, RoleGuard } from '../auth/auth.guard'
 
 @ApiTags('voice')
 @Controller('voice')
@@ -9,6 +9,7 @@ export class VoiceProtocolController {
   constructor(private readonly runStore: VoiceRunStoreService) {}
 
   @Get('protocol')
+  @PublicRoute()
   @ApiOperation({ summary: 'Describe the voice WebSocket protocol' })
   @ApiOkResponse({
     schema: {
@@ -24,7 +25,7 @@ export class VoiceProtocolController {
         clientMessages: [
           {
             type: 'authenticate',
-            description: 'First message; contains the portal control token.',
+            description: 'First message; contains a short-lived access JWT.',
           },
           {
             type: 'end_of_turn',
@@ -68,7 +69,7 @@ export class VoiceProtocolController {
         {
           type: 'authenticate',
           description: 'First message; contains the portal control token.',
-          example: { type: 'authenticate', token: '<PORTAL_CONTROL_TOKEN>' },
+          example: { type: 'authenticate', token: '<short-lived access JWT>' },
         },
         {
           type: 'end_of_turn',
@@ -103,6 +104,7 @@ export class VoiceProtocolController {
   }
 
   @Get('config')
+  @PublicRoute()
   @ApiOperation({ summary: 'Show active voice runtime configuration' })
   @ApiOkResponse({
     schema: {
@@ -148,6 +150,8 @@ export class VoiceProtocolController {
   }
 
   @Get('runs')
+  @UseGuards(AccessJwtGuard, RoleGuard)
+  @RequireRoles('admin')
   @ApiOperation({ summary: 'List recent persisted voice assistant runs' })
   @ApiOkResponse({
     schema: {
@@ -170,9 +174,7 @@ export class VoiceProtocolController {
   })
   getRuns(
     @Query('limit') limit: string | undefined,
-    @Req() request: { headers: { authorization?: string | string[] } },
   ) {
-    assertVoiceAuthorization(request)
     const parsedLimit = Number(limit)
 
     return {

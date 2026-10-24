@@ -3,6 +3,7 @@ dist
 .nx/cache
 .nx/workspace-data
 .env
+.env.auth.local
 
 # local
 .venv/

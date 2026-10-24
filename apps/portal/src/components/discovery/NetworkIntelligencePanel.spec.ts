@@ -75,6 +75,7 @@ describe('NetworkIntelligencePanel', () => {
     expect(panel.text()).toContain('0.0.0.0/0');
     expect(panel.text()).toContain('Nmap 7.992 available');
 
+    expect(panel.find('a[href^="http://192.168.7.10"]').exists()).toBe(false);
     await panel.get('button[aria-label="Close endpoint details"]').trigger('click');
     await panel.findAll('button.ni-device-row')[1].trigger('click');
     expect(panel.text()).toContain('Unidentified endpoint');
