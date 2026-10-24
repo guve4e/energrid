@@ -51,7 +51,7 @@ export interface DeviceInstallationChangeProposal {
 export interface DeviceInstallationEvent {
   id: string;
   deviceId: string;
-  kind: 'approved' | 'control_configured' | 'installation_details_saved' | 'command' | 'physical_outcome_confirmed';
+  kind: 'approved' | 'observation_authority_approved' | 'control_configured' | 'installation_details_saved' | 'command' | 'physical_outcome_confirmed';
   occurredAt: string;
   actor: string;
   evidence: Record<string, string | number | boolean | null>;

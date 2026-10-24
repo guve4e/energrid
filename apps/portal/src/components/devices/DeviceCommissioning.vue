@@ -41,6 +41,13 @@ type CommissioningDevice = {
   };
   state: { command?: { status: string } };
 };
+type InstallationDraft = {
+  name: string;
+  room: string;
+  settingsUrl: string;
+  assistantEnabled: boolean;
+  loadType: 'lighting' | '';
+};
 
 const props = defineProps<{
   device: CommissioningDevice;
@@ -49,7 +56,7 @@ const props = defineProps<{
   settingsUrlSuggestion?: string;
 }>();
 
-const emit = defineEmits<{ saved: [] }>();
+const emit = defineEmits<{ saved: []; dirtyChange: [dirty: boolean] }>();
 
 const name = ref('');
 const room = ref('');
@@ -58,6 +65,7 @@ const assistantEnabled = ref(false);
 const loadType = ref<'lighting' | ''>('');
 const initialLoadType = ref<'lighting' | ''>('');
 const loadConfirmed = ref(false);
+const savedDraft = ref<InstallationDraft>({ name: '', room: '', settingsUrl: '', assistantEnabled: false, loadType: '' });
 
 const busy = ref(false);
 const error = ref('');
@@ -70,6 +78,7 @@ const proposals = ref<InstallationProposal[]>([]);
 const proposalsError = ref('');
 const loadingProposals = ref(false);
 const proposalConfirmations = ref<Record<string, boolean>>({});
+let hasHydrated = false;
 
 const approved = computed(
   () => props.device.trustStatus === 'approved',
@@ -78,6 +87,26 @@ const approved = computed(
 const confirmed = computed(
   () => props.device.commissioning?.physicalOutcome === 'confirmed',
 );
+
+const draft = computed<InstallationDraft>(() => ({
+  name: name.value.trim(),
+  room: room.value.trim(),
+  settingsUrl: settingsUrl.value.trim(),
+  assistantEnabled: assistantEnabled.value,
+  loadType: loadType.value,
+}));
+const hasChanges = computed(() => Object.keys(savedDraft.value).some(key =>
+  draft.value[key as keyof InstallationDraft] !== savedDraft.value[key as keyof InstallationDraft],
+));
+const pendingFields = computed(() => {
+  const labels: Record<keyof InstallationDraft, string> = {
+    name: 'device name', room: 'room', settingsUrl: 'settings address',
+    assistantEnabled: 'Assistant permission', loadType: 'control classification',
+  };
+  return (Object.keys(labels) as Array<keyof InstallationDraft>)
+    .filter(key => draft.value[key] !== savedDraft.value[key])
+    .map(key => labels[key]);
+});
 
 const canConfirmPhysical = computed(
   () => approved.value &&
@@ -101,6 +130,40 @@ function expired(proposal: InstallationProposal) {
   return !Number.isFinite(timestamp) || Date.now() >= timestamp;
 }
 
+function hydrateSavedDraft() {
+  const currentLoad = props.device.metadata?.loadType === 'lighting' ? 'lighting' : '';
+  const values: InstallationDraft = {
+    name: props.device.displayName,
+    room: props.device.zoneName,
+    settingsUrl: props.device.settingsUrl || '',
+    assistantEnabled: props.device.assistantEnabled === true,
+    loadType: currentLoad,
+  };
+  const savedValuesChanged = Object.keys(values).some(key =>
+    values[key as keyof InstallationDraft] !== savedDraft.value[key as keyof InstallationDraft],
+  );
+  if (hasHydrated && hasChanges.value && savedValuesChanged &&
+      !window.confirm('Saved installation values changed. Discard your pending edits and load the new saved values?')) {
+    error.value = 'Saved values changed elsewhere. Your pending edits are preserved.';
+    return;
+  }
+  savedDraft.value = values;
+  name.value = values.name;
+  room.value = values.room;
+  settingsUrl.value = values.settingsUrl;
+  assistantEnabled.value = values.assistantEnabled;
+  loadType.value = values.loadType;
+  initialLoadType.value = values.loadType;
+  loadConfirmed.value = false;
+  error.value = '';
+  message.value = '';
+  proposalConfirmations.value = {};
+  hasHydrated = true;
+  emit('dirtyChange', false);
+  void loadEvents();
+  void loadProposals();
+}
+
 watch(
   () => [
     props.device.id,
@@ -109,31 +172,25 @@ watch(
     props.device.settingsUrl,
     props.device.assistantEnabled,
     props.device.metadata?.loadType,
-    props.settingsUrlSuggestion,
   ],
-  () => {
-    name.value = props.device.displayName;
-    room.value = props.device.zoneName;
-    settingsUrl.value =
-      props.device.settingsUrl || props.settingsUrlSuggestion || '';
-    assistantEnabled.value = props.device.assistantEnabled === true;
-
-    const currentLoad =
-      props.device.metadata?.loadType === 'lighting' ? 'lighting' : '';
-
-    loadType.value = currentLoad;
-    initialLoadType.value = currentLoad;
-    loadConfirmed.value = false;
-
-    error.value = '';
-    message.value = '';
-    proposalConfirmations.value = {};
-
-    void loadEvents();
-    void loadProposals();
-  },
+  hydrateSavedDraft,
   { immediate: true },
 );
+watch(hasChanges, dirty => emit('dirtyChange', dirty));
+
+function cancelChanges() {
+  if (busy.value) return;
+  if (hasChanges.value && !window.confirm('Discard unsaved installation changes?')) return;
+  name.value = savedDraft.value.name;
+  room.value = savedDraft.value.room;
+  settingsUrl.value = savedDraft.value.settingsUrl;
+  assistantEnabled.value = savedDraft.value.assistantEnabled;
+  loadType.value = savedDraft.value.loadType;
+  initialLoadType.value = savedDraft.value.loadType;
+  loadConfirmed.value = false;
+  error.value = '';
+  message.value = '';
+}
 
 async function request(
   path: string,
@@ -277,7 +334,7 @@ async function decideProposal(
 }
 
 async function saveDetails() {
-  if (busy.value || !approved.value) return;
+  if (busy.value || !approved.value || !hasChanges.value) return;
 
   const normalizedSettingsUrl = settingsUrl.value.trim();
 
@@ -326,7 +383,10 @@ async function saveDetails() {
       },
     );
 
-    message.value = 'Installation details saved.';
+    savedDraft.value = { ...draft.value };
+    initialLoadType.value = loadType.value;
+    loadConfirmed.value = false;
+    message.value = 'Installation changes saved.';
     await loadEvents();
     emit('saved');
   } catch (cause) {
@@ -406,9 +466,9 @@ function eventDetail(evidence: Record<string, unknown>) {
       <span class="subtle">Approved device configuration</span>
     </div>
 
-    <section class="proposal-section" aria-label="Installation proposals">
+    <section class="proposal-section" aria-label="Installation approval workflow">
       <div class="section-heading">
-        <h5>Pending proposals</h5>
+        <div><h5>Approval workflow</h5><p class="subtle">Review proposed changes separately from editing saved settings.</p></div>
         <button
           type="button"
           class="text-button"
@@ -495,28 +555,23 @@ function eventDetail(evidence: Record<string, unknown>) {
       </article>
     </section>
 
-    <form @submit.prevent="saveDetails">
-      <label>
-        Device name
-        <input
-          v-model="name"
-          maxlength="100"
-          :disabled="busy || !approved"
-          required
-        />
-      </label>
+    <form class="installation-form" @submit.prevent="saveDetails">
+      <div class="installation-settings-group">
+        <div class="installation-group-heading"><h5>Name and room</h5><span>Saved installation settings</span></div>
+        <div class="form-grid">
+          <label>
+            Device name
+            <input v-model="name" maxlength="100" :disabled="busy || !approved" required />
+          </label>
+          <label>
+            Room
+            <input v-model="room" maxlength="80" :disabled="busy || !approved" required />
+          </label>
+        </div>
+      </div>
 
-      <div class="form-grid">
-        <label>
-          Room
-          <input
-            v-model="room"
-            maxlength="80"
-            :disabled="busy || !approved"
-            required
-          />
-        </label>
-
+      <div class="installation-settings-group">
+        <div class="installation-group-heading"><h5>Control classification</h5><span>Does not grant control authority</span></div>
         <label>
           Controls
           <select v-model="loadType" :disabled="busy || !approved">
@@ -524,41 +579,36 @@ function eventDetail(evidence: Record<string, unknown>) {
             <option value="lighting">Lighting</option>
           </select>
         </label>
+
+        <label
+          v-if="loadType === 'lighting' && loadType !== initialLoadType"
+          class="checkbox-row"
+        >
+          <input v-model="loadConfirmed" type="checkbox" :disabled="busy" />
+          I verified that this device controls lighting.
+        </label>
       </div>
 
-      <label
-        v-if="loadType === 'lighting' &&
-          loadType !== initialLoadType"
-        class="checkbox-row"
-      >
-        <input
-          v-model="loadConfirmed"
-          type="checkbox"
-          :disabled="busy"
-        />
-        I verified that this device controls lighting.
-      </label>
+      <div class="installation-settings-group installation-assistant-group">
+        <label class="checkbox-row">
+          <input v-model="assistantEnabled" type="checkbox" :disabled="busy || !approved" />
+          Allow the assistant to use this device
+        </label>
+        <p class="subtle">Assistant permission is separate from installation approval and observation approval. Physical actions remain subject to Core safety checks.</p>
+      </div>
 
-      <label class="checkbox-row">
-        <input
-          v-model="assistantEnabled"
-          type="checkbox"
-          :disabled="busy || !approved"
-        />
-        Allow the assistant to use this device
-      </label>
+      <div class="installation-edit-state" :class="hasChanges ? 'has-pending' : 'is-saved'" role="status" aria-live="polite">
+        <strong>{{ hasChanges ? 'Unsaved changes' : 'Saved configuration' }}</strong>
+        <span v-if="hasChanges">Saved: {{ savedDraft.name }} · {{ savedDraft.room }}. Pending edits: {{ pendingFields.join(', ') }}.</span>
+        <span v-else>{{ savedDraft.name }} · {{ savedDraft.room }}</span>
+      </div>
 
-      <p class="subtle">
-        Assistant permission is separate from installation approval.
-        Physical actions remain subject to Core safety checks.
-      </p>
-
-      <div class="actions">
-        <button
-          type="submit"
-          :disabled="busy || !approved || !name.trim() || !room.trim()"
-        >
-          {{ busy ? 'Saving...' : 'Save installation' }}
+      <div class="actions installation-save-actions">
+        <button type="button" class="secondary" :disabled="busy || !hasChanges" @click="cancelChanges">
+          Revert changes
+        </button>
+        <button type="submit" class="primary" :disabled="busy || !approved || !hasChanges || !name.trim() || !room.trim()">
+          {{ busy ? 'Saving…' : 'Save changes' }}
         </button>
       </div>
 
@@ -573,8 +623,9 @@ function eventDetail(evidence: Record<string, unknown>) {
               type="url"
               maxlength="500"
               :disabled="busy || !approved"
-              placeholder="Verified HTTP(S) address"
+              :placeholder="settingsUrlSuggestion || 'Verified HTTP(S) address'"
             />
+            <span v-if="!savedDraft.settingsUrl && settingsUrlSuggestion" class="subtle">Suggested discovery address; it is not saved unless you enter it.</span>
           </label>
 
           <div class="physical-panel">
@@ -637,9 +688,10 @@ function eventDetail(evidence: Record<string, unknown>) {
 <style scoped>
 .commissioning {
   display: grid;
-  gap: 16px;
+  gap: 14px;
   min-width: 0;
   padding-top: 12px;
+  color: var(--eg-text, #111827);
 }
 
 h4, h5, p {
@@ -658,7 +710,7 @@ h5 { font-size: 14px; }
 }
 
 .subtle {
-  color: var(--muted, #64748b);
+  color: var(--eg-muted, #58677e);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -670,12 +722,23 @@ h5 { font-size: 14px; }
 
 .proposal-card {
   display: grid;
-  gap: 14px;
-  padding: 14px;
-  border: 1px solid var(--border, #d7dfeb);
-  border-radius: 10px;
-  background: var(--surface-muted, transparent);
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--eg-border, #d8e0ec);
+  border-radius: var(--eg-card-radius, 12px);
+  background: var(--eg-surface-soft, #f5f8fc);
 }
+
+.installation-form { gap: 10px; }
+.installation-settings-group { display: grid; gap: 10px; min-width: 0; padding: 12px; border: 1px solid var(--eg-border, #d8e0ec); border-radius: var(--eg-card-radius, 12px); background: var(--eg-surface, #fff); }
+.installation-group-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 10px; }
+.installation-group-heading h5 { margin: 0; }
+.installation-group-heading > span { color: var(--eg-muted, #58677e); font-size: 11px; }
+.installation-assistant-group { background: var(--eg-blue-soft, #eef4ff); border-color: var(--eg-blue-border, #cfe0ff); }
+.installation-edit-state { display: grid; gap: 3px; padding: 10px 12px; border-radius: var(--eg-control-radius, 8px); font-size: 12px; }
+.installation-edit-state.is-saved { color: var(--eg-success, #138a59); background: var(--eg-success-soft, #e8f7ef); }
+.installation-edit-state.has-pending { color: var(--eg-warning, #a45b08); background: var(--eg-warning-soft, #fff6e8); }
+.installation-edit-state span { color: var(--eg-muted, #58677e); line-height: 1.4; overflow-wrap: anywhere; }
 
 .proposal-diff {
   display: grid;
@@ -708,10 +771,10 @@ input:not([type='checkbox']), select, button {
   box-sizing: border-box;
   max-width: 100%;
   min-height: 38px;
-  border: 1px solid var(--border, #d7dfeb);
-  border-radius: 7px;
+  border: 1px solid var(--eg-border, #d8e0ec);
+  border-radius: var(--eg-control-radius, 8px);
   padding: 8px 10px;
-  background: var(--surface, transparent);
+  background: var(--eg-surface, #fff);
   color: inherit;
   font: inherit;
 }
@@ -731,7 +794,9 @@ button:disabled {
 }
 
 .secondary {
-  background: var(--surface-muted, #eef3fb);
+  background: var(--eg-blue-soft, #eef4ff);
+  color: var(--eg-blue, #2863e6);
+  border-color: var(--eg-blue-border, #cfe0ff);
 }
 
 .text-button {
@@ -765,8 +830,8 @@ button:disabled {
 }
 
 .advanced {
-  border: 1px solid var(--border, #d7dfeb);
-  border-radius: 8px;
+  border: 1px solid var(--eg-border, #d8e0ec);
+  border-radius: var(--eg-control-radius, 8px);
   min-width: 0;
 }
 
@@ -781,7 +846,7 @@ button:disabled {
   display: grid;
   gap: 12px;
   padding: 12px;
-  border-top: 1px solid var(--border, #d7dfeb);
+  border-top: 1px solid var(--eg-border, #d8e0ec);
 }
 
 .physical-panel {
@@ -799,15 +864,15 @@ button:disabled {
   list-style: none;
   margin: 0;
   padding: 0;
-  max-height: 230px;
-  overflow-y: auto;
+  max-height: none;
+  overflow: visible;
 }
 
 .history-list li {
   display: grid;
   gap: 4px;
   padding: 10px 0;
-  border-bottom: 1px solid var(--border, #d7dfeb);
+  border-bottom: 1px solid var(--eg-border, #d8e0ec);
   font-size: 12px;
   overflow-wrap: anywhere;
 }
@@ -820,18 +885,21 @@ button:disabled {
 }
 
 .history-heading time {
-  color: var(--muted, #64748b);
+  color: var(--eg-muted, #58677e);
   font-size: 11px;
 }
 
 .error {
-  color: #c0392b;
+  color: var(--eg-danger, #b42318);
   font-size: 12px;
 }
 
 .success {
+  color: var(--eg-success, #138a59);
   font-size: 12px;
 }
+
+.commissioning :is(button, summary, input, select):focus-visible { outline: 2px solid var(--eg-blue, #2863e6); outline-offset: 2px; }
 
 @media (max-width: 520px) {
   .form-grid {

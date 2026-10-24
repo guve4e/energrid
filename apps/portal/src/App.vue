@@ -19,6 +19,7 @@ import DeviceConnectionDiagnostics from './components/devices/DeviceConnectionDi
 import DeviceNetworkIdentityPanel from './components/devices/DeviceNetworkIdentityPanel.vue';
 import DeviceCommissioning from './components/devices/DeviceCommissioning.vue';
 import DeviceMeasurementHistory from './components/devices/DeviceMeasurementHistory.vue';
+import DeviceObservationApproval from './components/devices/DeviceObservationApproval.vue';
 import DeviceFirmwareDiagnostics from './components/devices/DeviceFirmwareDiagnostics.vue';
 import {
   microphoneRequestError,
@@ -567,6 +568,8 @@ const notificationsOpen = ref(false);
 const mobileMenuOpen = ref(false);
 const activePage = ref(pageFromPath(location.pathname));
 const selectedDeviceId = ref<string | null>(null);
+const measurementApprovalRevision = ref(0);
+const installationChangesPending = ref(false);
 const selectedExecutionTraceId = ref<string | null>(null);
 const deviceActionBusy = ref<Record<string, boolean>>({});
 const deviceActionError = ref<Record<string, string>>({});
@@ -587,6 +590,12 @@ const assistantLatestTraceId = ref('');
 function handleAssistantTurnCompleted(traceId: string) {
   assistantLatestTraceId.value = traceId;
   assistantTraceRefresh.value += 1;
+}
+function handleObservationAuthorityApproved() {
+  window.setTimeout(() => {
+    measurementApprovalRevision.value += 1;
+    void loadState();
+  }, 6000);
 }
 const logView = ref<'events' | 'interactions'>('events');
 const clientTrace = ref({
@@ -2260,6 +2269,7 @@ const deviceSummary = computed(() => {
 });
 
 function setActivePage(pageId: string, syncUrl = true) {
+  if (!confirmDiscardInstallationChanges()) return;
   activePage.value = pageId;
   window.scrollTo({ top: 0 });
   selectedDeviceId.value = null;
@@ -2728,18 +2738,27 @@ function deviceCommandLabel(device: PortalDevice) {
 }
 
 function deviceStatusClass(device: PortalDevice) {
-  if (!device.adapter.configured) return 'amber';
+  if (device.trustStatus !== 'approved') return 'amber';
   if (inventoryConnectionStatus(device) === 'online') return 'green';
   if (inventoryConnectionStatus(device) === 'offline') return 'amber';
-  return 'blue';
+  return device.adapter.configured ? 'blue' : 'amber';
+}
+
+function confirmDiscardInstallationChanges() {
+  if (!installationChangesPending.value) return true;
+  if (!window.confirm('Discard unsaved installation changes?')) return false;
+  installationChangesPending.value = false;
+  return true;
 }
 
 function selectDevice(device: PortalDevice) {
+  if (!confirmDiscardInstallationChanges()) return;
   selectedDeviceId.value = device.id;
   void nextTick(() => { deviceSheet.value?.scrollTo?.({ top: 0 }); });
 }
 
 function closeDeviceSheet() {
+  if (!confirmDiscardInstallationChanges()) return;
   selectedDeviceId.value = null;
   selectedExecutionTraceId.value = null;
 }
@@ -2822,7 +2841,9 @@ function deviceStateDetail(device: PortalDevice) {
   if (command?.status === 'acked') return 'confirmed by telemetry';
   if (command?.status === 'no_ack') return 'published, no telemetry ack';
   if (command?.status === 'failed') return 'publish failed';
-  return device.state.observedAt === null ? 'connectivity not checked' : device.adapter.configured ? 'configured' : 'needs setup';
+  if (Object.keys(device.state.values).length > 0) return 'latest state received';
+  if (device.state.observedAt !== null) return device.state.status;
+  return device.adapter.configured ? 'configured · no state yet' : 'not configured';
 }
 
 function expectedOnLabel(
@@ -4636,8 +4657,17 @@ onBeforeUnmount(() => {
                 </span>
               </div>
 
+              <DeviceObservationApproval
+                :key="`${selectedDevice.id}-observation-approval`"
+                :device-id="selectedDevice.id"
+                :enabled="selectedDevice.adapter.driver === 'energrid-esp8266' && selectedDevice.adapter.protocol === 'http'"
+                :api-base="apiBase"
+                :access-token="accessToken"
+                @approved="handleObservationAuthorityApproved"
+              />
+
               <DeviceMeasurementHistory
-                :key="selectedDevice.id"
+                :key="`${selectedDevice.id}-${measurementApprovalRevision}`"
                 :device-id="selectedDevice.id"
                 :device-status="selectedDevice.state.status"
                 :api-base="apiBase"
@@ -4699,6 +4729,7 @@ onBeforeUnmount(() => {
                 :device="selectedDevice"
                 :api-base="apiBase"
                 :access-token="accessToken"
+                @dirty-change="installationChangesPending = $event"
                 :settings-url-suggestion="approvedDeviceNetworkMatch(selectedDevice)?.settingsUrl"
                 @saved="loadState"
               />
@@ -4711,12 +4742,7 @@ onBeforeUnmount(() => {
               <div>
                 <dt>Status</dt>
                 <dd>
-                  {{ selectedDevice.trustStatus === 'approved' ? (selectedDevice.state.observedAt === null ? 'no readings yet' : selectedDevice.state.status) : 'awaiting approval' }} ·
-                  {{
-                    selectedDevice.adapter.configured
-                      ? 'readings configured'
-                      : 'readings need setup'
-                  }}
+                  {{ selectedDevice.trustStatus === 'approved' ? (selectedDevice.state.observedAt === null ? 'no state received yet' : selectedDevice.state.status) : 'awaiting approval' }}
                 </dd>
               </div>
               <div>

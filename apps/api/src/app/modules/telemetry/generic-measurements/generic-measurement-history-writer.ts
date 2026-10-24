@@ -33,7 +33,7 @@ export class GenericMeasurementHistoryWriter {
   private readonly logger = new Logger(GenericMeasurementHistoryWriter.name);
 
   constructor(
-    private readonly repository: Pick<PostgresGenericMeasurementRepository, 'appendIfDue'> | null,
+    private readonly repository: Pick<PostgresGenericMeasurementRepository, 'ensureEnrollmentReference' | 'appendIfDue'> | null,
     private readonly enabled: boolean,
     private readonly policies: Readonly<Record<string, MeasurementHistoryPolicy>>,
   ) {}
@@ -42,6 +42,18 @@ export class GenericMeasurementHistoryWriter {
     if (!this.enabled) return input.fields.map(({ field }) => ({ field, outcome: 'disabled' }));
     if (!this.repository || !input.evidenceId?.trim()) {
       return input.fields.map(({ field }) => ({ field, outcome: 'not_numeric_or_no_evidence' }));
+    }
+
+    try {
+      await this.repository.ensureEnrollmentReference({
+        tenantId: input.tenantId,
+        siteId: input.siteId,
+        deviceId: input.deviceId,
+      });
+    } catch (error) {
+      const code = safeDatabaseErrorCode(error);
+      this.logger.error(`History enrollment reference sync failed (tenant=${input.tenantId}, site=${input.siteId}, device=${input.deviceId}, code=${code}); retry on the next sample or evidence replay.`);
+      return input.fields.map(({ field }) => ({ field, outcome: 'failed' }));
     }
 
     const results: HistoryWriteResult[] = [];
@@ -78,15 +90,19 @@ export class GenericMeasurementHistoryWriter {
         const result = await this.repository.appendIfDue(measurement, policy);
         results.push({ field: observation.field, ...result });
       } catch (error) {
-        const code = error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
-          ? error.code.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 24)
-          : 'unknown';
+        const code = safeDatabaseErrorCode(error);
         this.logger.error(`History write failed (device=${input.deviceId}, metric=${observation.field}, code=${code}).`);
         results.push({ field: observation.field, outcome: 'failed' });
       }
     }
     return results;
   }
+}
+
+function safeDatabaseErrorCode(error: unknown): string {
+  return error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+    ? error.code.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 24)
+    : 'unknown';
 }
 
 function sampleIdentity(sourceId: string, selector: string, evidenceId: string, field: string): string {

@@ -20,6 +20,7 @@ import { OperationalLogService } from './operational-log.service';
 import { DeviceExecutionInvestigator } from './investigation/device-execution-investigator';
 import { DeviceInstallationStore } from './device-installation.store';
 import type { DeviceInstallationRecord } from './device-installation.store';
+import { energridHttpObservationApproval, isEnergridHttpObservationApproval } from './adapters/inbound/energrid/energrid-http-observation-approval';
 import type { DeviceEnrollmentStatus } from '@energrid/domain-devices';
 import { DEVICE_ENROLLMENT_SERVICE } from './enrollment/device-enrollment.module';
 import type { DeviceEnrollmentService } from './enrollment/device-enrollment.service';
@@ -604,7 +605,7 @@ export class DeviceRegistryService implements OnModuleInit {
 
   async persistInstallationEvent(
     deviceId: string,
-    kind: 'approved' | 'control_configured' | 'installation_details_saved' | 'command' | 'physical_outcome_confirmed',
+    kind: 'approved' | 'observation_authority_approved' | 'control_configured' | 'installation_details_saved' | 'command' | 'physical_outcome_confirmed',
     evidence: Record<string, string | number | boolean | null>,
   ): Promise<void> {
     if (!this.installationStore)
@@ -617,6 +618,60 @@ export class DeviceRegistryService implements OnModuleInit {
       actor: 'portal-installer',
       evidence,
     });
+  }
+
+  async getEnergridObservationApproval(tenantId: string, siteId: string, deviceId: string) {
+    await this.ensureInstallationsLoaded();
+    const device = this.getDevices().find(item => item.id === deviceId && item.tenantId === tenantId && item.siteId === siteId);
+    const physicalId = String(device?.metadata?.physicalId || '').toLowerCase();
+    const networkScope = String(device?.metadata?.networkScope || '');
+    if (!device || device.kind !== 'physical' || device.trustStatus !== 'approved' ||
+        device.adapter.driver !== 'energrid-esp8266' || device.adapter.protocol !== 'http' ||
+        !/^esp8266:[0-9a-f]{6}$/.test(physicalId) || device.id !== `device:${networkScope}:${physicalId}`) {
+      return null;
+    }
+    const installation = this.persistedInstallations.get(deviceId);
+    if (!installation || installation.device.tenantId !== tenantId || installation.device.siteId !== siteId) return null;
+    if (this.enrollment) {
+      const enrollment = await this.enrollment.find({ tenantId, siteId, deviceId });
+      if (!enrollment || enrollment.status !== 'enrolled') return null;
+    }
+    const expected = energridHttpObservationApproval(deviceId);
+    const approved = isEnergridHttpObservationApproval(installation.observationAuthority, deviceId);
+    return {
+      approved,
+      approvalStatus: approved ? 'approved' : installation.observationAuthority ? 'different_authority' : 'missing',
+      sourceId: expected.bindings[0].sourceId,
+      selector: expected.bindings[0].selector,
+      fields: [
+        { metric: 'temperature', rawKey: 'temperatureC', unit: 'Cel', displayUnit: '°C' },
+        { metric: 'humidity', rawKey: 'humidityPct', unit: '%RH', displayUnit: '%RH' },
+      ],
+    };
+  }
+
+  async approveEnergridObservations(tenantId: string, siteId: string, deviceId: string, actor: string) {
+    const status = await this.getEnergridObservationApproval(tenantId, siteId, deviceId);
+    if (!status) return null;
+    const installation = this.persistedInstallations.get(deviceId)!;
+    const expected = energridHttpObservationApproval(deviceId);
+    if (status.approved) return status;
+    if (installation.observationAuthority) {
+      throw new Error('A different observation authority already exists; it must be reviewed before replacement.');
+    }
+    if (!this.installationStore) throw new Error('Local device storage is unavailable.');
+    const updated = { ...installation, observationAuthority: expected, updatedAt: new Date().toISOString() };
+    await this.installationStore!.save(updated);
+    this.persistedInstallations.set(deviceId, updated);
+    await this.installationStore!.append({
+      id: `${new Date().toISOString()}-${Math.random().toString(36).slice(2, 10)}`,
+      deviceId,
+      kind: 'observation_authority_approved',
+      occurredAt: new Date().toISOString(),
+      actor: actor || 'portal-admin',
+      evidence: { sourceId: status.sourceId, selector: status.selector, fields: 'temperature,humidity' },
+    });
+    return { ...status, approved: true, approvalStatus: 'approved' as const };
   }
 
   async confirmPhysicalOutcome(deviceId: string): Promise<RegisteredDevice> {

@@ -37,8 +37,11 @@ describe('device firmware diagnostics', () => {
     expect(wrapper.text()).toContain('0.3.0');
     expect(wrapper.text()).toContain('52%');
     expect(wrapper.text()).toContain('3 / 2');
-    expect(wrapper.text()).toContain('Restarts observed in 10 min');
+    expect(wrapper.text()).toContain('Restarts · last 10 min');
     expect(wrapper.text()).toContain('Connectivity');
+    expect(wrapper.text()).toContain('Free heap');
+    expect(wrapper.text()).toContain('Largest free block');
+    expect(wrapper.text()).toContain('Boot session and reset evidence');
     expect(wrapper.text()).toContain('The firmware reports a watchdog reset.');
     expect(new Headers(fetchMock.mock.calls[0][1].headers).get('Authorization')).toBe('Bearer portal-test-token');
   });
@@ -50,5 +53,14 @@ describe('device firmware diagnostics', () => {
     await flushPromises();
     expect(wrapper.text()).toContain('No diagnostic snapshot is available.');
     expect(wrapper.text()).toContain('connectivity and measurement freshness are reported separately');
+  });
+
+  it('shows a recoverable diagnostics error without replacing connectivity or measurement state', async () => {
+    setAuthenticatedSession({ accessToken: 'portal-test-token', expiresIn: 900, user: { id: 'admin', email: 'admin@example.test', name: 'Admin', role: 'admin' } });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 503, json: async () => ({}) }));
+    wrapper = mount(DeviceFirmwareDiagnostics, { props: { deviceId, apiBase: '', accessToken: 'portal-test-token' } });
+    await flushPromises();
+    expect(wrapper.get('[role="alert"]').text()).toContain('could not be loaded');
+    expect(wrapper.text()).not.toContain('Findings recorded');
   });
 });

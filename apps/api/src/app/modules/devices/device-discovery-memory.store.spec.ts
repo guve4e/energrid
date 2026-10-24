@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import {
   dedupeNetworkEndpoints,
   DeviceDiscoveryMemoryStore,
+  networkDiscoveryIdentity,
 } from './device-discovery-memory.store';
 import type {
   NetworkDiscoveredDevice,
@@ -29,14 +30,19 @@ function device(
   };
 }
 
-function verifiedEnergridDevice(ipAddress: string, observedAt: string, scope = 'upstream-lan'): NetworkDiscoveredDevice {
+function verifiedEnergridDevice(
+  ipAddress: string,
+  observedAt: string,
+  scope = 'upstream-lan',
+  physicalId = 'esp8266:324864',
+): NetworkDiscoveredDevice {
   return {
-    id: 'esp8266:324864', ipAddress, networkZoneId: scope, networkZoneName: 'Upstream LAN',
+    id: physicalId, ipAddress, networkZoneId: scope, networkZoneName: 'Upstream LAN',
     vendor: 'Energrid', model: 'Energrid ESP8266 DHT22', firmwareVersion: '0.2.0', protocol: 'http',
     confidence: 0.95, status: 'online', discoveredAt: observedAt, reason: 'Verified firmware identity.',
     observations: [
       { source: 'http_identity', attribute: 'identity.verified', value: true, observedAt, scopeId: scope, method: 'GET /api/v1/identity' },
-      { source: 'http_identity', attribute: 'identity.device_id', value: 'esp8266:324864', observedAt, scopeId: scope, method: 'GET /api/v1/identity' },
+      { source: 'http_identity', attribute: 'identity.device_id', value: physicalId, observedAt, scopeId: scope, method: 'GET /api/v1/identity' },
     ],
   }
 }
@@ -110,6 +116,27 @@ describe('DeviceDiscoveryMemoryStore', () => {
     expect(records).toHaveLength(1);
     expect(records[0].firstSeenAt).toBe(timestamp);
     expect(records[0].lastSeenAt).toBe(timestamp);
+  });
+
+  it('stores uppercase and lowercase Energrid firmware IDs under one lowercase physical identity', async () => {
+    const observedAt = '2026-10-24T12:00:00.000Z';
+    const lowercase = verifiedEnergridDevice('192.168.1.129', observedAt, 'upstream-lan', 'esp8266:324b44');
+    const uppercase: NetworkDiscoveredDevice = {
+      ...lowercase,
+      id: 'esp8266:324B44',
+      observations: lowercase.observations?.map(observation =>
+        observation.attribute === 'identity.device_id'
+          ? { ...observation, value: 'esp8266:324B44' }
+          : observation,
+      ),
+    };
+
+    expect(networkDiscoveryIdentity(uppercase)).toBe(networkDiscoveryIdentity(lowercase));
+    await store.recordScan(observedAt, [lowercase, uppercase]);
+    const records = await store.listIdentityEvidence();
+
+    expect(records).toHaveLength(1);
+    expect(records[0].identity).toBe('device:upstream-lan:esp8266:324b44');
   });
 
   it('persists a re-verified Energrid identity and provenance across store restarts', async () => {

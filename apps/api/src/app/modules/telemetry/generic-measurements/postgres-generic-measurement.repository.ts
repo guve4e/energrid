@@ -38,6 +38,29 @@ export class PostgresGenericMeasurementRepository {
     private readonly definitions: readonly MeasurementDefinition[] = CORE_MEASUREMENT_DEFINITIONS,
   ) {}
 
+  /**
+   * Ensure the telemetry database has the parent key required by its local
+   * measurement FK. Only identity keys come from the authoritative enrollment;
+   * remaining non-null columns are neutral reference values, not copied data.
+   * PostgreSQL's unique constraint makes concurrent calls idempotent.
+   */
+  async ensureEnrollmentReference(identity: {
+    tenantId: string;
+    siteId: string;
+    deviceId: string;
+  }): Promise<void> {
+    if ([identity.tenantId, identity.siteId, identity.deviceId].some(value => !value?.trim())) {
+      throw new Error('Enrollment reference identity is required');
+    }
+    await this.pool.query(
+      `INSERT INTO device_inventory.enrollments (
+         tenant_id,site_id,device_id,display_name,status,enrolled_at,updated_at,version
+       ) VALUES ($1,$2,$3,'History enrollment reference','enrolled',now(),now(),1)
+       ON CONFLICT (tenant_id,site_id,device_id) DO NOTHING`,
+      [identity.tenantId, identity.siteId, identity.deviceId],
+    );
+  }
+
   async append(input: GenericMeasurementInput): Promise<MeasurementAppendResult> {
     const measurement = validateGenericMeasurement(input, this.definitions);
     const client = await this.pool.connect();

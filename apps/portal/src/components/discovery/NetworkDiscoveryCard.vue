@@ -67,31 +67,31 @@ function closeActions() {
 </template>
 
 <style scoped>
-.network-discovery-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 12px; padding: 16px; border-bottom: 1px solid var(--discovery-border, #d8e0ec); align-items: center; }
+.network-discovery-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 12px; padding: 16px; border-bottom: 1px solid var(--eg-border, var(--discovery-border, #d8e0ec)); align-items: center; color: var(--eg-text, #172b32); }
 .network-discovery-card:last-child { border-bottom: 0; }
 .network-discovery-card > * { min-width: 0; }
 .network-device-identity { grid-column: 1 / -1; }
-.network-device-identity strong, .network-device-address strong { display: block; color: var(--discovery-text, #172b32); font-size: 15px; overflow-wrap: anywhere; }
-.network-device-identity span, .network-device-address span { display: block; color: var(--discovery-muted, #52636b); font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
+.network-device-identity strong, .network-device-address strong { display: block; color: var(--eg-text, var(--discovery-text, #172b32)); font-size: 14px; overflow-wrap: anywhere; }
+.network-device-identity span, .network-device-address span { display: block; color: var(--eg-muted, var(--discovery-muted, #52636b)); font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
 .network-device-address strong { font-variant-numeric: tabular-nums; font-size: 13px; }
 .network-device-status { display: flex; align-items: flex-end; flex-direction: column; gap: 6px; font-size: 12px; }
-.connectivity { color: var(--discovery-muted, #52636b); }
+.connectivity { color: var(--eg-muted, var(--discovery-muted, #52636b)); }
 .connectivity::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: #829193; }
 .connectivity.is-online::before { background: #20ac7c; }
 .network-device-status .trust-pill { font-size: 10px; padding: 4px 7px; white-space: normal; }
 .network-device-inspect button { min-height: 44px; font-size: 12px; width: 100%; }
 .network-device-more { display: contents; }
-.network-device-more > summary { grid-column: 2; display: flex; justify-content: center; align-items: center; gap: 10px; min-height: 44px; padding: 0 12px; border: 1px solid var(--discovery-border, #d8e0ec); border-radius: 6px; cursor: pointer; font-size: 12px; list-style: none; }
+.network-device-more > summary { grid-column: 2; display: flex; justify-content: center; align-items: center; gap: 10px; min-height: 44px; padding: 0 12px; border: 1px solid var(--eg-border, var(--discovery-border, #d8e0ec)); border-radius: var(--eg-control-radius, 8px); cursor: pointer; font-size: 12px; list-style: none; }
 .network-device-more > summary::-webkit-details-marker { display: none; }
 .network-device-more[open] > summary span { transform: rotate(180deg); }
-.network-device-expanded { grid-column: 1 / -1; padding-top: 12px; border-top: 1px dashed var(--discovery-border, #d8e0ec); }
+.network-device-expanded { grid-column: 1 / -1; padding-top: 12px; border-top: 1px dashed var(--eg-border, var(--discovery-border, #d8e0ec)); }
 .network-device-more:not([open]) > .network-device-expanded { display: none; }
 .network-device-action-list { display: flex; flex-wrap: wrap; gap: 8px; }
 .network-device-action-list > * { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 8px 12px; font-size: 12px; color: inherit; border: 1px solid var(--discovery-border, #d8e0ec); border-radius: 6px; text-decoration: none; max-width: 100%; white-space: normal; }
 .network-device-details { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; margin: 16px 0 0; }
-.network-device-details dt { color: var(--discovery-muted, #52636b); font-size: 11px; margin-bottom: 4px; }
+.network-device-details dt { color: var(--eg-muted, var(--discovery-muted, #52636b)); font-size: 11px; margin-bottom: 4px; }
 .network-device-details dd { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
-.network-discovery-card :is(button, a, summary):focus-visible { outline: 2px solid var(--discovery-accent, #2863e6); outline-offset: 3px; }
+.network-discovery-card :is(button, a, summary):focus-visible { outline: 2px solid var(--eg-blue, var(--discovery-accent, #2863e6)); outline-offset: 3px; }
 @container device-list (min-width: 650px) {
   .network-discovery-card { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto auto auto; gap: 16px; }
   .network-device-identity { grid-column: auto; }

@@ -283,33 +283,34 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.device-measurements { display: grid; gap: 14px; color: var(--text, #182431); }
-.measurement-connectivity { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; color: var(--muted, #667486); font-size: 12px; }
-.measurement-connectivity strong { color: #087f5b; }
-.measurement-connectivity .connection-disconnected { color: #b5473b; }
+.device-measurements { display: grid; gap: 12px; min-width: 0; color: var(--eg-text, #111827); }
+.measurement-connectivity { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; color: var(--eg-muted, #58677e); font-size: 12px; }
+.measurement-connectivity strong { color: var(--eg-success, #138a59); }
+.measurement-connectivity .connection-disconnected { color: var(--eg-danger, #b42318); }
 .measurement-separator { opacity: .55; }
 .current-measurement-grid, .measurement-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.current-measurement, .measurement-chart { min-width: 0; border: 1px solid var(--border, #dce4eb); border-radius: 12px; background: var(--surface, #fff); padding: 12px; }
+.current-measurement, .measurement-chart { min-width: 0; border: 1px solid var(--eg-border, #d8e0ec); border-radius: var(--eg-card-radius, 12px); background: var(--eg-surface, #fff); padding: 12px; }
 .current-measurement { display: grid; gap: 6px; }
-.current-measurement > span:first-child, .measurement-chart h6 { color: var(--muted, #667486); font-size: 12px; font-weight: 650; }
-.current-measurement strong { font-size: clamp(20px, 5vw, 26px); line-height: 1.2; }
-.current-measurement small { color: var(--muted, #667486); font-size: 13px; font-weight: 600; }
-.current-measurement time { color: var(--muted, #667486); font-size: 11px; }
-.freshness-state { width: fit-content; border-radius: 999px; padding: 2px 8px; font-size: 11px; background: #f0f2f5; color: #556273; }
-.freshness-fresh { background: #e7f7ef; color: #087f5b; }
-.freshness-stale { background: #fff3df; color: #9a5b00; }
+.current-measurement > span:first-child, .measurement-chart h6 { color: var(--eg-muted, #58677e); font-size: 12px; font-weight: 650; }
+.current-measurement strong { font-size: clamp(20px, 4vw, 25px); line-height: 1.2; }
+.current-measurement small { color: var(--eg-muted, #58677e); font-size: 12px; font-weight: 600; }
+.current-measurement time { color: var(--eg-muted, #58677e); font-size: 11px; }
+.freshness-state { width: fit-content; border-radius: 999px; padding: 3px 8px; font-size: 11px; background: var(--eg-surface-soft, #f5f8fc); color: var(--eg-muted, #58677e); }
+.freshness-fresh { background: var(--eg-success-soft, #e8f7ef); color: var(--eg-success, #138a59); }
+.freshness-stale { background: var(--eg-warning-soft, #fff6e8); color: var(--eg-warning, #a45b08); }
 .measurement-history-heading, .measurement-chart header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .measurement-history-heading h5, .measurement-chart h6 { margin: 0; }
-.measurement-history-heading p, .chart-sampling-note { margin: 3px 0 0; color: var(--muted, #667486); font-size: 11px; }
+.measurement-history-heading p, .chart-sampling-note { margin: 3px 0 0; color: var(--eg-muted, #58677e); font-size: 11px; }
 .measurement-range { display: flex; flex-wrap: wrap; gap: 4px; }
-.measurement-range button { border: 1px solid var(--border, #dce4eb); background: transparent; border-radius: 7px; padding: 6px 8px; color: inherit; font: inherit; font-size: 11px; cursor: pointer; }
-.measurement-range button[aria-pressed="true"] { border-color: #2876ce; background: #eaf3ff; color: #175ca5; }
+.measurement-range button { min-height: 40px; border: 1px solid var(--eg-border, #d8e0ec); background: var(--eg-surface, #fff); border-radius: var(--eg-control-radius, 8px); padding: 6px 9px; color: inherit; font: inherit; font-size: 11px; cursor: pointer; }
+.measurement-range button[aria-pressed="true"] { border-color: var(--eg-blue, #2863e6); background: var(--eg-blue-soft, #eef4ff); color: var(--eg-blue, #2863e6); }
 .measurement-chart svg { display: block; width: 100%; height: auto; margin-top: 8px; overflow: visible; }
-.chart-axis { stroke: #cbd5df; stroke-width: 1; }
-.chart-point { fill: #2876ce; stroke: white; stroke-width: 1.5; }
-.measurement-chart svg text { fill: var(--muted, #667486); font-size: 8px; }
-.measurement-muted { margin: 0; color: var(--muted, #667486); font-size: 12px; }
-.measurement-error { margin: 0; color: #b42318; font-size: 12px; }
+.chart-axis { stroke: var(--eg-border, #d8e0ec); stroke-width: 1; }
+.chart-point { fill: var(--eg-blue, #2863e6); stroke: var(--eg-surface, #fff); stroke-width: 1.5; }
+.measurement-chart svg text { fill: var(--eg-muted, #58677e); font-size: 8px; }
+.measurement-muted { margin: 0; color: var(--eg-muted, #58677e); font-size: 12px; }
+.measurement-error { margin: 0; color: var(--eg-danger, #b42318); font-size: 12px; }
+.measurement-range button:focus-visible { outline: 2px solid var(--eg-blue, #2863e6); outline-offset: 2px; }
 @media (max-width: 560px) {
   .current-measurement-grid, .measurement-charts { grid-template-columns: minmax(0, 1fr); }
   .measurement-history-heading { align-items: flex-start; flex-direction: column; }

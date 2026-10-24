@@ -1,4 +1,20 @@
 :root {
+  --eg-blue: #2863e6;
+  --eg-blue-soft: #eef4ff;
+  --eg-blue-border: #cfe0ff;
+  --eg-text: #111827;
+  --eg-muted: #58677e;
+  --eg-border: #d8e0ec;
+  --eg-surface: #ffffff;
+  --eg-surface-soft: #f5f8fc;
+  --eg-success: #138a59;
+  --eg-success-soft: #e8f7ef;
+  --eg-warning: #a45b08;
+  --eg-warning-soft: #fff6e8;
+  --eg-danger: #b42318;
+  --eg-danger-soft: #fff0ee;
+  --eg-card-radius: 12px;
+  --eg-control-radius: 8px;
   color-scheme: light;
   font-family:
     Inter,
@@ -2430,6 +2446,20 @@ pre {
 }
 
 .theme-dark {
+  --eg-blue: #79a8ff;
+  --eg-blue-soft: #172b4d;
+  --eg-blue-border: #35517c;
+  --eg-text: #edf4f2;
+  --eg-muted: #aab8cc;
+  --eg-border: #344258;
+  --eg-surface: #111827;
+  --eg-surface-soft: #0d1727;
+  --eg-success: #78e4a9;
+  --eg-success-soft: #153628;
+  --eg-warning: #f7c66a;
+  --eg-warning-soft: #392c17;
+  --eg-danger: #fda29b;
+  --eg-danger-soft: #3a1f21;
   color-scheme: dark;
   background: #020617;
   color: #edf4f2;
@@ -4993,4 +5023,102 @@ pre {
   --ni-unknown-soft: #263247;
   --ni-success: #78e4a9;
   --ni-success-soft: #153628;
+}
+
+/* Device Details shares the same compact surfaces and controls as Discovery. */
+.device-sheet {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  max-height: min(820px, calc(100dvh - 40px));
+  border-color: var(--eg-border);
+  border-radius: 16px;
+  background: var(--eg-surface);
+  color: var(--eg-text);
+  padding: 14px 18px 18px;
+  box-shadow: 0 18px 55px rgba(15, 23, 42, 0.16);
+  scrollbar-gutter: stable;
+}
+
+.device-sheet-head {
+  top: -14px;
+  gap: 12px;
+  margin: 0;
+  padding: 10px 0 12px;
+  border-bottom: 1px solid var(--eg-border);
+  background: var(--eg-surface);
+}
+
+.device-sheet-head h3 { color: var(--eg-text); font-size: 21px; }
+.device-sheet-handle { background: var(--eg-border); }
+.device-sheet .device-setup-actions { display: grid; gap: 10px; min-width: 0; }
+.device-sheet .device-observation-overview {
+  margin: 0;
+  padding: 16px;
+  border-color: var(--eg-border);
+  border-radius: var(--eg-card-radius);
+  background: var(--eg-surface-soft);
+}
+.device-sheet .device-observation-heading { margin-bottom: 12px; }
+.device-sheet .device-observation-heading h4 { color: var(--eg-text); font-size: 18px; }
+.device-sheet .device-observation-eyebrow { color: var(--eg-muted); }
+.device-sheet .device-observation-protocol { border-color: var(--eg-border); color: var(--eg-muted); }
+.device-sheet .device-detail-disclosure {
+  border-color: var(--eg-border);
+  border-radius: var(--eg-card-radius);
+  background: var(--eg-surface);
+}
+.device-sheet .device-detail-disclosure > summary {
+  display: flex;
+  align-items: center;
+  min-height: 48px;
+  padding: 12px 14px;
+  color: var(--eg-text);
+}
+.device-sheet .device-detail-disclosure[open] > summary { border-color: var(--eg-border); }
+.device-sheet .device-detail-disclosure-content { padding: 8px 14px 14px; }
+.device-sheet .detail-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.device-sheet .detail-facts > div { display: grid; gap: 4px; min-width: 0; padding: 9px 10px; border: 1px solid var(--eg-border); border-radius: var(--eg-control-radius); background: var(--eg-surface); }
+.device-sheet .detail-facts dt { color: var(--eg-muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.device-sheet .detail-facts dd { margin: 0; color: var(--eg-text); font-size: 12px; }
+.device-sheet :is(button, a, summary, input, select):focus-visible { outline: 2px solid var(--eg-blue); outline-offset: 2px; }
+.device-sheet button.secondary { border: 1px solid var(--eg-blue-border); background: var(--eg-blue-soft); color: var(--eg-blue); box-shadow: none; }
+.device-sheet button.primary { background: var(--eg-blue); }
+.device-sheet .device-facts .trust-pill { justify-self: start; }
+
+.theme-dark .device-sheet { border-color: var(--eg-border); background: var(--eg-surface); color: var(--eg-text); box-shadow: none; }
+.theme-dark .device-sheet-head { background: var(--eg-surface); }
+.theme-dark .device-sheet .device-detail-disclosure,
+.theme-dark .device-sheet .device-observation-overview,
+.theme-dark .device-sheet .detail-facts > div { background: var(--eg-surface-soft); }
+.theme-dark .device-sheet .device-detail-disclosure > summary,
+.theme-dark .device-sheet .detail-facts dd { color: var(--eg-text); }
+
+@media (max-width: 820px) {
+  .device-sheet {
+    right: 0;
+    bottom: 0;
+    left: 0;
+    max-height: calc(100dvh - 8px);
+    gap: 10px;
+    border-radius: 16px 16px 0 0;
+    padding: 10px 14px max(16px, env(safe-area-inset-bottom));
+  }
+  .device-sheet-head { top: -10px; }
+  .device-sheet .detail-facts { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 520px) {
+  .device-sheet .device-observation-overview { padding: 12px; }
+  .device-sheet .device-detail-disclosure-content { padding: 6px 10px 12px; }
+  .installation-save-actions {
+    position: sticky;
+    bottom: -1px;
+    z-index: 1;
+    margin: 0 -4px -4px;
+    padding: 8px 4px max(8px, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--eg-border);
+    background: var(--eg-surface);
+  }
+  .installation-save-actions button { flex: 1 1 140px; }
 }

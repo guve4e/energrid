@@ -22,8 +22,11 @@ describe('DeviceCommissioning', () => {
     const page = mount(DeviceCommissioning, {
       props: { device: baseDevice, apiBase: '', accessToken: 'unit-token' },
     });
+    expect(page.get('button[type="submit"]').attributes('disabled')).toBeDefined();
     await page.get('input').setValue('Hall light');
     await page.findAll('input')[1].setValue('Hall');
+    expect(page.text()).toContain('Unsaved changes');
+    expect(page.text()).toContain('Saved: Relay · Kitchen');
     await page.get('form').trigger('submit');
     await flushPromises();
 
@@ -40,6 +43,26 @@ describe('DeviceCommissioning', () => {
       });
     expect(new Headers(patchCall?.[1]?.headers).get('Authorization')).toBe('Bearer unit-token');
     expect(page.emitted('saved')).toHaveLength(1);
+    expect(page.text()).toContain('Installation changes saved.');
+  });
+
+  it('warns before reverting pending edits and restores the saved values', async () => {
+    const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
+    vi.stubGlobal('fetch', fetch);
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirm);
+    const page = mount(DeviceCommissioning, {
+      props: { device: baseDevice, apiBase: '', accessToken: 'unit-token' },
+    });
+    await page.get('input').setValue('New name');
+    await page.get('button.secondary').trigger('click');
+    expect(confirm).toHaveBeenCalledWith('Discard unsaved installation changes?');
+    expect((page.get('input').element as HTMLInputElement).value).toBe('New name');
+    confirm.mockReturnValue(true);
+    await page.get('button.secondary').trigger('click');
+    expect((page.get('input').element as HTMLInputElement).value).toBe('Relay');
+    expect(page.text()).toContain('Saved configuration');
+    expect(fetch.mock.calls.some(([, options]) => options?.method === 'PATCH')).toBe(false);
   });
 
   it('requires an acknowledged device report before allowing physical confirmation', async () => {
@@ -49,14 +72,16 @@ describe('DeviceCommissioning', () => {
       props: { device: baseDevice, apiBase: '', accessToken: 'unit-token' },
     });
     expect(page.text()).toContain('Physical command result: not confirmed');
-    expect(page.find('button.secondary').exists()).toBe(false);
+    expect(page.text()).not.toContain('Confirm physical result');
     const acknowledgedProps = {
       device: { ...baseDevice, state: { command: { status: 'acked' } } },
     };
     await page.setProps(
       acknowledgedProps as Parameters<typeof page.setProps>[0],
     );
-    await page.get('button.secondary').trigger('click');
+    const confirmationButton = page.findAll('button').find(button => button.text() === 'Confirm physical result');
+    expect(confirmationButton).toBeDefined();
+    await confirmationButton!.trigger('click');
     await flushPromises();
 
     expect(fetch).toHaveBeenCalledWith(
@@ -74,6 +99,7 @@ describe('DeviceCommissioning', () => {
     const page = mount(DeviceCommissioning, {
       props: { device: baseDevice, apiBase: '', accessToken: 'unit-token' },
     });
+    await page.get('input').setValue('New name');
     await page.get('form').trigger('submit');
     await flushPromises();
     expect(page.get('[role="alert"]').text()).toBe('Storage unavailable');
@@ -91,8 +117,9 @@ describe('DeviceCommissioning', () => {
         settingsUrlSuggestion: 'http://192.168.1.21',
       },
     });
-    expect((page.find('input[type="url"]').element as HTMLInputElement).value)
-      .toBe('http://192.168.1.21');
+    expect((page.find('input[type="url"]').element as HTMLInputElement).value).toBe('');
+    expect(page.find('input[type="url"]').attributes('placeholder')).toBe('http://192.168.1.21');
+    await page.find('input[type="url"]').setValue('http://192.168.1.21');
     await page.find('input[type="checkbox"]').setValue(true);
     await page.get('form').trigger('submit');
     await flushPromises();

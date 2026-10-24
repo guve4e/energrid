@@ -29,3 +29,12 @@ export function energridHttpObservationApproval(deviceId: string): InstallationO
     },
   };
 }
+
+/** True only when the persisted authority is exactly the two-field HTTP proposal. */
+export function isEnergridHttpObservationApproval(
+  authority: InstallationObservationAuthority | undefined,
+  deviceId: string,
+): boolean {
+  if (!authority) return false;
+  return JSON.stringify(authority) === JSON.stringify(energridHttpObservationApproval(deviceId));
+}

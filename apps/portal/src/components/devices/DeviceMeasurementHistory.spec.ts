@@ -11,7 +11,10 @@ function json(payload: unknown, ok = true, status = 200) {
   return { ok, status, json: async () => structuredClone(payload) };
 }
 
-function installFetch(fields = {
+function installFetch(fields: Partial<{
+  temperature: { value: number; sourceId: string; receivedAt: string; ageSeconds: number; freshness: string; authority: string };
+  humidity: { value: number; sourceId: string; receivedAt: string; ageSeconds: number; freshness: string; authority: string };
+}> = {
   temperature: { value: 18.2, sourceId: 'energrid-http-status', receivedAt: new Date().toISOString(), ageSeconds: 2, freshness: 'fresh', authority: 'approved' },
   humidity: { value: 49.4, sourceId: 'energrid-http-status', receivedAt: new Date().toISOString(), ageSeconds: 2, freshness: 'fresh', authority: 'approved' },
 }, historyUnavailable = false, emptyHistory = false) {

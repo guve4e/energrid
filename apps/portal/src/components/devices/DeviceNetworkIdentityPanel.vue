@@ -164,72 +164,68 @@ watch(() => [props.deviceId, props.enrollmentStatus], load);
 
 <template>
   <section class="device-network-identity" aria-label="Enrolled device network identity">
-    <h4>Network identity</h4>
-    <p><strong>Enrollment status</strong> · {{ enrollmentStatus === 'not_enrolled' ? 'Not enrolled' : enrollmentStatus === 'unknown' ? 'Unknown' : enrollmentStatus }}</p>
+    <div class="device-identity-heading">
+      <div><span class="device-identity-eyebrow">Connection evidence</span><h4>Network identity</h4></div>
+      <span class="device-identity-enrollment">{{ enrollmentStatus === 'not_enrolled' ? 'Not enrolled' : enrollmentStatus === 'unknown' ? 'Unknown enrollment' : enrollmentStatus }}</span>
+    </div>
+
     <dl class="device-network-identity-facts">
-      <div><dt>Logical device ID</dt><dd>{{ deviceId }}</dd></div>
-      <div><dt>IP address</dt><dd>{{ association?.ipAddress || 'Not identified' }}</dd></div>
-      <div><dt>MAC address</dt><dd>{{ association?.macAddress || 'Not identified' }}</dd></div>
-      <div><dt>Hostname</dt><dd>{{ association?.hostname || 'Not identified' }}</dd></div>
-      <div><dt>Gateway / network</dt><dd>{{ [association?.gatewayId, association?.networkZoneName || association?.networkZoneId].filter(Boolean).join(' · ') || 'Not identified' }}</dd></div>
-      <div><dt>Last observed</dt><dd>{{ observedAt(association?.observedAt) }}</dd></div>
-      <div><dt>Endpoint</dt><dd>{{ protocol.toUpperCase() }} · {{ protocolEndpoint || 'Not identified' }}</dd></div>
-      <div><dt>Evidence source</dt><dd>{{ evidenceSourceLabel(association?.evidenceSource) }}</dd></div>
+      <div><dt>Logical device ID</dt><dd><code>{{ deviceId }}</code></dd><small>Portal device record</small></div>
+      <div><dt>Physical inventory ID</dt><dd>{{ physicalDevice?.physicalDeviceId || 'Not linked' }}</dd><small>Separate from the logical device ID</small></div>
+      <div><dt>Firmware identity</dt><dd>{{ physicalDevice?.identity ? `${physicalDevice.identity.namespace} · ${physicalDevice.identity.value}` : 'Unknown' }}</dd><small>Protocol-reported identity</small></div>
       <div>
-        <dt>Identity verification</dt>
-        <dd v-if="association">
-          {{ association.verificationStatus === 'hardware_verified' ? 'Hardware independently verified' : 'User confirmed' }}
-          <span v-if="association.macAddress && !association.hardwareVerifiedAt"> · MAC not independently verified</span>
-        </dd>
-        <dd v-else>Not identified</dd>
+        <dt>{{ association?.isCurrent ? 'Current IP address' : association ? 'Last known IP address' : 'IP address' }}</dt>
+        <dd>{{ association?.ipAddress || 'Unknown' }}</dd>
+        <small :class="['device-identity-evidence', association?.isCurrent ? 'is-current' : '']">{{ association ? association.isCurrent ? 'Current scoped evidence' : 'Last observed; ownership may have changed' : 'No network evidence' }}</small>
       </div>
+      <div><dt>Network scope</dt><dd>{{ association?.networkZoneName || association?.networkZoneId || 'Unknown' }}</dd><small>{{ association?.gatewayId || 'Gateway not identified' }}</small></div>
+      <div><dt>{{ association?.hardwareVerifiedAt ? 'Verified MAC address' : 'Observed MAC address' }}</dt><dd>{{ association?.macAddress || 'Unknown' }}</dd><small>{{ association?.hardwareVerifiedAt ? 'Hardware verified' : association?.macAddress ? 'Not independently verified' : 'No MAC evidence' }}</small></div>
+      <div><dt>Enrollment</dt><dd>{{ enrollmentStatus === 'not_enrolled' ? 'Not enrolled' : enrollmentStatus }}</dd><small>{{ physicalDevice?.verificationStatus?.replaceAll('_', ' ') || 'Physical identity not linked' }}</small></div>
     </dl>
 
-    <p v-if="!association">No LAN identity is associated with {{ deviceName }}.</p>
-    <div v-if="physicalDevice" class="physical-device-summary">
-      <p><strong>Physical device ID</strong> · {{ physicalDevice.physicalDeviceId }}</p>
-      <h5>Physical device · {{ physicalDevice.physicalDeviceId }}</h5>
-      <p>Component ID · {{ logicalAssignment?.componentKey || 'Not assigned to a component' }}</p>
-      <p v-if="logicalAssignment?.role">Logical role · {{ logicalAssignment.role }}</p>
-      <p>Identity status · {{ physicalDevice.verificationStatus.replaceAll('_', ' ') }}</p>
-      <p v-if="physicalDevice.vendor || physicalDevice.hardwareModel || physicalDevice.firmwareVersion">
-        Hardware · {{ [physicalDevice.vendor, physicalDevice.hardwareModel, physicalDevice.firmwareVersion].filter(Boolean).join(' · ') }}
-      </p>
-      <p v-if="physicalDevice.identity">Protocol identity · {{ physicalDevice.identity.namespace }} · {{ physicalDevice.identity.value }}</p>
-      <p v-else>Physical identity · Not identified</p>
-      <div v-for="component in physicalDevice.components" :key="component.key" class="physical-component">
-        <strong>Component {{ component.key }}</strong>
-        <span> · {{ component.capabilities.length ? component.capabilities.join(', ') : 'Capabilities not identified' }}</span>
-        <span v-for="assignment in physicalDevice.assignments.filter(item => item.componentKey === component.key)" :key="assignment.deviceId">
-          · {{ assignment.role || assignment.deviceId }}
-        </span>
+    <p v-if="!association" class="device-identity-empty">No LAN identity is associated with {{ deviceName }}.</p>
+
+    <details class="device-identity-technical">
+      <summary>Endpoint, provenance and physical components</summary>
+      <dl class="device-identity-technical-grid">
+        <div><dt>Endpoint</dt><dd>{{ protocol.toUpperCase() }} · {{ protocolEndpoint || 'Unknown' }}</dd></div>
+        <div><dt>Evidence source</dt><dd>{{ evidenceSourceLabel(association?.evidenceSource) }}</dd></div>
+        <div><dt>Last observed</dt><dd>{{ observedAt(association?.observedAt) }}</dd></div>
+        <div><dt>Last verified</dt><dd>{{ observedAt(association?.hardwareVerifiedAt || (association?.verificationStatus === 'hardware_verified' ? association.observedAt : undefined)) }}</dd></div>
+        <div><dt>Hostname</dt><dd>{{ association?.hostname || 'Unknown' }}</dd></div>
+        <div><dt>Protocol identity</dt><dd>{{ physicalDevice?.identity ? `${physicalDevice.identity.namespace} · ${physicalDevice.identity.value}` : 'Unknown' }}</dd></div>
+        <div v-if="physicalDevice?.vendor || physicalDevice?.hardwareModel || physicalDevice?.firmwareVersion"><dt>Inventory metadata</dt><dd>{{ [physicalDevice?.vendor, physicalDevice?.hardwareModel, physicalDevice?.firmwareVersion].filter(Boolean).join(' · ') }}</dd><small>Stored inventory details; firmware health reports its current version separately.</small></div>
+        <div><dt>Component and role</dt><dd>{{ [logicalAssignment?.componentKey, logicalAssignment?.role].filter(Boolean).join(' · ') || 'Not assigned' }}</dd></div>
+      </dl>
+      <div v-if="physicalDevice" class="physical-components">
+        <article v-for="component in physicalDevice.components" :key="component.key" class="physical-component">
+          <strong>{{ component.key }}</strong><span>{{ component.capabilities.length ? component.capabilities.join(', ') : 'Capabilities unknown' }}</span>
+          <span v-for="assignment in physicalDevice.assignments.filter(item => item.componentKey === component.key)" :key="assignment.deviceId">{{ assignment.role || assignment.deviceId }}</span>
+        </article>
       </div>
-      <div v-if="logicalAssignment && enrollmentStatus === 'enrolled'">
-        <button type="button" class="ghost" :disabled="busy" @click="editingRole = !editingRole">
-          {{ editingRole ? 'Cancel role edit' : 'Assign logical role' }}
-        </button>
+      <p v-if="physicalDevice?.endpoints.length" class="device-identity-endpoints">Stored endpoints: {{ physicalDevice.endpoints.map(endpoint => `${endpoint.protocol.toUpperCase()} ${endpoint.address}`).join(' · ') }}</p>
+      <div v-if="logicalAssignment && enrollmentStatus === 'enrolled'" class="device-network-identity-role">
+        <button type="button" class="ghost" :disabled="busy" @click="editingRole = !editingRole">{{ editingRole ? 'Cancel role edit' : 'Assign logical role' }}</button>
         <div v-if="editingRole" class="device-network-identity-association">
           <label>Logical role or name<input v-model="logicalRole" type="text" placeholder="Boiler, Oven..." :disabled="busy"></label>
-          <button type="button" class="primary" :disabled="busy" @click="saveRole">{{ busy ? 'Saving...' : 'Save role' }}</button>
+          <button type="button" class="primary" :disabled="busy" @click="saveRole">{{ busy ? 'Saving…' : 'Save role' }}</button>
         </div>
       </div>
-      <p v-if="physicalDevice.endpoints.length">
-        Endpoints · {{ physicalDevice.endpoints.map(endpoint => `${endpoint.protocol.toUpperCase()} ${endpoint.address}`).join(', ') }}
-      </p>
-    </div>
+    </details>
+
     <button v-if="['enrolled', 'suspended'].includes(enrollmentStatus)" type="button" class="ghost" :disabled="busy" @click="retire">
-      {{ busy ? 'Removing...' : 'Remove device' }}
+      {{ busy ? 'Removing…' : 'Remove device' }}
     </button>
     <div v-if="enrollmentStatus === 'retired'">
       <p>This device is retired and cannot report observations or receive commands.</p>
       <button type="button" class="primary" :disabled="busy" @click="reenroll">{{ busy ? 'Approving...' : 'Approve reenrollment' }}</button>
     </div>
-    <p v-if="error" role="alert">{{ error }}</p>
+    <p v-if="error" class="device-identity-error" role="alert">{{ error }}</p>
     <details v-if="history.length > 1" class="device-network-identity-history">
       <summary>Network observations · {{ history.length }}</summary>
       <ul>
         <li v-for="item in history" :key="`${item.observedAt}-${item.ipAddress}`">
-          {{ item.ipAddress }} · {{ observedAt(item.observedAt) }}
+          {{ item.ipAddress }} · {{ observedAt(item.observedAt) }} · {{ item.evidenceSource.replaceAll('_', ' ') }}
         </li>
       </ul>
     </details>
@@ -237,17 +233,31 @@ watch(() => [props.deviceId, props.enrollmentStatus], load);
 </template>
 
 <style scoped>
-.device-network-identity { border-top: 1px solid var(--line, #d8e1ed); padding: 16px 0; }
-.device-network-identity-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 20px; }
-.device-network-identity-facts div { min-width: 0; }
-.device-network-identity-facts dt { color: var(--muted, #9aa8b7); font-size: .78rem; }
-.device-network-identity-facts dd { min-width: 0; margin: 3px 0 0; overflow-wrap: break-word; word-break: normal; }
-.device-network-identity-association { display: grid; gap: 10px; margin-top: 12px; }
+.device-network-identity { display: grid; gap: 12px; min-width: 0; padding: 14px 0; border-top: 1px solid var(--eg-border, #d8e0ec); color: var(--eg-text, #111827); }
+.device-identity-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.device-identity-heading h4 { margin: 3px 0 0; color: var(--eg-text, #111827); }
+.device-identity-eyebrow { color: var(--eg-muted, #58677e); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.device-identity-enrollment, .device-identity-evidence { display: inline-flex; width: fit-content; border-radius: 999px; padding: 4px 8px; background: var(--eg-blue-soft, #eef4ff); color: var(--eg-blue, #2863e6); font-size: 11px; font-weight: 700; text-transform: capitalize; }
+.device-network-identity-facts, .device-identity-technical-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.device-network-identity-facts > div, .device-identity-technical-grid > div { display: grid; gap: 4px; min-width: 0; padding: 10px 11px; border: 1px solid var(--eg-border, #d8e0ec); border-radius: var(--eg-control-radius, 8px); background: var(--eg-surface-soft, #f5f8fc); }
+.device-network-identity-facts dt, .device-identity-technical-grid dt { color: var(--eg-muted, #58677e); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.device-network-identity-facts dd, .device-identity-technical-grid dd { min-width: 0; margin: 0; overflow-wrap: anywhere; font-size: 12px; }
+.device-network-identity-facts small { color: var(--eg-muted, #58677e); font-size: 10px; line-height: 1.35; }
+.device-identity-evidence { padding: 0; background: transparent; color: var(--eg-warning, #a45b08); }
+.device-identity-evidence.is-current { color: var(--eg-success, #138a59); }
+.device-identity-technical { border-top: 1px solid var(--eg-border, #d8e0ec); padding-top: 10px; }
+.device-identity-technical > summary, .device-network-identity-history > summary { min-height: 36px; cursor: pointer; color: var(--eg-blue, #2863e6); font-size: 12px; font-weight: 700; }
+.device-identity-empty, .device-identity-error, .device-identity-endpoints { margin: 0; color: var(--eg-muted, #58677e); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.device-identity-error { color: var(--eg-danger, #b42318); }
+.physical-components { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); gap: 8px; margin-top: 10px; }
+.physical-component { display: grid; gap: 4px; min-width: 0; padding: 10px; border: 1px solid var(--eg-border, #d8e0ec); border-radius: var(--eg-control-radius, 8px); font-size: 11px; overflow-wrap: anywhere; }
+.physical-component span { color: var(--eg-muted, #58677e); }
+.device-network-identity-role { margin-top: 10px; }
+.device-network-identity-association { display: grid; gap: 10px; margin-top: 10px; }
 .device-network-identity-association label { display: grid; gap: 6px; }
 .device-network-identity-association input { min-width: 0; padding: 10px; }
-.physical-component { margin: 6px 0; }
-.device-network-identity-history { margin-top: 12px; }
-@media (max-width: 600px) {
-  .device-network-identity-facts { grid-template-columns: minmax(0, 1fr); }
-}
+.device-network-identity-history { border-top: 1px solid var(--eg-border, #d8e0ec); padding-top: 10px; }
+.device-network-identity-history ul { display: grid; gap: 6px; padding-left: 18px; color: var(--eg-muted, #58677e); font-size: 11px; }
+.device-network-identity :is(button, summary, input):focus-visible { outline: 2px solid var(--eg-blue, #2863e6); outline-offset: 2px; }
+@media (max-width: 520px) { .device-network-identity-facts, .device-identity-technical-grid { grid-template-columns: minmax(0, 1fr); } }
 </style>

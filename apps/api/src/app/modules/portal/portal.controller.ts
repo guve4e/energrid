@@ -386,6 +386,46 @@ export class PortalController {
     return this.deviceMeasurements.current({ tenantId: tenant.id, siteId: site.id }, deviceId)
   }
 
+  @Get('devices/:deviceId/observation-approval')
+  async getDeviceObservationApproval(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalAdministrator(request)
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+    const approval = await this.deviceRegistry.getEnergridObservationApproval(tenant.id, site.id, deviceId)
+    if (!approval) throw new NotFoundException('Approved Energrid HTTP device was not found in this site')
+    return approval
+  }
+
+  @Post('devices/:deviceId/observation-approval')
+  async approveDeviceObservations(
+    @Param('deviceId') deviceId: string,
+    @Body() body: { confirmedDeviceId?: unknown; approvedFields?: unknown },
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalAdministrator(request)
+    if (body?.confirmedDeviceId !== deviceId || !Array.isArray(body?.approvedFields) ||
+        body.approvedFields.length !== 2 || !body.approvedFields.includes('temperature') ||
+        !body.approvedFields.includes('humidity')) {
+      throw new BadRequestException('Explicitly confirm this device and the temperature and humidity fields.')
+    }
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+    try {
+      const approval = await this.deviceRegistry.approveEnergridObservations(
+        tenant.id, site.id, deviceId, request.user?.email || 'portal-admin',
+      )
+      if (!approval) throw new NotFoundException('Enrolled Energrid HTTP device was not found in this site')
+      return approval
+    } catch (error) {
+      if (error instanceof NotFoundException || error instanceof BadRequestException || error instanceof ConflictException) throw error
+      if (error instanceof Error && error.message.includes('different observation authority')) {
+        throw new ConflictException(error.message)
+      }
+      throw error
+    }
+  }
+
   @Get('devices/:deviceId/measurements')
   async getDeviceMeasurementHistory(
     @Param('deviceId') deviceId: string,

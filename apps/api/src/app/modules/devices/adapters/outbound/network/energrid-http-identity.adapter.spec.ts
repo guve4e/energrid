@@ -25,6 +25,11 @@ describe('EnergridHttpIdentityAdapter', () => {
     expect(parseEnergridIdentity({ ...validPayload, schemaVersion: 2 })).toBeNull();
   });
 
+  it('canonicalizes uppercase firmware hex IDs to lowercase', () => {
+    expect(parseEnergridIdentity({ ...validPayload, id: 'esp8266:324B44' })?.id)
+      .toBe('esp8266:324b44');
+  });
+
   it('reads only private IPv4 hosts with the adapter response bounds', async () => {
     const transport: EnergridIdentityTransport = { get: jest.fn().mockResolvedValue(validPayload) };
     const adapter = new EnergridHttpIdentityAdapter(transport);

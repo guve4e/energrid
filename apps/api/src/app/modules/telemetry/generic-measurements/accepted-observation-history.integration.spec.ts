@@ -20,9 +20,21 @@ describe('accepted observation to PostgreSQL history integration', () => {
     const tenantId = `history-${randomUUID()}`;
     const siteId = 'site-home';
     const deviceId = 'device:upstream-lan:esp8266:324864';
+    const concurrentDeviceId = 'device:concurrent-lan:esp8266:324865';
     const directory = await mkdtemp(join(tmpdir(), 'energrid-history-state-'));
     const repository = new PostgresGenericMeasurementRepository(pool);
-    const writer = new GenericMeasurementHistoryWriter(repository, true, {
+    let failReferenceSyncOnce = true;
+    const retryableRepository = {
+      ensureEnrollmentReference: jest.fn(async (identity: { tenantId: string; siteId: string; deviceId: string }) => {
+        if (failReferenceSyncOnce) {
+          failReferenceSyncOnce = false;
+          throw Object.assign(new Error('temporary isolated history database outage'), { code: '08006' });
+        }
+        return repository.ensureEnrollmentReference(identity);
+      }),
+      appendIfDue: repository.appendIfDue.bind(repository),
+    };
+    const writer = new GenericMeasurementHistoryWriter(retryableRepository, true, {
       temperature: { meaningfulChange: 0.3, maxHeartbeatMs: 900_000 },
       humidity: { meaningfulChange: 2, maxHeartbeatMs: 900_000 },
     });
@@ -53,20 +65,37 @@ describe('accepted observation to PostgreSQL history integration', () => {
     });
 
     try {
-      await pool.query(
-        `INSERT INTO device_inventory.enrollments
-         (tenant_id,site_id,device_id,display_name,status,enrolled_at,updated_at,version)
-         VALUES ($1,$2,$3,'History integration sensor','enrolled',now(),now(),1)`,
-        [tenantId, siteId, deviceId],
-      );
-
       const first = await inputFor({ uptimeMs: 12_000, sampleCount: 6, lastSampleUptimeMs: 10_000 }, 42_000, 22.5, 48);
+      const firstAttempt = await ingress.ingest(first);
+      expect(firstAttempt).toMatchObject({ outcome: 'processed', accepted: true, historyWrites: [
+        { field: 'temperature', outcome: 'failed' },
+        { field: 'humidity', outcome: 'failed' },
+      ] });
+
+      // The durable LevelDB decision retries the same history sample after reference sync recovers.
       const firstResult = await ingress.ingest(first);
-      expect(firstResult).toMatchObject({ outcome: 'processed', accepted: true });
       expect(firstResult).toMatchObject({ historyWrites: [
         { field: 'temperature', outcome: 'stored', reason: 'initial' },
         { field: 'humidity', outcome: 'stored', reason: 'initial' },
       ] });
+      const initialReference = await pool.query(
+        `SELECT tenant_id,site_id,device_id,display_name FROM device_inventory.enrollments
+         WHERE tenant_id=$1 AND site_id=$2 AND device_id=$3`, [tenantId, siteId, deviceId],
+      );
+      expect(initialReference.rows).toHaveLength(1);
+      expect(initialReference.rows[0]).toMatchObject({
+        tenant_id: tenantId, site_id: siteId, device_id: deviceId,
+        display_name: 'History enrollment reference',
+      });
+
+      // The unique key arbitrates concurrent reference creation without a check-then-insert race.
+      const concurrentIdentity = { tenantId, siteId, deviceId: concurrentDeviceId };
+      await Promise.all(Array.from({ length: 12 }, () => repository.ensureEnrollmentReference(concurrentIdentity)));
+      const concurrentReference = await pool.query(
+        `SELECT count(*)::int AS count FROM device_inventory.enrollments
+         WHERE tenant_id=$1 AND site_id=$2 AND device_id=$3`, [tenantId, siteId, concurrentDeviceId],
+      );
+      expect(concurrentReference.rows[0].count).toBe(1);
 
       const unchanged = await inputFor({ uptimeMs: 14_000, sampleCount: 7, lastSampleUptimeMs: 12_000 }, 44_000, 22.6, 49);
       const unchangedResult = await ingress.ingest(unchanged);

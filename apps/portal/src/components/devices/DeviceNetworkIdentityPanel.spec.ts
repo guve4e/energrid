@@ -43,8 +43,8 @@ describe('DeviceNetworkIdentityPanel', () => {
   it('shows explicit unknown identity and does not associate a LAN record automatically', async () => {
     const page = mountPanel();
     await flushPromises();
-    expect(page.text()).toContain('Enrollment status');
-    expect(page.text()).toContain('Not identified');
+    expect(page.text()).toContain('Enrollment');
+    expect(page.text()).toContain('Unknown');
     expect(page.text()).toContain('MQTT · devices/temp-kitchen/data');
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][1].method).toBeUndefined();
@@ -117,6 +117,7 @@ describe('DeviceNetworkIdentityPanel', () => {
     const physicalDevice = {
       physicalDeviceId: 'shelly-proem-001',
       verificationStatus: 'user_confirmed',
+      identity: { namespace: 'mqtt:shelly-protocol-id', value: 'shellypro3em-001122334455' },
       components: [
         { key: 'em1:0', capabilities: ['power'] },
         { key: 'em1:1', capabilities: ['power'] },
@@ -161,19 +162,23 @@ describe('DeviceNetworkIdentityPanel', () => {
     for (const page of [boiler, oven]) {
       expect(page.text()).toContain('192.168.1.204');
       expect(page.text()).toContain('00:11:22:33:44:55');
-      expect(page.text()).toContain('Physical device · shelly-proem-001');
+      expect(page.text()).toContain('Physical inventory IDshelly-proem-001');
+      expect(page.text()).toContain('mqtt:shelly-protocol-id · shellypro3em-001122334455');
       expect(page.text()).toContain('shelly-proem');
-      expect(page.text()).toContain('gateway-home · Home LAN');
-      expect(page.text()).toContain('MQTT shelly/boiler@oven/status');
-      expect(page.text()).toContain('HTTP http://192.168.1.204/rpc');
+      expect(page.text()).toContain('Home LAN');
+      expect(page.text()).toContain('gateway-home');
+      expect(page.text()).toContain('MQTT · devices/temp-kitchen/data');
+      expect(page.text()).toContain('Stored endpoints: MQTT shelly/boiler@oven/status · HTTP http://192.168.1.204/rpc');
       expect(page.text()).toContain('Evidence sourceLAN Discovery');
+      expect(page.text()).toContain('Last known IP address');
+      expect(page.text()).toContain('Observed MAC address');
     }
     expect(boiler.text()).toContain('Logical device ID');
     expect(boiler.text()).toContain('boiler-power');
-    expect(boiler.text()).toContain('Component ID · em1:0');
+    expect(boiler.text()).toContain('em1:0');
     expect(oven.text()).toContain('Logical device ID');
     expect(oven.text()).toContain('oven-power');
-    expect(oven.text()).toContain('Component ID · em1:1');
+    expect(oven.text()).toContain('em1:1');
   });
 
   it('labels a per-device current observation as last observed, not live IP ownership', async () => {
@@ -198,5 +203,23 @@ describe('DeviceNetworkIdentityPanel', () => {
     expect(page.text()).toContain('Last observed');
     expect(page.text()).not.toContain('Live-confirmed');
     expect(page.text()).not.toContain('Current IP owner');
+  });
+
+  it('labels the MAC as verified only when verified evidence has a timestamp', async () => {
+    fetchMock.mockResolvedValue(response({
+      association: {
+        ipAddress: '192.168.1.133', macAddress: '02:00:00:00:00:0a',
+        networkZoneId: 'gateway-home:iot', observedAt: '2026-10-19T12:10:00.000Z',
+        hardwareVerifiedAt: '2026-10-19T12:11:00.000Z', evidenceSource: 'lan_discovery_protocol_match',
+        verificationStatus: 'hardware_verified', isCurrent: true,
+      },
+      history: [], physicalDevice: null,
+    }));
+    const page = mountPanel('device-a');
+    await flushPromises();
+    expect(page.text()).toContain('Current IP address');
+    expect(page.text()).toContain('Verified MAC address');
+    expect(page.text()).toContain('Hardware verified');
+    expect(page.text()).toContain('Last verified');
   });
 });

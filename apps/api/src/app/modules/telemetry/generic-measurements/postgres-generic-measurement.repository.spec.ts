@@ -20,6 +20,20 @@ function poolFor(query: jest.Mock) {
 }
 
 describe('PostgresGenericMeasurementRepository', () => {
+  it('creates a minimal enrollment reference with a conflict-safe upsert', async () => {
+    const query = jest.fn().mockResolvedValue({ rowCount: 0, rows: [] });
+    const repository = new PostgresGenericMeasurementRepository({ query } as never);
+
+    await repository.ensureEnrollmentReference({
+      tenantId: 'tenant-a', siteId: 'site-a', deviceId: 'device-a',
+    });
+
+    expect(query).toHaveBeenCalledWith(expect.stringContaining(
+      "ON CONFLICT (tenant_id,site_id,device_id) DO NOTHING",
+    ), ['tenant-a', 'site-a', 'device-a']);
+    expect(query.mock.calls[0][0]).toContain("'History enrollment reference','enrolled',now(),now(),1");
+  });
+
   it('validates before writing and inserts with full tenant/site/sample identity', async () => {
     const query = jest.fn().mockResolvedValue({ rowCount: 1, rows: [{ sample_id: 'sample-1' }] });
     const pool = poolFor(query);
