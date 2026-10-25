@@ -33,6 +33,7 @@ export class ApprovedMqttObservationRuntime
   implements OnModuleDestroy
 {
   readonly route?: ApprovedMqttObservationRoute;
+  readonly labRoute?: ApprovedMqttObservationRoute;
 
   private readonly store?: DeviceObservationStateStore;
   private readonly ingress?: DeviceIntelligenceObservationIngress;
@@ -47,12 +48,16 @@ export class ApprovedMqttObservationRuntime
     private readonly historyWriter?: GenericMeasurementHistoryWriter,
   ) {
     const raw = process.env.HOME_OBSERVATION_BINDINGS_JSON?.trim();
+    const labRaw = process.env.LAB_MQTT_OBSERVATION_BINDINGS_JSON?.trim();
+    if (labRaw && process.env.NODE_ENV === 'production') {
+      throw new Error('LAB_MQTT_OBSERVATION_BINDINGS_JSON is disabled in production');
+    }
 
     const httpEnabled = ['1', 'true', 'yes'].includes(
       String(process.env.HOME_HTTP_POLL_ENABLED).toLowerCase(),
     );
 
-    if (!raw && !httpEnabled) {
+    if (!raw && !labRaw && !httpEnabled) {
       return;
     }
 
@@ -67,6 +72,7 @@ export class ApprovedMqttObservationRuntime
     }
 
     const parsed: unknown = raw ? JSON.parse(raw) : [];
+    const labParsed: unknown = labRaw ? JSON.parse(labRaw) : [];
 
     if (!Array.isArray(parsed) || (raw && parsed.length === 0)) {
       throw new Error(
@@ -75,7 +81,27 @@ export class ApprovedMqttObservationRuntime
     }
 
     const configs = parsed as ApprovedMqttObservationConfig[];
-    this.configs.push(...configs);
+    if (!Array.isArray(labParsed) || (labRaw && labParsed.length !== 1)) {
+      throw new Error('LAB_MQTT_OBSERVATION_BINDINGS_JSON must contain exactly one explicitly scoped Virtual Device Lab route');
+    }
+    const labConfigs = labParsed as ApprovedMqttObservationConfig[];
+    for (const config of labConfigs) {
+      const expectedRegistration = /^device:device-lab-vlan:(esp8266:[0-9a-f]{6})$/i.exec(config.binding?.deviceId || '');
+      const fields = Object.keys(config.binding?.fields || {}).sort();
+      if (config.scope?.tenantId !== 'tenant-demo' || config.scope?.siteId !== 'site-device-lab' ||
+        !expectedRegistration || expectedRegistration[1].toLowerCase() !== config.expectedDeviceIdentity?.toLowerCase() ||
+        !config.binding.selector.startsWith('energrid/tenant-demo/site-device-lab/devices/') ||
+        !config.binding.selector.endsWith(`/devices/${config.binding.deviceId}/telemetry`) ||
+        !config.binding.selector.endsWith('/telemetry') || config.binding.selector.includes('+') ||
+        config.binding.selector.includes('#') || fields.join(',') !== 'humidity,temperature' ||
+        config.binding.fields.temperature?.rawKey !== 'temperatureC' || config.binding.fields.temperature?.type !== 'number' ||
+        config.binding.fields.humidity?.rawKey !== 'humidityPct' || config.binding.fields.humidity?.type !== 'number' ||
+        !config.policy.allowedSourcesByField?.temperature?.includes(config.binding.sourceId) ||
+        !config.policy.allowedSourcesByField?.humidity?.includes(config.binding.sourceId)) {
+        throw new Error('Lab MQTT route must be an exact tenant-demo/site-device-lab telemetry binding with a verified ESP8266 identity');
+      }
+    }
+    this.configs.push(...configs, ...labConfigs);
 
     this.store = new DeviceObservationStateStore(directory);
 
@@ -93,6 +119,12 @@ export class ApprovedMqttObservationRuntime
         configs,
         installations,
         enrollment,
+      );
+    }
+    if (labConfigs.length) {
+      this.labRoute = new ApprovedMqttObservationRoute(
+        registry, this.store!, labConfigs, installations, enrollment,
+        this.ingress,
       );
     }
   }
@@ -125,10 +157,11 @@ export class ApprovedMqttObservationRuntime
   }
 
   async recover(): Promise<void> {
-    if (!this.route) return;
+    if (!this.route && !this.labRoute) return;
 
     await this.registry.ensureInstallationsLoaded();
-    await this.route.recover();
+    await this.route?.recover();
+    await this.labRoute?.recover();
   }
 
   /** Read only persisted fields covered by an active, approved MQTT binding. */

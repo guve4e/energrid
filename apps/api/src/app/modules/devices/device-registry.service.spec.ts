@@ -1,4 +1,5 @@
 import { DeviceRegistryService } from './device-registry.service';
+import { runWithAuthorizedPortalSite } from '../portal/portal-site-context';
 
 describe('DeviceRegistryService', () => {
   it('does not infer offline from missing configuration or missing observations', () => {
@@ -6,6 +7,22 @@ describe('DeviceRegistryService', () => {
     const unobserved = snapshot.devices.filter(d => d.state.observedAt === null);
     expect(unobserved.length).toBeGreaterThan(0);
     expect(unobserved.every(d => d.state.status === 'unknown')).toBe(true);
+  });
+  it('keeps verified measurement support separate from observation authorization', () => {
+    process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({ devices: [{
+      deviceId: 'sensor-device', protocol: 'http', driver: 'energrid-esp8266',
+      capabilities: ['temperature', 'humidity'],
+      metadata: { observationApprovalRequired: true },
+    }] });
+    const device = new DeviceRegistryService().getSnapshot().devices.find(item => item.id === 'sensor-device');
+    expect(device?.supportedCapabilities?.map(capability => capability.kind)).toEqual(['temperature', 'humidity']);
+    expect(device?.capabilities).toEqual([]);
+  });
+  it('leaves an unknown device without invented switch or measurement capabilities', () => {
+    process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({ devices: [{ deviceId: 'unclassified-unit', protocol: 'none', capabilities: [] }] });
+    const device = new DeviceRegistryService().getSnapshot().devices.find(item => item.id === 'unclassified-unit');
+    expect(device?.supportedCapabilities).toEqual([]);
+    expect(device?.capabilities).toEqual([]);
   });
   afterEach(() => {});
 
@@ -261,6 +278,36 @@ describe('DeviceRegistryService', () => {
     expect(matches[0].adapter.target).toBe('http://192.168.1.211/api/v1/status');
   });
 
+  it('keeps Home inventory and discovery candidates isolated from the Virtual Device Lab site', () => {
+    const registry = new DeviceRegistryService();
+    const homeOwner = { tenantId: 'tenant-demo', siteId: 'site-home', siteName: 'Home', mode: 'home' as const };
+    const labOwner = { tenantId: 'tenant-demo', siteId: 'site-device-lab', siteName: 'Virtual Device Lab', mode: 'home' as const };
+    const labCandidate = {
+      id: 'simulated-esp8266', displayName: 'Virtual ESP8266',
+      tenantId: labOwner.tenantId, siteId: labOwner.siteId, siteName: labOwner.siteName,
+      protocol: 'http' as const, transport: 'http' as const, driver: 'energrid-esp8266',
+      target: 'http://172.30.250.10/api/v1/status', capabilities: ['temperature' as const],
+      metadata: { discoveryTenantId: labOwner.tenantId, discoverySiteId: labOwner.siteId },
+    };
+
+    runWithAuthorizedPortalSite(labOwner, () => {
+      expect(registry.registerDiscoveredDevice(labCandidate)).toBe(true);
+      expect(registry.getSnapshot().devices.map(device => device.id)).toContain(labCandidate.id);
+      expect(registry.getSnapshot().devices.every(device => device.siteId === labOwner.siteId)).toBe(true);
+    });
+
+    runWithAuthorizedPortalSite(homeOwner, () => {
+      const snapshot = registry.getSnapshot();
+      expect(snapshot.devices.some(device => device.id === labCandidate.id)).toBe(false);
+      expect(snapshot.devices.every(device => device.siteId === homeOwner.siteId)).toBe(true);
+      expect(snapshot.summary.total).toBe(2);
+    });
+
+    runWithAuthorizedPortalSite(labOwner, () => {
+      expect(registry.getSnapshot().devices.map(device => device.id)).toContain(labCandidate.id);
+    });
+  });
+
   it('restores an approved installation and its assigned room after a restart', async () => {
     process.env.HOME_DISCOVERED_DEVICES_JSON = JSON.stringify([{
       id: 'shellyplus1-installed:switch:0',
@@ -276,6 +323,7 @@ describe('DeviceRegistryService', () => {
     const records = new Map<string, any>();
     const store = {
       list: jest.fn(async () => [...records.values()]),
+      listAll: jest.fn(async () => [...records.values()]),
       save: jest.fn(async (record) => { records.set(record.device.id, record); }),
       append: jest.fn().mockResolvedValue(undefined),
       events: jest.fn().mockResolvedValue([]),
@@ -457,6 +505,7 @@ describe('DeviceRegistryService', () => {
           channel: 0,
           groups: ['kitchen.lights'],
           aliases: ['kitchen wall', 'лампа на стената в кухнята'],
+          capabilities: ['switch'],
         },
         {
           deviceId: 'kitchen.light.island.led',
@@ -465,6 +514,7 @@ describe('DeviceRegistryService', () => {
           channel: 0,
           groups: ['kitchen.lights'],
           aliases: ['kitchen island', 'лампи на острова'],
+          capabilities: ['switch'],
         },
         {
           deviceId: 'bath.light.led',
@@ -473,6 +523,7 @@ describe('DeviceRegistryService', () => {
           channel: 0,
           groups: ['bath.lights'],
           aliases: ['bathroom lights', 'лампи в банята'],
+          capabilities: ['switch'],
         },
         {
           deviceId: 'mainline',

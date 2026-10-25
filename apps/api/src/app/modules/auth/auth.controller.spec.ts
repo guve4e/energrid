@@ -49,7 +49,7 @@ describe('AuthController browser session transport', () => {
 
   it('rejects untrusted origins and refresh without a matching CSRF header', async () => {
     const { controller } = setup()
-    await expect(controller.login({ email: 'a', password: 'b' }, { headers: { origin: 'https://evil.example' } }, {} as never)).rejects.toBeInstanceOf(UnauthorizedException)
+    await expect(controller.login({ email: 'a', password: 'b' }, { headers: { origin: 'https://evil.example' } }, {} as never)).rejects.toMatchObject({ response: { code: 'UNTRUSTED_ORIGIN', origin: 'https://evil.example' } })
     const request = { headers: { origin: 'http://localhost:4300', cookie: `${csrfCookieName(config)}=${'x'.repeat(43)}` } }
     await expect(controller.refresh(request, 'y'.repeat(43), {} as never)).rejects.toThrow('CSRF validation failed')
   })

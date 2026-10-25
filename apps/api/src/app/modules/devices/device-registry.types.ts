@@ -126,6 +126,8 @@ export interface RegisteredDevice {
   zoneId: string;
   zoneName: string;
   trustStatus: DeviceTrustStatus;
+  /** Verified hardware support, separate from capability actions/observation permission. */
+  supportedCapabilities?: RegisteredDeviceCapability[];
   capabilities: RegisteredDeviceCapability[];
   adapter: RegisteredDeviceAdapter;
   control?: DeviceControlState;
@@ -273,6 +275,8 @@ export interface NetworkDiscoveryZone {
   seedIps: string[];
   gatewayIps?: string[];
   role?: 'primary' | 'iot' | 'camera' | 'guest' | 'service';
+  /** Explicit collector selection; virtual-lab scopes use a fixed allowlisted remote scanner. */
+  collectionSource?: 'local' | 'virtual-lab';
 }
 
 export type DeviceExecutionStageName =

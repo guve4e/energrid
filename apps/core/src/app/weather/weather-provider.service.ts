@@ -17,32 +17,44 @@ export class WeatherProviderService {
   private readonly cache = new Map<string, { expires: number; snapshot: WeatherSnapshot }>();
   private readonly pending = new Map<string, Promise<WeatherSnapshot>>();
 
-  async getSnapshot(model: 'best_match' | 'icon_seamless' | 'ncep_gfs_seamless' = 'best_match'): Promise<WeatherSnapshot> {
-    const cached = this.cache.get(model);
+  getDefaultLocation() {
+    return {
+      location: process.env.WEATHER_LOCATION?.trim() || 'Vidin',
+      latitude: this.coordinate(process.env.WEATHER_LATITUDE, 43.9916, 90),
+      longitude: this.coordinate(process.env.WEATHER_LONGITUDE, 22.8728, 180),
+    };
+  }
+
+  async getSnapshotForLocation(location: { location: string; latitude: number; longitude: number }, model: 'best_match' | 'icon_seamless' | 'ncep_gfs_seamless' = 'best_match'): Promise<WeatherSnapshot> {
+    const key = `${model}:${location.location}:${location.latitude}:${location.longitude}`;
+    const cached = this.cache.get(key);
     if (cached && cached.expires > Date.now()) return cached.snapshot;
-    const pending = this.pending.get(model);
+    const pending = this.pending.get(key);
     if (pending) return pending;
-    const request = this.fetchSnapshot(model).then(snapshot => {
+    const request = this.fetchSnapshot(model, location).then(snapshot => {
       const ttl = snapshot.availability === 'available' ? 10 * 60000 : 60000;
-      this.cache.set(model, { expires: Date.now() + ttl, snapshot });
+      this.cache.set(key, { expires: Date.now() + ttl, snapshot });
       return snapshot;
-    }).finally(() => this.pending.delete(model));
-    this.pending.set(model, request);
+    }).finally(() => this.pending.delete(key));
+    this.pending.set(key, request);
     return request;
   }
 
-  private async fetchSnapshot(model: string): Promise<WeatherSnapshot> {
+  async getSnapshot(model: 'best_match' | 'icon_seamless' | 'ncep_gfs_seamless' = 'best_match'): Promise<WeatherSnapshot> {
+    return this.getSnapshotForLocation(this.getDefaultLocation(), model);
+  }
+
+  private async fetchSnapshot(model: string, location = this.getDefaultLocation()): Promise<WeatherSnapshot> {
     try {
-      return await this.getOpenMeteoSnapshot(model);
+      return await this.getOpenMeteoSnapshot(model, location);
     } catch (error) {
       this.logger.warn(`Open-Meteo failed, weather unavailable: ${String(error)}`);
-      return { ...this.getFallbackSnapshot(), model };
+      return { ...this.getFallbackSnapshot(location), model };
     }
   }
 
-  private async getOpenMeteoSnapshot(model: string): Promise<WeatherSnapshot> {
-    const latitude = 43.9916;
-    const longitude = 22.8728;
+  private async getOpenMeteoSnapshot(model: string, location: { location: string; latitude: number; longitude: number }): Promise<WeatherSnapshot> {
+    const { latitude, longitude } = location;
 
     const params = new URLSearchParams({
       models: model,
@@ -94,7 +106,7 @@ export class WeatherProviderService {
     const data = (await response.json()) as OpenMeteoResponse;
 
     return {
-      location: 'Vidin',
+      location: location.location,
       coordinates: { latitude, longitude },
       provider: 'open-meteo',
       model,
@@ -184,9 +196,9 @@ export class WeatherProviderService {
     return code == null ? 'Unknown' : map[code] ?? `Weather code ${code}`;
   }
 
-  private getFallbackSnapshot(): WeatherSnapshot {
+  private getFallbackSnapshot(location = this.getDefaultLocation()): WeatherSnapshot {
     return {
-      location: 'Vidin', coordinates: { latitude: 43.9916, longitude: 22.8728 },
+      location: location.location, coordinates: { latitude: location.latitude, longitude: location.longitude },
       provider: 'open-meteo', availability: 'unavailable',
       units: { temperature: 'celsius', wind: 'km/h', precipitation: 'mm' },
       fetchedAt: new Date().toISOString(),
@@ -194,5 +206,10 @@ export class WeatherProviderService {
         pressure: null, windKmh: null, gustKmh: null, condition: 'Unavailable', weatherCode: null },
       hourly: [], daily: [], alerts: [],
     };
+  }
+
+  private coordinate(value: string | undefined, fallback: number, limit: number): number {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= -limit && parsed <= limit ? parsed : fallback;
   }
 }

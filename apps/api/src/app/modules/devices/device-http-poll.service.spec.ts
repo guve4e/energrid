@@ -6,6 +6,10 @@ import type { KnownNetworkDevice } from './device-discovery-memory.store'
 const upstreamZone: NetworkDiscoveryZone = {
   id: 'upstream-lan', name: 'Upstream LAN', cidr: '192.168.1.0/24', seedIps: [],
 }
+const virtualLabZone: NetworkDiscoveryZone = {
+  id: 'device-lab-vlan', name: 'Virtual Lab LAN', cidr: '172.30.250.0/28',
+  seedIps: ['172.30.250.10', '172.30.250.11'], collectionSource: 'virtual-lab',
+}
 const verifiedIdentity = (id = 'esp8266:324864') => ({
   schemaVersion: 1, id, model: 'Energrid ESP8266 DHT22', firmwareVersion: '0.2.0',
   capabilities: ['temperature', 'humidity'],
@@ -74,6 +78,60 @@ describe('DeviceHttpPollService', () => {
         status: 'online',
       }),
     )
+  })
+
+  it('polls an approved Lab-site ESP through the scoped remote HTTP transport and the same observation ingress', async () => {
+    const device = {
+      id: 'device:device-lab-vlan:esp8266:a1b2c3', tenantId: 'tenant-demo', siteId: 'site-device-lab',
+      trustStatus: 'approved', kind: 'physical',
+      adapter: { configured: false, protocol: 'http', driver: 'energrid-esp8266', target: 'http://172.30.250.10/api/v1/status' },
+      metadata: { physicalId: 'esp8266:a1b2c3', networkScope: 'device-lab-vlan' }, capabilities: [], zoneName: 'Lab',
+    } as unknown as RegisteredDevice
+    const observedAt = new Date().toISOString()
+    const discovery = { listIdentityEvidence: jest.fn().mockResolvedValue([{
+      schemaVersion: 2, ownership: { tenantId: 'tenant-demo', siteId: 'site-device-lab' },
+      identity: 'device:device-lab-vlan:esp8266:a1b2c3', firstSeenAt: observedAt,
+      lastSeenAt: observedAt, lastScanId: 'lab-scan-1', device: {
+        id: 'esp8266:a1b2c3', ipAddress: '172.30.250.10', networkZoneId: 'device-lab-vlan',
+        networkZoneName: 'Virtual Lab LAN', protocol: 'http', confidence: 1, status: 'online',
+        discoveredAt: observedAt, reason: 'identity verified in the isolated Lab network',
+        observations: [
+          { source: 'http_identity', attribute: 'identity.verified', value: true, observedAt, scopeId: 'device-lab-vlan', method: 'GET /api/v1/identity' },
+          { source: 'http_identity', attribute: 'identity.device_id', value: 'esp8266:a1b2c3', observedAt, scopeId: 'device-lab-vlan', method: 'GET /api/v1/identity' },
+        ],
+      },
+    }]) }
+    const observations = {
+      sourceSampleEvidenceId: jest.fn().mockResolvedValue('lab-sample-2-10000'),
+      ingestHttpObservation: jest.fn().mockResolvedValue({ outcome: 'processed', accepted: true, stage: 'observation', reason: 'accepted', updatedKeys: ['temperature', 'humidity'], rejectedFields: [], state: null }),
+    }
+    const registry = { getDevices: jest.fn().mockReturnValue([device]), ingestDeviceStatus: jest.fn() }
+    const remoteEvidence = {
+      identity: { status: 200, body: verifiedIdentity('esp8266:a1b2c3') },
+      status: { status: 200, body: {
+        schemaVersion: 1, deviceId: 'esp8266:a1b2c3', uptimeMs: 12000, sampleIntervalMs: 5000,
+        sensor: { state: 'ok', sampleCount: 2, lastSampleUptimeMs: 10000, readingAgeMs: 0, temperatureC: 27.25, humidityPct: 51 },
+      } },
+    }
+    const virtualRead = jest.fn().mockResolvedValue(remoteEvidence)
+    global.fetch = jest.fn() as unknown as typeof fetch
+
+    const poller = new DeviceHttpPollService(
+      registry as unknown as DeviceRegistryService,
+      observations as never,
+      discovery as never,
+      { getZones: () => [virtualLabZone], getConfiguredZone: () => virtualLabZone, readVirtualLabEnergridHttpEvidence: virtualRead } as never,
+    )
+    await poller.pollOnce()
+
+    expect(registry.getDevices).toHaveBeenCalledWith(true)
+    expect(virtualRead).toHaveBeenCalledWith('device-lab-vlan', '172.30.250.10', 'esp8266:a1b2c3', expect.any(AbortSignal))
+    expect(global.fetch).not.toHaveBeenCalled()
+    expect(observations.ingestHttpObservation).toHaveBeenCalledWith(expect.objectContaining({
+      scope: { tenantId: 'tenant-demo', siteId: 'site-device-lab' }, deviceId: device.id,
+      sourceId: 'energrid-http-status', selector: '/api/v1/status',
+      payload: { temperatureC: 27.25, humidityPct: 51 }, evidenceId: 'lab-sample-2-10000',
+    }))
   })
 
   it('marks HTTP devices offline when polling fails', async () => {
@@ -158,14 +216,19 @@ describe('DeviceHttpPollService', () => {
       registry as unknown as DeviceRegistryService,
       observations as never,
       discovery as never,
-      { getZones: () => [upstreamZone] } as never,
+      {
+        // A recent Lab scan may be the last selected scope, but must not hide
+        // the independently configured Home network from its scheduled poll.
+        getZones: () => [virtualLabZone],
+        getConfiguredZone: (scopeId: string) => scopeId === 'upstream-lan' ? upstreamZone : virtualLabZone,
+      } as never,
     )
     await poller.pollOnce()
 
     expect(global.fetch).toHaveBeenNthCalledWith(1, 'http://192.168.1.211/api/v1/identity', expect.objectContaining({ redirect: 'manual' }))
     expect(global.fetch).toHaveBeenNthCalledWith(2, 'http://192.168.1.211/api/v1/status', expect.objectContaining({ redirect: 'error' }))
     expect(observations.sourceSampleEvidenceId).toHaveBeenCalledWith(
-      { tenantId: 'valentin', siteId: 'boyana-home' }, device.id, 'energrid-http-status',
+      { tenantId: 'valentin', siteId: 'boyana-home' }, device.id, 'energrid-esp8266-sample',
       { uptimeMs: 12000, sampleCount: 6, lastSampleUptimeMs: 10000 },
     )
     expect(observations.ingestHttpObservation).toHaveBeenCalledWith(expect.objectContaining({
@@ -175,6 +238,125 @@ describe('DeviceHttpPollService', () => {
       evidenceId: 'energrid-http-status:sample-6-10000',
     }))
     expect(discovery.recordIdentityObservation).not.toHaveBeenCalled()
+  })
+
+  it('revalidates an enrolled endpoint when scoped Discovery Memory is empty, then survives poller recreation', async () => {
+    const device = {
+      id: 'device:upstream-lan:esp8266:324864', tenantId: 'tenant-demo', siteId: 'site-home',
+      trustStatus: 'approved', kind: 'physical',
+      adapter: { configured: false, protocol: 'http', driver: 'energrid-esp8266', target: 'http://192.168.1.198/api/v1/status' },
+      metadata: { physicalId: 'esp8266:324864', networkScope: 'upstream-lan' }, capabilities: [], zoneName: 'Garage',
+    } as unknown as RegisteredDevice
+    let records: KnownNetworkDevice[] = []
+    const discovery = {
+      listIdentityEvidence: jest.fn().mockImplementation(async (scope) => {
+        expect(scope).toEqual({ tenantId: 'tenant-demo', siteId: 'site-home' })
+        return records
+      }),
+      recordIdentityObservation: jest.fn().mockImplementation(async (observedAt, observedDevice, ownership) => {
+        records = [{
+          schemaVersion: 2, ownership, identity: 'device:upstream-lan:esp8266:324864',
+          firstSeenAt: observedAt, lastSeenAt: observedAt, lastScanId: `identity:${observedAt}`,
+          device: observedDevice,
+        }]
+      }),
+    }
+    const observations = {
+      sourceSampleEvidenceId: jest.fn().mockResolvedValue('http-sample'),
+      ingestHttpObservation: jest.fn().mockResolvedValue({
+        outcome: 'processed', accepted: true, stage: 'observation', reason: 'accepted',
+        updatedKeys: ['temperature', 'humidity'], rejectedFields: [], state: null,
+      }),
+    }
+    const registry = { getDevices: jest.fn().mockReturnValue([device]), ingestDeviceStatus: jest.fn() }
+    const statusPayload = (sampleCount: number) => ({
+      schemaVersion: 1, deviceId: 'esp8266:324864', uptimeMs: sampleCount * 2_000,
+      sampleIntervalMs: 2_000,
+      sensor: { state: 'ok', sampleCount, lastSampleUptimeMs: sampleCount * 2_000,
+        readingAgeMs: 100, temperatureC: 22.5, humidityPct: 48 },
+    })
+    const response = (body: unknown) => ({ ok: true, headers: { get: () => '300' }, json: async () => body })
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce(response(verifiedIdentity()))
+      .mockResolvedValueOnce(response(statusPayload(10)))
+      .mockResolvedValueOnce(response(verifiedIdentity()))
+      .mockResolvedValueOnce(response(statusPayload(11))) as unknown as typeof fetch
+    const makePoller = () => new DeviceHttpPollService(
+      registry as unknown as DeviceRegistryService, observations as never, discovery as never,
+      { getZones: () => [upstreamZone], getConfiguredZone: () => upstreamZone } as never,
+    )
+
+    await makePoller().pollOnce()
+
+    expect(global.fetch).toHaveBeenNthCalledWith(1, 'http://192.168.1.198/api/v1/identity', expect.objectContaining({ redirect: 'manual' }))
+    expect(discovery.recordIdentityObservation).toHaveBeenCalledWith(
+      expect.any(String), expect.objectContaining({
+        id: 'esp8266:324864', ipAddress: '192.168.1.198', networkZoneId: 'upstream-lan',
+        observations: expect.arrayContaining([
+          expect.objectContaining({ attribute: 'identity.device_id', value: 'esp8266:324864', scopeId: 'upstream-lan' }),
+        ]),
+      }),
+      { tenantId: 'tenant-demo', siteId: 'site-home' },
+    )
+    expect(observations.ingestHttpObservation).toHaveBeenCalledTimes(1)
+
+    // A new poller represents an API restart; it must use the durably scoped
+    // identity evidence produced by the first exact-identity verification.
+    await makePoller().pollOnce()
+    expect(global.fetch).toHaveBeenCalledTimes(4)
+    expect(observations.ingestHttpObservation).toHaveBeenCalledTimes(2)
+    expect(discovery.recordIdentityObservation).toHaveBeenCalledTimes(1)
+    expect(discovery.listIdentityEvidence).toHaveBeenNthCalledWith(2, { tenantId: 'tenant-demo', siteId: 'site-home' })
+  })
+
+  it('does not treat a reused last-known IP as the enrolled device when firmware identity differs', async () => {
+    const device = {
+      id: 'device:upstream-lan:esp8266:324864', tenantId: 'tenant-demo', siteId: 'site-home',
+      trustStatus: 'approved', kind: 'physical',
+      adapter: { configured: false, protocol: 'http', driver: 'energrid-esp8266', target: 'http://192.168.1.198/api/v1/status' },
+      metadata: { physicalId: 'esp8266:324864', networkScope: 'upstream-lan' }, capabilities: [], zoneName: 'Garage',
+    } as unknown as RegisteredDevice
+    const discovery = { listIdentityEvidence: jest.fn().mockResolvedValue([]), recordIdentityObservation: jest.fn() }
+    const observations = { sourceSampleEvidenceId: jest.fn(), ingestHttpObservation: jest.fn() }
+    const registry = { getDevices: jest.fn().mockReturnValue([device]), ingestDeviceStatus: jest.fn() }
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true, headers: { get: () => '100' }, json: async () => verifiedIdentity('esp8266:ffffff'),
+    }) as unknown as typeof fetch
+    const poller = new DeviceHttpPollService(
+      registry as unknown as DeviceRegistryService, observations as never, discovery as never,
+      { getZones: () => [upstreamZone] } as never,
+    )
+
+    await poller.pollOnce()
+
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    expect(discovery.recordIdentityObservation).not.toHaveBeenCalled()
+    expect(observations.ingestHttpObservation).not.toHaveBeenCalled()
+    expect(registry.ingestDeviceStatus).toHaveBeenCalledWith(expect.objectContaining({ deviceId: device.id, status: 'unknown' }))
+  })
+
+  it('keeps a missing-memory endpoint untrusted when its last-known address is unreachable', async () => {
+    const device = {
+      id: 'device:upstream-lan:esp8266:324864', tenantId: 'tenant-demo', siteId: 'site-home',
+      trustStatus: 'approved', kind: 'physical',
+      adapter: { configured: false, protocol: 'http', driver: 'energrid-esp8266', target: 'http://192.168.1.198/api/v1/status' },
+      metadata: { physicalId: 'esp8266:324864', networkScope: 'upstream-lan' }, capabilities: [], zoneName: 'Garage',
+    } as unknown as RegisteredDevice
+    const discovery = { listIdentityEvidence: jest.fn().mockResolvedValue([]), recordIdentityObservation: jest.fn() }
+    const observations = { sourceSampleEvidenceId: jest.fn(), ingestHttpObservation: jest.fn() }
+    const registry = { getDevices: jest.fn().mockReturnValue([device]), ingestDeviceStatus: jest.fn() }
+    global.fetch = jest.fn().mockRejectedValue(new Error('connect ECONNREFUSED')) as unknown as typeof fetch
+    const poller = new DeviceHttpPollService(
+      registry as unknown as DeviceRegistryService, observations as never, discovery as never,
+      { getZones: () => [upstreamZone] } as never,
+    )
+
+    await poller.pollOnce()
+
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    expect(discovery.recordIdentityObservation).not.toHaveBeenCalled()
+    expect(observations.ingestHttpObservation).not.toHaveBeenCalled()
+    expect(registry.ingestDeviceStatus).toHaveBeenCalledWith(expect.objectContaining({ deviceId: device.id, status: 'offline' }))
   })
 
   it('records only same-identity firmware diagnostics without blocking accepted observations when diagnostics fail', async () => {
@@ -298,6 +480,7 @@ describe('DeviceHttpPollService', () => {
           expect.objectContaining({ attribute: 'identity.verified', value: true, scopeId: 'upstream-lan', method: 'GET /api/v1/identity' }),
         ]),
       }),
+      { tenantId: 'tenant-demo', siteId: 'site-home' },
     )
     expect(observations.ingestHttpObservation).toHaveBeenCalledWith(expect.objectContaining({
       scope: { tenantId: 'tenant-demo', siteId: 'site-home' },
@@ -367,7 +550,7 @@ describe('DeviceHttpPollService', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1)
     expect(discovery.recordIdentityObservation).not.toHaveBeenCalled()
     expect(observations.ingestHttpObservation).not.toHaveBeenCalled()
-    expect(registry.ingestDeviceStatus).toHaveBeenCalledWith(expect.objectContaining({ deviceId: device.id, status: 'offline' }))
+    expect(registry.ingestDeviceStatus).toHaveBeenCalledWith(expect.objectContaining({ deviceId: device.id, status: 'unknown' }))
   })
 
   it('rejects redirects without following them or persisting identity evidence', async () => {

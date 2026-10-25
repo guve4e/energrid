@@ -75,6 +75,8 @@ export interface PendingCandidateDetails {
 
 export interface PendingEnrollmentCardModel {
   key: string;
+  tenantId: string;
+  siteId: string;
   title: string;
   typeLabel: string;
   protocolLabel: string;
@@ -164,6 +166,8 @@ function toCard(
 
   return {
     key,
+    tenantId: primary.tenantId,
+    siteId: primary.siteId,
     title: primary.discovery?.suggestedName || primary.displayName,
     typeLabel: capabilities.length ? capabilities.join(' · ') : primary.kind,
     protocolLabel: unique(candidates.map(candidate => identities[candidate.id]?.protocol || candidate.adapter.protocol)).join(' + '),

@@ -5,6 +5,7 @@ import {
   TELEMETRY_CONFIG,
   TELEMETRY_POOL,
   TELEMETRY_SPOOL_FACTORY,
+  MEASUREMENT_HISTORY_OUTBOX_FACTORY,
   TelemetryConfig,
   telemetryConfig,
 } from './telemetry.config';
@@ -14,11 +15,17 @@ import { TelemetryRollupService } from './telemetry-rollup.service';
 import { TelemetrySpool } from './telemetry-spool';
 import { PostgresGenericMeasurementRepository } from './generic-measurements/postgres-generic-measurement.repository';
 import { GenericMeasurementHistoryWriter } from './generic-measurements/generic-measurement-history-writer';
+import { GenericMeasurementHistoryOutbox } from './generic-measurements/generic-measurement-history-outbox';
 
 @Module({
   providers: [
     {
       provide: TELEMETRY_SPOOL_FACTORY,
+      useValue: (directory: string) =>
+        new ClassicLevel<string, unknown>(directory, { valueEncoding: 'json' }),
+    },
+    {
+      provide: MEASUREMENT_HISTORY_OUTBOX_FACTORY,
       useValue: (directory: string) =>
         new ClassicLevel<string, unknown>(directory, { valueEncoding: 'json' }),
     },
@@ -30,9 +37,10 @@ import { GenericMeasurementHistoryWriter } from './generic-measurements/generic-
       provide: TELEMETRY_POOL,
       inject: [TELEMETRY_CONFIG],
       useFactory: (config: TelemetryConfig) => {
-        if (!config.databaseUrl) return null;
+        const databaseUrl = config.databaseUrl;
+        if (!databaseUrl) return null;
         const pool = new Pool({
-          connectionString: config.databaseUrl!,
+          connectionString: databaseUrl,
           max: 3,
           connectionTimeoutMillis: 5000,
           query_timeout: 15_000,
@@ -56,10 +64,11 @@ import { GenericMeasurementHistoryWriter } from './generic-measurements/generic-
     },
     {
       provide: GenericMeasurementHistoryWriter,
-      inject: [PostgresGenericMeasurementRepository, TELEMETRY_CONFIG],
-      useFactory: (repository: PostgresGenericMeasurementRepository | null, config: TelemetryConfig) =>
-        new GenericMeasurementHistoryWriter(repository, config.historyEnabled, config.historyPolicies),
+      inject: [PostgresGenericMeasurementRepository, TELEMETRY_CONFIG, GenericMeasurementHistoryOutbox],
+      useFactory: (repository: PostgresGenericMeasurementRepository | null, config: TelemetryConfig, outbox: GenericMeasurementHistoryOutbox) =>
+        new GenericMeasurementHistoryWriter(repository, config.historyEnabled, config.historyPolicies, outbox, config.replayIntervalMs),
     },
+    GenericMeasurementHistoryOutbox,
     TelemetryStore,
     TelemetrySpool,
     TelemetryIngestService,

@@ -141,6 +141,7 @@ describe('MqttBrokerAttributionService', () => {
         ipAddress: '192.168.1.44',
         deviceReportedMacAddress: '78:ee:4c:cf:4b:54',
       }),
+      { tenantId: 'tenant', siteId: 'site' },
     )
     expect(memory.recordIdentityObservation.mock.calls[0][1]).not.toHaveProperty('macAddress')
     expect(inventory.recordMqttPublisherEvidence.mock.calls[0][1].clientId).not.toBe(protocolId)

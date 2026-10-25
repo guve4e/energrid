@@ -30,6 +30,49 @@ export class PortalDeviceMeasurementsService {
     private readonly repository: PostgresGenericMeasurementRepository | null,
   ) {}
 
+  async readModel(scope: DeviceMeasurementScope, deviceId: string) {
+    const model = await this.intelligence.readDeviceModel(scope, deviceId);
+    if (!model) throw new NotFoundException('Enrolled device was not found');
+    if (model.installation.status === 'not_enrolled') return model;
+    const canonicalDeviceId = model.identity.id;
+    const metrics = model.history.authorizedMetrics;
+    let summaries: Awaited<ReturnType<PostgresGenericMeasurementRepository['summarize']>> = [];
+    let historyStatus: 'available' | 'empty' | 'unknown' | 'unavailable' = 'empty';
+    if (metrics.length) {
+      if (!this.repository) {
+        historyStatus = 'unavailable';
+      } else {
+        try {
+          summaries = await this.repository.summarize({ ...scope, deviceId: canonicalDeviceId, metrics });
+          historyStatus = summaries.length ? 'available'
+            : metrics.some(metric => !CORE_MEASUREMENT_DEFINITIONS.some(definition => definition.metric === metric))
+              ? 'unknown' : 'empty';
+        } catch {
+          historyStatus = 'unavailable';
+        }
+      }
+    }
+    const byMetric = new Map(summaries.map(item => [item.metric, item]));
+    return {
+      ...model,
+      history: {
+        ...model.history,
+        availability: historyStatus,
+        streams: metrics.map(metric => {
+          const summary = byMetric.get(metric);
+          return {
+            metric,
+            status: historyStatus === 'unavailable' ? 'unavailable' as const
+              : summary ? 'available' as const
+                : CORE_MEASUREMENT_DEFINITIONS.some(definition => definition.metric === metric)
+                  ? 'empty' as const : 'unknown' as const,
+            ...(summary ? { count: summary.count, oldest: summary.oldest, newest: summary.newest } : {}),
+          };
+        }),
+      },
+    };
+  }
+
   async current(scope: DeviceMeasurementScope, deviceId: string) {
     const device = await this.intelligence.describeDevice(scope, deviceId);
     if (!device || device.deviceId !== deviceId) throw new NotFoundException('Enrolled device was not found');

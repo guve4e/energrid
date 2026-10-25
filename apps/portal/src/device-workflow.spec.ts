@@ -121,6 +121,32 @@ async function render(path: string, fetch: unknown, authenticated = true) {
   await flushPromises();
 }
 describe('device onboarding page workflow with mocked services', () => {
+  it('offers the authorized sites and submits only the selected site ID', async () => {
+    const state = {
+      ...data(),
+      sites: [
+        { id: 'site-home', name: 'Home', gatewayIds: [], deviceCount: 5, systemCount: 5 },
+        { id: 'site-device-lab', name: 'Virtual Device Lab', gatewayIds: [], deviceCount: 0, systemCount: 0 },
+      ],
+    };
+    const fetch = vi.fn(async (url: string, options?: RequestInit) => {
+      if (url === '/portal/state') return { ok: true, json: async () => structuredClone(state) };
+      if (url === '/portal/site-selection') return { ok: true, json: async () => ({}) };
+      if (url === '/portal/devices/enrollments') return { ok: true, json: async () => ({ enrollments: [] }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    await render('/network-intelligence/', fetch);
+
+    const selector = page!.find('select[aria-label="Select site"]');
+    expect(selector.findAll('option').map(option => option.text())).toEqual(['Home', 'Virtual Device Lab']);
+    await selector.setValue('site-device-lab');
+    await flushPromises();
+
+    const call = fetch.mock.calls.find(([url]) => url === '/portal/site-selection');
+    expect(call?.[1]).toEqual(expect.objectContaining({ method: 'POST' }));
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({ siteId: 'site-device-lab' });
+  });
+
   it('loads network snapshots and configured scopes after signing into Network Intelligence', async () => {
     localStorage.clear();
     const state = { ...data(), networkZones: [{ id: 'lan', name: 'LAN', cidr: '192.168.7.0/24', seedIps: [] }] };
@@ -141,6 +167,30 @@ describe('device onboarding page workflow with mocked services', () => {
     expect(page!.text()).toContain('LAN · 192.168.7.0/24');
     expect(page!.text()).not.toContain('Network snapshots unavailable');
     expect(fetch.mock.calls.some(([url]) => url === '/portal/network/capabilities')).toBe(true);
+  });
+
+  it('requires a target-specific confirmation for Virtual Lab and submits only its configured addresses', async () => {
+    const zones = [{
+      id: 'device-lab-vlan', name: 'Virtual Lab LAN', cidr: '172.30.250.0/28',
+      interfaceName: 'eth0', seedIps: ['172.30.250.10', '172.30.250.11'], collectionSource: 'virtual-lab' as const,
+    }]
+    const state = { ...data(), networkZones: zones }
+    const fetch = vi.fn(async (url: string, options?: RequestInit) => {
+      if (url === '/portal/network/scan') return { ok: true, json: async () => scanResult([], zones) }
+      if (url === '/portal/state') return { ok: true, json: async () => structuredClone(state) }
+      if (url === '/portal/devices/enrollments') return { ok: true, json: async () => ({ enrollments: [] }) }
+      if (url === '/portal/network/capabilities') return { ok: true, json: async () => ({ nmap: { available: true, enabled: true }, observer: null }) }
+      return { ok: true, json: async () => ({}) }
+    })
+    await render('/network-intelligence/', fetch)
+
+    await button('Scan network').trigger('click')
+    await flushPromises()
+
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('only the 2 configured Virtual Lab device address(es): 172.30.250.10, 172.30.250.11'))
+    const scanCall = fetch.mock.calls.find(([url]) => url === '/portal/network/scan')
+    expect(JSON.parse(String(scanCall?.[1]?.body))).toEqual({ scopeIds: ['device-lab-vlan'], fullSubnetConfirmed: true })
+    expect(JSON.stringify(scanCall?.[1]?.body)).not.toContain('192.168.')
   });
 
   it('shows backend network identity evidence and an explicit missing-evidence reason in Pending Enrollment', async () => {

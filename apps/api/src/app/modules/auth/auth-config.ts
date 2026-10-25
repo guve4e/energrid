@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common'
+import { networkInterfaces, type NetworkInterfaceInfo } from 'node:os'
 
 export interface AuthConfiguration {
   production: boolean
@@ -49,6 +50,7 @@ export class AuthConfig {
       throw new Error('Set AUTH_JWT_ACTIVE_KID=local in local development configuration')
     }
     const trustedOrigins = parseOrigins(environment.AUTH_TRUSTED_ORIGINS, production)
+    for (const origin of macLabLanOrigins(environment, networkInterfaces())) trustedOrigins.add(origin)
     this.value = { production, issuer, audience, activeKeyId, signingKeys, trustedOrigins, accessLifetimeSeconds: 900 }
   }
 }
@@ -72,3 +74,31 @@ function parseOrigins(value: string | undefined, production: boolean): Set<strin
   return new Set(parsed)
 }
 
+
+/** Exact private-LAN origins for the isolated Mac LAB portal. This is deliberately
+ * tied to the loopback-only local auth database and local signing key; it cannot
+ * enable LAN origins in production or on a production database. */
+export function macLabLanOrigins(
+  environment: NodeJS.ProcessEnv,
+  interfaces: NodeJS.Dict<NetworkInterfaceInfo[]> = networkInterfaces(),
+): string[] {
+  if (environment.NODE_ENV === 'production' || environment.AUTH_JWT_ACTIVE_KID !== 'local' ||
+      environment.AUTH_JWT_ISSUER !== 'energrid-local') return []
+  let database: URL
+  try { database = new URL(environment.AUTH_DATABASE_URL || '') } catch { return [] }
+  if (!['127.0.0.1', '[::1]'].includes(database.hostname) || database.port !== '5432' ||
+      database.pathname !== '/energrid_auth_local') return []
+  const addresses = new Set<string>()
+  for (const entries of Object.values(interfaces)) for (const entry of entries || []) {
+    if (entry.internal || entry.family !== 'IPv4' || !isPrivateLanIpv4(entry.address)) continue
+    addresses.add(entry.address)
+  }
+  return [...addresses].map(address => `http://${address}:4300`)
+}
+
+function isPrivateLanIpv4(address: string): boolean {
+  const octets = address.split('.').map(Number)
+  if (octets.length !== 4 || octets.some(value => !Number.isInteger(value) || value < 0 || value > 255)) return false
+  return octets[0] === 10 || octets[0] === 192 && octets[1] === 168 ||
+    octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31
+}

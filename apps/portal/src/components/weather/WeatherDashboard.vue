@@ -33,6 +33,12 @@ interface RiverScore {
   rmseCm: number | null; biasCm: number | null; rangeHitPct: number | null;
   directionAccuracyPct: number | null; verificationVersion: string; observationTimeBasis: string;
 }
+interface InvestigatorFinding {
+  id: string; eventType: string; startsAt: string; endsAt: string; location: string; severity: string;
+  confidence: string; uncertainty: string; evidenceRefs: string[]; consequences: string[]; preparation: string[];
+  explanationBg: string; reasoningSummary: string; provider: string; model: string; notificationState: string;
+  firstNotifiedAt: string | null; lastUpdatedAt: string;
+}
 const dashboard = ref<Dashboard | null>(null);
 const selectedDate = ref<string | null>(null);
 const selectedDay = computed(() => {
@@ -44,6 +50,9 @@ const selectedDetail = computed(() => dashboard.value?.dayDetails?.find(detail =
 const weather = ref<{ status: string; summary: WeatherScore[]; pending?: { scheduled: number; awaitingObservations: number }; note?: string; daily?: DailyPerformance; collection?: ObservationCollection } | null>(null);
 const river = ref<{ status?: string; summary: RiverScore[]; note?: string } | null>(null);
 const errors = ref<Record<string, string>>({});
+const findings = ref<InvestigatorFinding[]>([]);
+const investigationBusy = ref(false);
+const investigationMessage = ref('');
 const loading = ref(false);
 const lastRefresh = ref<string | null>(null);
 let controller: AbortController | undefined;
@@ -107,7 +116,7 @@ async function refresh() {
   controller = new AbortController();
   const timeout = setTimeout(() => controller?.abort(), 25000);
   try {
-    const results = await Promise.allSettled(['dashboard','performance','river-performance'].map(async endpoint => {
+    const results = await Promise.allSettled(['dashboard','performance','river-performance','investigator/findings'].map(async endpoint => {
       const response = await authFetch(`${props.apiBase}/portal/weather/${endpoint}`, {
         headers: { Authorization: `Bearer ${props.accessToken}` }, signal: controller!.signal,
       });
@@ -121,9 +130,37 @@ async function refresh() {
     dashboard.value = results[0].status === 'fulfilled' ? results[0].value : null;
     weather.value = results[1].status === 'fulfilled' ? results[1].value : null;
     river.value = results[2].status === 'fulfilled' ? results[2].value : null;
+    findings.value = results[3].status === 'fulfilled' ? results[3].value as InvestigatorFinding[] : [];
+    if (results[3].status === 'rejected') nextErrors['3'] = String(results[3].reason?.message || results[3].reason);
     errors.value = nextErrors;
     lastRefresh.value = new Date().toISOString();
   } finally { clearTimeout(timeout); loading.value = false; }
+}
+async function runInvestigation() {
+  if (investigationBusy.value) return;
+  investigationBusy.value = true;
+  investigationMessage.value = '';
+  try {
+    const response = await authFetch(`${props.apiBase}/portal/weather/investigator/run`, {
+      method: 'POST', headers: { Authorization: `Bearer ${props.accessToken}` },
+    });
+    if (!response.ok) throw new Error(await weatherErrorMessage(response));
+    const result = await response.json() as { status?: string; provider?: string; model?: string; summary?: string };
+    investigationMessage.value = result.status === 'completed'
+      ? `Оценката приключи · ${result.provider}/${result.model}. ${result.summary || ''}`
+      : `Статус: ${result.status || 'неизвестен'}`;
+    await refresh();
+  } catch (cause) {
+    investigationMessage.value = cause instanceof Error ? cause.message : 'Разследването не е достъпно.';
+  } finally { investigationBusy.value = false; }
+}
+async function updateFinding(finding: InvestigatorFinding, action: 'acknowledged' | 'dismissed') {
+  const response = await authFetch(`${props.apiBase}/portal/weather/investigator/findings/${encodeURIComponent(finding.id)}/acknowledge`, {
+    method: 'POST', headers: { Authorization: `Bearer ${props.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action }),
+  });
+  if (!response.ok) throw new Error(await weatherErrorMessage(response));
+  await refresh();
 }
 onMounted(() => { void refresh(); timer = setInterval(() => { void refresh(); }, 5 * 60000); });
 onBeforeUnmount(() => { disposed = true; controller?.abort(); if (timer) clearInterval(timer); });
@@ -137,6 +174,28 @@ onBeforeUnmount(() => { disposed = true; controller?.abort(); if (timer) clearIn
       <button type="button" :disabled="loading" @click="refresh">{{ loading ? 'Refreshing…' : 'Refresh' }}</button>
     </header>
     <p class="weather-muted">Last refresh attempt: {{ time(lastRefresh) }} · Automatic device actions are disabled.</p>
+
+    <section aria-labelledby="weather-investigator">
+      <div class="section-title"><h3 id="weather-investigator">Предупреждения за времето</h3>
+        <button type="button" :disabled="investigationBusy" @click="runInvestigation">{{ investigationBusy ? 'Проверявам…' : 'Run investigation' }}</button>
+      </div>
+      <p v-if="investigationMessage" class="weather-muted" role="status">{{ investigationMessage }}</p>
+      <p v-if="errors['3']" class="weather-notice" role="alert">{{ errors['3'] }}</p>
+      <p v-else-if="!findings.length" class="weather-muted">Няма активни предупреждения. Официалните метеорологични сигнали не се поддържат от текущия източник.</p>
+      <article v-for="finding in findings" :key="finding.id" class="weather-notice" :class="{ caution: finding.severity === 'high' || finding.severity === 'severe' }">
+        <strong>{{ finding.explanationBg }}</strong>
+        <p>{{ finding.startsAt ? `Очакван период: ${time(finding.startsAt)} – ${time(finding.endsAt)}` : '' }}</p>
+        <p v-if="finding.consequences.length">Възможни последици: {{ finding.consequences.join(' ') }}</p>
+        <p v-if="finding.preparation.length">Подготовка: {{ finding.preparation.join(' ') }}</p>
+        <p>{{ finding.uncertainty }}</p>
+        <small>Източник: {{ finding.provider }}/{{ finding.model }} · Обновено: {{ time(finding.lastUpdatedAt) }} · Доказателства: {{ finding.evidenceRefs.join(', ') }}</small>
+        <p v-if="finding.notificationState === 'prepared'" class="finding-actions">
+          <button type="button" @click="updateFinding(finding, 'acknowledged')">Разбрах</button>
+          <button type="button" @click="updateFinding(finding, 'dismissed')">Скрий</button>
+        </p>
+        <p v-else class="weather-muted">{{ finding.notificationState === 'acknowledged' ? 'Потвърдено' : 'Скрито' }}</p>
+      </article>
+    </section>
 
     <p v-if="errors['0']" class="weather-notice" role="alert">Current forecast: {{ errors['0'] }}</p>
     <p v-else-if="!dashboard && loading" role="status">Loading forecast sources…</p>

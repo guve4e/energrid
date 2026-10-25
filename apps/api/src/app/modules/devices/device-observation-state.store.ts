@@ -134,8 +134,9 @@ function evidenceFingerprint(
     .update(
       canonicalJson({
         deviceId: input.binding?.deviceId,
-        sourceId: input.binding?.sourceId,
-        selector: input.context.selector,
+        // evidenceId is the stable physical sample identity. The same sample
+        // can arrive over approved HTTP and MQTT bindings, whose provenance
+        // differs while their normalized field payload is identical.
         payload: input.payload,
       }),
     )

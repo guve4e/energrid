@@ -9,7 +9,10 @@ import { ApprovedMqttObservationRuntime } from './mqtt/approved-mqtt-observation
 import {
   ENERGRID_HTTP_OBSERVATION_SOURCE,
   ENERGRID_HTTP_STATUS_SELECTOR,
+  ENERGRID_SAMPLE_CURSOR_SOURCE,
+  energridFirmwareSampleEvidenceId,
   parseEnergridHttpSample,
+  resolveEnrolledEnergridHttpEndpoint,
   resolveEnergridHttpEndpoint,
 } from './adapters/inbound/energrid/energrid-http-observation.adapter'
 import { parseEnergridIdentity } from './adapters/outbound/network/energrid-http-identity.adapter'
@@ -51,7 +54,9 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
 
     try {
       const devices = this.registry
-        .getDevices()
+        // Poll approved installations for every authorized site, regardless
+        // of which site a Portal user currently has selected.
+        .getDevices(true)
         .filter((device) => device.trustStatus === 'approved')
         // Energrid's adapter stays unconfigured until observation approval.
         // Its persisted installation binding is checked by trusted ingress.
@@ -138,31 +143,72 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
 
     let records: KnownNetworkDevice[]
     try {
-      records = await this.discovery.listIdentityEvidence()
+      records = await this.discovery.listIdentityEvidence(scope)
     } catch {
       this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'unknown', observedAt: new Date().toISOString() })
       this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=trusted_identity_evidence_unavailable`)
       return
     }
-    const endpoint = resolveEnergridHttpEndpoint(device, records, this.lanDiscovery?.getZones() || [])
+    const networkScope = String(device.metadata?.networkScope || '')
+    // The last selected/scanned scope is transient UI state. Resolve every
+    // installation against its configured scope so a Lab scan cannot hide a
+    // Home endpoint (or vice versa) from the scheduled poller.
+    const scannedZones = this.lanDiscovery?.getZones() || []
+    const configuredZone = this.lanDiscovery?.getConfiguredZone?.(networkScope) ||
+      scannedZones.find(zone => zone.id === networkScope)
+    const endpointZones = configuredZone ? [configuredZone] : scannedZones
+    // Discovery Memory may be absent (for example, a legacy installation
+    // whose scan history is intentionally unscoped). Revalidate only the
+    // enrolled installation's saved target within its configured zone; this
+    // candidate is not trusted until its exact firmware identity is checked.
+    const endpoint = resolveEnergridHttpEndpoint(device, records, endpointZones) ||
+      resolveEnrolledEnergridHttpEndpoint(device, endpointZones)
     if (!endpoint) {
       this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'unknown', observedAt: new Date().toISOString() })
       this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=verified_endpoint_missing_or_out_of_scope`)
       return
     }
 
+    const virtualLabPoll = configuredZone?.collectionSource === 'virtual-lab'
+    if (virtualLabPoll) {
+      try {
+        const configuredTarget = new URL(device.adapter.target!)
+        if (configuredTarget.protocol !== 'http:' || (configuredTarget.port && configuredTarget.port !== '80')) {
+          throw new Error('virtual_lab_target_not_configured')
+        }
+      } catch {
+        this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'unknown', observedAt: new Date().toISOString() })
+        this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=virtual_lab_target_not_configured`)
+        return
+      }
+    }
+
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), httpPollTimeoutMs())
+    // The fixed remote reader includes Docker/SSH startup as well as two
+    // bounded GETs, while local Home sensors keep their existing HTTP timeout.
+    const timeout = setTimeout(() => controller.abort(), virtualLabPoll ? 12_000 : httpPollTimeoutMs())
     let phase: 'identity' | 'status' | 'observation' = 'identity'
     try {
-      const identityResponse = await fetch(endpoint.identityUrl, {
-        signal: controller.signal,
-        redirect: 'manual',
-        headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
-      })
-      if (identityResponse.status >= 300 && identityResponse.status < 400) throw new Error('identity_redirect_rejected')
-      if (!identityResponse.ok) throw new Error(`identity_http_${identityResponse.status}`)
-      const identityPayload: unknown = await readJsonResponse(identityResponse, 4 * 1024)
+      const virtualEvidence = virtualLabPoll
+        ? await this.lanDiscovery!.readVirtualLabEnergridHttpEvidence(
+          networkScope, endpoint.record.device.ipAddress, physicalId, controller.signal,
+        )
+        : null
+      let identityPayload: unknown
+      if (virtualEvidence) {
+        if (virtualEvidence.identity.status >= 300 && virtualEvidence.identity.status < 400) throw new Error('identity_redirect_rejected')
+        if (virtualEvidence.identity.status !== 200) throw new Error(`identity_http_${virtualEvidence.identity.status}`)
+        identityPayload = virtualEvidence.identity.body
+      } else {
+        const identityResponse = await fetch(endpoint.identityUrl, {
+          signal: controller.signal,
+          redirect: 'manual',
+          headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
+        })
+        if (identityResponse.status >= 300 && identityResponse.status < 400) throw new Error('identity_redirect_rejected')
+        if (!identityResponse.ok) throw new Error(`identity_http_${identityResponse.status}`)
+        identityPayload = await readJsonResponse(identityResponse, 4 * 1024)
+      }
       const identity = parseEnergridIdentity(identityPayload)
       if (!identity) {
         this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'offline', observedAt: new Date().toISOString() })
@@ -170,7 +216,10 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         return
       }
       if (identity.id !== physicalId) {
-        this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'offline', observedAt: new Date().toISOString() })
+        // The endpoint answered, but it is not the enrolled physical device.
+        // Keep device reachability unknown instead of labeling it offline or
+        // allowing the reused address to supply measurements.
+        this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'unknown', observedAt: new Date().toISOString() })
         this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=firmware_identity_mismatch`)
         return
       }
@@ -197,7 +246,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
           ],
         }
         try {
-          await this.discovery!.recordIdentityObservation(observedAt, refreshed)
+          await this.discovery!.recordIdentityObservation(observedAt, refreshed, scope)
           this.logger.log(`[DEVICE HTTP POLL] ${device.id} identity_refreshed scope=${device.metadata?.networkScope} observedAt=${observedAt}`)
         } catch {
           throw new Error('identity_evidence_persistence_failed')
@@ -206,13 +255,21 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'online', observedAt: new Date().toISOString() })
 
       phase = 'status'
-      const statusResponse = await fetch(endpoint.statusUrl, {
-        signal: controller.signal,
-        redirect: 'error',
-        headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
-      })
-      if (!statusResponse.ok) throw new Error(`status_http_${statusResponse.status}`)
-      const payload: unknown = await readJsonResponse(statusResponse)
+      let payload: unknown
+      if (virtualEvidence) {
+        if (!virtualEvidence.status) throw new Error('status_not_requested_identity_mismatch')
+        if (virtualEvidence.status.status >= 300 && virtualEvidence.status.status < 400) throw new Error('status_http_redirect_rejected')
+        if (virtualEvidence.status.status !== 200) throw new Error(`status_http_${virtualEvidence.status.status}`)
+        payload = virtualEvidence.status.body
+      } else {
+        const statusResponse = await fetch(endpoint.statusUrl, {
+          signal: controller.signal,
+          redirect: 'error',
+          headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
+        })
+        if (!statusResponse.ok) throw new Error(`status_http_${statusResponse.status}`)
+        payload = await readJsonResponse(statusResponse)
+      }
       const parsed = parseEnergridHttpSample(payload, physicalId)
       if (!parsed.accepted) {
         this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'online', observedAt: new Date().toISOString() })
@@ -222,9 +279,11 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       }
 
       phase = 'observation'
-      const evidenceId = await this.observations.sourceSampleEvidenceId(
-        scope, device.id, ENERGRID_HTTP_OBSERVATION_SOURCE, parsed.sample.counters,
-      )
+      const evidenceId = parsed.sample.sampleId
+        ? energridFirmwareSampleEvidenceId(physicalId, parsed.sample.sampleId)
+        : await this.observations.sourceSampleEvidenceId(
+          scope, device.id, ENERGRID_SAMPLE_CURSOR_SOURCE, parsed.sample.counters,
+        )
       if (!evidenceId) {
         this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=observation_store_unavailable`)
         return

@@ -22,6 +22,7 @@ import type {
   SiteSystem,
 } from '../devices/device-registry.types';
 import type { PendingDeviceIdentityProjection } from './pending-device-identity.projection';
+import { configuredPortalSite } from './portal-site-context';
 
 export interface PortalState {
   pendingDeviceIdentities?: Record<string, PendingDeviceIdentityProjection>;
@@ -81,6 +82,7 @@ export class PortalStateService {
   ) {}
 
   getState(): PortalState {
+    const activeSite = configuredPortalSite();
     this.investigation.analyze({
       networkDevices: this.lanDiscovery.getLastScan(),
       registeredDevices: this.deviceRegistry.getSnapshot().devices,
@@ -92,15 +94,13 @@ export class PortalStateService {
 
     return {
       tenant: {
-        id: process.env.PORTAL_TENANT_ID || 'tenant-demo',
+        id: activeSite.tenantId,
         name: process.env.PORTAL_TENANT_NAME || 'Energrid Demo',
       },
       site: {
         id: registry.site.id,
         name: registry.site.name,
-        mode:
-          (process.env.PORTAL_SITE_MODE as PortalState['site']['mode']) ||
-          'home',
+        mode: activeSite.mode,
       },
       sites: registry.sites,
       gateways: registry.gateways,

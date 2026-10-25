@@ -8,6 +8,7 @@ import {
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DeviceRegistryService } from './device-registry.service';
+import { configuredPortalSite } from '../portal/portal-site-context';
 import {
   parseDeviceControlBinding,
   deviceControlState,
@@ -71,14 +72,13 @@ export class DeviceControlService {
     }
 
     const device = this.findDevice(deviceId);
+    const site = configuredPortalSite();
     if (!device)
       throw new NotFoundException(`Device ${deviceId} was not found.`);
 
     if (
       device.trustStatus !== 'approved' ||
-      device.tenantId !== (process.env.PORTAL_TENANT_ID || 'tenant-demo') ||
-      device.siteId !==
-        (process.env.PORTAL_SITE_ID || process.env.HOME_SITE_ID || 'site-home')
+      device.tenantId !== site.tenantId || device.siteId !== site.siteId
     )
       throw new ForbiddenException(
         'Control is limited to approved devices in this site.',
@@ -141,13 +141,12 @@ export class DeviceControlService {
     action: DeviceCapabilityAction,
     seen: Set<string>,
   ): string | null {
+    const site = configuredPortalSite();
     if (seen.has(device.id))
       return 'Circular device group; no command was sent.';
     if (
       device.trustStatus !== 'approved' ||
-      device.tenantId !== (process.env.PORTAL_TENANT_ID || 'tenant-demo') ||
-      device.siteId !==
-        (process.env.PORTAL_SITE_ID || process.env.HOME_SITE_ID || 'site-home')
+      device.tenantId !== site.tenantId || device.siteId !== site.siteId
     )
       return 'Every group member must be approved in this site.';
     if (!deviceSupportsAction(device, action))

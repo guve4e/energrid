@@ -14,6 +14,7 @@ import {
 } from '@energrid/domain-devices';
 import { ShellyHttpControl } from './adapters/outbound/shelly-http-control';
 import { DeviceRegistryService } from './device-registry.service';
+import { configuredPortalSite } from '../portal/portal-site-context';
 import { DeviceLanDiscoveryService } from './device-lan-discovery.service';
 import { DeviceMqttIngestService } from './device-mqtt-ingest.service';
 import type { RegisteredDevice } from './device-registry.types';
@@ -32,14 +33,13 @@ export class DeviceDiagnosticsService {
   ) {}
 
   check(deviceId: string): Promise<DeviceConnectionReport> {
+    const site = configuredPortalSite();
     const devices = this.registry.getDevices();
     const device = devices.find((d) => d.id === deviceId);
     if (!device) throw new NotFoundException('Device not found.');
     if (
       device.trustStatus !== 'approved' ||
-      device.tenantId !== (process.env.PORTAL_TENANT_ID || 'tenant-demo') ||
-      device.siteId !==
-        (process.env.PORTAL_SITE_ID || process.env.HOME_SITE_ID || 'site-home')
+      device.tenantId !== site.tenantId || device.siteId !== site.siteId
     )
       throw new ForbiddenException(
         'Connection checks are limited to approved devices in this site.',

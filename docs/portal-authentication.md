@@ -31,6 +31,14 @@ The checked-in `.idea/workspace.xml` currently has `api`, `core`, `portal`, and 
 
 If `.env.auth.local` is missing, development API startup fails explicitly because JWT keys are required; it never invents a shared fallback key. The setup file is ignored and must remain local. Remove a local account with the administrator recovery workflow or delete the isolated local database only when you intend to discard local account/session data.
 
+### Android tablet and Mac LAB
+
+The Android dashboard must load from a trusted **Portal browser origin**, not the raw API host. The API IP `http://192.168.1.60` is not itself the production Portal origin; the Pi's public Portal redirect identifies `https://portal.energrid.bg`. The Android app defaults to that HTTPS Portal origin. Its bundled dashboard is served at that origin, so login, same-origin API calls, secure refresh cookies, and CSRF checks use the same host as the working Portal.
+
+For isolated Mac LAB use, the local API adds exact `http://<Mac-private-IPv4>:4300` origins only when all local-auth markers match: a non-production process, the loopback `energrid_auth_local` database, the `local` signing key ID, and the `energrid-local` issuer. It never discovers or adds LAN origins in production. Start the API with `pnpm api` and serve the Portal to the tablet with `pnpm portal:local:lan`; set the tablet's Portal address once to the Mac's current LAN address on port `4300`. The local account database remains separate from Pi accounts. No development login bypass is installed.
+
+Android WebView accepts cookies explicitly and flushes them when the app pauses and after login/refresh. Access tokens remain in memory; the HttpOnly refresh cookie restores or renews the session. The dashboard now attempts one normal refresh after an expired access token before showing the sign-in screen.
+
 ## HTTP contract and authorization
 
 - `POST /auth/login`: exact trusted `Origin`; generic invalid-credential response; returns a short access token and safe profile, and sets the refresh and CSRF cookies.

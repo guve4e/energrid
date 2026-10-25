@@ -235,4 +235,54 @@ describe('Approved ESP8266 MQTT observation integration', () => {
       router.subscriptions('energrid/tenant-home/site-home'),
     ).toContain('devices/temp-kitchen/data');
   });
+
+  it('sends only a matching fresh Lab ESP sample through shared observation ingress', async () => {
+    const deviceId = 'device:device-lab-vlan:esp8266:a1b2c3';
+    const scope = { tenantId: 'tenant-demo', siteId: 'site-device-lab' };
+    const topic = `energrid/tenant-demo/site-device-lab/devices/${deviceId}/telemetry`;
+    const sourceId = 'energrid-lab-mqtt';
+    const sampleId = '0123456789abcdef0123456789abcdef:7:30000';
+    const sample = {
+      schemaVersion: 1, deviceId: 'esp8266:a1b2c3', sampleId,
+      uptimeMs: 35_000, sampleIntervalMs: 5_000,
+      sensor: { state: 'ok', sampleCount: 7, lastSampleUptimeMs: 30_000, readingAgeMs: 5_000, temperatureC: 28.25, humidityPct: 48 },
+    };
+    const mqttBinding = {
+      deviceId, sourceId, selector: topic,
+      fields: {
+        temperature: { rawKey: 'temperatureC', type: 'number' as const },
+        humidity: { rawKey: 'humidityPct', type: 'number' as const },
+      },
+    };
+    const mqttPolicy = { deviceId, allowedSourcesByField: { temperature: [sourceId], humidity: [sourceId] } };
+    const ingress = { ingestConfiguredMqtt: jest.fn().mockResolvedValue({
+      outcome: 'processed', accepted: true, reason: 'accepted', state: { fields: { temperature: { value: 28.25 }, humidity: { value: 48 } } },
+    }) };
+    const registry = {
+      getDevices: jest.fn().mockReturnValue([{
+        id: deviceId, tenantId: scope.tenantId, siteId: scope.siteId, kind: 'physical', trustStatus: 'approved',
+        metadata: { physicalId: 'esp8266:a1b2c3' },
+      }]),
+      projectApprovedObservation: jest.fn(), claimApprovedObservationFields: jest.fn(), restoreApprovedObservation: jest.fn(),
+    };
+    const route = new ApprovedMqttObservationRoute(
+      registry as never, store, [{ scope, binding: mqttBinding, policy: mqttPolicy, expectedDeviceIdentity: 'esp8266:a1b2c3' }],
+      { get: jest.fn().mockResolvedValue({ schemaVersion: 1, device: { ...registry.getDevices()[0], tenantId: scope.tenantId, siteId: scope.siteId, trustStatus: 'approved' } }) } as never,
+      { find: jest.fn().mockResolvedValue({ status: 'enrolled' }) } as never,
+      ingress as never,
+    );
+    const message = { topic, payload: sample, payloadText: JSON.stringify(sample) };
+    await expect(route.process(message)).resolves.toEqual({ outcome: 'admitted' });
+    expect(ingress.ingestConfiguredMqtt).toHaveBeenCalledWith(expect.objectContaining({
+      scope, deviceId, sourceId, selector: topic, payload: { temperatureC: 28.25, humidityPct: 48 },
+      evidenceId: `energrid-device-sample:esp8266:a1b2c3:${sampleId}`,
+    }), expect.objectContaining({ binding: mqttBinding, policy: mqttPolicy }));
+    expect(registry.projectApprovedObservation).toHaveBeenCalled();
+
+    await expect(route.process({ ...message, payload: { ...sample, deviceId: 'esp8266:ffffff' } }))
+      .resolves.toMatchObject({ outcome: 'rejected', reasonCode: 'publisher_identity_mismatch' });
+    await expect(route.process({ ...message, payload: { ...sample, sensor: { ...sample.sensor, readingAgeMs: 20_000 } } }))
+      .resolves.toMatchObject({ outcome: 'rejected', reasonCode: 'invalid_sample' });
+    expect(ingress.ingestConfiguredMqtt).toHaveBeenCalledTimes(1);
+  });
 });

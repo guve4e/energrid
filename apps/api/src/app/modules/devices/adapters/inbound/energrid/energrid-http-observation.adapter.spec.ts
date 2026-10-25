@@ -1,5 +1,5 @@
 import { energridHttpObservationApproval } from './energrid-http-observation-approval';
-import { parseEnergridHttpSample, resolveEnergridHttpEndpoint } from './energrid-http-observation.adapter';
+import { parseEnergridHttpSample, resolveEnrolledEnergridHttpEndpoint, resolveEnergridHttpEndpoint } from './energrid-http-observation.adapter';
 import type { KnownNetworkDevice } from '../../../device-discovery-memory.store';
 import type { NetworkDiscoveryZone, RegisteredDevice } from '../../../device-registry.types';
 
@@ -64,6 +64,15 @@ describe('Energrid HTTP observation adapter', () => {
     expect(parseEnergridHttpSample({ ...status, sensor: { ...status.sensor, state: 'error', temperatureC: null } }, 'esp8266:324864')).toMatchObject({ accepted: false, reason: 'sensor_not_ok' });
   });
 
+  it('retains a validated stable firmware sample ID for cross-transport deduplication', () => {
+    const sampleId = '0123456789abcdef0123456789abcdef:6:10000';
+    expect(parseEnergridHttpSample({ ...status, sampleId }, 'esp8266:324864')).toMatchObject({
+      accepted: true, sample: { sampleId },
+    });
+    expect(parseEnergridHttpSample({ ...status, sampleId: `${sampleId}-changed` }, 'esp8266:324864'))
+      .toMatchObject({ accepted: false, reason: 'invalid_sample_identity' });
+  });
+
   it('creates explicit approval for only temperature and humidity from the Energrid status source', () => {
     const approval = energridHttpObservationApproval(device.id);
     expect(Object.keys(approval.bindings[0].fields)).toEqual(['temperature', 'humidity']);
@@ -82,5 +91,34 @@ describe('Energrid HTTP observation adapter', () => {
     expect(first?.statusUrl).toContain('192.168.1.211');
     expect(moved?.statusUrl).toContain('192.168.1.250');
     expect(changedIp.identity).toBe('device:upstream-lan:esp8266:324864');
+  });
+
+  it('offers only the enrolled last-known target for fresh identity revalidation when scan memory is missing', () => {
+    expect(resolveEnrolledEnergridHttpEndpoint(device, zones)).toMatchObject({
+      identityUrl: 'http://192.168.1.198:8080/api/v1/identity',
+      statusUrl: 'http://192.168.1.198:8080/api/v1/status',
+      identityFresh: false,
+      renewalDue: true,
+      record: {
+        ownership: { tenantId: 'tenant-a', siteId: 'site-a' },
+        identity: 'device:upstream-lan:esp8266:324864',
+        device: { ipAddress: '192.168.1.198', networkZoneId: 'upstream-lan', observations: [] },
+      },
+    });
+  });
+
+  it('rejects an enrolled target outside its configured zone or outside the fixed status endpoint', () => {
+    expect(resolveEnrolledEnergridHttpEndpoint({
+      ...device,
+      adapter: { ...device.adapter, target: 'http://192.168.2.198/api/v1/status' },
+    } as RegisteredDevice, zones)).toBeNull();
+    expect(resolveEnrolledEnergridHttpEndpoint({
+      ...device,
+      adapter: { ...device.adapter, target: 'http://192.168.1.198/private' },
+    } as RegisteredDevice, zones)).toBeNull();
+    expect(resolveEnrolledEnergridHttpEndpoint({
+      ...device,
+      metadata: { ...device.metadata, networkScope: 'another-site-scope' },
+    } as RegisteredDevice, zones)).toBeNull();
   });
 });

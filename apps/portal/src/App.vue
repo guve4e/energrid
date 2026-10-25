@@ -4,8 +4,9 @@ import { authFetch, clearAuthenticatedSession, getAccessToken, logoutRequest, on
 import NetworkDiscoveryCard from './components/discovery/NetworkDiscoveryCard.vue';
 import NetworkIntelligencePanel from './components/discovery/NetworkIntelligencePanel.vue';
 import EnergridChatWidget from './components/assistant/EnergridChatWidget.vue';
+import HomeDashboard from './components/home/HomeDashboard.vue';
 import { cloudEvidenceConsentMessage, networkEndpointInvestigationKey, type NetworkEndpointHttpProbeResult, type NetworkEndpointHttpProbeState, type NetworkEndpointIdentityRefreshResult, type NetworkEndpointIdentityRefreshState, type NetworkEndpointInvestigationState, type NetworkEndpointInvestigationResult } from './components/discovery/network-endpoint-investigation';
-import { resolveNetworkEndpointLifecycle } from './components/discovery/network-endpoint-lifecycle';
+import { resolveNetworkSnapshotLifecycles, type LifecycleDeviceRecord } from './components/discovery/network-endpoint-lifecycle';
 import PendingEnrollmentList from './components/discovery/PendingEnrollmentList.vue';
 import { buildPendingEnrollmentCards } from './components/discovery/pending-enrollment';
 import './discovery.css';
@@ -18,8 +19,7 @@ import DeviceSwitchControl from './components/devices/DeviceSwitchControl.vue';
 import DeviceConnectionDiagnostics from './components/devices/DeviceConnectionDiagnostics.vue';
 import DeviceNetworkIdentityPanel from './components/devices/DeviceNetworkIdentityPanel.vue';
 import DeviceCommissioning from './components/devices/DeviceCommissioning.vue';
-import DeviceMeasurementHistory from './components/devices/DeviceMeasurementHistory.vue';
-import DeviceObservationApproval from './components/devices/DeviceObservationApproval.vue';
+import DeviceCapabilityDetails from './components/devices/DeviceCapabilityDetails.vue';
 import DeviceFirmwareDiagnostics from './components/devices/DeviceFirmwareDiagnostics.vue';
 import {
   microphoneRequestError,
@@ -78,6 +78,7 @@ type PortalState = {
   sites?: Array<{
     id: string;
     name: string;
+    mode?: string;
     gatewayIds: string[];
     deviceCount: number;
     systemCount: number;
@@ -123,6 +124,7 @@ type PortalState = {
       actions: string[];
       unit?: string;
     }>;
+    supportedCapabilities?: Array<{ kind: string; actions: string[]; unit?: string }>;
     adapter: {
       id: string;
       protocol: string;
@@ -169,6 +171,7 @@ type PortalState = {
     interfaceName?: string;
     seedIps: string[];
     role?: string;
+    collectionSource?: 'local' | 'virtual-lab';
   }>;
   networkDevices?: Array<{
     id: string;
@@ -331,6 +334,7 @@ type PortalDevice = NonNullable<PortalState['devices']>[number];
 type NetworkDevice = NonNullable<PortalState['networkDevices']>[number];
 type NetworkSnapshot = {
   scanId: string; schemaVersion: number; startedAt: string; completedAt: string;
+  ownership?: { tenantId: string; siteId: string };
   collector: { id: string; host: string; interfaces: string[] };
   scopes: Array<{ id: string; name: string; cidr?: string; interfaceName?: string; complete: boolean; gatewayIpsObserved: string[] }>;
   methods: string[]; successes: number; failures: string[]; limitations: string[]; endpoints: NetworkDevice[];
@@ -342,11 +346,12 @@ type NetworkSnapshotDiff = {
   fromScanId: string; toScanId: string; comparableScopes: string[]; incompleteScopes: string[];
   addedEndpoints: Array<{ scopeId: string; ipAddress: string; macAddress?: string }>;
   notDetectedEndpoints: Array<{ scopeId: string; ipAddress: string; macAddress?: string }>;
-  verifiedAddressChanges: Array<{ identity: string; from: string; to: string }>;
+  verifiedAddressChanges: Array<{ scopeId?: string; identity: string; from: string; to: string }>;
   ipReuse: Array<{ scopeId: string; ipAddress: string; previousIdentity?: string; currentIdentity?: string }>;
   serviceChanges: Array<{ scopeId: string; ipAddress: string; added: string[]; removed: string[] }>;
   scopeChanges: Array<{ scopeId: string; previousCidr?: string; currentCidr?: string; previousInterface?: string; currentInterface?: string }>;
-  macChanges: Array<{ identity: string; previousObservedMac?: string; currentObservedMac?: string; previousDeviceReportedMac?: string; currentDeviceReportedMac?: string }>;
+  macChanges: Array<{ scopeId?: string; identity: string; previousObservedMac?: string; currentObservedMac?: string; previousDeviceReportedMac?: string; currentDeviceReportedMac?: string }>;
+  hostnameChanges: Array<{ scopeId?: string; identity: string; previous: string; current: string }>;
   gatewayChanges: Array<{ scopeId: string; previous: string[]; current: string[] }>;
   identityChanges: Array<{ scopeId: string; ipAddress: string; previous: string; current: string }>;
   topologyChanges: { added: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }>; removed: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }> };
@@ -499,6 +504,8 @@ const isAuthRestoring = ref(true);
 const state = ref<PortalState | null>(null);
 const loadingState = ref(false);
 const stateError = ref('');
+const siteSwitchBusy = ref(false);
+const siteSwitchError = ref('');
 const scanningNetwork = ref(false);
 const scanStartedAt = ref(0);
 const scanElapsedSeconds = ref(0);
@@ -566,8 +573,11 @@ const endpointMode = ref(
 const userMenuOpen = ref(false);
 const notificationsOpen = ref(false);
 const mobileMenuOpen = ref(false);
-const activePage = ref(pageFromPath(location.pathname));
+const standaloneHome = location.pathname.replace(/\/+$/, '') === '/d/home';
+const standaloneAssistantOpen = ref(false);
+const activePage = ref(standaloneHome ? 'home' : pageFromPath(location.pathname));
 const selectedDeviceId = ref<string | null>(null);
+const observationBindingMetrics = ref<Record<string, string[]>>({});
 const measurementApprovalRevision = ref(0);
 const installationChangesPending = ref(false);
 const selectedExecutionTraceId = ref<string | null>(null);
@@ -596,6 +606,12 @@ function handleObservationAuthorityApproved() {
     measurementApprovalRevision.value += 1;
     void loadState();
   }, 6000);
+}
+function handleDeviceObservationBindings(result: { deviceId: string; metrics: string[] }) {
+  observationBindingMetrics.value = {
+    ...observationBindingMetrics.value,
+    [result.deviceId]: result.metrics,
+  };
 }
 const logView = ref<'events' | 'interactions'>('events');
 const clientTrace = ref({
@@ -950,6 +966,7 @@ const deviceCards = computed(() => state.value?.devices || []);
 
 const enrolledDeviceKeys = ref<Set<string>>(new Set());
 const enrollmentStatuses = ref<Map<string, 'enrolled' | 'suspended' | 'retired'>>(new Map());
+const lifecycleEnrollmentRecords = ref<LifecycleDeviceRecord[]>([]);
 const enrollmentError = ref('');
 
 function deviceEnrollmentStatus(device: PortalDevice): 'enrolled' | 'suspended' | 'retired' | 'not_enrolled' | 'unknown' {
@@ -1058,13 +1075,11 @@ const enrolledPhysicalDeviceCount = computed(() => new Set(
   }),
 ).size);
 
-const networkEndpointLifecycle = computed(() => (latestNetworkSnapshot.value?.endpoints || []).map(endpoint =>
-  resolveNetworkEndpointLifecycle(
-    endpoint,
-    pendingEnrollmentCards.value,
-    enrolledInventoryDevices.value,
-    approvedDevices.value,
-  ),
+const networkEndpointLifecycle = computed(() => resolveNetworkSnapshotLifecycles(
+  networkSnapshots.value,
+  pendingEnrollmentCards.value,
+  lifecycleEnrollmentRecords.value,
+  approvedDevices.value,
 ));
 
 const deviceDiagnostics = computed(() => state.value?.deviceDiagnostics || []);
@@ -2027,6 +2042,14 @@ const selectedDevice = computed(() =>
       ) || null
     : null,
 );
+const selectedVerifiedSupport = computed(() => {
+  if (!selectedDevice.value) return [];
+  const listed = selectedDevice.value.supportedCapabilities ?? selectedDevice.value.capabilities;
+  return [...new Set([
+    ...listed.map((capability) => capability.kind),
+    ...(observationBindingMetrics.value[selectedDevice.value.id] || []),
+  ])];
+});
 const selectedDeviceTraces = computed(
   () =>
     state.value?.executionTraces
@@ -2291,6 +2314,19 @@ function setActivePage(pageId: string, syncUrl = true) {
   }
 }
 
+function openStandaloneAssistant() {
+  resetTurn();
+  voiceSetupError.value = '';
+  voiceStatus.value = 'idle';
+  standaloneAssistantOpen.value = true;
+  void loadVoiceRuns();
+}
+
+function closeStandaloneAssistant() {
+  if (recording.value) void stopRecording();
+  standaloneAssistantOpen.value = false;
+}
+
 function openPendingEnrollment(recordId?: string) {
   setActivePage('discovery');
   void nextTick(() => {
@@ -2382,14 +2418,27 @@ function renamePendingCandidate(candidateId: string) {
 async function scanNetwork(scopeIds?: string[]) {
   if (scanningNetwork.value) return;
   const availableScopes = state.value?.networkZones || [];
-  const selectedScopeIds = scopeIds?.length ? scopeIds : availableScopes.map(scope => scope.id);
+  const selectedScopeIds = scopeIds?.length
+    ? scopeIds
+    : availableScopes.filter(scope => scope.collectionSource !== 'virtual-lab').map(scope => scope.id);
   const selectedScopes = availableScopes.filter(scope => selectedScopeIds.includes(scope.id));
   if (!selectedScopeIds.length || selectedScopes.length !== new Set(selectedScopeIds).size) {
     stateError.value = 'Choose one or more configured network scopes before scanning.';
     return;
   }
-  const fullSubnetConfirmed = selectedScopes.some(scope => !!scope.cidr);
-  if (fullSubnetConfirmed && !window.confirm(`This will scan the selected subnet(s): ${selectedScopes.filter(scope => scope.cidr).map(scope => `${scope.name} ${scope.cidr}`).join(', ')}. Each subnet is limited to 254 addresses; when enabled, Nmap checks a fixed set of TCP service ports with bounded concurrency and timeouts. Continue?`)) return;
+  const virtualLabScopes = selectedScopes.filter(scope => scope.collectionSource === 'virtual-lab');
+  if (virtualLabScopes.length && virtualLabScopes.length !== selectedScopes.length) {
+    stateError.value = 'Scan the Virtual Lab separately from physical networks.';
+    return;
+  }
+  const fullSubnetSelected = selectedScopes.some(scope => !!scope.cidr && scope.collectionSource !== 'virtual-lab');
+  const virtualTargets = [...new Set(virtualLabScopes.flatMap(scope => scope.seedIps || []))];
+  const virtualLabConfirmed = virtualLabScopes.length > 0 && window.confirm(
+    `This will query only the ${virtualTargets.length} configured Virtual Lab device address(es): ${virtualTargets.join(', ')} on the isolated ${virtualLabScopes[0].cidr || 'Lab network'}. No other Lab or home-network addresses will be scanned. Continue?`,
+  );
+  if (virtualLabScopes.length && !virtualLabConfirmed) return;
+  const fullSubnetConfirmed = fullSubnetSelected || virtualLabConfirmed;
+  if (fullSubnetSelected && !window.confirm(`This will scan the selected subnet(s): ${selectedScopes.filter(scope => scope.cidr && scope.collectionSource !== 'virtual-lab').map(scope => `${scope.name} ${scope.cidr}`).join(', ')}. Each subnet is limited to 254 addresses; when enabled, Nmap checks a fixed set of TCP service ports with bounded concurrency and timeouts. Continue?`)) return;
   scanningNetwork.value = true;
   scanStartedAt.value = Date.now();
   scanElapsedSeconds.value = 0;
@@ -3096,6 +3145,7 @@ function closeMobileMenu() {
 async function loadEnrollmentMembership() {
   enrolledDeviceKeys.value = new Set();
   enrollmentStatuses.value = new Map();
+  lifecycleEnrollmentRecords.value = [];
   enrollmentError.value = '';
 
   try {
@@ -3125,6 +3175,7 @@ async function loadEnrollmentMembership() {
 
     const keys = new Set<string>();
     const statuses = new Map<string, 'enrolled' | 'suspended' | 'retired'>();
+    const lifecycleRecords: LifecycleDeviceRecord[] = [];
 
     for (const item of payload.enrollments) {
       if (
@@ -3133,7 +3184,9 @@ async function loadEnrollmentMembership() {
         typeof item.tenantId !== 'string' ||
         typeof item.siteId !== 'string' ||
         typeof item.deviceId !== 'string' ||
-        !['enrolled', 'suspended', 'retired'].includes(item.status)
+        !['enrolled', 'suspended', 'retired'].includes(item.status) ||
+        ('physicalIdentityValues' in item && (!Array.isArray(item.physicalIdentityValues) || !item.physicalIdentityValues.every((value: unknown) => typeof value === 'string'))) ||
+        ('ambiguousPhysicalIdentityValues' in item && (!Array.isArray(item.ambiguousPhysicalIdentityValues) || !item.ambiguousPhysicalIdentityValues.every((value: unknown) => typeof value === 'string')))
       ) {
         throw new Error('Invalid enrollment record');
       }
@@ -3146,6 +3199,14 @@ async function loadEnrollmentMembership() {
         ]);
         keys.add(key);
         statuses.set(key, 'enrolled');
+        lifecycleRecords.push({
+          id: item.deviceId,
+          displayName: typeof item.displayName === 'string' ? item.displayName : item.deviceId,
+          tenantId: item.tenantId,
+          siteId: item.siteId,
+          identityValues: Array.isArray(item.physicalIdentityValues) ? item.physicalIdentityValues as string[] : [],
+          ambiguousIdentityValues: Array.isArray(item.ambiguousPhysicalIdentityValues) ? item.ambiguousPhysicalIdentityValues as string[] : [],
+        });
       } else {
         statuses.set(JSON.stringify([item.tenantId, item.siteId, item.deviceId]), item.status);
       }
@@ -3153,9 +3214,11 @@ async function loadEnrollmentMembership() {
 
     enrolledDeviceKeys.value = keys;
     enrollmentStatuses.value = statuses;
+    lifecycleEnrollmentRecords.value = lifecycleRecords;
   } catch (error) {
     enrolledDeviceKeys.value = new Set();
     enrollmentStatuses.value = new Map();
+    lifecycleEnrollmentRecords.value = [];
     enrollmentError.value =
       error instanceof Error
         ? error.message
@@ -3198,6 +3261,29 @@ async function loadState() {
       error instanceof Error ? error.message : 'State unavailable';
   } finally {
     loadingState.value = false;
+  }
+}
+
+async function switchPortalSite(event: Event) {
+  const siteId = (event.target as HTMLSelectElement | null)?.value;
+  if (!siteId || siteId === state.value?.site.id) return;
+  siteSwitchBusy.value = true;
+  siteSwitchError.value = '';
+  try {
+    const response = await authFetch(`${apiBase}/portal/site-selection`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken.value}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ siteId }),
+    });
+    if (!response.ok) throw new Error('The selected site could not be opened.');
+    window.location.reload();
+  } catch (error) {
+    siteSwitchError.value = error instanceof Error ? error.message : 'The selected site could not be opened.';
+  } finally {
+    siteSwitchBusy.value = false;
   }
 }
 
@@ -3949,6 +4035,62 @@ onBeforeUnmount(() => {
     </section>
   </main>
 
+  <main v-else-if="standaloneHome" class="standalone-home-route">
+    <HomeDashboard
+      v-if="!standaloneAssistantOpen"
+      :api-base="apiBase"
+      :access-token="accessToken"
+      :native-wake-available="false"
+      :native-wake-enabled="false"
+      native-wake-status="unavailable"
+      @assistant="openStandaloneAssistant"
+    />
+
+    <section v-else class="home-assistant-screen">
+      <header class="home-assistant-header">
+        <div>
+          <span class="home-assistant-eyebrow">ENERGRID HOME</span>
+          <h1>Ask Energrid</h1>
+          <p>Задай въпрос за дома си или поискай безопасно действие.</p>
+        </div>
+        <button type="button" class="home-assistant-back" @click="closeStandaloneAssistant">Към дома</button>
+      </header>
+      <div class="home-assistant-status" :data-state="recording ? 'listening' : voiceStatus">
+        <span class="home-assistant-pulse"></span>
+        {{ recording ? 'Слушам…' : voiceStatus === 'idle' ? 'Готов за разговор' : voiceStatus }}
+      </div>
+      <p v-if="voiceSetupError" class="home-assistant-error" role="alert">{{ voiceSetupError }}</p>
+      <button
+        class="home-assistant-talk"
+        :class="{ listening: recording }"
+        :disabled="Boolean(pendingVoiceAction)"
+        type="button"
+        @pointerdown="startRecording"
+        @pointerup="stopRecording"
+        @pointercancel="stopRecording"
+        @lostpointercapture="stopRecording"
+      >
+        <span class="home-assistant-mic" aria-hidden="true">{{ recording ? '■' : '●' }}</span>
+        <strong>{{ recording ? 'Отпусни, за да изпратиш' : ['connecting', 'authenticating'].includes(voiceStatus) ? 'Свързване…' : 'Натисни и задръж' }}</strong>
+        <small>{{ recording ? 'Говори на български' : 'Натисни бутона и говори' }}</small>
+      </button>
+      <section v-if="pendingVoiceAction" class="home-assistant-approval" aria-live="assertive">
+        <div>
+          <strong>Потвърди действието</strong>
+          <ul><li v-for="(action, index) in pendingVoiceAction.actions" :key="`${action.type}:${action.deviceId}:${index}`">{{ voiceActionLabel(action) }}</li></ul>
+          <small>Нищо няма да се промени, докато не потвърдиш.</small>
+        </div>
+        <button class="home-assistant-back" type="button" @click="cancelVoiceAction">Отказ</button>
+        <button class="home-assistant-confirm" type="button" @click="confirmVoiceAction">Потвърди</button>
+      </section>
+      <p v-if="voiceActionOutcome" class="home-assistant-error" role="status">{{ voiceActionOutcome }}</p>
+      <div class="home-assistant-conversation" aria-live="polite">
+        <article><span>ТИ</span><p>{{ transcript || 'Тук ще се покаже разпознатата ти реч.' }}</p></article>
+        <article><span>ENERGRID</span><p>{{ assistant || 'Отговорът ще се появи тук и ще бъде прочетен на глас.' }}</p></article>
+      </div>
+    </section>
+  </main>
+
   <main
     v-else
     :class="['admin-shell', `theme-${theme}`, { 'menu-open': mobileMenuOpen }]"
@@ -4087,8 +4229,21 @@ onBeforeUnmount(() => {
 
       <section class="side-card">
         <span>Current site</span>
-        <strong>{{ state?.site.name || 'Home' }}</strong>
+        <label class="site-selector-label">
+          <span class="sr-only">Select site</span>
+          <select
+            :value="state?.site.id || 'site-home'"
+            :disabled="siteSwitchBusy"
+            aria-label="Select site"
+            @change="switchPortalSite"
+          >
+            <option v-for="site in state?.sites || []" :key="site.id" :value="site.id">
+              {{ site.name }}
+            </option>
+          </select>
+        </label>
         <small>{{ state?.tenant.name || 'Energrid Demo' }}</small>
+        <small v-if="siteSwitchError" role="alert">{{ siteSwitchError }}</small>
       </section>
     </aside>
 
@@ -4640,48 +4795,18 @@ onBeforeUnmount(() => {
             </div>
 
 
-            <section
-              class="device-observation-overview"
-              aria-label="Device measurements"
-            >
-              <div class="device-observation-heading">
-                <div>
-                  <span class="device-observation-eyebrow">
-                    Device overview
-                  </span>
-                  <h4>Measurements</h4>
-                </div>
-                <span class="device-observation-protocol">
-                  {{ selectedDevice.adapter.protocol.toUpperCase() }}
-                  · {{ canToggleDevice(selectedDevice) ? 'Controls available' : 'Read only' }}
-                </span>
-              </div>
-
-              <DeviceObservationApproval
-                :key="`${selectedDevice.id}-observation-approval`"
-                :device-id="selectedDevice.id"
-                :enabled="selectedDevice.adapter.driver === 'energrid-esp8266' && selectedDevice.adapter.protocol === 'http'"
-                :api-base="apiBase"
-                :access-token="accessToken"
-                @approved="handleObservationAuthorityApproved"
-              />
-
-              <DeviceMeasurementHistory
-                :key="`${selectedDevice.id}-${measurementApprovalRevision}`"
-                :device-id="selectedDevice.id"
-                :device-status="selectedDevice.state.status"
-                :api-base="apiBase"
-                :access-token="accessToken"
-              />
-
-              <p
-                v-if="selectedDevice.adapter.protocol === 'mqtt'"
-                class="device-observation-route"
-              >
-                MQTT topic:
-                <code>{{ selectedDevice.adapter.target }}</code>
-              </p>
-            </section>
+            <DeviceCapabilityDetails
+              :device="selectedDevice"
+              :api-base="apiBase"
+              :access-token="accessToken"
+              :approval-revision="measurementApprovalRevision"
+              :control-ready="canSwitchDevice(selectedDevice)"
+              :busy="deviceActionBusy[selectedDevice.id]"
+              :error="deviceActionError[selectedDevice.id]"
+              @action="sendDeviceAction(selectedDevice, $event)"
+              @approved="handleObservationAuthorityApproved"
+              @bindings="handleDeviceObservationBindings"
+            />
 
             <div class="device-setup-actions">
               <div v-if="selectedDevice.trustStatus !== 'approved'" class="device-approval-actions">
@@ -4693,7 +4818,6 @@ onBeforeUnmount(() => {
                 <h4>Member devices</h4>
                 <button v-for="id in selectedDevice.memberDeviceIds" :key="id" type="button" class="ghost" :disabled="!deviceCards.some(device => device.id === id)" @click="selectMemberDevice(id)">{{ deviceCards.find(device => device.id === id)?.displayName || id }}</button>
               </div>
-              <DeviceSwitchControl v-if="canSwitchDevice(selectedDevice)" :device="selectedDevice" :busy="deviceActionBusy[selectedDevice.id]" :error="deviceActionError[selectedDevice.id]" @action="sendDeviceAction(selectedDevice, $event)" />
               <details class="device-detail-disclosure">
                 <summary>Connection & diagnostics</summary>
                 <div class="device-detail-disclosure-content">
@@ -4717,7 +4841,7 @@ onBeforeUnmount(() => {
                     :access-token="accessToken"
                   />
                   <DeviceConnectionDiagnostics v-if="canToggleDevice(selectedDevice)" :key="selectedDevice.id" :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" />
-                  <DeviceControlSetup :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" :network-devices="networkDevices" :finding-address="scanningNetwork" :address-search-error="stateError" @find-address="scanNetwork" @saved="loadState" />
+                  <DeviceControlSetup v-if="canToggleDevice(selectedDevice)" :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" :network-devices="networkDevices" :finding-address="scanningNetwork" :address-search-error="stateError" @find-address="scanNetwork" @saved="loadState" />
                 </div>
               </details>
 
@@ -4764,17 +4888,22 @@ onBeforeUnmount(() => {
                 <dd>{{ selectedDevice.adapter.bridge }}</dd>
               </div>
               <div>
-                <dt>Capabilities</dt>
+                <dt>Verified support</dt>
                 <dd>
                   {{
-                    selectedDevice.capabilities
-                      .map(
-                        (capability) =>
-                          `${capability.kind}:${capability.actions.join('/')}`,
-                      )
-                      .join(', ')
+                    selectedVerifiedSupport.length
+                      ? selectedVerifiedSupport.join(', ')
+                      : 'Unknown — no verified capability evidence'
                   }}
                 </dd>
+              </div>
+              <div>
+                <dt>Authorized actions</dt>
+                <dd>{{ selectedDevice.capabilities.map((capability) => `${capability.kind}:${capability.actions.join('/')}`).join(', ') || 'No authorized observation or command actions' }}</dd>
+              </div>
+              <div v-if="selectedDevice.discovery || selectedDevice.metadata?.discoverySource">
+                <dt>Discovery evidence</dt>
+                <dd>{{ selectedDevice.discovery?.reason || `${selectedDevice.metadata?.discoverySource || 'Recorded discovery'} · confidence ${selectedDevice.discovery?.confidence ?? selectedDevice.metadata?.discoveryConfidence ?? 'unknown'}` }}</dd>
               </div>
               <div v-if="selectedDevice.memberDeviceIds?.length">
                 <dt>Members</dt>

@@ -218,6 +218,28 @@ describe('Device Intelligence observation ingress', () => {
     expect(Number.isNaN(Date.parse(request.context.receivedAt))).toBe(false);
   });
 
+  it('accepts a background observation for its authorized site when another Portal site is selected', async () => {
+    const h = harness();
+    const labDevice = {
+      id: deviceId,
+      tenantId: scope.tenantId,
+      siteId: scope.siteId,
+      trustStatus: 'approved',
+      kind: 'physical',
+    };
+    // The active Portal projection only exposes Home. Background polling must
+    // ask the registry for persisted devices across sites, then match scope.
+    h.registry.getDevices.mockImplementation((includeOtherSites?: boolean) =>
+      includeOtherSites ? [labDevice] : [],
+    );
+
+    const result = await h.ingress.ingest(h.input);
+
+    expect(h.registry.getDevices).toHaveBeenCalledWith(true);
+    expect(result).toMatchObject({ outcome: 'processed', accepted: true });
+    expect(h.store.process).toHaveBeenCalledWith(scope, deviceId, expect.any(Object));
+  });
+
   it('rejects a wrong tenant before persistence', async () => {
     const h = harness();
 

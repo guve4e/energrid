@@ -204,6 +204,35 @@ export class PostgresGenericMeasurementRepository {
     );
     return result.rows.map(row => fromRow(row, this.definitions));
   }
+
+  /** Return bounded stream metadata without exposing measurement values. */
+  async summarize(input: {
+    tenantId: string;
+    siteId: string;
+    deviceId: string;
+    metrics: string[];
+  }): Promise<Array<{ metric: string; count: number; oldest: string; newest: string }>> {
+    if ([input.tenantId, input.siteId, input.deviceId].some(value => !value?.trim()))
+      throw new Error('Measurement history identity is required');
+    const metrics = [...new Set(input.metrics)].filter(metric =>
+      this.definitions.some(definition => definition.metric === metric),
+    );
+    if (!metrics.length) return [];
+    const result = await this.pool.query(
+      `SELECT metric,count(*)::int AS count,min(observed_at) AS oldest,max(observed_at) AS newest
+       FROM telemetry.measurements
+       WHERE tenant_id=$1 AND site_id=$2 AND device_id=$3 AND component_id='device'
+         AND metric=ANY($4::text[])
+       GROUP BY metric`,
+      [input.tenantId, input.siteId, input.deviceId, metrics],
+    );
+    return result.rows.map(row => ({
+      metric: String(row.metric),
+      count: Number(row.count),
+      oldest: new Date(row.oldest).toISOString(),
+      newest: new Date(row.newest).toISOString(),
+    }));
+  }
 }
 
 function fromRow(row: Record<string, unknown>, definitions: readonly MeasurementDefinition[]): GenericMeasurement {

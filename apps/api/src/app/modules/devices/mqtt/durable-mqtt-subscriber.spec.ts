@@ -4,6 +4,7 @@ import { connect, type MqttClient, type IPublishPacket } from 'mqtt';
 import {
   DurableMqttSubscriber,
   durableMqttOptions,
+  labDurableMqttOptions,
 } from './durable-mqtt-subscriber';
 
 jest.mock('mqtt', () => ({ connect: jest.fn() }));
@@ -245,5 +246,22 @@ describe('durable MQTT configuration', () => {
         password: 'p',
       }),
     );
+  });
+});
+
+describe('isolated Lab MQTT configuration', () => {
+  const base = { NODE_ENV: 'development', LAB_MQTT_CLIENT_ID: 'energrid-lab-api', LAB_MQTT_HOST: '127.0.0.1' };
+  it('uses a separate durable MQTT 3.1.1 session over a loopback tunnel', () => {
+    expect(labDurableMqttOptions(base)).toMatchObject({
+      host: '127.0.0.1', port: 18883, clientId: 'energrid-lab-api', clean: false,
+      protocolVersion: 4, reconnectPeriod: 5000,
+    });
+  });
+  it.each([
+    [{ ...base, NODE_ENV: 'production' }, 'disabled in production'],
+    [{ ...base, LAB_MQTT_HOST: '192.168.1.138' }, 'loopback address'],
+    [{ ...base, LAB_MQTT_PORT: 'bad' }, 'LAB_MQTT_PORT'],
+  ])('fails closed for unsafe or malformed Lab broker settings', (env, reason) => {
+    expect(() => labDurableMqttOptions(env)).toThrow(reason as string);
   });
 });

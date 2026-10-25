@@ -53,6 +53,7 @@ import { MqttEvidenceCaptureService } from '../devices/mqtt/mqtt-evidence-captur
 import { DeviceControlService } from '../devices/device-control.service'
 import { DeviceDiagnosticsService } from '../devices/device-diagnostics.service'
 import { DeviceDiscoveryMemoryStore } from '../devices/device-discovery-memory.store'
+import type { DiscoveryOwnership } from '../devices/device-discovery-memory.store'
 import { DeviceLanDiscoveryService } from '../devices/device-lan-discovery.service'
 import { lookupMacVendor } from '../devices/mac-vendor-lookup'
 import { compareNetworkSnapshots } from '../devices/network-discovery-snapshot'
@@ -73,6 +74,7 @@ import type {
 } from '../devices/enrollment/physical-device-inventory.repository'
 import type { RegisteredDevice } from '../devices/device-registry.types'
 import { projectPendingDeviceIdentity } from './pending-device-identity.projection'
+import { projectEnrollmentIdentityLinks } from './enrollment-identity-projection'
 import { isNetworkObservationFresh } from '../devices/network-observation-freshness'
 import { shellyLanCandidates } from '../devices/adapters/inbound/shelly/shelly-lan-candidates'
 import { energridDiscoveryCandidate } from '../devices/adapters/inbound/energrid/energrid-discovery-candidate'
@@ -85,7 +87,10 @@ import { PortalStateService } from './portal-state.service'
 import { AccessJwtGuard, PublicRoute, RequireRoles, RoleGuard } from '../auth/auth.guard'
 import { AuthConfig } from '../auth/auth-config'
 import { PortalDeviceMeasurementsService } from './portal-device-measurements.service'
+import { PortalDeviceElectricalMeasurementsService } from './portal-device-electrical-measurements.service'
 import { DeviceFirmwareDiagnosticsService } from '../devices/device-firmware-diagnostics'
+import { WeatherAssistantQueryService } from './weather-assistant-query.service'
+import { PortalSiteService, portalSiteProjection } from './portal-site.service'
 
 type DisconnectAwareResponse = {
   writableEnded: boolean;
@@ -145,6 +150,9 @@ export class PortalController {
   @Inject(PortalDeviceMeasurementsService)
   private readonly deviceMeasurements!: PortalDeviceMeasurementsService;
 
+  @Inject(PortalDeviceElectricalMeasurementsService)
+  private readonly deviceElectricalMeasurements!: PortalDeviceElectricalMeasurementsService;
+
   constructor(
     private readonly stateService: PortalStateService,
     private readonly lanDiscovery: DeviceLanDiscoveryService,
@@ -177,6 +185,9 @@ export class PortalController {
     private readonly authConfig?: AuthConfig,
     @Optional()
     private readonly firmwareDiagnostics?: DeviceFirmwareDiagnosticsService,
+    @Optional()
+    private readonly weatherAssistant?: WeatherAssistantQueryService,
+    private readonly portalSites?: PortalSiteService,
   ) {}
 
   @Get()
@@ -207,6 +218,22 @@ export class PortalController {
     return { traces };
   }
 
+  @Get('sites')
+  async listAuthorizedSites(@Req() request: DeviceProxyRequest) {
+    assertPortalAdministrator(request)
+    const sites = await this.portalSites!.list(request.user!)
+    const selected = await this.portalSites!.forPrincipal(request.user!)
+    return { sites: sites.map(portalSiteProjection), selectedSiteId: selected.siteId }
+  }
+
+  @Post('site-selection')
+  async selectAuthorizedSite(@Body() body: { siteId?: unknown }, @Req() request: DeviceProxyRequest) {
+    assertPortalAdministrator(request)
+    if (typeof body?.siteId !== 'string') throw new BadRequestException('Choose an available site.')
+    const selected = await this.portalSites!.select(request.user!, body.siteId)
+    return { site: portalSiteProjection(selected) }
+  }
+
   @Post('assistant/chat')
   async chatWithEnergrid(
     @Body() body: { message?: unknown },
@@ -227,6 +254,8 @@ export class PortalController {
     const message = body.message.trim();
     const { tenant, site } = this.deviceRegistry.getSnapshot();
     const scope = { tenantId: tenant.id, siteId: site.id };
+    const weatherReply = await this.weatherAssistant?.answer(scope, message);
+    if (weatherReply) return { reply: weatherReply, conversationId: `weather:${site.id}` };
 
     const trace = new InteractionTraceSession(
       scope,
@@ -272,12 +301,13 @@ export class PortalController {
     const state = this.stateService.getState()
     const initialRegistry = this.deviceRegistry.getSnapshot()
     const { tenant, site } = initialRegistry
-    const networkHistory = await this.discoveryMemory.listIdentityEvidence().catch(() => [])
+    const ownership = { tenantId: tenant.id, siteId: site.id }
+    const networkHistory = await this.discoveryMemory.listIdentityEvidence(ownership).catch(() => [])
     // Discovery memory is durable across API restarts; repopulate only the
     // existing pending-candidate registry port from verified Energrid evidence.
     for (const record of networkHistory) {
       const candidate = energridDiscoveryCandidate(record.device)
-      if (candidate) this.deviceRegistry.registerDiscoveredDevice(candidate)
+      if (candidate) this.registerOwnedDiscoveryCandidate(candidate, ownership, site.name)
     }
     const currentDevices = this.deviceRegistry.getSnapshot().devices ?? state.devices ?? []
     const visibleCandidates = currentDevices.filter(device =>
@@ -314,7 +344,8 @@ export class PortalController {
         brokerEvidence,
       ),
     ]))
-    return { ...state, devices: currentDevices, pendingDeviceIdentities }
+    const authorizedSites = await this.portalSites!.list(request.user!)
+    return { ...state, sites: authorizedSites.map(portalSiteProjection), devices: currentDevices, pendingDeviceIdentities }
   }
 
 
@@ -330,11 +361,14 @@ export class PortalController {
 
     const { tenant, site } = this.deviceRegistry.getSnapshot()
 
+    const scope = { tenantId: tenant.id, siteId: site.id }
+    const [enrollments, physicalDevices] = await Promise.all([
+      this.enrollment.list(scope),
+      this.physicalInventory ? this.physicalInventory.list(scope) : Promise.resolve([]),
+    ])
+
     return {
-      enrollments: await this.enrollment.list({
-        tenantId: tenant.id,
-        siteId: site.id,
-      }),
+      enrollments: projectEnrollmentIdentityLinks(scope, enrollments, physicalDevices),
     }
   }
 
@@ -384,6 +418,16 @@ export class PortalController {
     assertPortalAdministrator(request)
     const { tenant, site } = this.deviceRegistry.getSnapshot()
     return this.deviceMeasurements.current({ tenantId: tenant.id, siteId: site.id }, deviceId)
+  }
+
+  @Get('devices/:deviceId/read-model')
+  async getDeviceReadModel(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalAdministrator(request)
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+    return this.deviceMeasurements.readModel({ tenantId: tenant.id, siteId: site.id }, deviceId)
   }
 
   @Get('devices/:deviceId/observation-approval')
@@ -440,6 +484,18 @@ export class PortalController {
     return this.deviceMeasurements.history(
       { tenantId: tenant.id, siteId: site.id }, deviceId, metric, from, to, limit,
     )
+  }
+
+  @Get('devices/:deviceId/electrical-measurements')
+  async getDeviceElectricalMeasurementHistory(
+    @Param('deviceId') deviceId: string,
+    @Query('metric') metric: unknown,
+    @Query('from') from: unknown,
+    @Query('to') to: unknown,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalAdministrator(request)
+    return this.deviceElectricalMeasurements.history(deviceId, metric, from, to)
   }
 
   @Get('devices/:deviceId/firmware-diagnostics')
@@ -513,8 +569,11 @@ export class PortalController {
     if (selected.length !== new Set(body.scopeIds as string[]).size) {
       throw new BadRequestException('One or more selected network scopes are not configured')
     }
-    if (selected.some(zone => zone.cidr) && body.fullSubnetConfirmed !== true) {
+    if (selected.some(zone => zone.cidr && zone.collectionSource !== 'virtual-lab') && body.fullSubnetConfirmed !== true) {
       throw new BadRequestException('Full-subnet discovery requires explicit operator confirmation')
+    }
+    if (selected.some(zone => zone.collectionSource === 'virtual-lab') && body.fullSubnetConfirmed !== true) {
+      throw new BadRequestException('Virtual Lab discovery requires explicit operator confirmation')
     }
     const controller = new AbortController()
     const abortIfDisconnected = () => {
@@ -531,9 +590,13 @@ export class PortalController {
     } finally {
       response?.off('close', abortIfDisconnected)
     }
-    for (const device of scan.devices) {
-      for (const candidate of shellyLanCandidates(device))
-        this.deviceRegistry.registerDiscoveredDevice(candidate)
+    const active = this.discoveryOwner()
+    const scanOwner = scan.snapshot.ownership
+    if (scanOwner && sameDiscoveryOwner(scanOwner, active.ownership)) {
+      for (const device of scan.devices) {
+        for (const candidate of shellyLanCandidates(device))
+          this.registerOwnedDiscoveryCandidate(candidate, scanOwner, active.siteName)
+      }
     }
     return scan
   }
@@ -548,7 +611,7 @@ export class PortalController {
   ) {
     assertPortalAdministrator(request)
 
-    const snapshot = await this.discoveryMemory.getSnapshot(scanId)
+    const snapshot = await this.discoveryMemory.getSnapshot(scanId, this.discoveryOwner().ownership)
     if (!snapshot) throw new NotFoundException('Network snapshot not found')
 
     const target = snapshot.endpoints.find(endpoint =>
@@ -702,8 +765,8 @@ export class PortalController {
     }
 
     const snapshot = typeof body?.scanId === 'string'
-      ? await this.discoveryMemory.getSnapshot(body.scanId)
-      : (await this.discoveryMemory.listSnapshots(1))[0];
+      ? await this.discoveryMemory.getSnapshot(body.scanId, { tenantId: tenant.id, siteId: site.id })
+      : (await this.discoveryMemory.listSnapshots({ tenantId: tenant.id, siteId: site.id }, 1))[0];
 
     if (!snapshot) {
       throw new NotFoundException('No discovery snapshot is available');
@@ -845,7 +908,8 @@ export class PortalController {
   @Get('network/snapshots')
   async listNetworkSnapshots(@Req() request: DeviceProxyRequest) {
     assertPortalAdministrator(request)
-    const snapshots = await this.discoveryMemory.listSnapshots(50)
+    const { ownership } = this.discoveryOwner()
+    const snapshots = await this.discoveryMemory.listHistoricalSnapshots(ownership, 50)
     return { snapshots: snapshots.map(snapshot => ({
       ...snapshot,
       networkRoles: projectNetworkRoles(snapshot),
@@ -871,9 +935,10 @@ export class PortalController {
     @Req() request: DeviceProxyRequest,
   ) {
     assertPortalAdministrator(request)
+    const ownership = this.discoveryOwner().ownership
     const [previous, current] = await Promise.all([
-      this.discoveryMemory.getSnapshot(fromScanId),
-      this.discoveryMemory.getSnapshot(toScanId),
+      this.discoveryMemory.getSnapshot(fromScanId, ownership),
+      this.discoveryMemory.getSnapshot(toScanId, ownership),
     ])
     if (!previous || !current) throw new NotFoundException('Network discovery snapshot was not found')
     return compareNetworkSnapshots(previous, current)
@@ -883,9 +948,10 @@ export class PortalController {
   async getNetworkDiscoveryMemory(@Req() request: DeviceProxyRequest) {
     assertPortalAdministrator(request)
 
+    const ownership = this.discoveryOwner().ownership
     const [devices, summary] = await Promise.all([
-      this.discoveryMemory.list(),
-      this.discoveryMemory.summary(),
+      this.discoveryMemory.list(ownership),
+      this.discoveryMemory.summary(ownership),
     ])
 
     return { summary, devices }
@@ -896,7 +962,7 @@ export class PortalController {
     @Req() request: DeviceProxyRequest,
   ) {
     assertPortalAdministrator(request)
-    return this.discoveryMemory.summary()
+    return this.discoveryMemory.summary(this.discoveryOwner().ownership)
   }
 
   @Post('network/:deviceId/investigate')
@@ -933,7 +999,8 @@ export class PortalController {
     if (!this.networkEndpointInvestigator) {
       throw new ServiceUnavailableException('Network endpoint investigation is unavailable')
     }
-    const snapshot = await this.discoveryMemory.getSnapshot(scanId)
+    const ownership = this.discoveryOwner().ownership
+    const snapshot = await this.discoveryMemory.getSnapshot(scanId, ownership)
     if (!snapshot) throw new NotFoundException('Network discovery snapshot was not found')
     const target = snapshot.endpoints.find(endpoint =>
       endpoint.networkZoneId === scopeId && endpoint.ipAddress === ipAddress && endpoint.id === endpointId,
@@ -942,7 +1009,7 @@ export class PortalController {
     if (energridDiscoveryCandidate(target)) {
       throw new ConflictException('Recognized Energrid devices use first-party identity and enrollment; LLM investigation is disabled.')
     }
-    const history = await this.discoveryMemory.listSnapshots(50)
+    const history = await this.discoveryMemory.listSnapshots(ownership, 50)
     return this.networkEndpointInvestigator.investigate(
       snapshot,
       { scopeId, ipAddress, endpointId },
@@ -962,7 +1029,7 @@ export class PortalController {
   ) {
     assertPortalAdministrator(request)
     if (!this.networkEndpointProbe) throw new ServiceUnavailableException('Read-only endpoint investigation is unavailable')
-    const snapshot = await this.discoveryMemory.getSnapshot(scanId)
+    const snapshot = await this.discoveryMemory.getSnapshot(scanId, this.discoveryOwner().ownership)
     if (!snapshot) throw new NotFoundException('Network discovery snapshot was not found')
     const target = snapshot.endpoints.find(endpoint =>
       endpoint.networkZoneId === scopeId && endpoint.ipAddress === ipAddress && endpoint.id === endpointId,
@@ -994,7 +1061,7 @@ export class PortalController {
   ) {
     assertPortalAdministrator(request)
     if (!this.networkEndpointIdentityRefresh) throw new ServiceUnavailableException('Targeted identity refresh is unavailable')
-    const snapshot = await this.discoveryMemory.getSnapshot(scanId)
+    const snapshot = await this.discoveryMemory.getSnapshot(scanId, this.discoveryOwner().ownership)
     if (!snapshot) throw new NotFoundException('Network discovery snapshot was not found')
     const target = snapshot.endpoints.find(endpoint =>
       endpoint.networkZoneId === scopeId && endpoint.ipAddress === ipAddress && endpoint.id === endpointId,
@@ -1109,7 +1176,7 @@ export class PortalController {
   private async resolveInvestigationTarget(deviceId: string) {
     const live = this.lanDiscovery.getLastScan().find(device => device.id === deviceId)
     if (live) return live
-    const remembered = (await this.discoveryMemory.list())
+    const remembered = (await this.discoveryMemory.list(this.discoveryOwner().ownership))
       .find(record => record.device.id === deviceId)
     if (remembered) return remembered.device
     throw new NotFoundException('Discovered device not found in this site')
@@ -1126,6 +1193,29 @@ export class PortalController {
       siteId: site.id,
       networkId: `${device.gatewayId || 'gateway-unknown'}:${device.networkZoneId}`,
     }
+  }
+
+  private discoveryOwner(): { ownership: DiscoveryOwnership; siteName: string } {
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+    return { ownership: { tenantId: tenant.id, siteId: site.id }, siteName: site.name }
+  }
+
+  private registerOwnedDiscoveryCandidate(
+    candidate: Parameters<DeviceRegistryService['registerDiscoveredDevice']>[0],
+    ownership: DiscoveryOwnership,
+    siteName: string,
+  ): boolean {
+    return this.deviceRegistry.registerDiscoveredDevice({
+      ...candidate,
+      tenantId: ownership.tenantId,
+      siteId: ownership.siteId,
+      siteName,
+      metadata: {
+        ...candidate.metadata,
+        discoveryTenantId: ownership.tenantId,
+        discoverySiteId: ownership.siteId,
+      },
+    })
   }
 
   @Get('mqtt/evidence/:deviceId/status')
@@ -1503,4 +1593,8 @@ export function assertPortalAdministrator(request: DeviceProxyRequest): void {
   if (request.user?.role !== 'admin') {
     throw new UnauthorizedException('Device control requires portal authorization.')
   }
+}
+
+function sameDiscoveryOwner(a: DiscoveryOwnership, b: DiscoveryOwnership): boolean {
+  return a.tenantId === b.tenantId && a.siteId === b.siteId
 }

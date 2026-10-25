@@ -2,10 +2,11 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { networkEndpointInvestigationKey, networkEndpointSafeCheckLabels, type NetworkEndpointHttpProbeState, type NetworkEndpointIdentityRefreshState, type NetworkEndpointInvestigationState } from './network-endpoint-investigation';
 
-type Scope = { id: string; name: string; cidr?: string; interfaceName?: string; seedIps?: string[] };
+type Scope = { id: string; name: string; cidr?: string; interfaceName?: string; seedIps?: string[]; collectionSource?: 'local' | 'virtual-lab' };
 type Observation = { source: string; attribute: string; value: string | number | boolean; observedAt: string; method?: string };
 type Endpoint = {
   id: string; ipAddress: string; networkZoneId: string; networkZoneName: string;
+  confidence?: number;
   macAddress?: string; deviceReportedMacAddress?: string; hostname?: string; vendor?: string;
   macVendorClue?: { status: 'matched'; vendor: string; prefix: string; assignmentType: string; databaseVersion: string; source: string; classification: string };
   model?: string; app?: string; protocol: string; status: string; discoveredAt: string; reason: string;
@@ -17,6 +18,8 @@ type ScopeSnapshot = { id: string; name: string; cidr?: string; interfaceName?: 
 type NetworkRole = { id: string; role: 'default_gateway'; label: 'Observed default gateway'; scopeId: string; scopeName: string; ipAddress: string; observedAt: string; observer: { id: string; host: string; interfaceName: string }; routeDestination: string; routeEvidence: string };
 type Snapshot = {
   scanId: string; schemaVersion: number; startedAt: string; completedAt: string;
+  ownership?: { tenantId: string; siteId: string };
+  ownershipStatus?: 'scoped' | 'legacy-unscoped';
   collector: { id: string; host: string; interfaces: string[] };
   scopes: ScopeSnapshot[]; methods: string[]; successes: number; failures: string[]; limitations: string[];
   endpoints: Endpoint[];
@@ -28,14 +31,20 @@ type Diff = {
   fromScanId: string; toScanId: string; comparableScopes: string[]; incompleteScopes: string[];
   addedEndpoints: Array<{ scopeId: string; ipAddress: string; macAddress?: string }>;
   notDetectedEndpoints: Array<{ scopeId: string; ipAddress: string; macAddress?: string }>;
-  verifiedAddressChanges: Array<{ identity: string; from: string; to: string }>;
+  verifiedAddressChanges: Array<{ scopeId?: string; identity: string; from: string; to: string }>;
   ipReuse: Array<{ scopeId: string; ipAddress: string; previousIdentity?: string; currentIdentity?: string }>;
   serviceChanges: Array<{ scopeId: string; ipAddress: string; added: string[]; removed: string[] }>;
   scopeChanges: Array<{ scopeId: string; previousCidr?: string; currentCidr?: string; previousInterface?: string; currentInterface?: string }>;
-  macChanges: Array<{ identity: string; previousObservedMac?: string; currentObservedMac?: string; previousDeviceReportedMac?: string; currentDeviceReportedMac?: string }>;
+  macChanges: Array<{ scopeId?: string; identity: string; previousObservedMac?: string; currentObservedMac?: string; previousDeviceReportedMac?: string; currentDeviceReportedMac?: string }>;
+  hostnameChanges?: Array<{ scopeId?: string; identity: string; previous: string; current: string }>;
   gatewayChanges: Array<{ scopeId: string; previous: string[]; current: string[] }>;
   identityChanges: Array<{ scopeId: string; ipAddress: string; previous: string; current: string }>;
   topologyChanges: { added: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }>; removed: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }> };
+};
+type DeltaCategory = 'new' | 'changed' | 'not-detected';
+type DeltaRow = {
+  key: string; scopeId: string; category: DeltaCategory; previous?: Endpoint; current?: Endpoint;
+  label: string; changes: string[];
 };
 type Observer = {
   observedAt: string;
@@ -49,7 +58,8 @@ type Observer = {
 };
 type EndpointLifecycle = {
   endpointKey: string;
-  stage: 'observed' | 'identified' | 'pending' | 'approved' | 'enrolled' | 'unknown';
+  snapshotId?: string;
+  stage: 'observed' | 'identified' | 'pending' | 'approved' | 'enrolled' | 'ambiguous' | 'unknown';
   recordId?: string;
   recordName?: string;
   relatedRecords?: number;
@@ -95,6 +105,7 @@ const mobileDetailsOpen = ref(false);
 const probeApprovalOpen = ref(false);
 const identityRefreshApprovalOpen = ref(false);
 const freshnessNow = ref(Date.now());
+const expandedDeltaCategory = ref<DeltaCategory | ''>('');
 let mobileMediaQuery: MediaQueryList | undefined;
 let freshnessTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -120,11 +131,10 @@ const availableScopes = computed<Scope[]>(() => props.scopes.length
   : (props.latest?.scopes || []).map(scope => ({ id: scope.id, name: scope.name, cidr: scope.cidr })));
 
 const selectedSnapshot = computed(() => props.snapshots.find(snapshot => snapshot.scanId === selectedScanId.value) || props.latest);
+const selectedSnapshotIsUnscoped = computed(() => !!selectedSnapshot.value && !selectedSnapshot.value.ownership);
 
-watch([() => props.latest?.scanId, () => props.snapshots.map(snapshot => snapshot.scanId).join(',')], () => {
-  if (!selectedScanId.value || !props.snapshots.some(snapshot => snapshot.scanId === selectedScanId.value)) {
-    selectedScanId.value = props.latest?.scanId || '';
-  }
+watch(() => props.latest?.scanId, latestScanId => {
+  if (latestScanId) selectedScanId.value = latestScanId;
 }, { immediate: true });
 
 watch([availableScopes, () => selectedSnapshot.value?.scanId], () => {
@@ -160,18 +170,89 @@ const selectedScope = computed(() => availableScopes.value.find(scope => scope.i
   || selectedSnapshot.value?.scopes.find(scope => scope.id === selectedScopeId.value) || null);
 const scopeSnapshot = computed(() => selectedSnapshot.value?.scopes.find(scope => scope.id === selectedScopeId.value) || null);
 const endpoints = computed(() => (selectedSnapshot.value?.endpoints || []).filter(endpoint => endpoint.networkZoneId === selectedScopeId.value));
+const comparablePreviousSnapshot = computed(() => props.comparison
+  ? props.snapshots.find(snapshot => snapshot.scanId === props.comparison?.fromScanId) || null
+  : null);
+const snapshotDeltas = computed<DeltaRow[]>(() => {
+  const diff = props.comparison;
+  const before = comparablePreviousSnapshot.value;
+  const after = props.snapshots.find(snapshot => snapshot.scanId === diff?.toScanId) || props.latest;
+  if (!diff || !before || !after) return [];
+  const rows: DeltaRow[] = [];
+  const endpointAt = (snapshot: Snapshot, scopeId: string, ipAddress: string, identity?: string) =>
+    snapshot.endpoints.find(endpoint => endpoint.networkZoneId === scopeId && (identity ? endpoint.id === identity : endpoint.ipAddress === ipAddress));
+  for (const item of diff.addedEndpoints) {
+    if (item.scopeId !== selectedScopeId.value) continue;
+    const current = endpointAt(after, item.scopeId, item.ipAddress);
+    rows.push({ key: `new:${item.scopeId}:${item.ipAddress}`, scopeId: item.scopeId, category: 'new', current,
+      label: current ? identityName(current) : item.ipAddress, changes: ['First detected in this comparable scan'] });
+  }
+  for (const item of diff.notDetectedEndpoints) {
+    if (item.scopeId !== selectedScopeId.value) continue;
+    const previous = endpointAt(before, item.scopeId, item.ipAddress);
+    rows.push({ key: `missing:${item.scopeId}:${item.ipAddress}`, scopeId: item.scopeId, category: 'not-detected', previous,
+      label: previous ? identityName(previous) : item.ipAddress, changes: ['Not detected in the latest scan; current status is unknown'] });
+  }
+  const changed = new Map<string, DeltaRow>();
+  const addChange = (scopeId: string, identityOrIp: string, change: string, identity = false) => {
+    if (scopeId !== selectedScopeId.value) return;
+    const previous = identity
+      ? before.endpoints.find(endpoint => endpoint.networkZoneId === scopeId && endpoint.id.toLowerCase() === identityOrIp.toLowerCase())
+      : endpointAt(before, scopeId, identityOrIp);
+    const current = identity
+      ? after.endpoints.find(endpoint => endpoint.networkZoneId === scopeId && endpoint.id.toLowerCase() === identityOrIp.toLowerCase())
+      : endpointAt(after, scopeId, identityOrIp);
+    const key = `changed:${scopeId}:${identity ? identityOrIp : identityOrIp}`;
+    const row = changed.get(key) || { key, scopeId, category: 'changed' as const, previous, current,
+      label: current ? identityName(current) : previous ? identityName(previous) : identityOrIp, changes: [] };
+    if (!row.changes.includes(change)) row.changes.push(change);
+    if (current) row.current = current;
+    if (previous) row.previous = previous;
+    changed.set(key, row);
+  };
+  for (const item of diff.verifiedAddressChanges) {
+    const previous = before.endpoints.find(endpoint => (!item.scopeId || endpoint.networkZoneId === item.scopeId) && endpoint.id.toLowerCase() === item.identity.toLowerCase());
+    const current = after.endpoints.find(endpoint => (!item.scopeId || endpoint.networkZoneId === item.scopeId) && endpoint.id.toLowerCase() === item.identity.toLowerCase());
+    const scopeId = item.scopeId || current?.networkZoneId || previous?.networkZoneId;
+    if (scopeId) addChange(scopeId, item.identity, `Verified IP address: ${item.from} → ${item.to}`, true);
+  }
+  for (const item of diff.ipReuse) addChange(item.scopeId, item.ipAddress,
+    `IP address reused at ${item.ipAddress}; identity changed or is not established`);
+  for (const item of diff.serviceChanges) {
+    const parts = [item.added.length ? `Services added: ${item.added.join(', ')}` : '', item.removed.length ? `Services removed: ${item.removed.join(', ')}` : ''].filter(Boolean);
+    if (parts.length) addChange(item.scopeId, item.ipAddress, parts.join('; '));
+  }
+  for (const item of diff.identityChanges) addChange(item.scopeId, item.ipAddress, `Identity verification: ${item.previous} → ${item.current}`);
+  for (const item of diff.macChanges) {
+    const current = after.endpoints.find(endpoint => (!item.scopeId || endpoint.networkZoneId === item.scopeId) && endpoint.id.toLowerCase() === item.identity.toLowerCase());
+    const previous = before.endpoints.find(endpoint => (!item.scopeId || endpoint.networkZoneId === item.scopeId) && endpoint.id.toLowerCase() === item.identity.toLowerCase());
+    const scopeId = item.scopeId || current?.networkZoneId || previous?.networkZoneId;
+    if (scopeId) addChange(scopeId, item.identity, `MAC evidence changed: ${item.previousObservedMac || item.previousDeviceReportedMac || 'none'} → ${item.currentObservedMac || item.currentDeviceReportedMac || 'none'}`, true);
+  }
+  for (const item of diff.hostnameChanges || []) {
+    const current = after.endpoints.find(endpoint => (!item.scopeId || endpoint.networkZoneId === item.scopeId) && endpoint.id.toLowerCase() === item.identity.toLowerCase());
+    const previous = before.endpoints.find(endpoint => (!item.scopeId || endpoint.networkZoneId === item.scopeId) && endpoint.id.toLowerCase() === item.identity.toLowerCase());
+    const scopeId = item.scopeId || current?.networkZoneId || previous?.networkZoneId;
+    if (scopeId) addChange(scopeId, item.identity, `Hostname: ${item.previous || 'none'} → ${item.current || 'none'}`, true);
+  }
+  rows.push(...changed.values());
+  return rows;
+});
+const deltasByCategory = computed(() => ({
+  new: snapshotDeltas.value.filter(row => row.category === 'new'),
+  changed: snapshotDeltas.value.filter(row => row.category === 'changed'),
+  'not-detected': snapshotDeltas.value.filter(row => row.category === 'not-detected'),
+}));
+function endpointEvidence(endpoint?: Endpoint): string[] {
+  if (!endpoint) return [];
+  return (endpoint.observations || []).map(observation =>
+    `${observation.source}.${observation.attribute}=${String(observation.value)}${observation.method ? ` · ${observation.method}` : ''} · ${date(observation.observedAt)}`,
+  );
+}
 const verifiedCount = computed(() => endpoints.value.filter(verifiedIdentity).length);
 const unidentifiedCount = computed(() => Math.max(0, endpoints.value.length - verifiedCount.value));
-const recentChangeCount = computed(() => {
-  const diff = props.comparison;
-  if (!diff || !diff.comparableScopes.includes(selectedScopeId.value)) return 0;
-  return diff.addedEndpoints.filter(item => item.scopeId === selectedScopeId.value).length
-    + diff.verifiedAddressChanges.length
-    + diff.ipReuse.filter(item => item.scopeId === selectedScopeId.value).length
-    + diff.serviceChanges.filter(item => item.scopeId === selectedScopeId.value).length
-    + diff.macChanges.length
-    + diff.identityChanges.filter(item => item.scopeId === selectedScopeId.value).length;
-});
+const recentChangeCount = computed(() => props.comparison?.toScanId === selectedSnapshot.value?.scanId
+  ? snapshotDeltas.value.length : 0);
 const selectedEndpoint = computed(() => endpoints.value.find(endpoint => endpointKey(endpoint) === selectedEndpointKey.value) || null);
 const endpointNetworkRole = (endpoint: Endpoint) => selectedSnapshot.value?.networkRoles?.find(role =>
   role.scopeId === endpoint.networkZoneId && role.ipAddress === endpoint.ipAddress,
@@ -237,7 +318,9 @@ function selectEndpoint(endpoint: Endpoint) {
 
 function endpointLifecycle(endpoint: Endpoint): EndpointLifecycle['stage'] {
   if (!verifiedIdentity(endpoint)) return 'observed';
-  const matched = props.endpointLifecycle?.find(item => item.endpointKey === endpointKey(endpoint));
+  const matched = props.endpointLifecycle?.find(item =>
+    item.endpointKey === endpointKey(endpoint) && item.snapshotId === selectedSnapshot.value?.scanId,
+  );
   if (matched?.stage === 'identified' && props.enrollmentStateAvailable === false) return 'unknown';
   return matched?.stage || (props.enrollmentStateAvailable === false ? 'unknown' : 'identified');
 }
@@ -249,12 +332,15 @@ function lifecycleLabel(stage: EndpointLifecycle['stage']): string {
     pending: 'Pending approval',
     approved: 'Approved · enrollment inactive',
     enrolled: 'Approved · enrolled',
+    ambiguous: 'Identity match is ambiguous',
     unknown: 'Enrollment state unavailable',
   })[stage];
 }
 
 function lifecycleFor(endpoint: Endpoint): EndpointLifecycle | undefined {
-  return props.endpointLifecycle?.find(item => item.endpointKey === endpointKey(endpoint));
+  return props.endpointLifecycle?.find(item =>
+    item.endpointKey === endpointKey(endpoint) && item.snapshotId === selectedSnapshot.value?.scanId,
+  );
 }
 
 function closeDetails() {
@@ -360,7 +446,7 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
           <span>Saved scan</span>
           <select v-model="selectedScanId" aria-label="Select saved network snapshot">
             <option v-for="snapshot in snapshots" :key="snapshot.scanId" :value="snapshot.scanId">
-              {{ snapshot.scopes.map(scope => scope.name).join(', ') || 'Network scan' }} · {{ date(snapshot.completedAt) }}{{ snapshot.scanId === latest?.scanId ? ' · Latest' : '' }}
+              {{ snapshot.scopes.map(scope => scope.name).join(', ') || 'Network scan' }} · {{ date(snapshot.completedAt) }}{{ snapshot.scanId === latest?.scanId ? ' · Latest' : '' }}{{ snapshot.ownership ? '' : ' · Legacy, unscoped' }}
             </option>
           </select>
         </label>
@@ -375,6 +461,9 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
       </span>
       <span class="ni-last-scan">{{ busy ? 'Collecting bounded network evidence…' : `Last scan · ${lastScanLabel}` }}</span>
       <p v-if="error" class="ni-error" role="alert">{{ error }}</p>
+    </div>
+    <div v-if="selectedSnapshotIsUnscoped" class="ni-legacy-snapshot" role="status">
+      Legacy snapshot · ownership was not recorded. This evidence is preserved for historical viewing only and cannot create or support onboarding candidates.
     </div>
 
     <nav class="ni-lifecycle-links" aria-label="Device lifecycle">
@@ -414,11 +503,38 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
       <p class="ni-note">Grouped by observed network. Physical links and wired or Wi-Fi attachment are not established by this view.</p>
       <div v-if="comparison && comparison.toScanId === selectedSnapshot.scanId && comparison.comparableScopes.includes(selectedScopeId)" class="ni-change-summary" aria-label="Changes since previous comparable scan">
         <strong>Since the previous scan</strong>
-        <span>{{ comparison.addedEndpoints.filter(item => item.scopeId === selectedScopeId).length }} new</span>
-        <span>{{ comparison.notDetectedEndpoints.filter(item => item.scopeId === selectedScopeId).length }} not detected <small>· not necessarily offline</small></span>
-        <span v-if="comparison.verifiedAddressChanges.length">{{ comparison.verifiedAddressChanges.length }} verified IP change{{ comparison.verifiedAddressChanges.length === 1 ? '' : 's' }}</span>
-        <span v-if="comparison.ipReuse.filter(item => item.scopeId === selectedScopeId).length">{{ comparison.ipReuse.filter(item => item.scopeId === selectedScopeId).length }} identity conflict{{ comparison.ipReuse.filter(item => item.scopeId === selectedScopeId).length === 1 ? '' : 's' }}</span>
+        <button type="button" :aria-pressed="expandedDeltaCategory === 'new'" @click="expandedDeltaCategory = expandedDeltaCategory === 'new' ? '' : 'new'">{{ deltasByCategory.new.length }} new</button>
+        <button type="button" :aria-pressed="expandedDeltaCategory === 'changed'" @click="expandedDeltaCategory = expandedDeltaCategory === 'changed' ? '' : 'changed'">{{ deltasByCategory.changed.length }} changed</button>
+        <button type="button" :aria-pressed="expandedDeltaCategory === 'not-detected'" @click="expandedDeltaCategory = expandedDeltaCategory === 'not-detected' ? '' : 'not-detected'">{{ deltasByCategory['not-detected'].length }} not detected <small>· not necessarily offline</small></button>
       </div>
+      <p v-else-if="selectedSnapshot.scanId === latest?.scanId && snapshots.length" class="ni-baseline-note">No previous comparable scan is available for this scope. This snapshot is the baseline.</p>
+      <p v-if="comparison?.toScanId === selectedSnapshot.scanId && comparison.comparableScopes.includes(selectedScopeId) && snapshotDeltas.length === 0" class="ni-no-deltas">No changes between these comparable snapshots.</p>
+      <section v-if="expandedDeltaCategory && deltasByCategory[expandedDeltaCategory].length" class="ni-delta-list" aria-label="Snapshot delta details">
+        <article v-for="row in deltasByCategory[expandedDeltaCategory]" :key="row.key" class="ni-delta-card">
+          <div class="ni-delta-head">
+            <span class="ni-delta-icon" aria-hidden="true">{{ row.category === 'new' ? '＋' : row.category === 'not-detected' ? '◷' : '↔' }}</span>
+            <div><strong>{{ row.label }}</strong><span>{{ selectedScope?.name || row.scopeId }} · {{ row.scopeId }}</span></div>
+          </div>
+          <p v-for="change in row.changes" :key="change" class="ni-delta-change">{{ change }}</p>
+          <div class="ni-delta-addresses">
+            <span v-if="row.previous">Previous · {{ row.previous.ipAddress }}</span>
+            <span v-if="row.current">Current · {{ row.current.ipAddress }}</span>
+            <span v-if="row.previous">Previous observation · {{ date(row.previous.discoveredAt) }}</span>
+            <span v-if="row.current">Current observation · {{ date(row.current.discoveredAt) }}</span>
+            <span v-if="row.current?.confidence !== undefined">Confidence · {{ Math.round(row.current.confidence * 100) }}%</span>
+            <span v-else-if="row.previous?.confidence !== undefined">Previous confidence · {{ Math.round(row.previous.confidence * 100) }}%</span>
+          </div>
+          <details class="ni-delta-evidence">
+            <summary>Evidence and timestamps</summary>
+            <ul>
+              <li v-for="evidence in [...endpointEvidence(row.previous), ...endpointEvidence(row.current)]" :key="evidence">{{ evidence }}</li>
+              <li v-if="!endpointEvidence(row.previous).length && !endpointEvidence(row.current).length">No endpoint observation provenance is available in these snapshots.</li>
+              <li v-if="row.previous?.reason">Previous discovery reason · {{ row.previous.reason }}</li>
+              <li v-if="row.current?.reason">Current discovery reason · {{ row.current.reason }}</li>
+            </ul>
+          </details>
+        </article>
+      </section>
     </section>
 
     <section v-if="selectedSnapshot" class="ni-inventory" aria-labelledby="ni-inventory-title">
@@ -457,10 +573,13 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
             <span>{{ lifecycleFor(selectedEndpoint)?.relatedRecords && lifecycleFor(selectedEndpoint)!.relatedRecords! > 1 ? `${lifecycleFor(selectedEndpoint)!.relatedRecords} enrolled logical records share this verified physical identity.` : 'Matched to an enrolled device by verified protocol identity.' }}</span>
             <button type="button" @click="emit('openDevice', lifecycleFor(selectedEndpoint)?.recordId || '')">Open device record ›</button>
           </div>
+          <div v-else-if="lifecycleFor(selectedEndpoint)?.stage === 'ambiguous'" class="ni-lifecycle-context">
+            <span>This verified identity has conflicting physical or enrollment records. No record was selected automatically.</span>
+          </div>
           <div v-else-if="endpointLifecycle(selectedEndpoint) === 'identified'" class="ni-lifecycle-context">
             <span>Identity is verified, but no pending or enrolled record is correlated.</span>
             <button
-              v-if="verifiedIdentity(selectedEndpoint) && selectedEndpoint.vendor === 'Shelly' && !selectedEndpoint.identityConflict && selectedSnapshot"
+              v-if="verifiedIdentity(selectedEndpoint) && selectedEndpoint.vendor === 'Shelly' && !selectedEndpoint.identityConflict && selectedSnapshot?.ownership"
               type="button"
               class="ni-button ni-button-primary"
               :disabled="busy || onboardingBusy"
@@ -500,7 +619,7 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
             <div><dt>Collector</dt><dd>{{ selectedSnapshot.collector.host }} · {{ selectedSnapshot.collector.interfaces.join(', ') || 'interface unknown' }}</dd></div>
           </dl>
           <p class="ni-detail-reason">{{ selectedEndpoint.reason }}</p>
-          <section v-if="!verifiedIdentity(selectedEndpoint)" class="ni-endpoint-investigation" aria-label="AI device investigation">
+          <section v-if="!verifiedIdentity(selectedEndpoint) && selectedSnapshot?.ownership" class="ni-endpoint-investigation" aria-label="AI device investigation">
             <div class="ni-ai-heading"><strong>✦ AI Device Investigator</strong><span>Snapshot evidence only · read-only</span></div>
             <p v-if="selectedEndpoint.identityConflict" role="status">Conflicting identity evidence is present. Keep these records separate and resolve the conflict with independent evidence.</p>
             <template v-else>
@@ -566,6 +685,9 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
               </div>
             </template>
           </section>
+          <p v-if="!verifiedIdentity(selectedEndpoint) && selectedSnapshotIsUnscoped" class="ni-legacy-action-note">
+            Investigation and follow-up actions are unavailable for unscoped legacy evidence. Run a new scan under an authorized site to continue.
+          </p>
           <section v-if="identityRefreshApprovalOpen && selectedEndpoint" class="ni-probe-approval" role="dialog" aria-modal="true" aria-labelledby="ni-identity-refresh-title">
             <h4 id="ni-identity-refresh-title">Approve one identity refresh?</h4>
             <p>Energrid will send one ARP identity request for <strong>{{ selectedEndpoint.ipAddress }}</strong> on the directly connected interface in the configured <strong>{{ selectedEndpoint.networkZoneName }}</strong> scope. It will not scan the subnet or change the device.</p>
@@ -665,6 +787,7 @@ h1, h2, h3, p { margin-top: 0; }
 .ni-status-pill.is-neutral { color: var(--ni-muted); background: var(--ni-surface); }
 .ni-last-scan { color: var(--ni-muted); font-size: 13px; }
 .ni-error { flex-basis: 100%; margin: 0; color: #c53131; }
+.ni-legacy-snapshot, .ni-legacy-action-note { border: 1px solid var(--ni-border, #d8e1ee); border-left: 3px solid #a56b00; border-radius: 8px; background: var(--ni-surface-muted, #f4f7fb); color: var(--ni-text, #253149); padding: 10px 12px; font-size: 13px; line-height: 1.45; }
 .ni-lifecycle-links { display: flex; align-items: stretch; gap: 9px; flex-wrap: wrap; }
 .ni-lifecycle-link { display: inline-grid; grid-template-columns: auto auto auto; align-items: center; gap: 9px; min-height: 40px; border: 1px solid var(--ni-border); border-radius: 10px; padding: 5px 11px; color: var(--ni-text); background: var(--ni-surface-raised); text-align: left; cursor: pointer; }
 .ni-lifecycle-link:hover { border-color: var(--ni-accent); background: var(--ni-accent-soft); }
@@ -695,6 +818,21 @@ h1, h2, h3, p { margin-top: 0; }
 .ni-change-summary strong { margin-right: 4px; }
 .ni-change-summary span { color: var(--ni-muted); }
 .ni-change-summary small { color: var(--ni-muted); }
+.ni-change-summary button { min-height: 32px; border: 1px solid var(--ni-border); border-radius: 999px; padding: 4px 11px; color: var(--ni-accent); background: var(--ni-bg); font: inherit; font-weight: 700; cursor: pointer; }
+.ni-change-summary button[aria-pressed="true"] { border-color: var(--ni-accent); background: var(--ni-accent-soft); }
+.ni-baseline-note, .ni-no-deltas { margin: 12px 0 0; color: var(--ni-muted); font-size: 13px; }
+.ni-delta-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr)); gap: 9px; margin-top: 10px; }
+.ni-delta-card { min-width: 0; border: 1px solid var(--ni-border); border-radius: 12px; padding: 12px; background: var(--ni-bg); }
+.ni-delta-head { display: flex; gap: 9px; align-items: center; }
+.ni-delta-head > div { display: grid; gap: 3px; min-width: 0; }
+.ni-delta-head strong { overflow-wrap: anywhere; font-size: 13px; }
+.ni-delta-head > div > span, .ni-delta-addresses { color: var(--ni-muted); font-size: 11px; }
+.ni-delta-icon { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; border-radius: 9px; color: var(--ni-accent); background: var(--ni-accent-soft); font-weight: 800; }
+.ni-delta-change { margin: 9px 0 0; color: var(--ni-text); font-size: 12px; overflow-wrap: anywhere; }
+.ni-delta-addresses { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 5px 9px; margin-top: 9px; }
+.ni-delta-evidence { margin-top: 10px; border-top: 1px solid var(--ni-border); padding-top: 8px; color: var(--ni-muted); font-size: 11px; }
+.ni-delta-evidence summary { cursor: pointer; font-weight: 700; }
+.ni-delta-evidence ul { display: grid; gap: 5px; padding-left: 17px; overflow-wrap: anywhere; }
 .ni-inventory-heading { margin-bottom: 10px; }
 .ni-inventory-controls { position: sticky; top: 0; z-index: 3; margin-bottom: 2px; padding: 5px 0 10px; background: var(--ni-bg); }
 .ni-search input { width: min(320px, 80vw); }

@@ -4,6 +4,10 @@ import type { LocalNetworkRuntimeReport } from './adapters/outbound/network/loca
 export interface NetworkDiscoverySnapshot {
   schemaVersion: 1 | 2;
   scanId: string;
+  /** Ownership is absent only on snapshots created before site scoping was added. */
+  ownership?: { tenantId: string; siteId: string };
+  /** Read-only API projection; never persisted as scan evidence. */
+  ownershipStatus?: 'scoped' | 'legacy-unscoped';
   startedAt: string;
   completedAt: string;
   collector: { id: string; host: string; interfaces: string[] };
@@ -13,6 +17,7 @@ export interface NetworkDiscoverySnapshot {
     cidr?: string;
     interfaceName?: string;
     role?: NetworkDiscoveryZone['role'];
+    collectionSource?: NetworkDiscoveryZone['collectionSource'];
     complete: boolean;
     gatewayIpsObserved: string[];
     collectionStages?: {
@@ -49,17 +54,19 @@ export interface NetworkDiscoverySnapshotDiff {
   incompleteScopes: string[];
   addedEndpoints: Array<{ scopeId: string; ipAddress: string; macAddress?: string }>;
   notDetectedEndpoints: Array<{ scopeId: string; ipAddress: string; macAddress?: string }>;
-  verifiedAddressChanges: Array<{ identity: string; from: string; to: string }>;
-  ipReuse: Array<{ scopeId: string; ipAddress: string; previousIdentity?: string; currentIdentity?: string }>;
+  verifiedAddressChanges: Array<{ scopeId: string; identity: string; from: string; to: string }>;
+  ipReuse: Array<{ scopeId: string; ipAddress: string; previousIdentity?: string; currentIdentity?: string; previousObservedMac?: string; currentObservedMac?: string }>;
   serviceChanges: Array<{ scopeId: string; ipAddress: string; added: string[]; removed: string[] }>;
   scopeChanges: Array<{ scopeId: string; previousCidr?: string; currentCidr?: string; previousInterface?: string; currentInterface?: string }>;
   macChanges: Array<{
+    scopeId: string;
     identity: string;
     previousObservedMac?: string;
     currentObservedMac?: string;
     previousDeviceReportedMac?: string;
     currentDeviceReportedMac?: string;
   }>;
+  hostnameChanges: Array<{ scopeId: string; identity: string; previous: string; current: string }>;
   gatewayChanges: Array<{ scopeId: string; previous: string[]; current: string[] }>;
   identityChanges: Array<{ scopeId: string; ipAddress: string; previous: string; current: string }>;
   topologyChanges: { added: NetworkDiscoverySnapshot['topology']['relationships']; removed: NetworkDiscoverySnapshot['topology']['relationships'] };
@@ -69,10 +76,20 @@ export function compareNetworkSnapshots(
   previous: NetworkDiscoverySnapshot,
   current: NetworkDiscoverySnapshot,
 ): NetworkDiscoverySnapshotDiff {
+  const ownershipMatches = !!previous.ownership && !!current.ownership &&
+    previous.ownership.tenantId === current.ownership.tenantId &&
+    previous.ownership.siteId === current.ownership.siteId;
   const previousScopes = new Map(previous.scopes.map(scope => [scope.id, scope]));
   const currentScopes = new Map(current.scopes.map(scope => [scope.id, scope]));
-  const comparableScopes = current.scopes
-    .filter(scope => previousScopes.get(scope.id)?.cidr === scope.cidr)
+  const comparableScopes = (ownershipMatches ? current.scopes : [])
+    .filter(scope => {
+      const previousScope = previousScopes.get(scope.id);
+      return !!previousScope && previousScope.cidr === scope.cidr &&
+        previousScope.interfaceName === scope.interfaceName &&
+        previousScope.complete === scope.complete &&
+        sameStageCoverage(previousScope, scope) &&
+        sameMethods(previous.methods, current.methods);
+    })
     .map(scope => scope.id)
     .sort();
   const incompleteScopes = comparableScopes
@@ -90,10 +107,13 @@ export function compareNetworkSnapshots(
     serviceChanges: [],
     scopeChanges: [],
     macChanges: [],
+    hostnameChanges: [],
     gatewayChanges: [],
     identityChanges: [],
     topologyChanges: { added: [], removed: [] },
   };
+
+  if (!ownershipMatches) return diff;
 
   for (const currentScope of current.scopes) {
     const previousScope = previousScopes.get(currentScope.id);
@@ -127,24 +147,26 @@ export function compareNetworkSnapshots(
 
     for (const device of after) {
       const previousAtIp = beforeByIp.get(device.ipAddress);
-      if (!previousAtIp && !beforeByIdentity.has(device.id)) {
+      if (!previousAtIp && !beforeByIdentity.has(verifiedIdentityValue(device) || '')) {
         diff.addedEndpoints.push(endpointSummary(scopeId, device));
       }
       if (previousAtIp && changedIdentity(previousAtIp, device)) {
         diff.ipReuse.push({
           scopeId,
           ipAddress: device.ipAddress,
-          ...(verifiedShellyIdentity(previousAtIp) ? { previousIdentity: previousAtIp.id } : {}),
-          ...(verifiedShellyIdentity(device) ? { currentIdentity: device.id } : {}),
+          ...(verifiedIdentityValue(previousAtIp) ? { previousIdentity: previousAtIp.id } : {}),
+          ...(verifiedIdentityValue(device) ? { currentIdentity: device.id } : {}),
+          ...(previousAtIp.macAddress ? { previousObservedMac: previousAtIp.macAddress } : {}),
+          ...(device.macAddress ? { currentObservedMac: device.macAddress } : {}),
         });
       }
       if (previousAtIp) {
-        const previousVerification = identityVerification(previousAtIp);
-        const currentVerification = identityVerification(device);
-        if (previousVerification !== currentVerification) {
-          diff.identityChanges.push({ scopeId, ipAddress: device.ipAddress, previous: previousVerification, current: currentVerification });
+        const previousIdentity = verifiedIdentityValue(previousAtIp);
+        const currentIdentity = verifiedIdentityValue(device);
+        if (previousIdentity && currentIdentity && previousIdentity !== currentIdentity) {
+          diff.identityChanges.push({ scopeId, ipAddress: device.ipAddress, previous: previousIdentity, current: currentIdentity });
         }
-        if (!verifiedShellyIdentity(device) && !verifiedShellyIdentity(previousAtIp)) {
+        if (!verifiedIdentityValue(device) && !verifiedIdentityValue(previousAtIp)) {
           appendServiceChange(diff, scopeId, device, previousAtIp);
         }
       }
@@ -153,25 +175,30 @@ export function compareNetworkSnapshots(
     for (const [identity, beforeDevice] of beforeByIdentity) {
       const afterDevice = afterByIdentity.get(identity);
       if (afterDevice && beforeDevice.ipAddress !== afterDevice.ipAddress) {
-        diff.verifiedAddressChanges.push({ identity, from: beforeDevice.ipAddress, to: afterDevice.ipAddress });
+        diff.verifiedAddressChanges.push({ scopeId, identity: beforeDevice.id.toLowerCase(), from: beforeDevice.ipAddress, to: afterDevice.ipAddress });
       }
       if (afterDevice) appendServiceChange(diff, scopeId, afterDevice, beforeDevice);
       if (afterDevice && (
-        beforeDevice.deviceReportedMacAddress?.toLowerCase() !== afterDevice.deviceReportedMacAddress?.toLowerCase() ||
-        beforeDevice.macAddress?.toLowerCase() !== afterDevice.macAddress?.toLowerCase()
+        meaningfulMacChange(beforeDevice.deviceReportedMacAddress, afterDevice.deviceReportedMacAddress) ||
+        meaningfulMacChange(beforeDevice.macAddress, afterDevice.macAddress)
       )) {
-        diff.macChanges.push({ identity,
+        diff.macChanges.push({ scopeId, identity,
           ...(beforeDevice.macAddress ? { previousObservedMac: beforeDevice.macAddress } : {}),
           ...(afterDevice.macAddress ? { currentObservedMac: afterDevice.macAddress } : {}),
           ...(beforeDevice.deviceReportedMacAddress ? { previousDeviceReportedMac: beforeDevice.deviceReportedMacAddress } : {}),
           ...(afterDevice.deviceReportedMacAddress ? { currentDeviceReportedMac: afterDevice.deviceReportedMacAddress } : {}),
         });
       }
+      if (afterDevice && meaningfulHostnameChange(beforeDevice.hostname, afterDevice.hostname)) {
+        diff.hostnameChanges.push({ scopeId, identity, previous: beforeDevice.hostname || '', current: afterDevice.hostname || '' });
+      }
     }
 
     if (!incompleteScopes.includes(scopeId)) {
       for (const device of before) {
-        if (!afterByIp.has(device.ipAddress)) {
+        const identity = verifiedIdentityValue(device);
+        const verifiedDeviceMoved = !!identity && afterByIdentity.has(identity);
+        if (!afterByIp.has(device.ipAddress) && !verifiedDeviceMoved) {
           diff.notDetectedEndpoints.push(endpointSummary(scopeId, device));
         }
       }
@@ -185,6 +212,7 @@ export function compareNetworkSnapshots(
   diff.serviceChanges.sort((a, b) => a.scopeId.localeCompare(b.scopeId) || a.ipAddress.localeCompare(b.ipAddress));
   diff.scopeChanges.sort((a, b) => a.scopeId.localeCompare(b.scopeId));
   diff.macChanges.sort((a, b) => a.identity.localeCompare(b.identity));
+  diff.hostnameChanges.sort((a, b) => a.identity.localeCompare(b.identity));
   diff.gatewayChanges.sort((a, b) => a.scopeId.localeCompare(b.scopeId));
   diff.identityChanges.sort((a, b) => a.scopeId.localeCompare(b.scopeId) || a.ipAddress.localeCompare(b.ipAddress));
   const previousRelations = new Map(previous.topology.relationships.map(relation => [relationshipKey(relation), relation]));
@@ -197,18 +225,27 @@ export function compareNetworkSnapshots(
 }
 
 function verifiedIdentities(devices: NetworkDiscoveredDevice[]): Map<string, NetworkDiscoveredDevice> {
-  const ordered = [...devices].filter(verifiedShellyIdentity).sort((a, b) =>
+  const ordered = [...devices].filter(device => !!verifiedIdentityValue(device)).sort((a, b) =>
     b.discoveredAt.localeCompare(a.discoveredAt) || a.ipAddress.localeCompare(b.ipAddress),
   );
-  return new Map(ordered.map(device => [device.id, device]));
+  return new Map(ordered.map(device => [verifiedIdentityValue(device)!, device]));
 }
 
-function verifiedShellyIdentity(device: NetworkDiscoveredDevice): boolean {
-  return device.vendor === 'Shelly' && device.protocol === 'http' && /^shelly[a-z0-9._-]+$/i.test(device.id);
-}
+function verifiedIdentityValue(device: NetworkDiscoveredDevice): string | null {
+  const shellyId = device.observations?.find(observation =>
+    observation.source === 'http_rpc' && observation.attribute === 'shelly.device_id',
+  )?.value;
+  if (typeof shellyId === 'string' && shellyId && shellyId === device.id) return shellyId.toLowerCase();
 
-function identityVerification(device: NetworkDiscoveredDevice): string {
-  return verifiedShellyIdentity(device) ? `verified:${device.id}` : 'not-established';
+  const identityVerified = device.observations?.some(observation =>
+    observation.source === 'http_identity' && observation.attribute === 'identity.verified' && observation.value === true,
+  );
+  const reportedId = device.observations?.find(observation =>
+    observation.source === 'http_identity' && observation.attribute === 'identity.device_id',
+  )?.value;
+  return identityVerified && typeof reportedId === 'string' && reportedId && reportedId.toLowerCase() === device.id.toLowerCase()
+    ? reportedId.toLowerCase()
+    : null;
 }
 
 function relationshipKey(relationship: NetworkDiscoverySnapshot['topology']['relationships'][number]): string {
@@ -216,10 +253,35 @@ function relationshipKey(relationship: NetworkDiscoverySnapshot['topology']['rel
 }
 
 function changedIdentity(previous: NetworkDiscoveredDevice, current: NetworkDiscoveredDevice): boolean {
-  if (verifiedShellyIdentity(previous) && verifiedShellyIdentity(current)) return previous.id !== current.id;
-  const beforeMac = previous.macAddress?.toLowerCase();
-  const afterMac = current.macAddress?.toLowerCase();
-  return !!beforeMac && !!afterMac && beforeMac !== afterMac;
+  const previousIdentity = verifiedIdentityValue(previous);
+  const currentIdentity = verifiedIdentityValue(current);
+  if (previousIdentity && currentIdentity) return previousIdentity !== currentIdentity;
+  return meaningfulMacChange(previous.macAddress, current.macAddress);
+}
+
+function normalizeMac(value: string): string {
+  return value.toLowerCase().replace(/[.:-]/g, '').replace(/\s/g, '');
+}
+
+function meaningfulMacChange(previous?: string, current?: string): boolean {
+  return !!previous && !!current && normalizeMac(previous) !== normalizeMac(current);
+}
+
+function meaningfulHostnameChange(previous?: string, current?: string): boolean {
+  return !!previous?.trim() && !!current?.trim() &&
+    previous.trim().toLocaleLowerCase() !== current.trim().toLocaleLowerCase();
+}
+
+function sameMethods(previous: string[], current: string[]): boolean {
+  return [...previous].sort().join('\u0000') === [...current].sort().join('\u0000');
+}
+
+function sameStageCoverage(previous: NetworkDiscoverySnapshot['scopes'][number], current: NetworkDiscoverySnapshot['scopes'][number]): boolean {
+  const before = previous.collectionStages;
+  const after = current.collectionStages;
+  if (!before || !after) return before === after;
+  return before.hostDiscovery.complete === after.hostDiscovery.complete &&
+    before.serviceEnrichment.complete === after.serviceEnrichment.complete;
 }
 
 function serviceEvidence(device: NetworkDiscoveredDevice): string[] {
@@ -237,8 +299,8 @@ function appendServiceChange(
   const previousServices = serviceEvidence(previous);
   const currentServices = serviceEvidence(current);
   const added = currentServices.filter(value => !previousServices.includes(value));
-  const removed = previousServices.filter(value => !currentServices.includes(value));
-  if (added.length || removed.length) diff.serviceChanges.push({ scopeId, ipAddress: current.ipAddress, added, removed });
+  // A missing positive port observation is not evidence that a service was removed.
+  if (added.length) diff.serviceChanges.push({ scopeId, ipAddress: current.ipAddress, added, removed: [] });
 }
 
 function endpointSummary(scopeId: string, device: NetworkDiscoveredDevice) {

@@ -31,6 +31,7 @@ const props = defineProps<{
   deviceStatus: string;
   apiBase: string;
   accessToken: string;
+  supportedMetrics?: Metric[];
 }>();
 
 const ranges = [
@@ -38,7 +39,7 @@ const ranges = [
   { value: '24h', label: '24 hours', milliseconds: 24 * 60 * 60_000 },
   { value: '7d', label: '7 days', milliseconds: 7 * 24 * 60 * 60_000 },
 ] as const;
-const metrics: Metric[] = ['temperature', 'humidity'];
+const metrics = computed<Metric[]>(() => props.supportedMetrics ?? ['temperature', 'humidity']);
 const selectedRange = ref<(typeof ranges)[number]['value']>('24h');
 const fields = ref<Partial<Record<Metric, CurrentField>>>({});
 const freshnessLimitSeconds = ref(60);
@@ -127,7 +128,7 @@ function historyUnit(metric: Metric): string {
   const unit = history.value[metric]?.unit;
   return unit === 'Cel' ? '°C' : unit || unitFor(metric);
 }
-const authorizedMetrics = computed(() => metrics.filter(metric =>
+const authorizedMetrics = computed(() => metrics.value.filter(metric =>
   fields.value[metric]?.authority === 'approved' &&
   typeof fields.value[metric]?.value === 'number',
 ));
@@ -205,7 +206,7 @@ async function loadHistory() {
   }
 }
 
-watch(() => [props.deviceId, props.apiBase, props.accessToken], () => {
+watch(() => [props.deviceId, props.apiBase, props.accessToken, props.supportedMetrics?.join(',')], () => {
   fields.value = {};
   void (async () => { await loadCurrent(); await loadHistory(); })();
 });
@@ -243,7 +244,7 @@ onBeforeUnmount(() => {
       </article>
     </div>
     <p v-if="!currentLoading && !currentError && authorizedMetrics.length === 0" class="measurement-muted">
-      No authorized temperature or humidity observations are available for this device.
+      No authorized {{ metrics.map(labelFor).join(' or ').toLowerCase() }} observations are available.
     </p>
 
     <div class="measurement-history-heading">
@@ -278,7 +279,7 @@ onBeforeUnmount(() => {
         <p v-else class="measurement-muted">No {{ labelFor(metric).toLowerCase() }} history in this range.</p>
       </article>
     </div>
-    <p v-else-if="!historyLoading && !historyError" class="measurement-muted">History is unavailable until a measurement source is approved and observed.</p>
+    <p v-else-if="!historyLoading && !historyError" class="measurement-muted">History is unavailable until an authorized measurement is observed.</p>
   </section>
 </template>
 

@@ -33,15 +33,27 @@ import { WeatherVerificationScheduler } from './weather-verification.scheduler';
 import { WeatherDailyVerificationService } from './weather-daily-verification.service';
 import { WeatherObservationCollector } from './weather-observation-collector.service';
 import { WeatherStationDailyService } from './weather-station-daily.service';
+import { WeatherInvestigatorController } from './weather-investigator.controller';
+import { WEATHER_INVESTIGATOR_PROVIDER, WeatherInvestigatorService } from './weather-investigator.service';
+import { WeatherInvestigatorScheduler } from './weather-investigator.scheduler';
+import { ApiWeatherInvestigatorProvider, FixtureWeatherInvestigatorProvider } from './weather-investigator';
 
 @Module({
-  controllers: [WeatherController, RiverController, WeatherVerificationController],
+  controllers: [WeatherController, RiverController, WeatherVerificationController, WeatherInvestigatorController],
   providers: [
     WeatherVerificationService,
     WeatherVerificationScheduler,
     WeatherDailyVerificationService,
     WeatherObservationCollector,
     WeatherStationDailyService,
+    WeatherInvestigatorService,
+    WeatherInvestigatorScheduler,
+    { provide: WEATHER_INVESTIGATOR_PROVIDER, useFactory: () =>
+      process.env.ENERGRID_LAB_MODE === 'true' &&
+      process.env.WEATHER_INVESTIGATOR_PROVIDER === 'api-llm' &&
+      !!process.env.WEATHER_INVESTIGATOR_OPAQUE_SITE_ID?.trim()
+        ? new ApiWeatherInvestigatorProvider()
+        : new FixtureWeatherInvestigatorProvider() },
     WeatherService,
     WeatherProviderService,
     WeatherRiskEngine,

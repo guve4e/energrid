@@ -6,6 +6,8 @@ describe('portal route helpers', () => {
     ['/', 'assistant'],
     ['/weather', 'weather'],
     ['/weather/', 'weather'],
+    ['/d/home', 'home'],
+    ['/d/home/', 'home'],
     ['/energy/', 'energy'],
     ['/devices/shelly', 'devices'],
     ['/network-intelligence/', 'network-intelligence'],

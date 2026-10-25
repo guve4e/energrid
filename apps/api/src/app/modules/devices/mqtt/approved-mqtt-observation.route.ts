@@ -9,11 +9,15 @@ import type { ObservationScope } from '../device-observation-state.store';
 import { DeviceObservationStateStore } from '../device-observation-state.store';
 import type { DeviceMqttMessage } from './device-mqtt-message-adapter';
 import type { DeviceEnrollmentService } from '../enrollment/device-enrollment.service';
+import type { DeviceIntelligenceObservationIngress } from '../device-intelligence-observation-ingress';
+import type { ResolvedObservationAuthority } from '../device-observation-installation-authority';
+import { energridFirmwareSampleEvidenceId } from '../adapters/inbound/energrid/energrid-http-observation.adapter';
 
 export interface ApprovedMqttObservationConfig {
   scope: ObservationScope;
   binding: ApprovedObservationBinding;
   policy: ObservationAuthorityPolicy;
+  expectedDeviceIdentity?: string;
 }
 
 export type ApprovedMqttObservationResult =
@@ -25,6 +29,8 @@ export type ApprovedMqttObservationResult =
         | 'device_not_approved'
         | 'device_not_enrolled'
         | 'installation_missing_or_mismatched'
+        | 'publisher_identity_mismatch'
+        | 'invalid_sample'
         | 'observation_policy_rejected'
     }
 
@@ -51,6 +57,7 @@ export class ApprovedMqttObservationRoute {
     configs: readonly ApprovedMqttObservationConfig[],
     private readonly installations: Pick<DeviceInstallationStore, 'get'>,
     private readonly enrollment?: Pick<DeviceEnrollmentService, 'find'>,
+    private readonly ingress?: Pick<DeviceIntelligenceObservationIngress, 'ingestConfiguredMqtt'>,
   ) {
     for (const config of configs) {
       const { binding, policy, scope } = config;
@@ -100,7 +107,7 @@ export class ApprovedMqttObservationRoute {
         });
         if (!enrollment || enrollment.status !== 'enrolled') continue;
       }
-      const approved = this.registry.getDevices().some(
+      const approved = this.registry.getDevices(true).some(
         (device) =>
           device.id === binding.deviceId &&
           device.tenantId === scope.tenantId &&
@@ -202,7 +209,7 @@ export class ApprovedMqttObservationRoute {
 
     // This is a second check, not an installation/approval operation.
     // The profile itself must have been explicitly provisioned.
-    const device = this.registry.getDevices().find(
+    const device = this.registry.getDevices(true).find(
       (candidate) =>
         candidate.id === binding.deviceId &&
         candidate.tenantId === scope.tenantId &&
@@ -236,6 +243,33 @@ export class ApprovedMqttObservationRoute {
         outcome: 'rejected',
         reasonCode: 'installation_missing_or_mismatched',
       };
+    }
+
+    if (config.expectedDeviceIdentity) {
+      const parsed = parseExpectedDeviceSample(
+        message.payload,
+        config.expectedDeviceIdentity,
+        (device as { metadata?: Record<string, unknown> }).metadata?.physicalId,
+      );
+      if (!parsed.ok) return { outcome: 'rejected', reasonCode: parsed.reasonCode };
+      if (!this.ingress) return { outcome: 'rejected', reasonCode: 'observation_policy_rejected' };
+      const sample = parsed.sample;
+      const evidenceId = energridFirmwareSampleEvidenceId(config.expectedDeviceIdentity!, sample.sampleId);
+      if (!evidenceId) return { outcome: 'rejected', reasonCode: 'invalid_sample' };
+      const authority: ResolvedObservationAuthority = { binding, policy };
+      const outcome = await this.ingress.ingestConfiguredMqtt({
+        scope, deviceId: binding.deviceId, sourceId: binding.sourceId,
+        selector: binding.selector, payload: sample.values, evidenceId,
+      }, authority);
+      if (outcome.outcome !== 'processed' ||
+          (!outcome.accepted && outcome.reason !== 'duplicate_evidence')) {
+        return { outcome: 'rejected', reasonCode: 'observation_policy_rejected' };
+      }
+      if (outcome.accepted && outcome.state) {
+        const values = Object.fromEntries(Object.entries(outcome.state.fields).map(([key, field]) => [key, field.value]));
+        this.registry.projectApprovedObservation({ deviceId: binding.deviceId, values, observedAt: new Date().toISOString() });
+      }
+      return { outcome: 'admitted' };
     }
 
     // Reception time is assigned by Energrid.
@@ -279,4 +313,31 @@ export class ApprovedMqttObservationRoute {
     });
     return { outcome: 'admitted' };
   }
+}
+
+function parseExpectedDeviceSample(
+  payload: unknown,
+  expectedIdentity: string,
+  registeredPhysicalIdentity: unknown,
+): { ok: true; sample: { values: { temperatureC: number; humidityPct: number }; sampleId: string } } | { ok: false; reasonCode: 'publisher_identity_mismatch' | 'invalid_sample' } {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return { ok: false, reasonCode: 'invalid_sample' };
+  const root = payload as Record<string, unknown>;
+  if (registeredPhysicalIdentity !== expectedIdentity || root.deviceId !== expectedIdentity) return { ok: false, reasonCode: 'publisher_identity_mismatch' };
+  if (root.schemaVersion !== 1 || root.deviceId !== expectedIdentity || !Number.isSafeInteger(root.uptimeMs) || Number(root.uptimeMs) < 0 ||
+      !Number.isSafeInteger(root.sampleIntervalMs) || Number(root.sampleIntervalMs) < 1) return { ok: false, reasonCode: 'invalid_sample' };
+  const sensor = root.sensor;
+  if (!sensor || typeof sensor !== 'object' || Array.isArray(sensor)) return { ok: false, reasonCode: 'invalid_sample' };
+  const sample = sensor as Record<string, unknown>;
+  if (sample.state !== 'ok' || !Number.isSafeInteger(sample.sampleCount) || Number(sample.sampleCount) < 1 ||
+      !Number.isSafeInteger(sample.lastSampleUptimeMs) || Number(sample.lastSampleUptimeMs) < 0 ||
+      !Number.isSafeInteger(sample.readingAgeMs) || Number(sample.readingAgeMs) < 0 ||
+      Number(sample.readingAgeMs) > Math.min(15_000, Math.max(5_000, Number(root.sampleIntervalMs) * 3)) ||
+      typeof root.sampleId !== 'string' || !energridFirmwareSampleEvidenceId(expectedIdentity, root.sampleId) ||
+      root.sampleId.split(':')[1] !== String(sample.sampleCount) || root.sampleId.split(':')[2] !== String(sample.lastSampleUptimeMs) ||
+      typeof sample.temperatureC !== 'number' || !Number.isFinite(sample.temperatureC) || sample.temperatureC < -40 || sample.temperatureC > 80 ||
+      typeof sample.humidityPct !== 'number' || !Number.isFinite(sample.humidityPct) || sample.humidityPct < 0 || sample.humidityPct > 100) return { ok: false, reasonCode: 'invalid_sample' };
+  return {
+    ok: true,
+    sample: { values: { temperatureC: sample.temperatureC, humidityPct: sample.humidityPct }, sampleId: root.sampleId as string },
+  };
 }

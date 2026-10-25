@@ -1,4 +1,6 @@
 import { Logger } from '@nestjs/common';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { TelemetryIngestService } from './telemetry-ingest.service';
 import {
   ConflictingElectricalReadingError,
@@ -292,7 +294,7 @@ describe('approved durable electrical ingestion', () => {
 });
 
 describe('telemetry configuration', () => {
-  it('is disabled by default with no implicit disk location or retention deletion', () => {
+  it('is disabled by default and retains bounded queue configuration', () => {
     expect(telemetryConfig({})).toEqual({
       enabled: false,
       databaseUrl: null,
@@ -306,6 +308,7 @@ describe('telemetry configuration', () => {
       rollupIntervalMs: 300000,
       maxPendingWrites: 100_000,
       spoolDirectory: null,
+      historyOutboxDirectory: join(homedir(), '.energrid', 'measurement-history-outbox'),
       replayIntervalMs: 5000,
     });
   });

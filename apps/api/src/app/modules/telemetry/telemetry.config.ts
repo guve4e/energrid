@@ -1,8 +1,10 @@
-import { isAbsolute } from 'node:path';
+import { isAbsolute, join } from 'node:path';
+import { homedir } from 'node:os';
 
 export const TELEMETRY_POOL = Symbol('TELEMETRY_POOL');
 export const TELEMETRY_CONFIG = Symbol('TELEMETRY_CONFIG');
 export const TELEMETRY_SPOOL_FACTORY = Symbol('TELEMETRY_SPOOL_FACTORY');
+export const MEASUREMENT_HISTORY_OUTBOX_FACTORY = Symbol('MEASUREMENT_HISTORY_OUTBOX_FACTORY');
 
 export interface TelemetryConfig {
   enabled: boolean;
@@ -12,6 +14,7 @@ export interface TelemetryConfig {
   rollupIntervalMs: number;
   maxPendingWrites: number;
   spoolDirectory: string | null;
+  historyOutboxDirectory: string;
   replayIntervalMs: number;
 }
 
@@ -70,6 +73,10 @@ export function telemetryConfig(env: NodeJS.ProcessEnv): TelemetryConfig {
     throw new Error(
       'An absolute TELEMETRY_SPOOL_DIRECTORY is required when telemetry is enabled',
     );
+  const historyOutboxDirectory = env.TELEMETRY_HISTORY_OUTBOX_DIRECTORY?.trim() ||
+    join(homedir(), '.energrid', 'measurement-history-outbox');
+  if (!isAbsolute(historyOutboxDirectory))
+    throw new Error('TELEMETRY_HISTORY_OUTBOX_DIRECTORY must be absolute');
   const integer = (
     name: string,
     fallback: number,
@@ -99,6 +106,7 @@ export function telemetryConfig(env: NodeJS.ProcessEnv): TelemetryConfig {
       1_000_000,
     ),
     spoolDirectory,
+    historyOutboxDirectory,
     replayIntervalMs: integer(
       'TELEMETRY_REPLAY_INTERVAL_MS',
       5000,

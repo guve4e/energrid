@@ -24,6 +24,7 @@ import { energridHttpObservationApproval, isEnergridHttpObservationApproval } fr
 import type { DeviceEnrollmentStatus } from '@energrid/domain-devices';
 import { DEVICE_ENROLLMENT_SERVICE } from './enrollment/device-enrollment.module';
 import type { DeviceEnrollmentService } from './enrollment/device-enrollment.service';
+import { configuredPortalSite } from '../portal/portal-site-context';
 
 export interface DiscoveredDeviceConfig {
   id?: string;
@@ -90,6 +91,7 @@ interface ApprovedDeviceConfig {
   settingsUrl?: string;
   status?: string;
   capabilities?: DeviceCapabilityKind[];
+  supportedCapabilities?: DeviceCapabilityKind[];
   groups?: string[];
   aliases?: string[];
   metadata?: Record<string, string | number | boolean>;
@@ -183,8 +185,9 @@ export class DeviceRegistryService implements OnModuleInit {
       Array.isArray(configured)
     )
       throw new Error('HOME_DEVICE_CONTROL_BINDINGS_JSON must be an object.');
+    const owner = configuredInstallationSite();
     for (const [id, binding] of Object.entries(configured))
-      this.controlBindings.set(id, parseDeviceControlBinding(binding));
+      this.controlBindings.set(scopedDeviceKey(id, owner.tenantId, owner.siteId), parseDeviceControlBinding(binding));
   }
 
   private installationsReady?: Promise<void>;
@@ -207,22 +210,27 @@ export class DeviceRegistryService implements OnModuleInit {
   }
 
   private async loadInstallations(): Promise<void> {
-    const siteId = configuredSite().siteId;
+    if (!this.installationStore) return;
+    const records = await this.installationStore.listAll();
+    const owners = new Map(records.map(record => [`${record.device.tenantId}:${record.device.siteId}`, {
+      tenantId: record.device.tenantId, siteId: record.device.siteId,
+    }]));
     if (this.enrollment) {
-      const { tenantId } = configuredSite();
-      const enrollments = await this.enrollment.list({ tenantId, siteId });
-      for (const enrollment of enrollments) {
-        this.enrollmentStatusByDeviceId.set(enrollment.deviceId, enrollment.status);
+      for (const owner of owners.values()) {
+        const enrollments = await this.enrollment.list(owner);
+        for (const enrollment of enrollments) {
+          this.enrollmentStatusByDeviceId.set(scopedDeviceKey(enrollment.deviceId, owner.tenantId, owner.siteId), enrollment.status);
+        }
       }
     }
-    if (!this.installationStore) return;
-    for (const record of await this.installationStore.list(siteId)) {
+    for (const record of records) {
       const device = record.device;
-      this.persistedInstallations.set(device.id, record);
-      if (this.enrollment && this.enrollmentStatusByDeviceId.get(device.id) !== 'enrolled') {
+      const key = scopedDeviceKey(device.id, device.tenantId, device.siteId);
+      this.persistedInstallations.set(key, record);
+      if (this.enrollment && this.enrollmentStatusByDeviceId.get(key) !== 'enrolled') {
         continue;
       }
-      this.liveApprovedDeviceConfigs.set(device.id, {
+      this.liveApprovedDeviceConfigs.set(key, {
         id: device.id,
         displayName: device.displayName,
         tenantId: device.tenantId,
@@ -246,16 +254,16 @@ export class DeviceRegistryService implements OnModuleInit {
         state: { values: {}, observedAt: null, source: 'device-store', status: 'unknown' },
       });
       if (device.control?.binding)
-        this.controlBindings.set(device.id, parseDeviceControlBinding(device.control.binding));
+        this.controlBindings.set(key, parseDeviceControlBinding(device.control.binding));
     }
   }
 
   getSnapshot(): DeviceRegistrySnapshot {
-    const allDevices = this.getDevices();
+    const allDevices = this.getDevices(true);
     const allSystems = this.getSystems(allDevices);
-    const currentSiteId = configuredSite().siteId;
+    const currentSite = configuredSite();
     const devices = allDevices.filter(
-      (device) => device.siteId === currentSiteId,
+      (device) => device.tenantId === currentSite.tenantId && device.siteId === currentSite.siteId,
     );
     const systems = this.getSystems(devices);
     const zones = this.getZones(devices, systems);
@@ -300,11 +308,15 @@ export class DeviceRegistryService implements OnModuleInit {
     };
   }
 
-  getDevices(): RegisteredDevice[] {
+  getDevices(includeOtherSites = false): RegisteredDevice[] {
     const now = new Date().toISOString();
-    const identity = configuredSite();
-    const shellyDevices = this.getKitchenLightShellyDevices();
-    const importedDevices = this.getApprovedDevicesFromConfig();
+    const identity = includeOtherSites ? configuredInstallationSite() : configuredSite();
+    const homeSite = isConfiguredHomeSite(identity);
+    const shellyDevices = homeSite ? this.getKitchenLightShellyDevices() : [];
+    const allImportedDevices = this.getApprovedDevicesFromConfig(true);
+    const importedDevices = allImportedDevices.filter(device =>
+      device.tenantId === identity.tenantId && device.siteId === identity.siteId,
+    );
     const importedLogicalGroups =
       logicalGroupsFromImportedDevices(importedDevices);
     const hasShellyGroup = shellyDevices.length > 0;
@@ -477,28 +489,31 @@ export class DeviceRegistryService implements OnModuleInit {
 
     const devices = dedupeDevices([
       ...importedLogicalGroups,
-      ...(hasShellyGroup || hasGenericLightMqtt || !hasImportedKitchenLights
+      ...(homeSite && (hasShellyGroup || hasGenericLightMqtt || !hasImportedKitchenLights)
         ? [kitchenLightGroup]
         : []),
       ...physicalLights,
-      ...(hasImportedKitchenTemperature ? [] : [temperatureDevice]),
+      ...(homeSite && !hasImportedKitchenTemperature ? [temperatureDevice] : []),
       ...importedDevices,
-      ...this.getDiscoveredDevices(),
-    ]);
+      ...(includeOtherSites ? allImportedDevices.filter(device =>
+        device.tenantId !== identity.tenantId || device.siteId !== identity.siteId,
+      ) : []),
+      ...this.getDiscoveredDevices(includeOtherSites),
+    ].filter(device => includeOtherSites || (device.tenantId === identity.tenantId && device.siteId === identity.siteId)));
 
     const result = devices.map((device) => ({
       ...this.withLiveState(device),
-      ...(this.persistedInstallations.has(device.id)
+      ...(this.persistedInstallations.has(scopedDeviceKey(device.id, device.tenantId, device.siteId))
         ? {
             commissioning: {
-              physicalOutcome: this.persistedInstallations.get(device.id)!.physicalOutcome.status,
-              confirmedAt: this.persistedInstallations.get(device.id)!.physicalOutcome.confirmedAt,
+              physicalOutcome: this.persistedInstallations.get(scopedDeviceKey(device.id, device.tenantId, device.siteId))!.physicalOutcome.status,
+              confirmedAt: this.persistedInstallations.get(scopedDeviceKey(device.id, device.tenantId, device.siteId))!.physicalOutcome.confirmedAt,
             },
           }
         : {}),
       control: deviceControlState(
         device,
-        this.controlBindings.get(device.id) || null,
+        this.controlBindings.get(scopedDeviceKey(device.id, device.tenantId, device.siteId)) || null,
       ),
     }));
     const groupState = (
@@ -564,7 +579,7 @@ export class DeviceRegistryService implements OnModuleInit {
     const state = deviceControlState(device, binding);
     if (binding && !['ready', 'disabled'].includes(state.status))
       throw new Error(state.reason);
-    this.controlBindings.set(deviceId, binding);
+    this.controlBindings.set(scopedDeviceKey(device.id, device.tenantId, device.siteId), binding);
     this.operationalLog?.record({
       level: 'info',
       source: 'device-registry',
@@ -581,7 +596,8 @@ export class DeviceRegistryService implements OnModuleInit {
   ): Promise<void> {
     if (!this.installationStore)
       throw new Error('Local device storage is unavailable.');
-    const existing = this.persistedInstallations.get(device.id);
+    const key = scopedDeviceKey(device.id, device.tenantId, device.siteId);
+    const existing = this.persistedInstallations.get(key);
     const record: DeviceInstallationRecord = {
       schemaVersion: 1,
       device,
@@ -596,7 +612,7 @@ export class DeviceRegistryService implements OnModuleInit {
       updatedAt: new Date().toISOString(),
     };
     await this.installationStore.save(record);
-    this.persistedInstallations.set(device.id, record);
+    this.persistedInstallations.set(key, record);
     if (initialApproval)
       await this.persistInstallationEvent(device.id, 'approved', {
         physicalId: String(device.metadata?.physicalId || device.adapter.target || ''),
@@ -630,7 +646,7 @@ export class DeviceRegistryService implements OnModuleInit {
         !/^esp8266:[0-9a-f]{6}$/.test(physicalId) || device.id !== `device:${networkScope}:${physicalId}`) {
       return null;
     }
-    const installation = this.persistedInstallations.get(deviceId);
+    const installation = this.persistedInstallations.get(scopedDeviceKey(deviceId, tenantId, siteId));
     if (!installation || installation.device.tenantId !== tenantId || installation.device.siteId !== siteId) return null;
     if (this.enrollment) {
       const enrollment = await this.enrollment.find({ tenantId, siteId, deviceId });
@@ -653,7 +669,8 @@ export class DeviceRegistryService implements OnModuleInit {
   async approveEnergridObservations(tenantId: string, siteId: string, deviceId: string, actor: string) {
     const status = await this.getEnergridObservationApproval(tenantId, siteId, deviceId);
     if (!status) return null;
-    const installation = this.persistedInstallations.get(deviceId)!;
+    const key = scopedDeviceKey(deviceId, tenantId, siteId);
+    const installation = this.persistedInstallations.get(key)!;
     const expected = energridHttpObservationApproval(deviceId);
     if (status.approved) return status;
     if (installation.observationAuthority) {
@@ -662,7 +679,7 @@ export class DeviceRegistryService implements OnModuleInit {
     if (!this.installationStore) throw new Error('Local device storage is unavailable.');
     const updated = { ...installation, observationAuthority: expected, updatedAt: new Date().toISOString() };
     await this.installationStore!.save(updated);
-    this.persistedInstallations.set(deviceId, updated);
+    this.persistedInstallations.set(key, updated);
     await this.installationStore!.append({
       id: `${new Date().toISOString()}-${Math.random().toString(36).slice(2, 10)}`,
       deviceId,
@@ -675,7 +692,9 @@ export class DeviceRegistryService implements OnModuleInit {
   }
 
   async confirmPhysicalOutcome(deviceId: string): Promise<RegisteredDevice> {
-    const existing = this.persistedInstallations.get(deviceId);
+    const device = this.getDevices().find((item) => item.id === deviceId);
+    const key = device ? scopedDeviceKey(device.id, device.tenantId, device.siteId) : '';
+    const existing = this.persistedInstallations.get(key);
     if (!existing) throw new Error('Persist this device installation before confirmation.');
     const current = this.getDevices().find((device) => device.id === deviceId);
     if (current?.state.command?.status !== 'acked')
@@ -691,7 +710,7 @@ export class DeviceRegistryService implements OnModuleInit {
       updatedAt: confirmedAt,
     };
     await this.installationStore!.save(updated);
-    this.persistedInstallations.set(deviceId, updated);
+    this.persistedInstallations.set(key, updated);
     await this.persistInstallationEvent(deviceId, 'physical_outcome_confirmed', {
       confirmedAt,
     });
@@ -711,7 +730,8 @@ export class DeviceRegistryService implements OnModuleInit {
       throw new Error('Approve this device before editing its installation details.');
     if (settingsUrl != null && !safeSettingsUrl(settingsUrl))
       throw new Error('Device settings must be an absolute HTTP or HTTPS URL without embedded credentials.');
-    const config = this.liveApprovedDeviceConfigs.get(deviceId) || {
+    const key = scopedDeviceKey(device.id, device.tenantId, device.siteId);
+    const config = this.liveApprovedDeviceConfigs.get(key) || {
       id: device.id,
       tenantId: device.tenantId,
       siteId: device.siteId,
@@ -746,13 +766,13 @@ export class DeviceRegistryService implements OnModuleInit {
         ? device.settingsUrl
         : settingsUrl ? safeSettingsUrl(settingsUrl) : undefined,
     };
-    this.liveApprovedDeviceConfigs.set(deviceId, nextConfig);
+    this.liveApprovedDeviceConfigs.set(key, nextConfig);
     const updated = this.getDevices().find((item) => item.id === deviceId)!;
     try {
       await this.persistInstallation(updated);
       return updated;
     } catch (error) {
-      this.liveApprovedDeviceConfigs.set(deviceId, config);
+      this.liveApprovedDeviceConfigs.set(key, config);
       throw error;
     }
   }
@@ -818,6 +838,7 @@ export class DeviceRegistryService implements OnModuleInit {
         discovered.metadata?.mqttEvidenceCandidate !== true,
       // Discovery-reported sensor capabilities are not observation authority.
       // A separate approval workflow must grant measurement access.
+      supportedCapabilities: capabilities,
       capabilities: discovered.metadata?.observationApprovalRequired === true ? [] : capabilities,
       values: discovered.state.values,
       state: {
@@ -834,9 +855,10 @@ export class DeviceRegistryService implements OnModuleInit {
       }),
     };
 
-    this.liveApprovedDeviceConfigs.set(id, approved);
-    this.liveDiscoveredDeviceConfigs.delete(id);
-    this.blockedDiscoveredDeviceIds.delete(id);
+    const key = scopedDeviceKey(id, discovered.tenantId, discovered.siteId);
+    this.liveApprovedDeviceConfigs.set(key, approved);
+    this.liveDiscoveredDeviceConfigs.delete(key);
+    this.blockedDiscoveredDeviceIds.delete(key);
     this.operationalLog?.record({
       level: 'info',
       source: 'device-registry',
@@ -866,8 +888,9 @@ export class DeviceRegistryService implements OnModuleInit {
     );
     if (!discovered) return false;
 
-    this.blockedDiscoveredDeviceIds.add(id);
-    this.liveDiscoveredDeviceConfigs.delete(id);
+    const key = scopedDeviceKey(id, discovered.tenantId, discovered.siteId);
+    this.blockedDiscoveredDeviceIds.add(key);
+    this.liveDiscoveredDeviceConfigs.delete(key);
     this.operationalLog?.record({
       level: 'info',
       source: 'device-registry',
@@ -887,19 +910,24 @@ export class DeviceRegistryService implements OnModuleInit {
     commandTopic?: string,
   ): void {
     const id = `${physicalId}:${component}`;
+    const owner = configuredSite();
+    const key = scopedDeviceKey(id, owner.tenantId, owner.siteId);
     const capability: DeviceCapabilityKind = component.startsWith('switch:')
       ? 'switch'
       : 'power';
 
-    const existing = this.liveDiscoveredDeviceConfigs.get(id);
+    const existing = this.liveDiscoveredDeviceConfigs.get(key);
     if (
       existing &&
       (!commandTopic || existing.metadata?.mqttCommandTopic === commandTopic)
     )
       return;
 
-    this.liveDiscoveredDeviceConfigs.set(id, {
+    this.liveDiscoveredDeviceConfigs.set(key, {
       id,
+      tenantId: owner.tenantId,
+      siteId: owner.siteId,
+      siteName: owner.siteName,
       displayName: `${physicalId} ${component}`,
       suggestedName: `${physicalId} ${component}`,
       suggestedRoom: 'Unknown',
@@ -913,6 +941,8 @@ export class DeviceRegistryService implements OnModuleInit {
       reason: 'Discovered from Shelly MQTT telemetry',
       metadata: cleanMetadata({
         ...existing?.metadata,
+        discoveryTenantId: owner.tenantId,
+        discoverySiteId: owner.siteId,
         physicalId,
         component,
         channel: channel ?? undefined,
@@ -936,20 +966,29 @@ export class DeviceRegistryService implements OnModuleInit {
       return false;
     }
 
-    if (this.liveApprovedDeviceConfigs.has(id) && !this.isEnrollmentRetired(id)) {
+    const defaultOwner = configuredSite();
+    const tenantId = config.tenantId || defaultOwner.tenantId;
+    const siteId = config.siteId || defaultOwner.siteId;
+    const key = scopedDeviceKey(id, tenantId, siteId);
+    if (this.liveApprovedDeviceConfigs.has(key) && !this.isEnrollmentRetired(id, tenantId, siteId)) {
       return false;
     }
 
-    const retired = this.isEnrollmentRetired(id);
-    if (retired) this.liveApprovedDeviceConfigs.delete(id);
+    const retired = this.isEnrollmentRetired(id, tenantId, siteId);
+    if (retired) this.liveApprovedDeviceConfigs.delete(key);
     const metadata = cleanMetadata({
-      ...this.liveDiscoveredDeviceConfigs.get(id)?.metadata,
+      ...this.liveDiscoveredDeviceConfigs.get(key)?.metadata,
       ...config.metadata,
+      discoveryTenantId: tenantId,
+      discoverySiteId: siteId,
       ...(retired ? { previouslyEnrolledRetired: true } : {}),
     });
 
-    this.liveDiscoveredDeviceConfigs.set(id, {
+    this.liveDiscoveredDeviceConfigs.set(key, {
       ...config,
+      tenantId,
+      siteId,
+      siteName: config.siteName || defaultOwner.siteName,
       ...(retired ? {
         reason: 'Previously enrolled device is retired. Explicit approval is required to reenroll.',
       } : {}),
@@ -983,16 +1022,17 @@ export class DeviceRegistryService implements OnModuleInit {
   }
 
   private getKitchenTemperatureFromEnv(): number | null {
-    const configured = Number(
+    const raw =
       process.env.PORTAL_KITCHEN_TEMP_C ||
-        process.env.HOME_FAKE_INSIDE_TEMP_C ||
-        22.4,
-    );
+      process.env.HOME_FAKE_INSIDE_TEMP_C;
+    if (raw == null || raw.trim() === "") return null;
 
+    const configured = Number(raw);
     return Number.isFinite(configured) ? configured : null;
   }
 
   private getSystems(devices: RegisteredDevice[]): SiteSystem[] {
+    if (!isConfiguredHomeSite(configuredSite())) return [];
     const now = new Date().toISOString();
     const systems: SiteSystem[] = [
       {
@@ -1247,42 +1287,50 @@ export class DeviceRegistryService implements OnModuleInit {
     return [...byZone.values()];
   }
 
-  private getDiscoveredDevices(): RegisteredDevice[] {
+  private getDiscoveredDevices(includeOtherSites = false): RegisteredDevice[] {
+    const owner = configuredSite();
+    const belongsHere = (device: RegisteredDevice) =>
+      device.tenantId === owner.tenantId && device.siteId === owner.siteId;
     return [
       ...parseDiscoveredDevices(process.env.HOME_DISCOVERED_DEVICES_JSON),
       ...parseDiscoveredDevices([...this.liveDiscoveredDeviceConfigs.values()]),
     ].filter(
       (device) =>
-        !this.liveApprovedDeviceConfigs.has(device.id) &&
-        !this.blockedDiscoveredDeviceIds.has(device.id),
+        (includeOtherSites || belongsHere(device)) &&
+        !this.liveApprovedDeviceConfigs.has(scopedDeviceKey(device.id, device.tenantId, device.siteId)) &&
+        !this.blockedDiscoveredDeviceIds.has(scopedDeviceKey(device.id, device.tenantId, device.siteId)),
     );
   }
 
-  private getApprovedDevicesFromConfig(): RegisteredDevice[] {
+  private getApprovedDevicesFromConfig(includeOtherSites = false): RegisteredDevice[] {
+    const owner = configuredSite();
+    const belongsHere = (device: RegisteredDevice) =>
+      device.tenantId === owner.tenantId && device.siteId === owner.siteId;
     return [
       ...parseApprovedDevices(
         process.env.HOME_APPROVED_DEVICES_JSON ||
           process.env.HOME_DEVICE_REGISTRY_JSON ||
           process.env.DEVICE_REGISTRY_JSON,
-      ).filter(device => !this.isEnrollmentInactive(device.id)),
+      ).filter(device => (includeOtherSites || belongsHere(device)) && !this.isEnrollmentInactive(device.id, device.tenantId, device.siteId)),
       ...parseApprovedDevices([...this.liveApprovedDeviceConfigs.values()])
-        .filter(device => !this.isEnrollmentInactive(device.id)),
+        .filter(device => (includeOtherSites || belongsHere(device)) && !this.isEnrollmentInactive(device.id, device.tenantId, device.siteId)),
     ];
   }
 
   setEnrollmentStatus(deviceId: string, status: DeviceEnrollmentStatus): void {
     const id = safeId(deviceId);
     if (!id) return;
-    this.enrollmentStatusByDeviceId.set(id, status);
+    const key = scopedDeviceKey(id, configuredSite().tenantId, configuredSite().siteId);
+    this.enrollmentStatusByDeviceId.set(key, status);
     if (status !== 'enrolled') {
-      this.liveApprovedDeviceConfigs.delete(id);
+      this.liveApprovedDeviceConfigs.delete(key);
       return;
     }
 
-    const record = this.persistedInstallations.get(id);
+    const record = this.persistedInstallations.get(key);
     if (!record) return;
     const device = record.device;
-    this.liveApprovedDeviceConfigs.set(id, {
+    this.liveApprovedDeviceConfigs.set(key, {
       id: device.id,
       displayName: device.displayName,
       tenantId: device.tenantId,
@@ -1307,15 +1355,15 @@ export class DeviceRegistryService implements OnModuleInit {
       values: {},
       state: { values: {}, observedAt: null, source: 'device-store', status: 'unknown' },
     });
-    this.liveDiscoveredDeviceConfigs.delete(id);
+    this.liveDiscoveredDeviceConfigs.delete(key);
   }
 
-  isEnrollmentRetired(deviceId: string): boolean {
-    return this.enrollmentStatusByDeviceId.get(deviceId) === 'retired';
+  isEnrollmentRetired(deviceId: string, tenantId = configuredSite().tenantId, siteId = configuredSite().siteId): boolean {
+    return this.enrollmentStatusByDeviceId.get(scopedDeviceKey(deviceId, tenantId, siteId)) === 'retired';
   }
 
-  private isEnrollmentInactive(deviceId: string): boolean {
-    const status = this.enrollmentStatusByDeviceId.get(deviceId);
+  private isEnrollmentInactive(deviceId: string, tenantId = configuredSite().tenantId, siteId = configuredSite().siteId): boolean {
+    const status = this.enrollmentStatusByDeviceId.get(scopedDeviceKey(deviceId, tenantId, siteId));
     return status !== undefined && status !== 'enrolled';
   }
 
@@ -1338,11 +1386,15 @@ export class DeviceRegistryService implements OnModuleInit {
       const device = item as ApprovedDeviceConfig;
       const id = safeId(device.id || device.deviceId || device.key);
       if (!id) continue;
+      const fallbackOwner = configuredInstallationSite();
+      const tenantId = device.tenantId || raw.tenantId || fallbackOwner.tenantId;
+      const siteId = device.siteId || raw.siteId || fallbackOwner.siteId;
+      const key = scopedDeviceKey(id, tenantId, siteId);
 
-      this.liveApprovedDeviceConfigs.set(id, {
+      this.liveApprovedDeviceConfigs.set(key, {
         ...device,
-        tenantId: device.tenantId || raw.tenantId,
-        siteId: device.siteId || raw.siteId,
+        tenantId,
+        siteId,
         siteName: device.siteName || raw.siteName,
         gatewayId: device.gatewayId || raw.gatewayId,
         state: {
@@ -1360,7 +1412,7 @@ export class DeviceRegistryService implements OnModuleInit {
           status: device.state?.status || device.status || 'online',
         },
       });
-      this.liveDiscoveredDeviceConfigs.delete(id);
+      this.liveDiscoveredDeviceConfigs.delete(key);
     }
   }
 
@@ -1555,6 +1607,10 @@ export class DeviceRegistryService implements OnModuleInit {
     };
     const id = safeId(raw.id || raw.deviceId || raw.key);
     if (!id) return;
+    const fallbackOwner = configuredInstallationSite();
+    const tenantId = raw.tenantId || fallbackOwner.tenantId;
+    const siteId = raw.siteId || fallbackOwner.siteId;
+    const key = scopedDeviceKey(id, tenantId, siteId);
 
     const incomingValues = raw.state?.values || raw.values || {};
 
@@ -1608,13 +1664,13 @@ export class DeviceRegistryService implements OnModuleInit {
       raw.evidence?.reason,
     );
 
-    if (!this.liveApprovedDeviceConfigs.has(id)) {
-      this.liveDiscoveredDeviceConfigs.set(id, {
+    if (!this.liveApprovedDeviceConfigs.has(key)) {
+      this.liveDiscoveredDeviceConfigs.set(key, {
         id,
         displayName:
           raw.displayName || raw.name || displayNameFromDeviceKey(id),
-        tenantId: raw.tenantId,
-        siteId: raw.siteId,
+        tenantId,
+        siteId,
         siteName: raw.siteName,
         gatewayId: raw.gatewayId,
         zoneName: raw.zoneName || raw.location,
@@ -2411,17 +2467,34 @@ function canAssistantUseDevice(
 }
 
 function configuredSite() {
+  const active = configuredPortalSite();
   return {
-    tenantId: process.env.PORTAL_TENANT_ID || 'tenant-demo',
-    siteId:
-      process.env.PORTAL_SITE_ID || process.env.HOME_SITE_ID || 'site-home',
-    siteName:
-      process.env.PORTAL_SITE_NAME || process.env.HOME_SITE_NAME || 'Home',
+    tenantId: active.tenantId,
+    siteId: active.siteId,
+    siteName: active.siteName,
     gatewayId:
       process.env.HOME_GATEWAY_ID ||
       process.env.PORTAL_GATEWAY_ID ||
       'site-gateway',
   };
+}
+
+function configuredInstallationSite() {
+  return {
+    tenantId: process.env.PORTAL_TENANT_ID || 'tenant-demo',
+    siteId: process.env.PORTAL_SITE_ID || process.env.HOME_SITE_ID || 'site-home',
+    siteName: process.env.PORTAL_SITE_NAME || 'Home',
+    gatewayId: process.env.HOME_GATEWAY_ID || process.env.PORTAL_GATEWAY_ID || 'site-gateway',
+  };
+}
+
+function isConfiguredHomeSite(site: { tenantId: string; siteId: string }): boolean {
+  const installation = configuredInstallationSite();
+  return site.tenantId === installation.tenantId && site.siteId === installation.siteId;
+}
+
+function scopedDeviceKey(deviceId: string, tenantId: string, siteId: string): string {
+  return `${encodeURIComponent(tenantId)}:${encodeURIComponent(siteId)}:${encodeURIComponent(deviceId)}`;
 }
 
 function mqttTopicFor(
@@ -2553,7 +2626,7 @@ function normalizeApprovedDevice(item: unknown): RegisteredDevice | null {
   const id = safeId(raw.id || raw.deviceId || raw.key);
   if (!id) return null;
 
-  const defaultIdentity = configuredSite();
+  const defaultIdentity = configuredInstallationSite();
   const identity = {
     tenantId: safeId(raw.tenantId) || defaultIdentity.tenantId,
     siteId: safeId(raw.siteId) || defaultIdentity.siteId,
@@ -2562,6 +2635,9 @@ function normalizeApprovedDevice(item: unknown): RegisteredDevice | null {
   };
   const zoneName =
     raw.zoneName || raw.location || inferZoneName(id, raw.groups);
+  const supportedCapabilities = (raw.supportedCapabilities
+    ? raw.supportedCapabilities.filter(isCapabilityKind).map(kind => ({ kind, actions: actionsForCapability(kind), unit: unitForCapability(kind) }))
+    : inferCapabilities(raw));
   const capabilities = raw.metadata?.observationApprovalRequired === true
     ? []
     : inferCapabilities(raw);
@@ -2581,6 +2657,7 @@ function normalizeApprovedDevice(item: unknown): RegisteredDevice | null {
     trustStatus: 'approved',
     assistantEnabled: raw.assistantEnabled === true || protocol === 'simulated',
     settingsUrl: safeSettingsUrl(raw.settingsUrl),
+    supportedCapabilities,
     capabilities,
     adapter: {
       id: raw.driver || inferDriver(raw, protocol),
@@ -2736,25 +2813,12 @@ function inferCapabilities(
     .filter(isCapabilityKind);
 
   const inferred = new Set<DeviceCapabilityKind>([...explicit, ...readings]);
-  const text =
-    `${raw.type || ''} ${raw.deviceId || ''} ${raw.key || ''} ${(raw.groups || []).join(' ')}`.toLowerCase();
-
-  if (text.includes('temp')) inferred.add('temperature');
-  if (text.includes('humid')) inferred.add('humidity');
-  if (text.includes('power') || text.includes('energy')) inferred.add('power');
-  if (text.includes('motion') || text.includes('presence'))
-    inferred.add('motion');
-  if (text.includes('pump')) inferred.add('pump');
-  if (
-    text.includes('boiler') ||
-    text.includes('oven') ||
-    text.includes('fridge')
-  )
-    inferred.add('power');
-  if (text.includes('light') || text.includes('lights'))
-    inferred.add(raw.kind === 'logical' ? 'light' : 'switch');
-  if (inferred.size === 0) inferred.add('switch');
-
+  const values = raw.state?.values ?? raw.values ?? {};
+  if (typeof values.temperature === 'number') inferred.add('temperature');
+  if (typeof values.humidity === 'number') inferred.add('humidity');
+  if (typeof values.motion === 'boolean') inferred.add('motion');
+  if (typeof values.on === 'boolean' || typeof values.output === 'boolean') inferred.add('switch');
+  if (['power', 'current', 'voltage', 'energy', 'energy_delta', 'returnedEnergy'].some(key => typeof values[key] === 'number')) inferred.add('power');
   return [...inferred].map((kind) => ({
     kind,
     actions: actionsForCapability(kind),
@@ -2953,16 +3017,14 @@ function normalizeDiscoveredDevice(
 
   const raw = item as DiscoveredDeviceConfig;
   const id = safeId(raw.id) || `discovered-${index + 1}`;
-  const defaultIdentity = configuredSite();
+  const defaultIdentity = configuredInstallationSite();
   const identity = {
     tenantId: safeId(raw.tenantId) || defaultIdentity.tenantId,
     siteId: safeId(raw.siteId) || defaultIdentity.siteId,
     siteName: raw.siteName || defaultIdentity.siteName,
     gatewayId: safeId(raw.gatewayId) || defaultIdentity.gatewayId,
   };
-  const capabilities = (raw.capabilities || ['switch']).filter(
-    isCapabilityKind,
-  );
+  const capabilities = (raw.capabilities || []).filter(isCapabilityKind);
   const protocol = isProtocol(raw.protocol) ? raw.protocol : 'none';
   const transport = inferTransport(raw, protocol);
   const source = raw.source || protocolToDiscoverySource(protocol);
@@ -2975,6 +3037,11 @@ function normalizeDiscoveredDevice(
     zoneId: safeId(raw.zoneId) || 'unassigned',
     zoneName: raw.zoneName || raw.suggestedRoom || 'Unassigned',
     trustStatus: 'discovered',
+    supportedCapabilities: capabilities.map((kind) => ({
+      kind,
+      actions: actionsForCapability(kind),
+      unit: unitForCapability(kind),
+    })),
     capabilities: capabilities.map((kind) => ({
       kind,
       actions: actionsForCapability(kind),

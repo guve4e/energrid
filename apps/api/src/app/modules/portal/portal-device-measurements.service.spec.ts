@@ -12,8 +12,13 @@ function harness() {
   const intelligence = {
     describeDevice: jest.fn().mockResolvedValue({ deviceId, displayName: 'Kitchen DHT22' }),
     readObservations: jest.fn().mockResolvedValue(current),
+    readDeviceModel: jest.fn().mockResolvedValue({ installation: { status: 'enrolled' }, history: { authorizedMetrics: ['temperature', 'humidity'] }, identity: { id: deviceId } }),
   };
-  const repository = { read: jest.fn().mockResolvedValue([
+  const repository = {
+    summarize: jest.fn().mockResolvedValue([
+      { metric: 'temperature', count: 42, oldest: '2026-10-23T10:00:00.000Z', newest: '2026-10-24T10:00:00.000Z' },
+    ]),
+    read: jest.fn().mockResolvedValue([
     { observedAt: '2026-10-24T09:05:00.000Z', value: 18, unit: 'Cel', quality: 'measured' },
     { observedAt: '2026-10-24T09:55:00.000Z', value: 18.2, unit: 'Cel', quality: 'measured' },
   ]) };
@@ -23,6 +28,60 @@ function harness() {
 describe('PortalDeviceMeasurementsService', () => {
   const to = new Date(Date.now() - 60_000).toISOString();
   const from = new Date(Date.parse(to) - 60 * 60_000).toISOString();
+
+  it('adds retained-history availability only for authorized metrics', async () => {
+    const h = harness();
+    await expect(h.service.readModel(scope, deviceId)).resolves.toMatchObject({
+      identity: { id: deviceId },
+      history: {
+        availability: 'available',
+        streams: [
+          { metric: 'temperature', status: 'available', count: 42 },
+          { metric: 'humidity', status: 'empty' },
+        ],
+      },
+    });
+    expect(h.repository.summarize).toHaveBeenCalledWith({ ...scope, deviceId, metrics: ['temperature', 'humidity'] });
+  });
+
+  it('reports history unavailable without changing live authorized observations', async () => {
+    const h = harness();
+    h.repository.summarize.mockRejectedValue(new Error('history database unavailable'));
+    await expect(h.service.readModel(scope, deviceId)).resolves.toMatchObject({
+      history: { availability: 'unavailable', streams: [{ status: 'unavailable' }, { status: 'unavailable' }] },
+    });
+  });
+
+  it('keeps unknown measurement history distinct from empty or unauthorized history', async () => {
+    const h = harness();
+    h.intelligence.readDeviceModel.mockResolvedValue({ installation: { status: 'enrolled' }, history: { authorizedMetrics: ['custom_signal'] }, identity: { id: deviceId } } as never);
+    h.repository.summarize.mockResolvedValueOnce([]);
+    await expect(h.service.readModel(scope, deviceId)).resolves.toMatchObject({
+      history: { availability: 'unknown', streams: [{ metric: 'custom_signal', status: 'unknown' }] },
+    });
+    expect(h.repository.summarize).toHaveBeenCalledWith({ ...scope, deviceId, metrics: ['custom_signal'] });
+  });
+
+  it('uses the canonical stored device id for a case-normalized history lookup', async () => {
+    const h = harness();
+    await h.service.readModel(scope, deviceId.toUpperCase());
+    expect(h.repository.summarize).toHaveBeenCalledWith({
+      ...scope, deviceId, metrics: ['temperature', 'humidity'],
+    });
+  });
+
+  it('preserves a discovered device as not enrolled without querying measurement history', async () => {
+    const h = harness();
+    h.intelligence.readDeviceModel.mockResolvedValue({
+      installation: { status: 'not_enrolled' },
+      history: { authorizedMetrics: [], availability: 'not_available', streams: [] },
+    } as never);
+    await expect(h.service.readModel(scope, 'candidate')).resolves.toMatchObject({
+      installation: { status: 'not_enrolled' },
+      history: { availability: 'not_available' },
+    });
+    expect(h.repository.summarize).not.toHaveBeenCalled();
+  });
 
   it('returns latest Core observations with Core freshness, not PostgreSQL history', async () => {
     const h = harness();

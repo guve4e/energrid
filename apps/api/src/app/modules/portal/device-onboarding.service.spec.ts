@@ -31,7 +31,11 @@ function createHarness(
         : {}),
     },
     capabilities: [{ kind: initialMetadata.component === 'switch:0' ? 'switch' : 'power', actions: ['read'] }],
-    metadata: initialMetadata,
+    metadata: {
+      discoveryTenantId: identity.tenantId,
+      discoverySiteId: identity.siteId,
+      ...initialMetadata,
+    },
   } as unknown as RegisteredDevice;
 
   const registry = {
@@ -93,6 +97,19 @@ function createHarness(
 }
 
 describe('DeviceOnboardingService', () => {
+  it('rejects a candidate whose verified discovery owner differs from the authorized site', async () => {
+    const { service, registry, enrollment } = createHarness(undefined, {
+      discoverySiteId: 'site-virtual-lab',
+    });
+
+    await expect(service.approve(identity.deviceId)).rejects.toThrow(
+      'Discovery evidence ownership does not match the authorized tenant and site',
+    );
+    expect(registry.approveDiscoveredDevice).not.toHaveBeenCalled();
+    expect(registry.persistInstallation).not.toHaveBeenCalled();
+    expect(enrollment.enroll).not.toHaveBeenCalled();
+  });
+
   it('explicitly reenrolls a retired discovery candidate after fresh evidence makes it pending', async () => {
     const { service, registry, enrollment } = createHarness(undefined, {
       mqttEvidenceCandidate: true,

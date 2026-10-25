@@ -7,6 +7,7 @@ import { Inject } from '@nestjs/common';
 import { DEVICE_ENROLLMENT_SERVICE } from './enrollment/device-enrollment.module';
 import { Injectable } from '@nestjs/common';
 import { AuthorizedDeviceObservationReader } from './device-intelligence-observation-reader';
+import { resolveInstallationObservationAuthority } from './device-observation-installation-authority';
 import {
   projectAuthorizedObservations,
   observationFreshnessLimitSeconds,
@@ -575,6 +576,139 @@ export class DeviceIntelligenceQueryService {
     return projectAuthorizedObservations(
       state, observationFreshnessLimitSeconds(),
     );
+  }
+
+  /**
+   * Canonical, read-only projection of an enrolled installation. Support,
+   * observation authority, current state and command routing deliberately
+   * remain separate. An empty capability declaration is reported as unknown
+   * and never masks persisted observation bindings.
+   */
+  async readDeviceModel(scope: IntelligenceScope, deviceQuery: string) {
+    const described = await this.describeDevice(scope, deviceQuery);
+    if (!described) {
+      const query = deviceQuery.trim().toLowerCase();
+      const candidate = this.registry.getDevices().find(item =>
+        item.id.toLowerCase() === query && item.tenantId === scope.tenantId &&
+        item.siteId === scope.siteId && item.trustStatus === 'discovered'
+      );
+      if (!candidate) return null;
+      const supported = candidate.supportedCapabilities ?? [];
+      return {
+        identity: {
+          id: candidate.id,
+          physicalId: typeof candidate.metadata?.physicalId === 'string'
+            ? candidate.metadata.physicalId : null,
+          kind: candidate.kind,
+          protocol: candidate.adapter.protocol,
+          adapterId: candidate.adapter.id,
+          memberDeviceIds: candidate.memberDeviceIds ?? [],
+        },
+        installation: { tenantId: scope.tenantId, siteId: scope.siteId, displayName: candidate.displayName, zoneId: candidate.zoneId, zoneName: candidate.zoneName, status: 'not_enrolled' as const },
+        capabilities: {
+          supportStatus: supported.length ? 'verified' as const : 'unknown' as const,
+          supported: supported.map(item => item.kind),
+          evidence: candidate.discovery ? { source: candidate.discovery.source, confidence: candidate.discovery.confidence, reason: candidate.discovery.reason } : [],
+        },
+        observationAuthorization: { status: 'none' as const, bindings: [] },
+        current: { registry: candidate.state, freshnessLimitSeconds: observationFreshnessLimitSeconds(), observations: {} },
+        history: { endpoint: null, authorizedMetrics: [], availability: 'not_available' as const, streams: [] },
+        commands: { executionMustBeRevalidated: true as const, available: [] },
+      };
+    }
+
+    const installation = await this.installations.get(scope.siteId, described.deviceId);
+    const enrollment = await this.enrollment.find({
+      tenantId: scope.tenantId,
+      siteId: scope.siteId,
+      deviceId: described.deviceId,
+    });
+    const device = this.registry.getDevices().find(item =>
+      item.id.toLowerCase() === described.deviceId.toLowerCase() &&
+      item.tenantId === scope.tenantId && item.siteId === scope.siteId &&
+      item.trustStatus === 'approved'
+    );
+    if (!installation || !enrollment || enrollment.status !== 'enrolled' || !device) return null;
+
+    const observations = await this.readObservations(scope, described.deviceId);
+    const bindings = (installation.observationAuthority?.bindings ?? [])
+      .filter(binding => binding?.deviceId === described.deviceId)
+      .map(binding => {
+        const resolved = resolveInstallationObservationAuthority(
+          installation, binding.sourceId, binding.selector,
+        );
+        const fields = resolved?.binding.deviceId === described.deviceId
+          ? Object.keys(resolved.binding.fields) : [];
+        return fields.length ? {
+          sourceId: binding.sourceId,
+          selector: binding.selector,
+          fields,
+        } : null;
+      })
+      .filter((binding): binding is NonNullable<typeof binding> => binding !== null);
+
+    const supported = device.supportedCapabilities;
+    const hasVerifiedSupport = Array.isArray(supported) && supported.length > 0;
+    const commands = device.capabilities.flatMap(capability =>
+      capability.actions.filter(action => action !== 'read').map(action => ({
+        capability: capability.kind,
+        action,
+        available: device.control?.status === 'ready' &&
+          device.adapter.configured && device.trustStatus === 'approved',
+        requiresConfirmation: device.policy.confirmationRequiredFor.includes(action),
+        requiresApproval: device.policy.requiresApproval,
+      })),
+    );
+
+    return {
+      identity: {
+        id: device.id,
+        physicalId: typeof device.metadata?.physicalId === 'string'
+          ? device.metadata.physicalId : null,
+        kind: device.kind,
+        protocol: device.adapter.protocol,
+        adapterId: device.adapter.id,
+        memberDeviceIds: device.memberDeviceIds ?? [],
+      },
+      installation: {
+        tenantId: enrollment.tenantId,
+        siteId: enrollment.siteId,
+        displayName: device.displayName,
+        zoneId: device.zoneId,
+        zoneName: device.zoneName,
+        status: enrollment.status,
+        enrolledAt: enrollment.enrolledAt,
+        version: enrollment.version,
+        physicalOutcome: installation.physicalOutcome.status,
+      },
+      capabilities: {
+        supportStatus: hasVerifiedSupport ? 'verified' as const : 'unknown' as const,
+        supported: (supported ?? []).map(item => item.kind),
+        evidence: device.discovery ? {
+          source: device.discovery.source,
+          confidence: device.discovery.confidence,
+          reason: device.discovery.reason,
+        } : [],
+      },
+      observationAuthorization: {
+        status: bindings.length ? 'approved' as const : 'none' as const,
+        bindings,
+      },
+      current: {
+        registry: device.state,
+        freshnessLimitSeconds: observations?.freshnessLimitSeconds ?? observationFreshnessLimitSeconds(),
+        observations: observations?.fields ?? {},
+      },
+      history: {
+        endpoint: `/portal/devices/${encodeURIComponent(device.id)}/measurements`,
+        authorizedMetrics: [...new Set(bindings.flatMap(binding => binding.fields))],
+        availability: 'queryable' as const,
+      },
+      commands: {
+        executionMustBeRevalidated: true as const,
+        available: commands,
+      },
+    };
   }
 
   /** Resolve a room inside the authenticated site and return one approved metric. */

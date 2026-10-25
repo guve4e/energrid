@@ -34,6 +34,23 @@ describe('PostgresGenericMeasurementRepository', () => {
     expect(query.mock.calls[0][0]).toContain("'History enrollment reference','enrolled',now(),now(),1");
   });
 
+  it('summarizes only explicitly authorized supported measurement streams', async () => {
+    const query = jest.fn().mockResolvedValue({ rows: [
+      { metric: 'temperature', count: 8, oldest: new Date('2026-10-23T10:00:00.000Z'), newest: new Date('2026-10-24T10:00:00.000Z') },
+    ] });
+    const repository = new PostgresGenericMeasurementRepository({ query } as never);
+    await expect(repository.summarize({
+      tenantId: 'tenant-a', siteId: 'site-a', deviceId: 'device-a',
+      metrics: ['temperature', 'humidity', 'not_a_measurement'],
+    })).resolves.toEqual([{
+      metric: 'temperature', count: 8,
+      oldest: '2026-10-23T10:00:00.000Z', newest: '2026-10-24T10:00:00.000Z',
+    }]);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("component_id='device'"), [
+      'tenant-a', 'site-a', 'device-a', ['temperature', 'humidity'],
+    ]);
+  });
+
   it('validates before writing and inserts with full tenant/site/sample identity', async () => {
     const query = jest.fn().mockResolvedValue({ rowCount: 1, rows: [{ sample_id: 'sample-1' }] });
     const pool = poolFor(query);

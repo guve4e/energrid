@@ -7,7 +7,8 @@ import type {
 } from './device-observation-state.store';
 import type { DeviceObservationState } from '@energrid/domain-devices';
 import { resolveInstallationObservationAuthority } from './device-observation-installation-authority';
-import type { GenericMeasurementHistoryWriter, HistoryWriteResult } from '../telemetry/generic-measurements/generic-measurement-history-writer';
+import type { ResolvedObservationAuthority } from './device-observation-installation-authority';
+import { HistoryOutboxUnavailableError, type GenericMeasurementHistoryWriter, type HistoryWriteResult } from '../telemetry/generic-measurements/generic-measurement-history-writer';
 
 export interface TrustedObservationInput {
   scope: {
@@ -68,6 +69,31 @@ export class DeviceIntelligenceObservationIngress {
   async ingest(
     input: TrustedObservationInput,
   ): Promise<ObservationIngressOutcome> {
+    return this.ingestUsingAuthority(input);
+  }
+
+  /**
+   * Trusted MQTT routes are themselves explicitly configured with a binding
+   * and policy. They still pass through the same enrollment, installation,
+   * deterministic observation and history checks as HTTP ingress.
+   */
+  async ingestConfiguredMqtt(
+    input: TrustedObservationInput,
+    configuredAuthority: ResolvedObservationAuthority,
+  ): Promise<ObservationIngressOutcome> {
+    if (configuredAuthority.binding.deviceId !== input.deviceId ||
+      configuredAuthority.binding.sourceId !== input.sourceId ||
+      configuredAuthority.binding.selector !== input.selector ||
+      configuredAuthority.policy.deviceId !== input.deviceId) {
+      return { outcome: 'rejected', reasonCode: 'observation_authority_missing' };
+    }
+    return this.ingestUsingAuthority(input, configuredAuthority);
+  }
+
+  private async ingestUsingAuthority(
+    input: TrustedObservationInput,
+    configuredAuthority?: ResolvedObservationAuthority,
+  ): Promise<ObservationIngressOutcome> {
     const { scope, deviceId, sourceId, selector } = input;
 
     if (
@@ -82,7 +108,11 @@ export class DeviceIntelligenceObservationIngress {
 
     await this.registry.ensureInstallationsLoaded();
 
-    const device = this.registry.getDevices().find(candidate =>
+    // This ingress also serves background pollers that operate across all
+    // persisted sites. Resolve the device from the trusted input scope rather
+    // than the currently selected Portal site, then keep the exact scope match
+    // and the durable enrollment/installation checks below.
+    const device = this.registry.getDevices(true).find(candidate =>
       candidate.id === deviceId &&
       candidate.tenantId === scope.tenantId &&
       candidate.siteId === scope.siteId &&
@@ -122,10 +152,8 @@ export class DeviceIntelligenceObservationIngress {
       };
     }
 
-    const authority = resolveInstallationObservationAuthority(
-      installation,
-      sourceId,
-      selector,
+    const authority = configuredAuthority ?? resolveInstallationObservationAuthority(
+      installation, sourceId, selector,
     );
 
     if (!authority) {
@@ -157,13 +185,14 @@ export class DeviceIntelligenceObservationIngress {
       input.evidenceId &&
       (result.accepted || result.reason === 'duplicate_evidence')
     ) {
+      const acceptedState = result.state;
       const acceptedKeys = result.accepted
         ? result.updatedKeys
-        : Object.entries(result.state.fields)
+        : Object.entries(acceptedState.fields)
             .filter(([, field]) => field.sourceId === sourceId && field.evidenceId === input.evidenceId)
             .map(([key]) => key);
       const fields = acceptedKeys.flatMap(fieldName => {
-        const field = result.state!.fields[fieldName];
+        const field = acceptedState.fields[fieldName];
         return field && field.sourceId === sourceId && field.evidenceId === input.evidenceId &&
           typeof field.value === 'number' && Number.isFinite(field.value)
           ? [{
@@ -185,6 +214,7 @@ export class DeviceIntelligenceObservationIngress {
             fields,
           });
         } catch (error) {
+          if (error instanceof HistoryOutboxUnavailableError) throw error;
           this.logger.error(`History sink failed after accepted observation (device=${deviceId}).`);
           historyWrites = fields.map(({ field }) => ({ field, outcome: 'failed' }));
         }

@@ -377,7 +377,7 @@ export class MqttBrokerAttributionService implements OnModuleInit, OnModuleDestr
         },
       ],
     }
-    await this.discoveryMemory.recordIdentityObservation(verifiedAt, device)
+    await this.discoveryMemory.recordIdentityObservation(verifiedAt, device, scope)
   }
 
   private async handleDisconnect(event: BrokerPublisherEvidenceV1): Promise<boolean> {

@@ -129,7 +129,8 @@ describe('portal control configuration authorization', () => {
   it('rebuilds the physical Energrid pending candidate from persisted discovery memory after API restart', async () => {
     const observedAt = new Date().toISOString();
     const record = {
-      schemaVersion: 1, identity: 'device:upstream-lan:esp8266:324864', firstSeenAt: observedAt,
+      schemaVersion: 2, ownership: { tenantId: 'tenant-demo', siteId: 'site-home' },
+      identity: 'device:upstream-lan:esp8266:324864', firstSeenAt: observedAt,
       lastSeenAt: observedAt, lastScanId: 'scan-1', device: {
         id: 'esp8266:324864', ipAddress: '192.168.1.198', networkZoneId: 'upstream-lan', networkZoneName: 'Upstream LAN',
         protocol: 'http', confidence: 1, status: 'online', discoveredAt: observedAt, reason: 'Verified identity',
@@ -143,14 +144,14 @@ describe('portal control configuration authorization', () => {
         ],
       },
     };
-    const createController = () => {
+    const createController = (siteId = 'site-home') => {
       const candidateConfigs = new Map<string, any>();
       const registry = {
         registerDiscoveredDevice: jest.fn(config => { candidateConfigs.set(config.id, config); return true; }),
         getSnapshot: jest.fn(() => ({
-          tenant: { id: 'tenant-demo' }, site: { id: 'site-home' },
+          tenant: { id: 'tenant-demo' }, site: { id: siteId, name: siteId },
           devices: [...candidateConfigs.values()].map(config => ({
-            ...config, tenantId: 'tenant-demo', siteId: 'site-home', siteName: 'Home', zoneId: 'home', zoneName: 'Home',
+            ...config, tenantId: 'tenant-demo', siteId, siteName: siteId, zoneId: 'home', zoneName: 'Home',
             trustStatus: 'discovered', kind: 'physical', capabilities: config.capabilities.map((kind: string) => ({ kind, actions: ['read'] })),
             adapter: { protocol: config.protocol, target: config.target, driver: config.driver },
             state: { values: {}, observedAt: null, source: 'registry', status: 'unknown' },
@@ -160,7 +161,9 @@ describe('portal control configuration authorization', () => {
       const controller = new PortalController(
         { getState: () => ({ devices: [] }) } as never, {} as never, {} as never, {} as never, {} as never,
         registry as never, {} as never, {} as never, {} as never, {} as never,
-        { listIdentityEvidence: jest.fn().mockResolvedValue([record]) } as never,
+        { listIdentityEvidence: jest.fn(async (owner: { tenantId: string; siteId: string }) =>
+          owner.tenantId === record.ownership.tenantId && owner.siteId === record.ownership.siteId ? [record] : [],
+        ) } as never,
       );
       return { controller, registry };
     };
@@ -177,6 +180,11 @@ describe('portal control configuration authorization', () => {
         evidenceSource: 'bounded GET /api/v1/identity', verificationStatus: 'verified',
       },
     });
+
+    const lab = createController('site-virtual-lab');
+    const labState = await lab.controller.getState({ method: 'GET', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 } });
+    expect(lab.registry.registerDiscoveredDevice).not.toHaveBeenCalled();
+    expect(labState.devices).toEqual([]);
   });
 
   it('projects a pending Shelly candidate from scoped inventory plus an exact current LAN protocol match', async () => {
@@ -359,6 +367,7 @@ describe('portal control configuration authorization', () => {
       execute,
     } = setup();
     scanNow.mockResolvedValue({
+      snapshot: { ownership: { tenantId: 'tenant-demo', siteId: 'site-home' } },
       devices: [
         {
           id: 'shellyplus1-8813bfcdc8bc',
@@ -398,7 +407,7 @@ describe('portal control configuration authorization', () => {
   });
   it('keeps verified Energrid HTTP identities in Discovery without registering or approving them', async () => {
     const { controller, scanNow, registerDiscoveredDevice, configure, execute } = setup();
-    scanNow.mockResolvedValue({ devices: [{
+    scanNow.mockResolvedValue({ snapshot: { ownership: { tenantId: 'tenant-demo', siteId: 'site-home' } }, devices: [{
       id: 'esp8266:324864', vendor: 'Energrid', protocol: 'http', status: 'online',
       ipAddress: '192.168.1.198', networkZoneId: 'home-lan', networkZoneName: 'Home LAN',
       model: 'Energrid ESP8266 DHT22',

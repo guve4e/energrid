@@ -10,7 +10,8 @@ const scopes = [
 ];
 
 const snapshot = {
-  scanId: 'scan-1', schemaVersion: 2, startedAt: '2026-10-21T10:00:00Z', completedAt: '2026-10-21T10:00:05Z',
+  scanId: 'scan-1', schemaVersion: 2, ownership: { tenantId: 'tenant-demo', siteId: 'site-home' },
+  startedAt: '2026-10-21T10:00:00Z', completedAt: '2026-10-21T10:00:05Z',
   collector: { id: 'mac/en0', host: 'mac', interfaces: ['en0'] },
   scopes: [{ id: 'eero', name: 'Eero', cidr: '192.168.7.0/24', interfaceName: 'en0', complete: true, gatewayIpsObserved: [] }],
   methods: ['neighbor_table', 'nmap_tcp_connect_service_scan', 'shelly_http_rpc'], successes: 2, failures: [], limitations: ['No remote observer'],
@@ -40,6 +41,18 @@ const observer = {
 };
 
 describe('NetworkIntelligencePanel', () => {
+  it('shows unscoped v2 history as read-only evidence without offering investigation actions', async () => {
+    const { ownership: _ownership, ...legacySnapshot } = snapshot;
+    const panel = mount(NetworkIntelligencePanel, {
+      props: { scopes, snapshots: [legacySnapshot], latest: legacySnapshot, comparison: null },
+    });
+    expect(panel.text()).toContain('Legacy snapshot · ownership was not recorded');
+    await panel.findAll('button.ni-device-row')[1].trigger('click');
+    expect(panel.text()).toContain('Investigation and follow-up actions are unavailable for unscoped legacy evidence');
+    expect(panel.find('button.ni-investigate-button').exists()).toBe(false);
+    panel.unmount();
+  });
+
   it('scans only the explicitly selected network scope', async () => {
     const panel = mount(NetworkIntelligencePanel, { props: { scopes, snapshots: [], latest: null, comparison: null } });
     await panel.get('select[aria-label="Select network scope"]').setValue('housenet');
@@ -49,8 +62,11 @@ describe('NetworkIntelligencePanel', () => {
   });
 
   it('surfaces real endpoint summary, identity distinctions, service evidence, and diagnostics on demand', async () => {
+    const baseline = { ...snapshot, scanId: 'scan-0', completedAt: '2026-10-20T10:00:05Z', endpoints: [
+      { ...snapshot.endpoints[1], id: 'previous-endpoint', ipAddress: '192.168.7.4', discoveredAt: '2026-10-20T10:00:04Z' },
+    ] };
     const panel = mount(NetworkIntelligencePanel, { props: {
-      scopes, snapshots: [snapshot], latest: snapshot, observer,
+      scopes, snapshots: [snapshot, baseline], latest: snapshot, observer,
       nmapCapability: { available: true, enabled: true, version: '7.992' },
       comparison: { fromScanId: 'scan-0', toScanId: 'scan-1', comparableScopes: ['eero'], incompleteScopes: [],
         addedEndpoints: [{ scopeId: 'eero', ipAddress: '192.168.7.10' }], notDetectedEndpoints: [{ scopeId: 'eero', ipAddress: '192.168.7.4' }],
@@ -83,6 +99,45 @@ describe('NetworkIntelligencePanel', () => {
     panel.unmount();
   });
 
+  it('opens exact new, changed and not-detected endpoint deltas from the summary', async () => {
+    const verified = snapshot.endpoints[0];
+    const previous = { ...snapshot, scanId: 'scan-before', completedAt: '2026-10-20T10:00:05Z', endpoints: [
+      { ...verified, ipAddress: '192.168.7.9', discoveredAt: '2026-10-20T10:00:02Z' },
+      { ...snapshot.endpoints[1], id: 'old-host', ipAddress: '192.168.7.30', hostname: 'old-host', discoveredAt: '2026-10-20T10:00:04Z' },
+    ] };
+    const added = { ...snapshot.endpoints[1], id: 'new-host', ipAddress: '192.168.7.31', hostname: 'new-device',
+      discoveredAt: '2026-10-21T10:00:04Z', confidence: 0.8,
+      observations: [{ source: 'tcp', attribute: 'port.443.open', value: true, observedAt: '2026-10-21T10:00:04Z', method: 'bounded_tcp_scan' }] };
+    const current = { ...snapshot, endpoints: [{ ...verified, ipAddress: '192.168.7.11', discoveredAt: '2026-10-21T10:00:03Z' }, added] };
+    const comparison = {
+      fromScanId: previous.scanId, toScanId: current.scanId, comparableScopes: ['eero'], incompleteScopes: [],
+      addedEndpoints: [{ scopeId: 'eero', ipAddress: added.ipAddress }],
+      notDetectedEndpoints: [{ scopeId: 'eero', ipAddress: '192.168.7.30' }],
+      verifiedAddressChanges: [{ identity: verified.id, from: '192.168.7.9', to: '192.168.7.11' }],
+      ipReuse: [], serviceChanges: [], scopeChanges: [], macChanges: [], hostnameChanges: [], gatewayChanges: [], identityChanges: [],
+      topologyChanges: { added: [], removed: [] },
+    };
+    const panel = mount(NetworkIntelligencePanel, { props: {
+      scopes, snapshots: [current, previous], latest: current, comparison,
+    } });
+
+    const summaryButtons = panel.findAll('.ni-change-summary button');
+    expect(summaryButtons.map(button => button.text())).toEqual(['1 new', '1 changed', '1 not detected · not necessarily offline']);
+
+    await summaryButtons[0].trigger('click');
+    expect(panel.get('.ni-delta-list').text()).toContain('new-device');
+    expect(panel.get('.ni-delta-list').text()).toContain('192.168.7.31');
+    expect(panel.get('.ni-delta-list').text()).toContain('bounded_tcp_scan');
+    await summaryButtons[1].trigger('click');
+    expect(panel.get('.ni-delta-list').text()).toContain('Verified IP address: 192.168.7.9 → 192.168.7.11');
+    expect(panel.get('.ni-delta-list').text()).toContain('Previous · 192.168.7.9');
+    expect(panel.get('.ni-delta-list').text()).toContain('Current · 192.168.7.11');
+    await summaryButtons[2].trigger('click');
+    expect(panel.get('.ni-delta-list').text()).toContain('old-host');
+    expect(panel.get('.ni-delta-list').text()).toContain('Not detected in the latest scan; current status is unknown');
+    panel.unmount();
+  });
+
   it('puts evidence-backed gateway role ahead of the unidentified-device label without claiming hardware identity', async () => {
     const withGatewayRole = { ...snapshot, networkRoles: [{
       id: 'role:gateway:eero:192.168.7.20', role: 'default_gateway' as const, label: 'Observed default gateway' as const,
@@ -109,13 +164,20 @@ describe('NetworkIntelligencePanel', () => {
     panel.unmount();
   });
 
+  it('labels a first scan as the baseline when there is no previous comparable snapshot', () => {
+    const panel = mount(NetworkIntelligencePanel, { props: { scopes, snapshots: [snapshot], latest: snapshot, comparison: null } });
+    expect(panel.text()).toContain('No previous comparable scan is available for this scope. This snapshot is the baseline.');
+    expect(panel.find('.ni-change-summary').exists()).toBe(false);
+    panel.unmount();
+  });
+
   it('shows lifecycle counts and opens only the correlated pending or enrolled record', async () => {
     const verifiedKey = 'eero:192.168.7.10:shellyplus1-123456789abc';
     const panel = mount(NetworkIntelligencePanel, { props: {
       scopes, snapshots: [snapshot], latest: snapshot, comparison: null,
       pendingCount: 2, enrolledCount: 1,
       endpointLifecycle: [
-        { endpointKey: verifiedKey, stage: 'pending', recordId: 'pending:physical-1' },
+        { endpointKey: verifiedKey, snapshotId: snapshot.scanId, stage: 'pending', recordId: 'pending:physical-1' },
         { endpointKey: 'eero:192.168.7.20:aa:bb:cc:dd:ee:ff', stage: 'observed' },
       ],
     } });

@@ -12,6 +12,8 @@ import type {
 import type { NetworkDiscoverySnapshot } from './network-discovery-snapshot';
 import { isNetworkObservationFresh } from './network-observation-freshness';
 
+const TEST_OWNER = { tenantId: 'tenant-test', siteId: 'site-test' };
+
 function device(
   ipAddress: string,
   macAddress: string,
@@ -50,6 +52,18 @@ function verifiedEnergridDevice(
 describe('DeviceDiscoveryMemoryStore', () => {
   let directory: string;
   let store: DeviceDiscoveryMemoryStore;
+
+  function recordScan(scanId: string, devices: NetworkDiscoveredDevice[], owner = TEST_OWNER) {
+    return store.recordScan(scanId, devices, owner);
+  }
+
+  function recordIdentityObservation(observedAt: string, device: NetworkDiscoveredDevice, owner = TEST_OWNER) {
+    return store.recordIdentityObservation(observedAt, device, owner);
+  }
+
+  function recordSnapshot(snapshot: NetworkDiscoverySnapshot) {
+    return store.recordSnapshot({ ...snapshot, ownership: snapshot.ownership || TEST_OWNER });
+  }
 
   beforeEach(async () => {
     directory = await mkdtemp(join(tmpdir(), 'energrid-discovery-'));
@@ -103,7 +117,7 @@ describe('DeviceDiscoveryMemoryStore', () => {
   it('persists devices across store restarts', async () => {
     const timestamp = '2026-10-18T10:00:00.000Z';
 
-    await store.recordScan(timestamp, [
+    await recordScan(timestamp, [
       device('192.168.7.21', '78:ee:4c:cf:42:68'),
     ]);
 
@@ -111,7 +125,7 @@ describe('DeviceDiscoveryMemoryStore', () => {
 
     store = new DeviceDiscoveryMemoryStore(directory);
 
-    const records = await store.list();
+    const records = await store.list(TEST_OWNER);
 
     expect(records).toHaveLength(1);
     expect(records[0].firstSeenAt).toBe(timestamp);
@@ -132,8 +146,8 @@ describe('DeviceDiscoveryMemoryStore', () => {
     };
 
     expect(networkDiscoveryIdentity(uppercase)).toBe(networkDiscoveryIdentity(lowercase));
-    await store.recordScan(observedAt, [lowercase, uppercase]);
-    const records = await store.listIdentityEvidence();
+    await recordScan(observedAt, [lowercase, uppercase]);
+    const records = await store.listIdentityEvidence(TEST_OWNER);
 
     expect(records).toHaveLength(1);
     expect(records[0].identity).toBe('device:upstream-lan:esp8266:324b44');
@@ -143,8 +157,8 @@ describe('DeviceDiscoveryMemoryStore', () => {
     const initialAt = '2026-10-23T12:00:00.000Z';
     const refreshedAt = '2026-10-23T12:10:00.000Z';
     const initial = verifiedEnergridDevice('192.168.1.198', initialAt);
-    await store.recordIdentityObservation(initialAt, initial);
-    await store.recordIdentityObservation(refreshedAt, {
+    await recordIdentityObservation(initialAt, initial);
+    await recordIdentityObservation(refreshedAt, {
       ...initial,
       discoveredAt: refreshedAt,
       reason: 'Re-verified by the bounded HTTP poller.',
@@ -158,7 +172,7 @@ describe('DeviceDiscoveryMemoryStore', () => {
     await store.onModuleDestroy();
     store = new DeviceDiscoveryMemoryStore(directory);
 
-    const record = (await store.listIdentityEvidence()).find(item => item.identity === 'device:upstream-lan:esp8266:324864');
+    const record = (await store.listIdentityEvidence(TEST_OWNER)).find(item => item.identity === 'device:upstream-lan:esp8266:324864');
     expect(record).toMatchObject({
       lastSeenAt: refreshedAt,
       lastScanId: `identity:${refreshedAt}`,
@@ -174,25 +188,25 @@ describe('DeviceDiscoveryMemoryStore', () => {
 
   it('stores immutable scan snapshots across store restarts and rejects replacing an existing scan ID', async () => {
     const snapshot: NetworkDiscoverySnapshot = {
-      schemaVersion: 1, scanId: 'scan-immutable-1', startedAt: '2026-10-18T10:00:00.000Z',
+      schemaVersion: 1, ownership: TEST_OWNER, scanId: 'scan-immutable-1', startedAt: '2026-10-18T10:00:00.000Z',
       completedAt: '2026-10-18T10:00:05.000Z', collector: { id: 'mac/en0', host: 'mac', interfaces: ['en0'] },
       scopes: [{ id: 'home', name: 'Home', cidr: '192.168.7.0/24', complete: true, gatewayIpsObserved: [] }],
       methods: ['icmp', 'tcp'], successes: 1, failures: [], limitations: [], rawEvidenceOmitted: 0,
       rawEvidence: [{ observedAt: '2026-10-18T10:00:01.000Z', source: 'neighbor_table', scopeId: 'home', evidence: { ipAddress: '192.168.7.21' } }],
       endpoints: [device('192.168.7.21', '78:ee:4c:cf:42:68')], topology: { relationships: [] },
     }
-    await store.recordSnapshot(snapshot)
-    await expect(store.recordSnapshot({ ...snapshot, completedAt: '2026-10-18T10:01:00.000Z' }))
+    await recordSnapshot(snapshot)
+    await expect(recordSnapshot({ ...snapshot, completedAt: '2026-10-18T10:01:00.000Z' }))
       .rejects.toThrow('Discovery snapshot already exists')
     await store.onModuleDestroy()
     store = new DeviceDiscoveryMemoryStore(directory)
-    expect(await store.getSnapshot(snapshot.scanId)).toEqual(snapshot)
-    expect(await store.listSnapshots()).toEqual([snapshot])
+    expect(await store.getSnapshot(snapshot.scanId, TEST_OWNER)).toEqual(snapshot)
+    expect(await store.listSnapshots(TEST_OWNER)).toEqual([snapshot])
   })
 
   it('preserves version 2 runtime observer evidence across a store restart', async () => {
     const snapshot: NetworkDiscoverySnapshot = {
-      schemaVersion: 2, scanId: 'scan-runtime-2', startedAt: '2026-10-21T10:00:00.000Z',
+      schemaVersion: 2, ownership: TEST_OWNER, scanId: 'scan-runtime-2', startedAt: '2026-10-21T10:00:00.000Z',
       completedAt: '2026-10-21T10:00:05.000Z', collector: { id: 'observer/linux', host: 'observer', interfaces: ['eth0'] },
       scopes: [{ id: 'eth0-network', name: 'Local network', cidr: '10.42.6.0/26', interfaceName: 'eth0', complete: false, gatewayIpsObserved: [] }],
       methods: ['neighbor_table'], successes: 0, failures: [], limitations: [], rawEvidenceOmitted: 0,
@@ -206,44 +220,132 @@ describe('DeviceDiscoveryMemoryStore', () => {
         capabilities: [{ id: 'route_table', available: true, detail: 'Route table read.' }], limitations: [],
       },
     }
-    await store.recordSnapshot(snapshot)
+    await recordSnapshot(snapshot)
     await store.onModuleDestroy()
     store = new DeviceDiscoveryMemoryStore(directory)
-    expect(await store.getSnapshot(snapshot.scanId)).toEqual(snapshot)
+    expect(await store.getSnapshot(snapshot.scanId, TEST_OWNER)).toEqual(snapshot)
   })
 
+  it('isolates snapshots and candidate evidence by explicit tenant/site owner', async () => {
+    const home = { tenantId: 'tenant-demo', siteId: 'site-home' };
+    const lab = { tenantId: 'tenant-demo', siteId: 'site-virtual-lab' };
+    const observed = device('172.30.250.10', '02:00:00:00:00:10');
+    const snapshot: NetworkDiscoverySnapshot = {
+      schemaVersion: 2, ownership: home, scanId: 'home-scan',
+      startedAt: '2026-10-24T10:00:00.000Z', completedAt: '2026-10-24T10:00:05.000Z',
+      collector: { id: 'mac/en0', host: 'mac', interfaces: ['en0'] },
+      scopes: [{ id: 'device-lab-vlan', name: 'Virtual Lab', cidr: '172.30.250.0/28', complete: true, gatewayIpsObserved: [] }],
+      methods: ['virtual_lab'], successes: 1, failures: [], limitations: [], rawEvidenceOmitted: 0,
+      rawEvidence: [], endpoints: [observed], topology: { relationships: [] },
+    };
+    await recordScan(snapshot.completedAt, [observed], home);
+    await recordSnapshot(snapshot);
+
+    expect(await store.listIdentityEvidence(home)).toHaveLength(1);
+    expect(await store.listIdentityEvidence(lab)).toEqual([]);
+    expect(await store.getSnapshot(snapshot.scanId, home)).toMatchObject({ ownership: home });
+    expect(await store.getSnapshot(snapshot.scanId, lab)).toBeNull();
+    expect(await store.listSnapshots(lab)).toEqual([]);
+    expect(await store.listSnapshots(home)).toEqual([snapshot]);
+  });
+
+  it('keeps ownership unchanged when the active site context changes and after recovery', async () => {
+    const home = { tenantId: 'tenant-demo', siteId: 'site-home' };
+    const lab = { tenantId: 'tenant-demo', siteId: 'site-virtual-lab' };
+    const timestamp = '2026-10-24T11:00:00.000Z';
+    const observed = device('172.30.250.11', '02:00:00:00:00:11');
+    await recordScan(timestamp, [observed], lab);
+    const snapshot: NetworkDiscoverySnapshot = {
+      schemaVersion: 2, ownership: lab, scanId: 'lab-scan', startedAt: timestamp,
+      completedAt: timestamp, collector: { id: 'observer', host: 'lab', interfaces: ['eth0'] },
+      scopes: [{ id: 'device-lab-vlan', name: 'Virtual Lab', cidr: '172.30.250.0/28', complete: true, gatewayIpsObserved: [] }],
+      methods: ['virtual_lab'], successes: 1, failures: [], limitations: [], rawEvidenceOmitted: 0,
+      rawEvidence: [], endpoints: [observed], topology: { relationships: [] },
+    };
+    await recordSnapshot(snapshot);
+
+    await store.onModuleDestroy();
+    store = new DeviceDiscoveryMemoryStore(directory);
+
+    expect(await store.listIdentityEvidence(home)).toEqual([]);
+    expect(await store.listIdentityEvidence(lab)).toMatchObject([
+      { ownership: lab, device: { ipAddress: observed.ipAddress } },
+    ]);
+    expect(await store.getSnapshot('lab-scan', home)).toBeNull();
+    expect(await store.getSnapshot('lab-scan', lab)).toMatchObject({ ownership: lab });
+  });
+
+  it('preserves legacy unscoped snapshot history but excludes it from candidates and scoped comparisons', async () => {
+    const legacy: NetworkDiscoverySnapshot = {
+      schemaVersion: 2, scanId: 'm3-legacy-scan', startedAt: '2026-10-24T12:00:00.000Z',
+      completedAt: '2026-10-24T12:00:05.000Z', collector: { id: 'mac/en0', host: 'mac', interfaces: ['en0'] },
+      scopes: [{ id: 'device-lab-vlan', name: 'Virtual Lab', cidr: '172.30.250.0/28', complete: true, gatewayIpsObserved: [] }],
+      methods: ['virtual_lab'], successes: 1, failures: [], limitations: [], rawEvidenceOmitted: 0,
+      rawEvidence: [], endpoints: [device('172.30.250.10', '02:00:00:00:00:10')], topology: { relationships: [] },
+    };
+    const legacyDevice = device('172.30.250.10', '02:00:00:00:00:10');
+    const legacyRecord = {
+      schemaVersion: 1, identity: networkDiscoveryIdentity(legacyDevice),
+      firstSeenAt: legacy.completedAt, lastSeenAt: legacy.completedAt,
+      lastScanId: legacy.scanId, device: legacyDevice,
+    };
+    const legacyKey = `known:${encodeURIComponent(legacyRecord.identity)}`;
+    const db = (store as unknown as { db: { put(key: string, value: unknown): Promise<void> } }).db;
+    await db.put(legacyKey, legacyRecord);
+    await db.put(`snapshot:${encodeURIComponent(legacy.scanId)}`, legacy);
+
+    const history = await store.listHistoricalSnapshots(TEST_OWNER);
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({ scanId: legacy.scanId, ownershipStatus: 'legacy-unscoped' });
+    expect(await store.getSnapshot(legacy.scanId, TEST_OWNER)).toBeNull();
+    expect(await store.listIdentityEvidence(TEST_OWNER)).toEqual([]);
+    expect(await store.list(TEST_OWNER)).toEqual([]);
+  });
+
+  it('refuses new discovery records without an explicit owner', async () => {
+    await expect(store.recordScan('scan-unowned', [device('192.168.7.9', '02:00:00:00:00:09')], undefined as never))
+      .rejects.toThrow('server-authorized tenant/site ownership');
+    const unowned = {
+      schemaVersion: 2 as const, scanId: 'snapshot-unowned', startedAt: '2026-10-24T12:00:00.000Z',
+      completedAt: '2026-10-24T12:00:01.000Z', collector: { id: 'x', host: 'x', interfaces: [] },
+      scopes: [], methods: [], successes: 0, failures: [], limitations: [], rawEvidenceOmitted: 0,
+      rawEvidence: [], endpoints: [], topology: { relationships: [] },
+    };
+    await expect(store.recordSnapshot(unowned)).rejects.toThrow('require server-authorized tenant/site ownership');
+  });
+
   it('retains devices absent from a later scan', async () => {
-    await store.recordScan('2026-10-18T10:00:00.000Z', [
+    await recordScan('2026-10-18T10:00:00.000Z', [
       device('192.168.7.21', '78:ee:4c:cf:42:68'),
       device('192.168.7.30', 'e4:b0:63:74:7c:ac'),
     ]);
 
-    await store.recordScan('2026-10-18T11:00:00.000Z', [
+    await recordScan('2026-10-18T11:00:00.000Z', [
       device('192.168.7.21', '78:ee:4c:cf:42:68'),
     ]);
 
-    expect(await store.summary()).toEqual({
+    expect(await store.summary(TEST_OWNER)).toEqual({
       lastScanId: '2026-10-18T11:00:00.000Z',
       known: 2,
       observedInLatestScan: 1,
       notObservedInLatestScan: 1,
     });
 
-    expect(await store.list()).toHaveLength(2);
+    expect(await store.list(TEST_OWNER)).toHaveLength(2);
   });
 
   it('retains identity when an IP address changes', async () => {
     const mac = '78:ee:4c:cf:42:68';
 
-    await store.recordScan('2026-10-18T10:00:00.000Z', [
+    await recordScan('2026-10-18T10:00:00.000Z', [
       device('192.168.7.21', mac),
     ]);
 
-    await store.recordScan('2026-10-18T11:00:00.000Z', [
+    await recordScan('2026-10-18T11:00:00.000Z', [
       device('192.168.7.99', mac),
     ]);
 
-    const records = await store.list();
+    const records = await store.list(TEST_OWNER);
 
     expect(records).toHaveLength(1);
     expect(records[0].device.ipAddress).toBe('192.168.7.99');
@@ -261,10 +363,10 @@ describe('DeviceDiscoveryMemoryStore', () => {
   it('correlates a verified firmware ID across DHCP changes and restarts while keeping scope boundaries', async () => {
     const firstSeen = '2026-10-23T12:00:00.000Z';
     const lastSeen = '2026-10-23T12:10:00.000Z';
-    await store.recordScan(firstSeen, [verifiedEnergridDevice('192.168.1.198', firstSeen)]);
-    await store.recordScan(lastSeen, [verifiedEnergridDevice('192.168.1.205', lastSeen)]);
+    await recordScan(firstSeen, [verifiedEnergridDevice('192.168.1.198', firstSeen)]);
+    await recordScan(lastSeen, [verifiedEnergridDevice('192.168.1.205', lastSeen)]);
 
-    let records = await store.list();
+    let records = await store.list(TEST_OWNER);
     expect(records).toHaveLength(1);
     expect(records[0]).toMatchObject({
       identity: 'device:upstream-lan:esp8266:324864', firstSeenAt: firstSeen, lastSeenAt: lastSeen,
@@ -275,25 +377,25 @@ describe('DeviceDiscoveryMemoryStore', () => {
 
     await store.onModuleDestroy();
     store = new DeviceDiscoveryMemoryStore(directory);
-    records = await store.list();
+    records = await store.list(TEST_OWNER);
     expect(records).toHaveLength(1);
     expect(records[0].lastSeenAt).toBe(lastSeen);
 
-    await store.recordScan('2026-10-23T12:20:00.000Z', [
+    await recordScan('2026-10-23T12:20:00.000Z', [
       verifiedEnergridDevice('192.168.1.205', '2026-10-23T12:20:00.000Z', 'other-routed-lan'),
     ]);
-    expect(await store.list()).toHaveLength(2);
+    expect(await store.list(TEST_OWNER)).toHaveLength(2);
   });
 
   it('replaces an unverified endpoint-only alias with the verified canonical firmware identity', async () => {
     const firstSeen = '2026-10-23T12:00:00.000Z';
-    await store.recordScan(firstSeen, [{
+    await recordScan(firstSeen, [{
       ...device('192.168.1.198', 'ff:ff:ff:ff:ff:ff'),
       id: '192.168.1.198', networkZoneId: 'upstream-lan', networkZoneName: 'Upstream LAN',
     }]);
-    await store.recordScan('2026-10-23T12:01:00.000Z', [verifiedEnergridDevice('192.168.1.198', '2026-10-23T12:01:00.000Z')]);
+    await recordScan('2026-10-23T12:01:00.000Z', [verifiedEnergridDevice('192.168.1.198', '2026-10-23T12:01:00.000Z')]);
 
-    const records = await store.list();
+    const records = await store.list(TEST_OWNER);
     expect(records).toHaveLength(1);
     expect(records[0].identity).toBe('device:upstream-lan:esp8266:324864');
   });
@@ -301,33 +403,33 @@ describe('DeviceDiscoveryMemoryStore', () => {
   it('deduplicates repeated verified identity evidence within one scan', async () => {
     const observedAt = '2026-10-23T12:00:00.000Z';
     const candidate = verifiedEnergridDevice('192.168.1.198', observedAt);
-    await store.recordScan(observedAt, [candidate, structuredClone(candidate)]);
+    await recordScan(observedAt, [candidate, structuredClone(candidate)]);
 
-    const records = await store.list();
+    const records = await store.list(TEST_OWNER);
     expect(records).toHaveLength(1);
     expect(records[0].device.endpoints).toHaveLength(1);
     expect(records[0].device.observations?.filter(item => item.attribute === 'identity.verified')).toHaveLength(1);
   });
 
   it('keeps a missed device as historical evidence and marks it absent from the latest scan', async () => {
-    await store.recordScan('2026-10-23T12:00:00.000Z', [verifiedEnergridDevice('192.168.1.198', '2026-10-23T12:00:00.000Z')]);
-    await store.recordScan('2026-10-23T12:05:00.000Z', []);
+    await recordScan('2026-10-23T12:00:00.000Z', [verifiedEnergridDevice('192.168.1.198', '2026-10-23T12:00:00.000Z')]);
+    await recordScan('2026-10-23T12:05:00.000Z', []);
 
-    const [record] = await store.list();
+    const [record] = await store.list(TEST_OWNER);
     expect(record.lastScanId).toBe('2026-10-23T12:00:00.000Z');
     expect(record.device.status).toBe('online');
     expect(isNetworkObservationFresh(record.device.discoveredAt, Date.parse('2026-10-23T12:05:00.000Z'))).toBe(false);
-    expect(await store.summary()).toMatchObject({ known: 1, observedInLatestScan: 0, notObservedInLatestScan: 1 });
+    expect(await store.summary(TEST_OWNER)).toMatchObject({ known: 1, observedInLatestScan: 0, notObservedInLatestScan: 1 });
   });
 
   it('retains all same-scan endpoint addresses under one scoped observed identity', async () => {
     const mac = '78:ee:4c:cf:42:68';
-    await store.recordScan('2026-10-18T10:00:00.000Z', [
+    await recordScan('2026-10-18T10:00:00.000Z', [
       device('192.168.7.21', mac),
       device('192.168.7.22', mac),
     ]);
 
-    const records = await store.list();
+    const records = await store.list(TEST_OWNER);
 
     expect(records).toHaveLength(1);
     expect(records[0].device.endpoints?.map(endpoint => endpoint.ipAddress).sort())
@@ -335,28 +437,28 @@ describe('DeviceDiscoveryMemoryStore', () => {
   });
 
   it('projects legacy and MAC-keyed memory for one scoped IP as one endpoint', async () => {
-    await store.recordScan('2026-10-18T10:00:00.000Z', [
+    await recordScan('2026-10-18T10:00:00.000Z', [
       device('192.168.7.21', 'ff:ff:ff:ff:ff:ff'),
     ]);
-    await store.recordScan('2026-10-18T11:00:00.000Z', [
+    await recordScan('2026-10-18T11:00:00.000Z', [
       device('192.168.7.21', '78:ee:4c:cf:42:68'),
     ]);
 
-    const records = await store.list();
+    const records = await store.list(TEST_OWNER);
 
     expect(records).toHaveLength(1);
     expect(records[0].device.macAddress).toBe('78:ee:4c:cf:42:68');
   });
 
   it('keeps one current endpoint after repeated scans while retaining hostname observations', async () => {
-    await store.recordScan('2026-10-18T10:00:00.000Z', [
+    await recordScan('2026-10-18T10:00:00.000Z', [
       {
         ...device('192.168.7.21', '78:ee:4c:cf:42:68'),
         hostname: 'esp-3254b7',
         observations: [{ source: 'dns', attribute: 'hostname', value: 'esp-3254b7', observedAt: '2026-10-18T10:00:00.000Z' }],
       },
     ]);
-    await store.recordScan('2026-10-18T11:00:00.000Z', [
+    await recordScan('2026-10-18T11:00:00.000Z', [
       {
         ...device('192.168.7.21', '78:ee:4c:cf:42:68'),
         hostname: 'ESP-3254B7',
@@ -364,7 +466,7 @@ describe('DeviceDiscoveryMemoryStore', () => {
       },
     ]);
 
-    const records = await store.list();
+    const records = await store.list(TEST_OWNER);
 
     expect(records).toHaveLength(1);
     expect(records[0].device.observations?.map(item => item.value)).toEqual([
@@ -381,18 +483,18 @@ describe('DeviceDiscoveryMemoryStore', () => {
       networkZoneName: 'Guest LAN',
     };
 
-    await store.recordScan('2026-10-18T10:00:00.000Z', [first, second]);
+    await recordScan('2026-10-18T10:00:00.000Z', [first, second]);
 
-    expect(await store.list()).toHaveLength(2);
+    expect(await store.list(TEST_OWNER)).toHaveLength(2);
   });
 
   it('retains conflicting MAC evidence on one endpoint projection', async () => {
-    await store.recordScan('2026-10-18T10:00:00.000Z', [
+    await recordScan('2026-10-18T10:00:00.000Z', [
       device('192.168.7.21', '78:ee:4c:cf:42:68'),
       device('192.168.7.21', 'e4:b0:63:74:7c:ac'),
     ]);
 
-    const records = await store.list();
+    const records = await store.list(TEST_OWNER);
 
     expect(records).toHaveLength(1);
     expect(records[0].device.identityConflict).toEqual({
@@ -427,11 +529,11 @@ describe('DeviceDiscoveryMemoryStore', () => {
       components: [{ component: 'temperature:0', channel: 0 }],
       observations: [{ source: 'tcp' as const, attribute: 'service', value: 1883, observedAt: scanId }],
     };
-    await store.recordScan(scanId, [shelly, esp]);
+    await recordScan(scanId, [shelly, esp]);
 
-    const identityEvidence = await store.listIdentityEvidence();
+    const identityEvidence = await store.listIdentityEvidence(TEST_OWNER);
     const endpointView = dedupeNetworkEndpoints(identityEvidence.map(record => record.device));
-    const rememberedEndpointView = await store.list();
+    const rememberedEndpointView = await store.list(TEST_OWNER);
 
     expect(identityEvidence).toHaveLength(2);
     expect(identityEvidence.map(record => record.device.id).sort()).toEqual([
@@ -513,13 +615,13 @@ describe('DeviceDiscoveryMemoryStore', () => {
   });
 
   it('preserves knowledge when a scan returns no devices', async () => {
-    await store.recordScan('2026-10-18T10:00:00.000Z', [
+    await recordScan('2026-10-18T10:00:00.000Z', [
       device('192.168.7.21', '78:ee:4c:cf:42:68'),
     ]);
 
-    await store.recordScan('2026-10-18T11:00:00.000Z', []);
+    await recordScan('2026-10-18T11:00:00.000Z', []);
 
-    const summary = await store.summary();
+    const summary = await store.summary(TEST_OWNER);
 
     expect(summary.known).toBe(1);
     expect(summary.observedInLatestScan).toBe(0);
@@ -527,7 +629,7 @@ describe('DeviceDiscoveryMemoryStore', () => {
   });
 
   it('keeps reused-IP endpoint evidence separate from historical device identity evidence', async () => {
-    await store.recordScan('2026-10-19T10:00:00.000Z', [{
+    await recordScan('2026-10-19T10:00:00.000Z', [{
       ...device('192.168.1.133', 'ec:62:60:90:d1:97'),
       id: 'shellypro2pm-ec626090d194', vendor: 'Shelly', protocol: 'http',
       model: 'Shelly Pro 2PM',
@@ -537,14 +639,14 @@ describe('DeviceDiscoveryMemoryStore', () => {
       components: [{ component: 'switch:0', channel: 0 }],
       observations: [{ source: 'tcp', attribute: 'service', value: 80, observedAt: '2026-10-19T10:00:00.000Z' }],
     }]);
-    await store.recordScan('2026-10-20T10:00:00.000Z', [{
+    await recordScan('2026-10-20T10:00:00.000Z', [{
       ...device('192.168.1.133', '3c:71:bf:32:54:b7'),
       id: '3c:71:bf:32:54:b7', vendor: 'Espressif', protocol: 'unknown', status: 'online',
       observations: [{ source: 'icmp', attribute: 'reachable', value: true, observedAt: '2026-10-20T10:00:00.000Z' }],
     }]);
 
-    const endpointView = await store.list();
-    const identityEvidence = await store.listIdentityEvidence();
+    const endpointView = await store.list(TEST_OWNER);
+    const identityEvidence = await store.listIdentityEvidence(TEST_OWNER);
 
     expect(endpointView).toHaveLength(1);
     expect(endpointView[0].device).toMatchObject({

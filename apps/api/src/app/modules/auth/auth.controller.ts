@@ -94,7 +94,9 @@ function clearSessionCookies(response: AuthHttpResponse, config: AuthConfig) {
 
 function validateOrigin(request: AuthHttpRequest, config: AuthConfig): void {
   const origin = request.headers.origin
-  if (!origin || !config.value.trustedOrigins.has(origin)) throw new UnauthorizedException('Untrusted browser origin')
+  if (!origin || !config.value.trustedOrigins.has(origin)) {
+    throw new UnauthorizedException({ code: 'UNTRUSTED_ORIGIN', message: 'Untrusted browser origin', origin: origin || null })
+  }
 }
 function validateCsrf(request: AuthHttpRequest, header: string | undefined, config: AuthConfig): void {
   const cookie = readRequestCookie(request, csrfCookieName(config))

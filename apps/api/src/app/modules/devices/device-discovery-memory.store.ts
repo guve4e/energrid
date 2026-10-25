@@ -12,8 +12,15 @@ export const DEVICE_DISCOVERY_MEMORY_DIRECTORY = Symbol(
   'DEVICE_DISCOVERY_MEMORY_DIRECTORY',
 );
 
+export interface DiscoveryOwnership {
+  tenantId: string;
+  siteId: string;
+}
+
 export interface KnownNetworkDevice {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
+  /** Missing only on legacy records; those records are never candidate evidence. */
+  ownership?: DiscoveryOwnership;
   identity: string;
   firstSeenAt: string;
   lastSeenAt: string;
@@ -294,19 +301,35 @@ function verifiedDeviceIdentity(device: NetworkDiscoveredDevice): string | null 
   return verified && typeof id === 'string' && id === device.id ? id.toLowerCase() : null
 }
 
-function key(identity: string): string {
-  return `known:${encodeURIComponent(identity)}`;
+function scopedKey(identity: string, ownership: DiscoveryOwnership): string {
+  return `known:${encodeURIComponent(ownership.tenantId)}:${encodeURIComponent(ownership.siteId)}:${encodeURIComponent(identity)}`;
+}
+
+function summaryKey(ownership: DiscoveryOwnership): string {
+  return `meta:lastScanId:${encodeURIComponent(ownership.tenantId)}:${encodeURIComponent(ownership.siteId)}`;
+}
+
+function validOwnership(value: unknown): value is DiscoveryOwnership {
+  if (!value || typeof value !== 'object') return false;
+  const ownership = value as Partial<DiscoveryOwnership>;
+  return typeof ownership.tenantId === 'string' && ownership.tenantId.trim().length > 0 &&
+    typeof ownership.siteId === 'string' && ownership.siteId.trim().length > 0;
+}
+
+function sameOwnership(a: DiscoveryOwnership | undefined, b: DiscoveryOwnership): boolean {
+  return !!a && a.tenantId === b.tenantId && a.siteId === b.siteId;
 }
 
 function isKnownDevice(value: unknown): value is KnownNetworkDevice {
   if (!value || typeof value !== 'object') return false;
   const record = value as Partial<KnownNetworkDevice>;
 
-  return record.schemaVersion === 1 &&
+  return (record.schemaVersion === 1 || record.schemaVersion === 2) &&
     typeof record.identity === 'string' &&
     typeof record.firstSeenAt === 'string' &&
     typeof record.lastSeenAt === 'string' &&
     typeof record.lastScanId === 'string' &&
+    (record.schemaVersion === 1 || validOwnership(record.ownership)) &&
     !!record.device &&
     typeof record.device.ipAddress === 'string';
 }
@@ -352,12 +375,14 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
   async recordScan(
     scanId: string,
     devices: NetworkDiscoveredDevice[],
+    ownership: DiscoveryOwnership,
   ): Promise<void> {
+    if (!validOwnership(ownership)) throw new Error('Discovery evidence requires server-authorized tenant/site ownership');
     const recordsByKey = new Map<string, KnownNetworkDevice>();
     const endpointAliasesToDelete = new Set<string>();
     for (const device of devices) {
       const identity = networkDiscoveryIdentity(device);
-      const databaseKey = key(identity);
+      const databaseKey = scopedKey(identity, ownership);
       const pending = recordsByKey.get(databaseKey);
       const previousValue = pending || await this.getOptional(databaseKey);
       const previous = isKnownDevice(previousValue)
@@ -365,7 +390,8 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
         : null;
 
       const record: KnownNetworkDevice = {
-        schemaVersion: 1,
+        schemaVersion: 2,
+        ownership: structuredClone(ownership),
         identity,
         firstSeenAt: previous?.firstSeenAt || scanId,
         lastSeenAt: scanId,
@@ -378,7 +404,7 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
       recordsByKey.set(databaseKey, record);
 
       const endpointIdentity = networkEndpointIdentity(device)
-      const endpointKey = key(endpointIdentity)
+      const endpointKey = scopedKey(endpointIdentity, ownership)
       if (!verifiedDeviceIdentity(device)) continue
       const endpointValue = await this.getOptional(endpointKey)
       if (isKnownDevice(endpointValue) && endpointValue.identity === endpointIdentity &&
@@ -401,7 +427,7 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
 
     operations.push({
       type: 'put',
-      key: 'meta:lastScanId',
+      key: summaryKey(ownership),
       value: scanId,
     });
 
@@ -453,22 +479,45 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
   }
 
   async recordSnapshot(snapshot: NetworkDiscoverySnapshot): Promise<void> {
+    if (!validOwnership(snapshot.ownership)) {
+      throw new Error('New discovery snapshots require server-authorized tenant/site ownership');
+    }
     const snapshotKey = `snapshot:${encodeURIComponent(snapshot.scanId)}`;
     if (await this.getOptional(snapshotKey) !== undefined) {
       throw new Error(`Discovery snapshot already exists: ${snapshot.scanId}`);
     }
-    await this.db.put(snapshotKey, structuredClone(snapshot));
+    const { ownershipStatus: _projectionOnlyStatus, ...persistedSnapshot } = snapshot;
+    await this.db.put(snapshotKey, structuredClone(persistedSnapshot));
   }
 
-  async getSnapshot(scanId: string): Promise<NetworkDiscoverySnapshot | null> {
+  async getSnapshot(scanId: string, ownership: DiscoveryOwnership): Promise<NetworkDiscoverySnapshot | null> {
+    if (!validOwnership(ownership)) return null;
     const value = await this.getOptional(`snapshot:${encodeURIComponent(scanId)}`);
-    return isNetworkDiscoverySnapshot(value) ? value : null;
+    return isNetworkDiscoverySnapshot(value) && sameOwnership(value.ownership, ownership) ? value : null;
   }
 
-  async listSnapshots(limit = 50): Promise<NetworkDiscoverySnapshot[]> {
+  async listSnapshots(ownership: DiscoveryOwnership, limit = 50): Promise<NetworkDiscoverySnapshot[]> {
+    if (!validOwnership(ownership)) return [];
     const snapshots: NetworkDiscoverySnapshot[] = [];
     for await (const [, value] of this.db.iterator({ gte: 'snapshot:', lt: 'snapshot:\uffff' })) {
-      if (isNetworkDiscoverySnapshot(value)) snapshots.push(value);
+      if (isNetworkDiscoverySnapshot(value) && sameOwnership(value.ownership, ownership)) snapshots.push(value);
+    }
+    return snapshots
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.scanId.localeCompare(a.scanId))
+      .slice(0, Math.max(1, Math.min(Math.floor(limit), 100)));
+  }
+
+  /** Includes legacy snapshots for read-only history, explicitly marked unscoped. */
+  async listHistoricalSnapshots(ownership: DiscoveryOwnership, limit = 50): Promise<NetworkDiscoverySnapshot[]> {
+    if (!validOwnership(ownership)) return [];
+    const snapshots: NetworkDiscoverySnapshot[] = [];
+    for await (const [, value] of this.db.iterator({ gte: 'snapshot:', lt: 'snapshot:\uffff' })) {
+      if (!isNetworkDiscoverySnapshot(value)) continue;
+      if (value.ownership && !sameOwnership(value.ownership, ownership)) continue;
+      snapshots.push({
+        ...value,
+        ownershipStatus: value.ownership ? 'scoped' : 'legacy-unscoped',
+      });
     }
     return snapshots
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.scanId.localeCompare(a.scanId))
@@ -479,13 +528,16 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
   async recordIdentityObservation(
     observedAt: string,
     device: NetworkDiscoveredDevice,
+    ownership: DiscoveryOwnership,
   ): Promise<void> {
+    if (!validOwnership(ownership)) throw new Error('Identity evidence requires server-authorized tenant/site ownership');
     const identity = networkDiscoveryIdentity(device);
-    const databaseKey = key(identity);
+    const databaseKey = scopedKey(identity, ownership);
     const previousValue = await this.getOptional(databaseKey);
     const previous = isKnownDevice(previousValue) ? previousValue : null;
     const record: KnownNetworkDevice = {
-      schemaVersion: 1,
+      schemaVersion: 2,
+      ownership: structuredClone(ownership),
       identity,
       firstSeenAt: previous?.firstSeenAt || observedAt,
       lastSeenAt: observedAt,
@@ -497,26 +549,27 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
     await this.db.put(databaseKey, record);
   }
 
-  async list(): Promise<KnownNetworkDevice[]> {
-    return dedupeKnownRecords(await this.listIdentityEvidence());
+  async list(ownership: DiscoveryOwnership): Promise<KnownNetworkDevice[]> {
+    return dedupeKnownRecords(await this.listIdentityEvidence(ownership));
   }
 
-  async listIdentityEvidence(): Promise<KnownNetworkDevice[]> {
+  async listIdentityEvidence(ownership: DiscoveryOwnership): Promise<KnownNetworkDevice[]> {
+    if (!validOwnership(ownership)) return [];
     const records: KnownNetworkDevice[] = [];
 
     for await (const [, value] of this.db.iterator({
       gte: 'known:',
       lt: 'known:\uffff',
     })) {
-      if (isKnownDevice(value)) records.push(value);
+      if (isKnownDevice(value) && value.schemaVersion === 2 && sameOwnership(value.ownership, ownership)) records.push(value);
     }
 
     return records.sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt));
   }
 
-  async summary(): Promise<DiscoveryMemorySummary> {
-    const records = await this.list();
-    const value = await this.getOptional('meta:lastScanId');
+  async summary(ownership: DiscoveryOwnership): Promise<DiscoveryMemorySummary> {
+    const records = await this.list(ownership);
+    const value = await this.getOptional(summaryKey(ownership));
     const lastScanId = typeof value === 'string' ? value : null;
 
     const observedInLatestScan = lastScanId
@@ -540,6 +593,7 @@ function isNetworkDiscoverySnapshot(value: unknown): value is NetworkDiscoverySn
     typeof snapshot.scanId === 'string' &&
     typeof snapshot.startedAt === 'string' &&
     typeof snapshot.completedAt === 'string' &&
+    (snapshot.ownership === undefined || validOwnership(snapshot.ownership)) &&
     Array.isArray(snapshot.scopes) &&
     Array.isArray(snapshot.rawEvidence) &&
     Array.isArray(snapshot.endpoints);

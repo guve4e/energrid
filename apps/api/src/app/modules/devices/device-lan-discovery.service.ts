@@ -3,6 +3,7 @@ import {
   dedupeNetworkEndpoints,
   DeviceDiscoveryMemoryStore,
   normalizeNetworkHostname,
+  type DiscoveryOwnership,
 } from './device-discovery-memory.store'
 import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
@@ -33,6 +34,7 @@ import {
   type LocalNetworkRuntimeReport,
 } from './adapters/outbound/network/local-network-runtime.adapter'
 import { EnergridHttpIdentityAdapter } from './adapters/outbound/network/energrid-http-identity.adapter'
+import { VirtualLabNetworkEvidenceAdapter, type VirtualLabEnergridHttpEvidence, type VirtualLabScanResult } from './adapters/outbound/network/virtual-lab-network-evidence.adapter'
 
 const execFileAsync = promisify(execFile)
 const activeScanConcurrency = 24
@@ -181,6 +183,7 @@ export class DeviceLanNetworkEvidenceCollector {
 export class DeviceLanDiscoveryService {
   private readonly logger = new Logger(DeviceLanDiscoveryService.name)
   private lastScan: NetworkDiscoveredDevice[] = []
+  private lastScanOwnership: DiscoveryOwnership | null = null
   private lastZones: NetworkDiscoveryZone[] = []
 
   constructor(
@@ -190,14 +193,39 @@ export class DeviceLanDiscoveryService {
     @Optional()
     @Inject(PHYSICAL_DEVICE_INVENTORY_SERVICE)
     private readonly physicalInventory?: PhysicalDeviceInventoryService,
+    @Optional()
+    private readonly virtualLabEvidence: VirtualLabNetworkEvidenceAdapter = new VirtualLabNetworkEvidenceAdapter(),
   ) {}
 
   getLastScan(): NetworkDiscoveredDevice[] {
-    return this.lastScan
+    const { tenant, site } = this.registry.getSnapshot()
+    return this.lastScanOwnership?.tenantId === tenant.id && this.lastScanOwnership.siteId === site.id
+      ? this.lastScan
+      : []
   }
 
   getZones(): NetworkDiscoveryZone[] {
     return this.lastZones.length > 0 ? this.lastZones : configuredNetworkZones()
+  }
+
+  getConfiguredZone(scopeId: string): NetworkDiscoveryZone | undefined {
+    return configuredNetworkZones().find(zone => zone.id === scopeId)
+  }
+
+  readVirtualLabEnergridHttpEvidence(
+    scopeId: string,
+    targetIp: string,
+    physicalId: string,
+    signal?: AbortSignal,
+  ): Promise<VirtualLabEnergridHttpEvidence> {
+    if (process.env.HOME_VIRTUAL_LAB_ENABLED !== 'true') {
+      throw new Error('Virtual Lab HTTP polling is disabled.')
+    }
+    const zone = this.getConfiguredZone(scopeId)
+    if (!zone || zone.collectionSource !== 'virtual-lab') {
+      throw new Error('Virtual Lab HTTP polling requires a configured virtual network scope.')
+    }
+    return this.virtualLabEvidence.readEnergridHttpEvidence(zone, targetIp, physicalId, signal)
   }
 
   getNmapCapability(): Promise<NmapCapability & { enabled: boolean }> {
@@ -217,23 +245,39 @@ export class DeviceLanDiscoveryService {
   }> {
     const startedAt = new Date().toISOString()
     const scanId = randomUUID()
+    // Capture the server-authorized owner once, before collection starts. Network
+    // scope IDs below describe vantage/network identity, not site ownership.
+    const registryAtStart = this.registry.getSnapshot()
+    const ownership = { tenantId: registryAtStart.tenant.id, siteId: registryAtStart.site.id }
     const configuredZones = configuredNetworkZones()
     if (configuredZones.length === 0) {
       throw new BadRequestException('No network scan scopes are configured')
     }
     const zones = selectScanZones(configuredZones, options.scopeIds)
-    if (zones.some(zone => zone.cidr) && options.fullSubnetConfirmed !== true) {
+    if (zones.some(zone => zone.cidr && zone.collectionSource !== 'virtual-lab') && options.fullSubnetConfirmed !== true) {
       throw new BadRequestException('Full-subnet discovery requires explicit operator confirmation')
     }
-    const evidence = await this.evidenceCollector.collectEvidence(zones, options.signal)
-    const nmapHostDiscoverySelected = process.env.HOME_NMAP_ENABLED === 'true' && evidence.nmap.capability.available
+    const virtualLabZones = zones.filter(zone => zone.collectionSource === 'virtual-lab')
+    if (virtualLabZones.length && (virtualLabZones.length !== 1 || zones.length !== 1)) {
+      throw new BadRequestException('Virtual Lab scans must run separately from local network scopes')
+    }
+    let virtualLabResult: VirtualLabScanResult | undefined
+    const evidence = virtualLabZones.length
+      ? (virtualLabResult = await this.virtualLabEvidence.scan(virtualLabZones[0], options.signal), {
+          candidates: virtualLabResult.candidates as NetworkCandidate[],
+          nmap: virtualLabResult.nmap,
+          runtime: undefined,
+        })
+      : await this.evidenceCollector.collectEvidence(zones, options.signal)
+    const nmapHostDiscoverySelected = !!virtualLabResult ||
+      (process.env.HOME_NMAP_ENABLED === 'true' && evidence.nmap.capability.available)
     const discoveredCandidates = evidence.candidates
     const endpointCandidates = mergeNeighborCandidates(discoveredCandidates)
     const identityCandidates = identityCandidatesForScan(discoveredCandidates)
     const conflictingEndpoints = new Set(endpointCandidates
       .filter(candidate => (candidate.macEvidence || []).length > 1)
       .map(candidate => `${candidate.networkZoneId}:${candidate.ipAddress}`))
-    const devices = await Promise.all(
+    const devices = virtualLabResult?.devices || await Promise.all(
       identityCandidates.map(async (candidate) => {
         const matchesExplicitScope = candidateMatchesExplicitScope(candidate, zones)
         return this.evidenceCollector.enrichCandidate(candidate as NetworkCandidate & {
@@ -250,16 +294,16 @@ export class DeviceLanDiscoveryService {
       dedupeNetworkDevices(devices),
       discoveredCandidates.filter(candidate => candidate.evidenceSource === 'nmap'),
     )
+    this.lastScanOwnership = ownership
     const boundedEvidence = buildBoundedRawEvidence(discoveredCandidates, this.lastScan, startedAt)
     const completedAt = new Date().toISOString()
     await this.discoveryMemory.recordScan(completedAt, devices.map(device => {
       const observations = (device.observations || []).filter(item => item.method !== 'nmap_tcp_connect_service_scan')
       return { ...device, ...(observations.length ? { observations } : { observations: undefined }) }
-    }))
-    if (this.physicalInventory) {
-      const { tenant, site } = this.registry.getSnapshot()
+    }), ownership)
+    if (this.physicalInventory && !virtualLabResult) {
       try {
-        const scope = { tenantId: tenant.id, siteId: site.id }
+        const scope = ownership
         const observations: PhysicalLanObservation[] = []
         for (const device of this.lastScan) {
           const candidates = shellyLanCandidates(device)
@@ -325,7 +369,7 @@ export class DeviceLanDiscoveryService {
         throw error
       }
     }
-    const collectorInterfaces = [...new Set([
+    const collectorInterfaces = virtualLabResult?.collector.interfaces || [...new Set([
       ...interfacesForZones(zones),
       ...evidence.nmap.scopes.flatMap(scope => scope.interfaceName ? [scope.interfaceName] : []),
     ])].sort()
@@ -333,9 +377,10 @@ export class DeviceLanDiscoveryService {
     const snapshot: NetworkDiscoverySnapshot = {
       schemaVersion: 2,
       scanId,
+      ownership,
       startedAt,
       completedAt: new Date().toISOString(),
-      collector: {
+      collector: virtualLabResult?.collector || {
         id: `${localHostname()}/${collectorInterfaces.join(',') || 'interface-unknown'}`,
         host: localHostname(),
         interfaces: collectorInterfaces,
@@ -348,22 +393,26 @@ export class DeviceLanDiscoveryService {
           ? { interfaceName: nmapScopeById.get(zone.id)?.interfaceName || interfaceForZone(zone) }
           : {}),
         ...(zone.role ? { role: zone.role } : {}),
+        ...(zone.collectionSource ? { collectionSource: zone.collectionSource } : {}),
         ...(nmapScopeById.get(zone.id) ? { collectionStages: {
           hostDiscovery: toSnapshotStage(nmapScopeById.get(zone.id)!.hostDiscovery),
           serviceEnrichment: toSnapshotStage(nmapScopeById.get(zone.id)!.serviceEnrichment),
         } } : {}),
         complete: nmapHostDiscoverySelected
-          ? nmapScopeById.get(zone.id)?.complete === true
+          ? (nmapScopeById.get(zone.id)?.complete === true)
           : scanScopeComplete(zone),
         gatewayIpsObserved: [...new Set(this.lastScan
           .filter(device => device.networkZoneId === zone.id && device.gatewayId && isIpv4Address(device.gatewayId))
           .map(device => device.gatewayId!))].sort(),
       })),
-      methods: [...new Set([...discoveryMethods(zones, !nmapHostDiscoverySelected), ...evidence.nmap.methods])].sort(),
+      methods: [...new Set([
+        ...(virtualLabResult ? virtualLabMethods(virtualLabResult) : discoveryMethods(zones, !nmapHostDiscoverySelected)),
+        ...evidence.nmap.methods,
+      ])].sort(),
       successes: this.lastScan.length,
       failures: evidence.nmap.failures,
       limitations: [
-        ...scanLimitations(zones),
+        ...(virtualLabResult ? virtualLabLimitations(zones, virtualLabResult) : scanLimitations(zones)),
         ...evidence.nmap.limitations,
         ...(boundedEvidence.omitted ? [`Raw candidate evidence was bounded; ${boundedEvidence.omitted} record(s) omitted.`] : []),
       ],
@@ -371,10 +420,10 @@ export class DeviceLanDiscoveryService {
       rawEvidenceOmitted: boundedEvidence.omitted,
       endpoints: structuredClone(this.lastScan),
       topology: { relationships: [] },
-      ...(evidence.runtime ? { runtime: evidence.runtime } : {}),
+      ...(virtualLabResult?.runtime ? { runtime: virtualLabResult.runtime } : evidence.runtime ? { runtime: evidence.runtime } : {}),
     }
     await this.discoveryMemory.recordSnapshot(snapshot)
-    const previousSnapshots = await this.discoveryMemory.listSnapshots(100)
+    const previousSnapshots = await this.discoveryMemory.listSnapshots(ownership, 100)
     const previous = previousSnapshots.find(item => item.scanId !== scanId &&
       item.scopes.some(previousScope => zones.some(zone => previousScope.id === zone.id && previousScope.cidr === zone.cidr)))
     const comparison = previous ? compareNetworkSnapshots(previous, snapshot) : null
@@ -526,7 +575,14 @@ function configuredSeedHosts(): Array<{
 
 function configuredNetworkZones(): NetworkDiscoveryZone[] {
   const parsed = parseNetworkZones(process.env.HOME_NETWORK_ZONES_JSON)
-  if (parsed.length > 0) return parsed
+  const configured = parsed.filter(zone =>
+    zone.collectionSource !== 'virtual-lab' || process.env.HOME_VIRTUAL_LAB_ENABLED === 'true',
+  )
+  const virtualLab = process.env.HOME_VIRTUAL_LAB_ENABLED === 'true'
+    ? parseNetworkZones(process.env.HOME_VIRTUAL_LAB_SCOPE_JSON).filter(zone => zone.collectionSource === 'virtual-lab')
+    : []
+  const configuredScopes = [...configured, ...virtualLab.filter(zone => !configured.some(item => item.id === zone.id))]
+  if (configuredScopes.length > 0) return configuredScopes
 
   const cidrs = String(process.env.HOME_LAN_SCAN_SUBNETS || '')
     .split(',')
@@ -722,6 +778,7 @@ function normalizeNetworkZone(item: unknown, index: number): NetworkDiscoveryZon
     seeds?: string[]
     gatewayIps?: string[]
     role?: NetworkDiscoveryZone['role']
+    collectionSource?: NetworkDiscoveryZone['collectionSource']
   }
 
   const id = safeZoneId(raw.id || raw.name || `network-${index + 1}`)
@@ -743,7 +800,24 @@ function normalizeNetworkZone(item: unknown, index: number): NetworkDiscoveryZon
     seedIps,
     gatewayIps,
     role: raw.role,
+    ...(raw.collectionSource === 'virtual-lab' ? { collectionSource: 'virtual-lab' as const } : {}),
   }
+}
+
+function virtualLabMethods(result: VirtualLabScanResult): string[] {
+  const methods = [...result.nmap.methods]
+  for (const observation of result.devices.flatMap(device => device.observations || [])) {
+    if (observation.method && !methods.includes(observation.method)) methods.push(observation.method)
+  }
+  return methods
+}
+
+function virtualLabLimitations(zones: NetworkDiscoveryZone[], result: VirtualLabScanResult): string[] {
+  return [
+    ...scanLimitations(zones).filter(item => !item.startsWith('No remote network observer is configured')),
+    `The remote observer queried only the ${zones[0].seedIps.length} explicitly configured virtual-device addresses; other addresses in ${zones[0].cidr} were not scanned.`,
+    ...result.nmap.limitations,
+  ]
 }
 
 function isBroadcastInZones(

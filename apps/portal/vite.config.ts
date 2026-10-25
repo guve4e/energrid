@@ -23,6 +23,7 @@ export default defineConfig({
   },
   server: {
     port: 4300,
+    host: process.env.VITE_DEV_HOST || 'localhost',
     proxy: {
       '/auth': apiProxyTarget,
       '/portal': {
@@ -37,6 +38,7 @@ export default defineConfig({
   },
   preview: {
     port: 4300,
+    host: process.env.VITE_DEV_HOST || 'localhost',
   },
   build: {
     outDir: '../../dist/apps/portal',

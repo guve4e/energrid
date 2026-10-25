@@ -49,6 +49,14 @@ export class DeviceOnboardingService {
       throw new NotFoundException('Device candidate not found');
     }
 
+    if (candidate.tenantId !== tenant.id || candidate.siteId !== site.id ||
+        candidate.metadata?.discoveryTenantId !== tenant.id ||
+        candidate.metadata?.discoverySiteId !== site.id) {
+      throw new ConflictException(
+        'Discovery evidence ownership does not match the authorized tenant and site',
+      );
+    }
+
     const pending = candidate.trustStatus === 'discovered';
 
     const retryable =

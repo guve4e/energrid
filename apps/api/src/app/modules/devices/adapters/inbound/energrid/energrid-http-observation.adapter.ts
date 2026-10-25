@@ -3,10 +3,19 @@ import type { KnownNetworkDevice } from '../../../device-discovery-memory.store'
 
 export const ENERGRID_HTTP_OBSERVATION_SOURCE = 'energrid-http-status';
 export const ENERGRID_HTTP_STATUS_SELECTOR = '/api/v1/status';
+/** Shared firmware sample cursor used by HTTP and the isolated Lab MQTT path. */
+export const ENERGRID_SAMPLE_CURSOR_SOURCE = 'energrid-esp8266-sample';
 
 export interface EnergridHttpSample {
   values: { temperatureC: number; humidityPct: number };
   counters: { uptimeMs: number; sampleCount: number; lastSampleUptimeMs: number };
+  sampleId?: string;
+}
+
+/** Stable firmware sample identity shared by all approved transports. */
+export function energridFirmwareSampleEvidenceId(deviceId: string, sampleId: string): string | null {
+  if (!/^esp8266:[0-9a-f]{6}$/i.test(deviceId) || !/^[0-9a-f]{32}:\d+:\d+$/.test(sampleId)) return null;
+  return `energrid-device-sample:${deviceId.toLowerCase()}:${sampleId}`;
 }
 
 export interface EnergridHttpEndpoint {
@@ -78,6 +87,62 @@ export function resolveEnergridHttpEndpoint(
   };
 }
 
+/**
+ * Revalidate the endpoint already bound to an enrolled installation when no
+ * scoped Discovery Memory record is available. This is only a bounded
+ * candidate: the caller must GET /api/v1/identity and match the exact physical
+ * ID before recording evidence or requesting status.
+ */
+export function resolveEnrolledEnergridHttpEndpoint(
+  device: RegisteredDevice,
+  zones: readonly NetworkDiscoveryZone[],
+): EnergridHttpEndpoint | null {
+  if (device.adapter.driver !== 'energrid-esp8266' || device.adapter.protocol !== 'http') return null;
+  const physicalId = String(device.metadata?.physicalId || '').toLowerCase();
+  const networkScope = String(device.metadata?.networkScope || '');
+  const zone = zones.find(item => item.id === networkScope);
+  if (!/^esp8266:[0-9a-f]{6}$/.test(physicalId) || !networkScope || !zone ||
+      device.id !== `device:${networkScope}:${physicalId}` || !device.tenantId || !device.siteId ||
+      !device.adapter.target) return null;
+
+  let configured: URL;
+  try { configured = new URL(device.adapter.target); } catch { return null; }
+  if (configured.protocol !== 'http:' || configured.username || configured.password ||
+      configured.pathname !== ENERGRID_HTTP_STATUS_SELECTOR || configured.search || configured.hash ||
+      !isIPv4(configured.hostname) || !addressBelongsToZone(configured.hostname, zone)) return null;
+
+  const observedAt = new Date().toISOString();
+  const ipAddress = configured.hostname;
+  const record: KnownNetworkDevice = {
+    schemaVersion: 2,
+    ownership: { tenantId: device.tenantId, siteId: device.siteId },
+    identity: `device:${networkScope}:${physicalId}`,
+    firstSeenAt: observedAt,
+    lastSeenAt: observedAt,
+    lastScanId: `enrolled-endpoint:${device.id}`,
+    device: {
+      id: physicalId,
+      ipAddress,
+      networkZoneId: networkScope,
+      networkZoneName: zone.name,
+      protocol: 'http',
+      confidence: 0,
+      status: 'unknown',
+      discoveredAt: observedAt,
+      reason: 'Last-known enrolled endpoint; awaiting fresh protocol identity verification.',
+      observations: [],
+    },
+  };
+  const authority = `${ipAddress}${configured.port ? `:${configured.port}` : ''}`;
+  return {
+    identityUrl: `http://${authority}/api/v1/identity`,
+    statusUrl: `http://${authority}${ENERGRID_HTTP_STATUS_SELECTOR}`,
+    record,
+    identityFresh: false,
+    renewalDue: true,
+  };
+}
+
 function addressBelongsToZone(ipAddress: string, zone: NetworkDiscoveryZone): boolean {
   if (!isIPv4(ipAddress)) return false;
   if (zone.seedIps.includes(ipAddress)) return true;
@@ -121,6 +186,10 @@ export function parseEnergridHttpSample(
     return { accepted: false, reason: 'invalid_sample_counters' };
   }
   if (data.state !== 'ok') return { accepted: false, reason: 'sensor_not_ok' };
+  if (root.sampleId !== undefined && (typeof root.sampleId !== 'string' || !energridFirmwareSampleEvidenceId(expectedPhysicalId, root.sampleId) ||
+      root.sampleId.split(':')[1] !== String(data.sampleCount) || root.sampleId.split(':')[2] !== String(data.lastSampleUptimeMs))) {
+    return { accepted: false, reason: 'invalid_sample_identity' };
+  }
   const temperatureC = data.temperatureC;
   const humidityPct = data.humidityPct;
   if (typeof temperatureC !== 'number' || !Number.isFinite(temperatureC) || temperatureC < -40 || temperatureC > 80 ||
@@ -138,6 +207,7 @@ export function parseEnergridHttpSample(
         sampleCount: Number(data.sampleCount),
         lastSampleUptimeMs: Number(data.lastSampleUptimeMs),
       },
+      ...(typeof root.sampleId === 'string' ? { sampleId: root.sampleId } : {}),
     },
   };
 }

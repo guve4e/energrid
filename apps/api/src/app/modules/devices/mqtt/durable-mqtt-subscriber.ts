@@ -26,6 +26,31 @@ export function durableMqttOptions(env: NodeJS.ProcessEnv): IClientOptions {
   };
 }
 
+/** A separate, loopback-only tunnel connection for the isolated Device Lab broker. */
+export function labDurableMqttOptions(env: NodeJS.ProcessEnv): IClientOptions {
+  if (env.NODE_ENV === 'production') throw new Error('Lab MQTT subscriber is disabled in production');
+  const host = env.LAB_MQTT_HOST?.trim();
+  if (host !== '127.0.0.1' && host !== '::1') throw new Error('LAB_MQTT_HOST must be a loopback address provided by the SSH tunnel');
+  const clientId = env.LAB_MQTT_CLIENT_ID?.trim();
+  if (!clientId || !/^[a-zA-Z0-9_.:-]{1,120}$/.test(clientId)) throw new Error('A stable LAB_MQTT_CLIENT_ID is required');
+  const port = Number(env.LAB_MQTT_PORT || 18883);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Invalid LAB_MQTT_PORT');
+  return {
+    host,
+    port,
+    protocol: 'mqtt',
+    username: env.LAB_MQTT_USERNAME,
+    password: env.LAB_MQTT_PASSWORD,
+    clientId,
+    clean: false,
+    protocolVersion: 4,
+    reconnectPeriod: 5000,
+    connectTimeout: 10_000,
+    resubscribe: false,
+    manualConnect: true,
+  };
+}
+
 /** QoS 1 PUBACK is released by handleMessage only after local durable admission. */
 export class DurableMqttSubscriber {
   private readonly logger = new Logger(DurableMqttSubscriber.name);

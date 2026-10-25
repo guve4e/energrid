@@ -306,6 +306,43 @@ describe('Persistent Device Observation State', () => {
     expect(decisions).toHaveLength(1);
   });
 
+  it('deduplicates the same stable sample when it arrives on a second approved transport', async () => {
+    const evidenceId = 'energrid-device-sample:esp8266:a1b2c3:boot-sample';
+    const httpBinding = {
+      ...binding,
+      sourceId: 'energrid-http-status',
+      selector: '/api/v1/status',
+      fields: {
+        temperature: { rawKey: 'temperatureC', type: 'number' as const },
+        humidity: { rawKey: 'humidityPct', type: 'number' as const },
+      },
+    };
+    const httpPolicy = {
+      deviceId: binding.deviceId,
+      allowedSourcesByField: { temperature: ['energrid-http-status'], humidity: ['energrid-http-status'] },
+    };
+    const http = await store.process(scope, binding.deviceId, {
+      binding: httpBinding, policy: httpPolicy,
+      context: { selector: '/api/v1/status', receivedAt: '2026-10-24T12:00:00.000Z', evidenceId },
+      payload: { temperatureC: 28.25, humidityPct: 48 },
+    });
+    const mqttSource = 'energrid-lab-mqtt';
+    const mqttBinding = {
+      ...httpBinding,
+      sourceId: mqttSource,
+      selector: 'energrid/tenant-demo/site-device-lab/devices/device:lab/telemetry',
+    };
+    const mqtt = await store.process(scope, binding.deviceId, {
+      binding: mqttBinding,
+      policy: { deviceId: binding.deviceId, allowedSourcesByField: { temperature: [mqttSource], humidity: [mqttSource] } },
+      context: { selector: mqttBinding.selector, receivedAt: '2026-10-24T12:00:01.000Z', evidenceId },
+      payload: { temperatureC: 28.25, humidityPct: 48 },
+    });
+    expect(http.accepted).toBe(true);
+    expect(mqtt).toMatchObject({ accepted: false, reason: 'duplicate_evidence', stage: 'deduplication' });
+    expect(await store.decisions(scope, binding.deviceId)).toHaveLength(1);
+  });
+
   it('recognizes duplicate evidence after restart', async () => {
     const input = {
       binding,

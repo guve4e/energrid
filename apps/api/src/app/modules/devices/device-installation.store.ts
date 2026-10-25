@@ -57,6 +57,16 @@ export interface DeviceInstallationEvent {
   evidence: Record<string, string | number | boolean | null>;
 }
 
+export interface PortalSiteRecord {
+  schemaVersion: 1;
+  tenantId: string;
+  siteId: string;
+  name: string;
+  mode: 'home' | 'away' | 'night';
+  explicitlyAuthorized: true;
+  createdAt: string;
+}
+
 export const DEVICE_INSTALLATION_STORE_DIRECTORY = Symbol(
   'DEVICE_INSTALLATION_STORE_DIRECTORY',
 );
@@ -93,6 +103,55 @@ export class DeviceInstallationStore implements OnModuleInit, OnModuleDestroy {
       if (isInstallationRecord(value)) records.push(value);
     }
     return records;
+  }
+
+  async listAll(): Promise<DeviceInstallationRecord[]> {
+    await this.ensureOpen();
+    const records: DeviceInstallationRecord[] = [];
+    for await (const [key, value] of this.db.iterator({ gte: 'installation:', lt: 'installation;\uffff' })) {
+      if (key.startsWith('installation:') && isInstallationRecord(value)) records.push(value);
+    }
+    return records;
+  }
+
+  async ensurePortalSite(input: Pick<PortalSiteRecord, 'tenantId' | 'siteId' | 'name' | 'mode'>): Promise<PortalSiteRecord> {
+    await this.ensureOpen();
+    const key = portalSiteKey(input.tenantId, input.siteId);
+    try {
+      const existing: unknown = await this.db.get(key);
+      if (isPortalSiteRecord(existing)) return existing;
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+    }
+    const record: PortalSiteRecord = { schemaVersion: 1, ...input, explicitlyAuthorized: true, createdAt: new Date().toISOString() };
+    await this.db.put(key, record);
+    return record;
+  }
+
+  async listPortalSites(): Promise<PortalSiteRecord[]> {
+    await this.ensureOpen();
+    const records: PortalSiteRecord[] = [];
+    for await (const [key, value] of this.db.iterator({ gte: 'portal-site:', lt: 'portal-site;\uffff' })) {
+      if (key.startsWith('portal-site:') && isPortalSiteRecord(value)) records.push(value);
+    }
+    return records.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  async setPortalSiteSelection(userId: string, tenantId: string, siteId: string): Promise<void> {
+    await this.ensureOpen();
+    await this.db.put(portalSiteSelectionKey(userId), { schemaVersion: 1, userId, tenantId, siteId, updatedAt: new Date().toISOString() });
+  }
+
+  async getPortalSiteSelection(userId: string): Promise<{ tenantId: string; siteId: string } | null> {
+    await this.ensureOpen();
+    try {
+      const value = await this.db.get(portalSiteSelectionKey(userId)) as { schemaVersion?: number; tenantId?: string; siteId?: string };
+      if (value?.schemaVersion !== 1 || !value.tenantId || !value.siteId) return null;
+      return { tenantId: value.tenantId, siteId: value.siteId };
+    } catch (error) {
+      if (isNotFound(error)) return null;
+      throw error;
+    }
   }
 
   async get(siteId: string, deviceId: string): Promise<DeviceInstallationRecord | null> {
@@ -238,6 +297,23 @@ function deviceStoreDirectory(): string {
 
 function installationKey(siteId: string, deviceId: string): string {
   return `installation:${siteId}:${deviceId}`;
+}
+
+function portalSiteKey(tenantId: string, siteId: string): string {
+  return `portal-site:${encodeURIComponent(tenantId)}:${encodeURIComponent(siteId)}`;
+}
+
+function portalSiteSelectionKey(userId: string): string {
+  return `portal-site-selection:${encodeURIComponent(userId)}`;
+}
+
+function isPortalSiteRecord(value: unknown): value is PortalSiteRecord {
+  if (!value || typeof value !== 'object') return false;
+  const site = value as Partial<PortalSiteRecord>;
+  return site.schemaVersion === 1 && site.explicitlyAuthorized === true &&
+    typeof site.tenantId === 'string' && typeof site.siteId === 'string' &&
+    typeof site.name === 'string' && ['home', 'away', 'night'].includes(site.mode || '') &&
+    typeof site.createdAt === 'string';
 }
 
 function isInstallationRecord(value: unknown): value is DeviceInstallationRecord {

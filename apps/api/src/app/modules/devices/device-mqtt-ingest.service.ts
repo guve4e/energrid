@@ -32,6 +32,7 @@ import type { PhysicalDeviceInventoryService } from './enrollment/physical-devic
 import {
   DurableMqttSubscriber,
   durableMqttOptions,
+  labDurableMqttOptions,
 } from './mqtt/durable-mqtt-subscriber';
 import { MqttBrokerAttributionService } from './mqtt/mqtt-broker-attribution.service';
 
@@ -74,6 +75,7 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(DeviceMqttIngestService.name);
   private process: ChildProcessWithoutNullStreams | null = null;
   private durableSubscriber?: DurableMqttSubscriber;
+  private labDurableSubscriber?: DurableMqttSubscriber;
   private buffer = '';
   private recentMessages: MqttDebugMessage[] = [];
   private readonly debugMessages = new Subject<MqttDebugMessage>();
@@ -113,6 +115,19 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
     // Do not subscribe before durable observation recovery.
     // A recovery failure must prevent MQTT startup.
     await this.approvedObservations?.recover();
+
+    if (labMqttEnabled()) {
+      const route = this.approvedObservations?.labRoute;
+      const topics = route?.subscriptions() ?? [];
+      if (!topics.length) throw new Error('LAB_MQTT_ENABLED requires one exact LAB_MQTT_OBSERVATION_BINDINGS_JSON route');
+      this.labDurableSubscriber = new DurableMqttSubscriber(
+        labDurableMqttOptions(process.env),
+        topics,
+        (topic, payload) => this.handleLabPayload(topic, payload),
+      );
+      this.labDurableSubscriber.start();
+      this.logger.log(`[DEVICE LAB MQTT] isolated subscriber started topics=${topics.length}`);
+    }
 
     if (!mqttIngestEnabled()) return;
 
@@ -212,10 +227,25 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
+    await this.labDurableSubscriber?.stop();
     await this.durableSubscriber?.stop();
     this.process?.kill();
     this.process = null;
     this.debugMessages.complete();
+  }
+
+  private async handleLabPayload(topic: string, payloadText: string): Promise<void> {
+    if (Buffer.byteLength(payloadText, 'utf8') > 4096) return;
+    let payload: unknown;
+    try { payload = JSON.parse(payloadText); } catch { return; }
+    const route = this.approvedObservations?.labRoute;
+    if (!route) return;
+    const result = await route.process({ topic, payload, payloadText });
+    if (result.outcome === 'admitted') {
+      this.logger.log(`[DEVICE LAB MQTT] observation admitted topic=${topic}`);
+      return;
+    }
+    this.logger.warn(`[DEVICE LAB MQTT] observation rejected topic=${topic} reason=${result.reasonCode}`);
   }
 
   getDebugState(): MqttDebugState {
@@ -880,6 +910,14 @@ function mqttIngestEnabled(): boolean {
   return ['1', 'true', 'yes'].includes(
     String(process.env.HOME_MQTT_INGEST_ENABLED).toLowerCase(),
   );
+}
+
+function labMqttEnabled(): boolean {
+  const enabled = ['1', 'true', 'yes'].includes(String(process.env.LAB_MQTT_ENABLED).toLowerCase());
+  if (enabled && process.env.NODE_ENV === 'production') {
+    throw new Error('LAB_MQTT_ENABLED is only available to the isolated development Device Lab');
+  }
+  return enabled;
 }
 
 function mqttPrefix(): string {

@@ -25,8 +25,14 @@ import { shellyLanCandidates } from './adapters/inbound/shelly/shelly-lan-candid
 import { NmapNetworkEvidenceAdapter, type NmapCommandRunner } from './adapters/outbound/network/nmap-network-evidence.adapter'
 import type { LocalNetworkRuntimeAdapter, LocalNetworkRuntimeReport } from './adapters/outbound/network/local-network-runtime.adapter'
 import { EnergridHttpIdentityAdapter, type EnergridIdentityTransport } from './adapters/outbound/network/energrid-http-identity.adapter'
+import type { VirtualLabNetworkEvidenceAdapter } from './adapters/outbound/network/virtual-lab-network-evidence.adapter'
 
 let mockReachableTcpPorts = new Set<number>()
+const TEST_OWNER = { tenantId: 'tenant-demo', siteId: 'site-home' }
+const TEST_DEVICE_OWNER = { tenantId: 'tenant-test', siteId: 'site-test' }
+const TEST_REGISTRY = {
+  getSnapshot: () => ({ tenant: { id: TEST_OWNER.tenantId }, site: { id: TEST_OWNER.siteId, name: 'Home' }, devices: [] }),
+} as unknown as DeviceRegistryService
 
 jest.mock('node:child_process', () => ({
   execFile: jest.fn((_command, _args, _options, callback) => callback(new Error('mocked'))),
@@ -64,6 +70,9 @@ describe('LAN discovery evidence persistence', () => {
     directory = await mkdtemp(join(tmpdir(), 'energrid-lan-evidence-'))
     memory = new DeviceDiscoveryMemoryStore(directory)
     process.env.HOME_LAN_ACTIVE_SCAN_ENABLED = 'false'
+    process.env.HOME_VIRTUAL_LAB_ENABLED = 'false'
+    process.env.PORTAL_TENANT_ID = TEST_OWNER.tenantId
+    process.env.PORTAL_SITE_ID = TEST_OWNER.siteId
     process.env.HOME_NETWORK_ZONES_JSON = JSON.stringify({
       zones: [{ id: 'home-lan', name: 'Home LAN', cidr: '192.168.1.0/24' }],
     })
@@ -94,21 +103,21 @@ describe('LAN discovery evidence persistence', () => {
   })
 
   it('requires explicit confirmation before a configured subnet scan and writes nothing before confirmation', async () => {
-    const service = new DeviceLanDiscoveryService(memory, {} as DeviceRegistryService, new DeviceLanNetworkEvidenceCollector())
+    const service = new DeviceLanDiscoveryService(memory, TEST_REGISTRY, new DeviceLanNetworkEvidenceCollector())
 
     await expect(service.scanNow()).rejects.toThrow('explicit operator confirmation')
-    expect(await memory.listSnapshots()).toEqual([])
-    expect(await memory.listIdentityEvidence()).toEqual([])
+    expect(await memory.listSnapshots(TEST_OWNER)).toEqual([])
+    expect(await memory.listIdentityEvidence(TEST_OWNER)).toEqual([])
   })
 
   it('does not treat discovered interface scopes as configured or authorized scan scopes', async () => {
     delete process.env.HOME_NETWORK_ZONES_JSON
     delete process.env.HOME_LAN_SCAN_SUBNETS
-    const service = new DeviceLanDiscoveryService(memory, {} as DeviceRegistryService, new DeviceLanNetworkEvidenceCollector())
+    const service = new DeviceLanDiscoveryService(memory, TEST_REGISTRY, new DeviceLanNetworkEvidenceCollector())
 
     expect(service.getZones()).toEqual([])
     await expect(service.scanNow()).rejects.toThrow('No network scan scopes are configured')
-    expect(await memory.listSnapshots()).toEqual([])
+    expect(await memory.listSnapshots(TEST_OWNER)).toEqual([])
   })
 
   it('verifies Energrid firmware identity from a bounded HTTP host and scopes its evidence', async () => {
@@ -151,7 +160,7 @@ describe('LAN discovery evidence persistence', () => {
       }),
     }
     const service = new DeviceLanDiscoveryService(
-      memory, {} as DeviceRegistryService,
+      memory, TEST_REGISTRY,
       new DeviceLanNetworkEvidenceCollector(undefined, undefined, new EnergridHttpIdentityAdapter(transport)),
     )
 
@@ -168,14 +177,116 @@ describe('LAN discovery evidence persistence', () => {
     process.env.HOME_ROUTER_CLIENTS_JSON = JSON.stringify([{
       ipAddress: '192.168.1.133', macAddress: '02:00:00:00:00:0a',
     }])
-    const service = new DeviceLanDiscoveryService(memory, {} as DeviceRegistryService, new DeviceLanNetworkEvidenceCollector())
+    const service = new DeviceLanDiscoveryService(memory, TEST_REGISTRY, new DeviceLanNetworkEvidenceCollector())
 
     const result = await service.scanNow({ scopeIds: ['eero'], fullSubnetConfirmed: true })
 
     expect(result.zones.map(zone => zone.id)).toEqual(['eero'])
     expect(result.devices).toEqual([])
     expect(result.snapshot.scopes.map(scope => scope.id)).toEqual(['eero'])
-    expect(await memory.listSnapshots()).toHaveLength(1)
+    expect(await memory.listSnapshots(TEST_OWNER)).toHaveLength(1)
+  })
+
+  it('persists fixed-target Virtual Lab results through Discovery Memory without local probing or physical inventory writes', async () => {
+    process.env.HOME_VIRTUAL_LAB_ENABLED = 'true'
+    process.env.HOME_NETWORK_ZONES_JSON = JSON.stringify({ zones: [{
+      id: 'device-lab-vlan', name: 'Virtual Lab LAN', cidr: '172.30.250.0/28',
+      interfaceName: 'eth0', seedIps: ['172.30.250.10', '172.30.250.11'],
+      collectionSource: 'virtual-lab', role: 'service',
+    }] })
+    const identities = [
+      { ipAddress: '172.30.250.10', id: 'esp8266:a1b2c3', macAddress: '5e:24:06:c6:81:59', deviceReportedMacAddress: undefined, protocol: 'http' as const, vendor: 'Energrid' },
+      { ipAddress: '172.30.250.11', id: 'shellyplus1-00c0de000001', macAddress: '56:73:18:cd:7a:d9', deviceReportedMacAddress: '02:c0:de:00:00:01', protocol: 'http' as const, vendor: 'Shelly' },
+    ]
+    const devices: NetworkDiscoveredDevice[] = identities.map(item => ({
+      ...item, networkZoneId: 'device-lab-vlan', networkZoneName: 'Virtual Lab LAN',
+      confidence: 0.95, status: 'online', discoveredAt: '2026-10-25T10:00:00.000Z',
+      reason: 'The simulated device returned a matching read-only protocol identity.',
+      observations: item.id.startsWith('esp8266:') ? [
+        { source: 'http_identity', attribute: 'identity.verified', value: true, observedAt: '2026-10-25T10:00:00.000Z', scopeId: 'device-lab-vlan', method: 'GET /api/v1/identity' },
+        { source: 'http_identity', attribute: 'identity.device_id', value: item.id, observedAt: '2026-10-25T10:00:00.000Z', scopeId: 'device-lab-vlan', method: 'GET /api/v1/identity' },
+      ] : [
+        { source: 'http_rpc', attribute: 'shelly.device_id', value: item.id, observedAt: '2026-10-25T10:00:00.000Z', scopeId: 'device-lab-vlan', method: 'Shelly.GetDeviceInfo' },
+      ],
+    }))
+    const virtualLab = {
+      scan: jest.fn().mockResolvedValue({
+        devices,
+        candidates: devices.map(device => ({
+          ipAddress: device.ipAddress, macAddress: device.macAddress,
+          deviceReportedMacAddress: device.deviceReportedMacAddress,
+          networkZoneId: device.networkZoneId, networkZoneName: device.networkZoneName,
+          evidenceSource: 'nmap', observedAt: device.discoveredAt,
+        })),
+        nmap: {
+          capability: { available: true, version: '7.93' }, hosts: [],
+          scopes: [{ scopeId: 'device-lab-vlan', complete: true, targetCount: 2, hostsReported: 2,
+            hostDiscovery: { durationMs: 12, complete: true, targetCount: 2, hostsReported: 2 },
+            serviceEnrichment: { durationMs: 31, complete: true, targetCount: 2, hostsReported: 2 } }],
+          methods: ['nmap_host_discovery', 'nmap_tcp_connect_service_scan'], failures: [], limitations: [], cancelled: false,
+        },
+        collector: { id: 'virtual-lab-docker/192.168.1.138/eth0', host: '192.168.1.138', interfaces: ['eth0'] },
+      }),
+    } as unknown as VirtualLabNetworkEvidenceAdapter
+    const localCollector = new DeviceLanNetworkEvidenceCollector()
+    const localScan = jest.spyOn(localCollector, 'collectEvidence')
+    const physicalInventory = { discover: jest.fn(), refreshNetworkObservations: jest.fn() }
+    const service = new DeviceLanDiscoveryService(
+      memory, TEST_REGISTRY, localCollector, physicalInventory as never, virtualLab,
+    )
+
+    const result = await service.scanNow({ scopeIds: ['device-lab-vlan'], fullSubnetConfirmed: true })
+    const saved = await memory.getSnapshot(result.snapshot.scanId, TEST_OWNER)
+    const historicalEvidence = await memory.listIdentityEvidence(TEST_OWNER)
+
+    expect(virtualLab.scan).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'device-lab-vlan', collectionSource: 'virtual-lab', seedIps: ['172.30.250.10', '172.30.250.11'],
+    }), undefined)
+    expect(localScan).not.toHaveBeenCalled()
+    expect(result.devices.map(device => device.id)).toEqual(['esp8266:a1b2c3', 'shellyplus1-00c0de000001'])
+    expect(saved?.collector).toEqual({ id: 'virtual-lab-docker/192.168.1.138/eth0', host: '192.168.1.138', interfaces: ['eth0'] })
+    expect(saved?.scopes[0]).toMatchObject({ collectionSource: 'virtual-lab', complete: true, cidr: '172.30.250.0/28' })
+    expect(saved?.endpoints.find(item => item.id.startsWith('shelly'))).toMatchObject({
+      ipAddress: '172.30.250.11', macAddress: '56:73:18:cd:7a:d9', deviceReportedMacAddress: '02:c0:de:00:00:01',
+    })
+    expect(historicalEvidence.map(record => record.device.id).sort()).toEqual(['esp8266:a1b2c3', 'shellyplus1-00c0de000001'])
+    expect(physicalInventory.discover).not.toHaveBeenCalled()
+    expect(physicalInventory.refreshNetworkObservations).not.toHaveBeenCalled()
+  })
+
+  it('binds a snapshot to the server-authorized site captured before asynchronous collection', async () => {
+    process.env.HOME_VIRTUAL_LAB_ENABLED = 'true'
+    process.env.HOME_NETWORK_ZONES_JSON = JSON.stringify({ zones: [{
+      id: 'device-lab-vlan', name: 'Virtual Lab LAN', cidr: '172.30.250.0/28',
+      seedIps: ['172.30.250.10'], collectionSource: 'virtual-lab',
+    }] })
+    let activeOwner = { tenant: { id: 'tenant-demo' }, site: { id: 'site-home', name: 'Home' } }
+    const registry = { getSnapshot: jest.fn(() => activeOwner) }
+    const virtualLab = {
+      scan: jest.fn(async () => {
+        activeOwner = { tenant: { id: 'tenant-demo' }, site: { id: 'site-virtual-lab', name: 'Virtual Lab' } }
+        return {
+          devices: [], candidates: [], collector: { id: 'lab', host: 'lab', interfaces: ['eth0'] },
+          nmap: { capability: { available: true }, hosts: [], scopes: [], methods: [], failures: [], limitations: [], cancelled: false },
+        }
+      }),
+    } as unknown as VirtualLabNetworkEvidenceAdapter
+    const service = new DeviceLanDiscoveryService(memory, registry as never, new DeviceLanNetworkEvidenceCollector(), undefined, virtualLab)
+
+    const result = await service.scanNow({ scopeIds: ['device-lab-vlan'], fullSubnetConfirmed: true })
+
+    expect(result.snapshot.ownership).toEqual(TEST_OWNER)
+    expect(await memory.getSnapshot(result.snapshot.scanId, TEST_OWNER)).toMatchObject({ ownership: TEST_OWNER })
+    expect(await memory.getSnapshot(result.snapshot.scanId, { tenantId: 'tenant-demo', siteId: 'site-virtual-lab' })).toBeNull()
+  })
+
+  it('does not expose the Virtual Lab scope unless it is explicitly enabled', () => {
+    process.env.HOME_VIRTUAL_LAB_ENABLED = 'false'
+    process.env.HOME_NETWORK_ZONES_JSON = JSON.stringify({ zones: [{
+      id: 'device-lab-vlan', name: 'Virtual Lab LAN', cidr: '172.30.250.0/28',
+      seedIps: ['172.30.250.10', '172.30.250.11'], collectionSource: 'virtual-lab',
+    }] })
+    expect(new DeviceLanDiscoveryService(memory, TEST_REGISTRY, new DeviceLanNetworkEvidenceCollector()).getZones()).toEqual([])
   })
 
   it('persists Nmap observations and services through the existing immutable snapshot store', async () => {
@@ -191,13 +302,13 @@ describe('LAN discovery evidence persistence', () => {
     const adapter = new NmapNetworkEvidenceAdapter(runner, () => ({}), () => new Date('2026-10-21T00:00:00.000Z'))
     const service = new DeviceLanDiscoveryService(
       memory,
-      {} as DeviceRegistryService,
+      TEST_REGISTRY,
       new DeviceLanNetworkEvidenceCollector(adapter),
     )
 
     const result = await service.scanNow({ fullSubnetConfirmed: true })
-    const saved = await memory.getSnapshot(result.snapshot.scanId)
-    const identityRecords = await memory.listIdentityEvidence()
+    const saved = await memory.getSnapshot(result.snapshot.scanId, TEST_OWNER)
+    const identityRecords = await memory.listIdentityEvidence(TEST_OWNER)
     const endpoint = saved?.endpoints.find(item => item.ipAddress === '192.168.1.133')
 
     expect(result.snapshot.methods).toContain('nmap_tcp_connect_service_scan')
@@ -245,10 +356,10 @@ describe('LAN discovery evidence persistence', () => {
       new NmapNetworkEvidenceAdapter(runner),
       runtimeAdapter,
     )
-    const service = new DeviceLanDiscoveryService(memory, {} as DeviceRegistryService, collector)
+    const service = new DeviceLanDiscoveryService(memory, TEST_REGISTRY, collector)
 
     const result = await service.scanNow({ scopeIds: ['home-lan'], fullSubnetConfirmed: true })
-    const saved = await memory.getSnapshot(result.snapshot.scanId)
+    const saved = await memory.getSnapshot(result.snapshot.scanId, TEST_OWNER)
 
     expect(result.snapshot.schemaVersion).toBe(2)
     expect(saved?.runtime).toMatchObject({ observer: runtime.observer, localScopes: runtime.localScopes })
@@ -258,14 +369,14 @@ describe('LAN discovery evidence persistence', () => {
   it('persists each same-scan MAC identity before projecting the ambiguous endpoint', async () => {
     const service = new DeviceLanDiscoveryService(
       memory,
-      {} as DeviceRegistryService,
+      TEST_REGISTRY,
       new DeviceLanNetworkEvidenceCollector(),
     )
 
     const result = await service.scanNow({ fullSubnetConfirmed: true })
-    const identityRecords = await memory.listIdentityEvidence()
-    const endpointRecords = await memory.list()
-    const savedSnapshot = await memory.getSnapshot(result.snapshot.scanId)
+    const identityRecords = await memory.listIdentityEvidence(TEST_OWNER)
+    const endpointRecords = await memory.list(TEST_OWNER)
+    const savedSnapshot = await memory.getSnapshot(result.snapshot.scanId, TEST_OWNER)
     expect(savedSnapshot).toEqual(result.snapshot)
     expect(savedSnapshot?.rawEvidence.length).toBeGreaterThan(0)
     expect(savedSnapshot?.rawEvidence.length).toBeLessThanOrEqual(2048)
@@ -309,7 +420,7 @@ describe('LAN discovery evidence persistence', () => {
   })
 
   it('deduplicates repeated hardware, retains DHCP history, and uses only the current endpoint identity', async () => {
-    const service = new DeviceLanDiscoveryService(memory, {} as DeviceRegistryService, new DeviceLanNetworkEvidenceCollector())
+    const service = new DeviceLanDiscoveryService(memory, TEST_REGISTRY, new DeviceLanNetworkEvidenceCollector())
     await service.scanNow({ fullSubnetConfirmed: true })
 
     process.env.HOME_ROUTER_CLIENTS_JSON = JSON.stringify([
@@ -325,7 +436,7 @@ describe('LAN discovery evidence persistence', () => {
       },
     ])
     const repeatedIdentityScan = await service.scanNow({ fullSubnetConfirmed: true })
-    let records = await memory.listIdentityEvidence()
+    let records = await memory.listIdentityEvidence(TEST_OWNER)
     const identityA = records.find(record => record.device.macAddress === '02:00:00:00:00:0a')!
     expect(records).toHaveLength(2)
     expect(identityA.device.components).toEqual([
@@ -341,7 +452,7 @@ describe('LAN discovery evidence persistence', () => {
       components: [{ component: 'switch:0', channel: 0 }],
     }])
     const reusedAddressScan = await service.scanNow({ fullSubnetConfirmed: true })
-    records = await memory.listIdentityEvidence()
+    records = await memory.listIdentityEvidence(TEST_OWNER)
     expect(records).toHaveLength(2)
     expect(records.find(record => record.device.macAddress === '02:00:00:00:00:0a')?.device)
       .toMatchObject({ model: 'Sensor A', firmwareVersion: '1.2.3' })
@@ -371,9 +482,9 @@ describe('LAN discovery evidence persistence', () => {
       },
     ])
 
-    const service = new DeviceLanDiscoveryService(memory, {} as DeviceRegistryService, new DeviceLanNetworkEvidenceCollector())
+    const service = new DeviceLanDiscoveryService(memory, TEST_REGISTRY, new DeviceLanNetworkEvidenceCollector())
     const result = await service.scanNow({ fullSubnetConfirmed: true })
-    const records = await memory.listIdentityEvidence()
+    const records = await memory.listIdentityEvidence(TEST_OWNER)
 
     expect(records).toHaveLength(2)
     expect(new Set(records.map(record => record.device.networkZoneId)))
@@ -508,7 +619,7 @@ describe('LAN discovery evidence persistence', () => {
         }),
       }),
     ]))
-    const identityHistory = await memory.listIdentityEvidence()
+    const identityHistory = await memory.listIdentityEvidence(TEST_DEVICE_OWNER)
     expect(identityHistory.find(record => record.device.id === 'shellyplus1-8813bfcdc8bc')?.device.observations)
       .toContainEqual(expect.objectContaining({
         attribute: 'shelly.component_status', value: 'switch:0', observedAt: componentObservation!.observedAt,
@@ -558,7 +669,7 @@ describe('LAN discovery evidence persistence', () => {
 
     await expect(service.scanNow({ fullSubnetConfirmed: true })).rejects.toThrow('inventory unavailable')
 
-    expect(await memory.listIdentityEvidence()).toHaveLength(1)
+    expect(await memory.listIdentityEvidence(TEST_DEVICE_OWNER)).toHaveLength(1)
     expect(inventory.refreshNetworkObservations).not.toHaveBeenCalled()
   })
 
@@ -570,6 +681,7 @@ describe('LAN discovery evidence persistence', () => {
       vendor: 'Espressif',
     }])
     const registry = {
+      ...TEST_REGISTRY,
       registerDiscoveredDevice: jest.fn(),
       approveDiscoveredDevice: jest.fn(),
     }
@@ -584,7 +696,7 @@ describe('LAN discovery evidence persistence', () => {
         vendor: 'Espressif',
       }),
     ]))
-    expect(await memory.listIdentityEvidence()).toHaveLength(1)
+    expect(await memory.listIdentityEvidence(TEST_OWNER)).toHaveLength(1)
     expect(registry.approveDiscoveredDevice).not.toHaveBeenCalled()
     expect(registry.registerDiscoveredDevice).not.toHaveBeenCalled()
   })

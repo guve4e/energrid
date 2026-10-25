@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { ClassicLevel } from 'classic-level';
 import { createVerifiedEnrollmentTestPool } from '../../devices/enrollment/postgres-integration-test-database';
 import { DeviceIntelligenceObservationIngress } from '../../devices/device-intelligence-observation-ingress';
 import { DeviceObservationStateStore } from '../../devices/device-observation-state.store';
@@ -10,6 +11,14 @@ import { energridHttpObservationApproval } from '../../devices/adapters/inbound/
 import { ENERGRID_HTTP_OBSERVATION_SOURCE, ENERGRID_HTTP_STATUS_SELECTOR } from '../../devices/adapters/inbound/energrid/energrid-http-observation.adapter';
 import { GenericMeasurementHistoryWriter } from './generic-measurement-history-writer';
 import { PostgresGenericMeasurementRepository } from './postgres-generic-measurement.repository';
+import { GenericMeasurementHistoryOutbox } from './generic-measurement-history-outbox';
+
+function historyOutbox(directory: string) {
+  return new GenericMeasurementHistoryOutbox(
+    { historyOutboxDirectory: directory, maxPendingWrites: 1000 } as never,
+    path => new ClassicLevel<string, unknown>(path, { valueEncoding: 'json' }),
+  );
+}
 
 const testWithDatabase = process.env.ENERGRID_ENROLLMENT_TEST_DATABASE_URL ? it : it.skip;
 
@@ -34,10 +43,10 @@ describe('accepted observation to PostgreSQL history integration', () => {
       }),
       appendIfDue: repository.appendIfDue.bind(repository),
     };
-    const writer = new GenericMeasurementHistoryWriter(retryableRepository, true, {
+    let writer = new GenericMeasurementHistoryWriter(retryableRepository, true, {
       temperature: { meaningfulChange: 0.3, maxHeartbeatMs: 900_000 },
       humidity: { meaningfulChange: 2, maxHeartbeatMs: 900_000 },
-    });
+    }, historyOutbox(join(directory, 'history-outbox')));
     const device = { id: deviceId, tenantId, siteId, kind: 'physical', trustStatus: 'approved' };
     let installation = {
       schemaVersion: 1, device, observationAuthority: energridHttpObservationApproval(deviceId),
@@ -68,15 +77,22 @@ describe('accepted observation to PostgreSQL history integration', () => {
       const first = await inputFor({ uptimeMs: 12_000, sampleCount: 6, lastSampleUptimeMs: 10_000 }, 42_000, 22.5, 48);
       const firstAttempt = await ingress.ingest(first);
       expect(firstAttempt).toMatchObject({ outcome: 'processed', accepted: true, historyWrites: [
-        { field: 'temperature', outcome: 'failed' },
-        { field: 'humidity', outcome: 'failed' },
+        { field: 'temperature', outcome: 'pending' },
+        { field: 'humidity', outcome: 'pending' },
       ] });
 
       // The durable LevelDB decision retries the same history sample after reference sync recovers.
+      await writer.onModuleDestroy();
+      const recoveredRepository = new PostgresGenericMeasurementRepository(pool);
+      writer = new GenericMeasurementHistoryWriter(recoveredRepository, true, {
+        temperature: { meaningfulChange: 0.3, maxHeartbeatMs: 900_000 },
+        humidity: { meaningfulChange: 2, maxHeartbeatMs: 900_000 },
+      }, historyOutbox(join(directory, 'history-outbox')));
+      await writer.onModuleInit();
       const firstResult = await ingress.ingest(first);
       expect(firstResult).toMatchObject({ historyWrites: [
-        { field: 'temperature', outcome: 'stored', reason: 'initial' },
-        { field: 'humidity', outcome: 'stored', reason: 'initial' },
+        { field: 'temperature', outcome: 'duplicate' },
+        { field: 'humidity', outcome: 'duplicate' },
       ] });
       const initialReference = await pool.query(
         `SELECT tenant_id,site_id,device_id,display_name FROM device_inventory.enrollments
@@ -144,7 +160,7 @@ describe('accepted observation to PostgreSQL history integration', () => {
         enrollment as never, store, new GenericMeasurementHistoryWriter(restartRepository, true, {
           temperature: { meaningfulChange: 0.3, maxHeartbeatMs: 900_000 },
           humidity: { meaningfulChange: 2, maxHeartbeatMs: 900_000 },
-        }));
+        }, historyOutbox(join(directory, 'history-outbox'))));
       expect(await ingress.ingest(reboot)).toMatchObject({ outcome: 'processed', accepted: false, reason: 'duplicate_evidence' });
       expect((await store.getState({ tenantId, siteId }, deviceId))?.fields.temperature.value).toBe(22.9);
 
