@@ -20,6 +20,7 @@ import { DeviceIntelligenceObservationIngress, type TrustedObservationInput } fr
 import { GenericMeasurementHistoryWriter } from '../../telemetry/generic-measurements/generic-measurement-history-writer';
 import { ENERGRID_HTTP_OBSERVATION_SOURCE, ENERGRID_HTTP_STATUS_SELECTOR } from '../adapters/inbound/energrid/energrid-http-observation.adapter';
 import { resolveInstallationObservationAuthority } from '../device-observation-installation-authority';
+import { SHELLY_MQTT_OBSERVATION_SOURCE } from '../adapters/inbound/shelly/shelly-mqtt-observation-approval';
 
 /**
  * Runtime owner of explicitly configured MQTT observation profiles.
@@ -56,8 +57,11 @@ export class ApprovedMqttObservationRuntime
     const httpEnabled = ['1', 'true', 'yes'].includes(
       String(process.env.HOME_HTTP_POLL_ENABLED).toLowerCase(),
     );
+    const mqttEnabled = ['1', 'true', 'yes'].includes(
+      String(process.env.HOME_MQTT_INGEST_ENABLED).toLowerCase(),
+    );
 
-    if (!raw && !labRaw && !httpEnabled) {
+    if (!raw && !labRaw && !httpEnabled && !mqttEnabled) {
       return;
     }
 
@@ -154,6 +158,69 @@ export class ApprovedMqttObservationRuntime
       }
     }
     return result;
+  }
+
+  /**
+   * Shelly's ordinary MQTT topic is only admitted for an already enrolled,
+   * independently LAN-verified component with a persisted per-field approval.
+   * MQTT identity claims never create devices or supply their own site scope.
+   */
+  async ingestShellyMqttObservation(input: {
+    topic: string;
+    physicalId: string;
+    componentKey: string;
+    values: Record<string, unknown>;
+    evidenceId: string;
+  }) {
+    const rejected = (reasonCode: string) => ({
+      outcome: 'rejected' as const,
+      reasonCode,
+      deviceId: `${input.physicalId}:${input.componentKey}`,
+    });
+    if (!/^shelly[a-z0-9._-]{1,114}$/i.test(input.physicalId) ||
+        !/^(?:switch|em1):(?:[0-9]|[12][0-9]|3[01])$/.test(input.componentKey) ||
+        input.topic !== `${input.physicalId}/events/rpc` ||
+        !input.evidenceId || input.evidenceId.length > 128 ||
+        typeof input.values.power !== 'number' || !Number.isFinite(input.values.power)) {
+      return rejected('shelly_observation_contract_invalid');
+    }
+    const deviceId = `${input.physicalId}:${input.componentKey}`;
+    await this.registry.ensureInstallationsLoaded();
+    const device = this.registry.getDevices(true).find(candidate =>
+      candidate.id === deviceId && candidate.kind === 'physical' &&
+      candidate.trustStatus === 'approved' && candidate.adapter.driver === 'shelly-lan' &&
+      candidate.adapter.protocol === 'http' &&
+      candidate.metadata?.physicalId === input.physicalId &&
+      candidate.metadata?.component === input.componentKey &&
+      candidate.metadata?.identityEvidenceSource === 'verified_shelly_http_rpc' &&
+      candidate.metadata?.componentEvidenceSource === 'verified_shelly_component_status_rpc' &&
+      candidate.metadata?.shellyMqttObservationApprovalRequired === true &&
+      String(candidate.metadata?.verifiedMeasurementFields || '').split(',').includes('power'),
+    );
+    if (!device) return rejected('shelly_lan_verified_enrollment_missing');
+    const scope = { tenantId: device.tenantId, siteId: device.siteId };
+    if (!this.ingress) return rejected('observation_authority_missing');
+    const result = await this.ingress.ingest({
+      scope,
+      deviceId,
+      sourceId: SHELLY_MQTT_OBSERVATION_SOURCE,
+      selector: input.topic,
+      payload: { power: input.values.power },
+      evidenceId: input.evidenceId,
+    });
+    if (result.outcome === 'processed' && result.accepted && result.state) {
+      const fields = Object.fromEntries(Object.entries(result.state.fields)
+        .filter(([, field]) => field.sourceId === SHELLY_MQTT_OBSERVATION_SOURCE)
+        .map(([name, field]) => [name, field.value]));
+      const observedAt = Object.values(result.state.fields)
+        .filter(field => field.sourceId === SHELLY_MQTT_OBSERVATION_SOURCE)
+        .map(field => field.measuredAt ?? field.receivedAt)
+        .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
+      if (Object.keys(fields).length && observedAt) {
+        this.registry.projectApprovedObservation({ deviceId, values: fields, observedAt });
+      }
+    }
+    return { ...result, deviceId, scope };
   }
 
   async recover(): Promise<void> {

@@ -21,6 +21,7 @@ import { DeviceExecutionInvestigator } from './investigation/device-execution-in
 import { DeviceInstallationStore } from './device-installation.store';
 import type { DeviceInstallationRecord } from './device-installation.store';
 import { energridHttpObservationApproval, isEnergridHttpObservationApproval } from './adapters/inbound/energrid/energrid-http-observation-approval';
+import { isShellyMqttObservationApproval, shellyMqttObservationApproval, SHELLY_MQTT_OBSERVATION_SOURCE } from './adapters/inbound/shelly/shelly-mqtt-observation-approval';
 import type { DeviceEnrollmentStatus } from '@energrid/domain-devices';
 import { DEVICE_ENROLLMENT_SERVICE } from './enrollment/device-enrollment.module';
 import type { DeviceEnrollmentService } from './enrollment/device-enrollment.service';
@@ -687,6 +688,64 @@ export class DeviceRegistryService implements OnModuleInit {
       occurredAt: new Date().toISOString(),
       actor: actor || 'portal-admin',
       evidence: { sourceId: status.sourceId, selector: status.selector, fields: 'temperature,humidity' },
+    });
+    return { ...status, approved: true, approvalStatus: 'approved' as const };
+  }
+
+  async getShellyObservationApproval(tenantId: string, siteId: string, deviceId: string) {
+    await this.ensureInstallationsLoaded();
+    const device = this.getDevices(true).find(item =>
+      item.id === deviceId && item.tenantId === tenantId && item.siteId === siteId,
+    );
+    const physicalId = String(device?.metadata?.physicalId || '');
+    const component = String(device?.metadata?.component || '');
+    if (!device || device.kind !== 'physical' || device.trustStatus !== 'approved' ||
+        device.adapter.driver !== 'shelly-lan' || device.adapter.protocol !== 'http' ||
+        device.metadata?.identityEvidenceSource !== 'verified_shelly_http_rpc' ||
+        device.metadata?.componentEvidenceSource !== 'verified_shelly_component_status_rpc' ||
+        device.metadata?.shellyMqttObservationApprovalRequired !== true ||
+        !String(device.metadata?.verifiedMeasurementFields || '').split(',').includes('power') ||
+        !/^shelly[a-z0-9._-]{1,114}$/i.test(physicalId) ||
+        !/^(?:switch|em1):(?:[0-9]|[12][0-9]|3[01])$/.test(component) ||
+        device.id !== `${physicalId}:${component}`) return null;
+    const installation = this.persistedInstallations.get(scopedDeviceKey(deviceId, tenantId, siteId));
+    if (!installation || installation.device.tenantId !== tenantId || installation.device.siteId !== siteId) return null;
+    if (this.enrollment) {
+      const enrollment = await this.enrollment.find({ tenantId, siteId, deviceId });
+      if (!enrollment || enrollment.status !== 'enrolled') return null;
+    }
+    const expected = shellyMqttObservationApproval(deviceId);
+    const approved = isShellyMqttObservationApproval(installation.observationAuthority, deviceId);
+    return {
+      approved,
+      approvalStatus: approved ? 'approved' : installation.observationAuthority ? 'different_authority' : 'missing',
+      sourceId: SHELLY_MQTT_OBSERVATION_SOURCE,
+      selector: expected.bindings[0].selector,
+      fields: [{ metric: 'power', rawKey: 'power', unit: 'W', displayUnit: 'W' }],
+    };
+  }
+
+  async approveShellyObservations(tenantId: string, siteId: string, deviceId: string, actor: string) {
+    const status = await this.getShellyObservationApproval(tenantId, siteId, deviceId);
+    if (!status) return null;
+    const key = scopedDeviceKey(deviceId, tenantId, siteId);
+    const installation = this.persistedInstallations.get(key)!;
+    if (status.approved) return status;
+    if (installation.observationAuthority) {
+      throw new Error('A different observation authority already exists; it must be reviewed before replacement.');
+    }
+    if (!this.installationStore) throw new Error('Local device storage is unavailable.');
+    const authority = shellyMqttObservationApproval(deviceId);
+    const updated = { ...installation, observationAuthority: authority, updatedAt: new Date().toISOString() };
+    await this.installationStore.save(updated);
+    this.persistedInstallations.set(key, updated);
+    await this.installationStore.append({
+      id: `${new Date().toISOString()}-${Math.random().toString(36).slice(2, 10)}`,
+      deviceId,
+      kind: 'observation_authority_approved',
+      occurredAt: new Date().toISOString(),
+      actor: actor || 'portal-admin',
+      evidence: { sourceId: status.sourceId, selector: status.selector, fields: 'power' },
     });
     return { ...status, approved: true, approvalStatus: 'approved' as const };
   }

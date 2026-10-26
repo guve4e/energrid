@@ -1449,7 +1449,7 @@ function normalizeMacAddress(value: unknown): string | undefined {
   return hex.match(/.{2}/g)?.join(':')
 }
 
-type ShellyComponentProbeEvidence = {
+export type ShellyComponentProbeEvidence = {
   components: NonNullable<NetworkDiscoveredDevice['components']>
   observations: NonNullable<NetworkDiscoveredDevice['observations']>
 }
@@ -1459,6 +1459,14 @@ const shellyComponentProbeConcurrency = 4
 
 export async function probeShellyComponents(ipAddress: string): Promise<NonNullable<NetworkDiscoveredDevice['components']>> {
   return (await probeShellyComponentEvidence(ipAddress)).components
+}
+
+export async function probeShellyComponentsWithEvidence(
+  ipAddress: string,
+  scopeId?: string,
+  interfaceName?: string,
+): Promise<ShellyComponentProbeEvidence> {
+  return probeShellyComponentEvidence(ipAddress, scopeId, interfaceName)
 }
 
 async function probeShellyComponentEvidence(
@@ -1490,11 +1498,14 @@ async function probeShellyComponentEvidence(
         const method = item.component.startsWith('switch:') ? 'Switch.GetStatus' : 'EM1.GetStatus'
         const body = await readShellyRpcJson(baseUrl, `${method}?id=${item.channel}`, controller.signal)
         if (!isConfirmedShellyComponentStatus(item, body)) return null
+        const status = body as Record<string, unknown>
+        const power = numberValue(status.apower) ?? numberValue(status.act_power)
         return {
           component: item.component,
           channel: item.channel,
           observedAt: new Date().toISOString(),
           method: `${method}?id=${item.channel}`,
+          ...(power === undefined ? {} : { power }),
         }
       }))
       for (const result of results) {
@@ -1504,6 +1515,15 @@ async function probeShellyComponentEvidence(
           source: 'http_rpc',
           attribute: 'shelly.component_status',
           value: result.component,
+          observedAt: result.observedAt,
+          ...(scopeId ? { scopeId } : {}),
+          ...(interfaceName ? { interfaceName } : {}),
+          method: result.method,
+        })
+        if (result.power !== undefined) confirmed.observations.push({
+          source: 'http_rpc',
+          attribute: 'shelly.measurement_capability',
+          value: `${result.component}:power`,
           observedAt: result.observedAt,
           ...(scopeId ? { scopeId } : {}),
           ...(interfaceName ? { interfaceName } : {}),

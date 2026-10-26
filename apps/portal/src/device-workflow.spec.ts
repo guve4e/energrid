@@ -287,9 +287,10 @@ describe('device onboarding page workflow with mocked services', () => {
     expect(shellyCard.text()).toContain('not independent hardware authentication');
     const channelRows = shellyCard.findAll('.pending-channel-detail');
     expect(channelRows).toHaveLength(2);
-    await channelRows[1].findAll('button').find(candidateButton => candidateButton.text() === 'Approve')!.trigger('click');
-    await flushPromises();
-    expect(fetch.mock.calls.some(([url]) => String(url).includes('/portal/discovery/') && String(url).includes('%3Aem1%3A1/approve'))).toBe(true);
+    const approveButton = channelRows[1].findAll('button').find(candidateButton => candidateButton.text() === 'Approve')!;
+    expect(approveButton.attributes('disabled')).toBeDefined();
+    expect(channelRows[1].text()).toContain('Fresh Shelly LAN identity and component verification is required before enrollment');
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/portal/discovery/') && String(url).includes('%3Aem1%3A1/approve'))).toBe(false);
   });
 
   it('shows persisted LAN identity as last observed and avoids an automatic scan when history exists', async () => {

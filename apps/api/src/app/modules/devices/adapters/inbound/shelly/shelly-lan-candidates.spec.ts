@@ -15,6 +15,12 @@ const device: NetworkDiscoveredDevice = {
   confidence: 0.9,
   discoveredAt: '2026-10-13T08:00:00Z',
   reason: 'Shelly HTTP response',
+  observations: [
+    { source: 'http_rpc', attribute: 'shelly.component_status', value: 'switch:0', observedAt: '2026-10-13T08:00:00Z', method: 'Switch.GetStatus?id=0' },
+    { source: 'http_rpc', attribute: 'shelly.component_status', value: 'switch:1', observedAt: '2026-10-13T08:00:00Z', method: 'Switch.GetStatus?id=1' },
+    { source: 'http_rpc', attribute: 'shelly.component_status', value: 'em1:0', observedAt: '2026-10-13T08:00:00Z', method: 'EM1.GetStatus?id=0' },
+    { source: 'http_rpc', attribute: 'shelly.measurement_capability', value: 'switch:0:power', observedAt: '2026-10-13T08:00:00Z', method: 'Switch.GetStatus?id=0' },
+  ],
   components: [
     { component: 'switch:0', channel: 0 },
     { component: 'switch:1', channel: 1 },
@@ -35,6 +41,8 @@ describe('Shelly LAN onboarding candidates', () => {
         component: 'switch:1',
         channel: 1,
         httpBaseUrl: 'http://192.168.7.21',
+        identityEvidenceSource: 'verified_shelly_http_rpc',
+        componentEvidenceSource: 'verified_shelly_component_status_rpc',
       },
     });
     expect(candidates[2].capabilities).toEqual(['power']);
@@ -51,6 +59,12 @@ describe('Shelly LAN onboarding candidates', () => {
     { components: undefined },
   ])('does not invent supported channels for %o', (extra) => {
     expect(shellyLanCandidates({ ...device, ...extra })).toEqual([]);
+  });
+  it('does not create a candidate from an advertised component without matching status RPC evidence', () => {
+    expect(shellyLanCandidates({
+      ...device,
+      observations: device.observations?.filter(item => item.value !== 'switch:1'),
+    }).map(item => item.id)).not.toContain(`${device.id}:switch:1`);
   });
   it('deduplicates channels and rejects invalid component/channel assignments', () => {
     expect(

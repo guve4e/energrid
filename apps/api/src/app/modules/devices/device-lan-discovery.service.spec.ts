@@ -15,6 +15,7 @@ import {
   parseRouterClientsJson,
   mergeNeighborCandidates,
   probeShelly,
+  probeShellyComponentsWithEvidence,
   DeviceLanNetworkEvidenceCollector,
   DeviceLanDiscoveryService,
 } from './device-lan-discovery.service'
@@ -91,6 +92,34 @@ describe('LAN discovery evidence persistence', () => {
       },
     ])
     global.fetch = jest.fn().mockRejectedValue(new Error('mocked')) as unknown as typeof fetch
+  })
+
+  it('records Shelly power capability only when the read-only component status confirms a numeric value', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ components: [{ key: 'switch:0' }] }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 0, output: false, apower: 18.5 }) }) as unknown as typeof fetch
+
+    const result = await probeShellyComponentsWithEvidence('192.168.1.220', 'upstream-lan', 'en0')
+
+    expect(result.components).toEqual([{ component: 'switch:0', channel: 0 }])
+    expect(result.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: 'http_rpc', attribute: 'shelly.measurement_capability', value: 'switch:0:power',
+        scopeId: 'upstream-lan', interfaceName: 'en0', method: 'Switch.GetStatus?id=0',
+        observedAt: expect.any(String),
+      }),
+    ]))
+  })
+
+  it('does not infer Shelly power capability from a component or its model without status evidence', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ components: [{ key: 'switch:0' }] }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 0, output: false }) }) as unknown as typeof fetch
+
+    const result = await probeShellyComponentsWithEvidence('192.168.1.220', 'upstream-lan', 'en0')
+
+    expect(result.components).toEqual([{ component: 'switch:0', channel: 0 }])
+    expect(result.observations.some(item => item.attribute === 'shelly.measurement_capability')).toBe(false)
   })
 
   afterEach(async () => {

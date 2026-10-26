@@ -28,6 +28,18 @@ sequenceDiagram
 
 The diagram combines the durable-subscriber contract with the approved observation/history path; not every MQTT topic or device protocol enters each stage. Do not infer broker delivery guarantees for QoS 0. The bounded in-memory operational log is diagnostic context, not the durable observation record.
 
+### Shelly Gen2+ LAN onboarding and MQTT measurement admission
+
+The Shelly path treats a Gen2+ MQTT identity/topic as a protocol claim, not physical authentication. A normal Shelly MQTT message does not create a pending registry candidate, select the current/default site, create an inventory record, update device state, or write measurements. Unknown Shelly hardware must first be found in an operator-authorized configured LAN scope.
+
+The read-only LAN collector obtains `Shelly.GetDeviceInfo`, enumerates supported components with `Shelly.GetComponents` (or its documented status fallback), and confirms each component with its own `Switch.GetStatus?id=N` or `EM1.GetStatus?id=N` response. Only that scan evidence creates the ordinary Discovery candidate. The candidate carries separate scan timestamp, observer IP/MAC evidence, device-reported MAC, protocol identity, component method and timestamp. Enrollment requires the same tenant/site owner and recent identity plus component RPC evidence (currently 15 minutes); stale or MQTT-only Shelly candidates remain blocked until a new configured-scope scan.
+
+After manual enrollment, a separate authenticated Portal approval proposes only the numeric `power` field when the corresponding status RPC reported `apower`/`act_power`. The saved installation binds the logical component to the exact device-root `shelly-mqtt` event topic and the `power` field. The operator must confirm that single proposal. This grants no relay command permission. MQTT processing then resolves the already enrolled LAN-verified device from its persisted tenant/site, checks the exact topic and binding, and passes the measurement to `DeviceIntelligenceObservationIngress`; accepted samples use the existing durable observation state and generic measurement history writer. Device-observed sample timestamps and a stable message evidence ID support duplicate delivery handling. The existing electrical history sink receives only the accepted, approved power reading when its observation timestamp is device-reported.
+
+This initial Shelly approval supports `power` only. Other electrical values parsed by the adapter are not made authorized by this approval. Control route setup and switching remain separate and disabled until independently configured and verified. Unmatched MQTT traffic is not attributed to the active Portal site, and a site change cannot transfer the device's persisted installation authority.
+
+Implementation anchors: [Shelly LAN candidate adapter](../apps/api/src/app/modules/devices/adapters/inbound/shelly/shelly-lan-candidates.ts), [onboarding service](../apps/api/src/app/modules/portal/device-onboarding.service.ts), [Shelly observation approval contract](../apps/api/src/app/modules/devices/adapters/inbound/shelly/shelly-mqtt-observation-approval.ts), and [approved Shelly ingress](../apps/api/src/app/modules/devices/mqtt/approved-mqtt-observation.runtime.ts).
+
 An optional Mosquitto publisher-attribution plugin sends signed broker evidence to a dedicated topic. It records publisher metadata and a payload digest rather than retaining payloads. API-side HMAC and timestamp checks are required; candidate peer addresses require additional bounded Shelly RPC identity evidence before they can be promoted as verified LAN addresses. See [the plugin guide](../deploy/mosquitto/README.md).
 
 ## HTTP polling and identity verification

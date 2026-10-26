@@ -8,7 +8,7 @@ import {
 import {
   runWithInteractionTrace,
 } from '../observability/interaction-trace-context';
-import { probeShellyComponents } from '../devices/device-lan-discovery.service'
+import { probeShellyComponentsWithEvidence } from '../devices/device-lan-discovery.service'
 import { readOnlyShellyDeviceInfo } from '../devices/adapters/inbound/shelly/read-only-shelly-rpc'
 import { BlockList, isIP } from 'node:net'
 import {
@@ -471,6 +471,45 @@ export class PortalController {
     }
   }
 
+  @Get('devices/:deviceId/shelly-observation-approval')
+  async getShellyObservationApproval(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalAdministrator(request)
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+    const approval = await this.deviceRegistry.getShellyObservationApproval(tenant.id, site.id, deviceId)
+    if (!approval) throw new NotFoundException('LAN-verified, enrolled Shelly power component was not found in this site')
+    return approval
+  }
+
+  @Post('devices/:deviceId/shelly-observation-approval')
+  async approveShellyObservations(
+    @Param('deviceId') deviceId: string,
+    @Body() body: { confirmedDeviceId?: unknown; approvedFields?: unknown },
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalAdministrator(request)
+    if (body?.confirmedDeviceId !== deviceId || !Array.isArray(body?.approvedFields) ||
+        body.approvedFields.length !== 1 || body.approvedFields[0] !== 'power') {
+      throw new BadRequestException('Explicitly confirm this Shelly component and its power measurement.')
+    }
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+    try {
+      const approval = await this.deviceRegistry.approveShellyObservations(
+        tenant.id, site.id, deviceId, request.user?.email || 'portal-admin',
+      )
+      if (!approval) throw new NotFoundException('LAN-verified, enrolled Shelly power component was not found in this site')
+      return approval
+    } catch (error) {
+      if (error instanceof NotFoundException || error instanceof BadRequestException || error instanceof ConflictException) throw error
+      if (error instanceof Error && error.message.includes('different observation authority')) {
+        throw new ConflictException(error.message)
+      }
+      throw error
+    }
+  }
+
   @Get('devices/:deviceId/measurements')
   async getDeviceMeasurementHistory(
     @Param('deviceId') deviceId: string,
@@ -722,8 +761,12 @@ export class PortalController {
       throw new BadRequestException('Fresh Shelly identity verification failed')
     }
 
-    const components = await probeShellyComponents(ipAddress)
-    if (!components.length) {
+    const componentEvidence = await probeShellyComponentsWithEvidence(
+      ipAddress,
+      scopeId,
+      target.observations?.find(item => item.scopeId === scopeId && item.interfaceName)?.interfaceName,
+    )
+    if (!componentEvidence.components.length) {
       throw new BadRequestException('No supported RPC components verified')
     }
 
@@ -745,7 +788,8 @@ export class PortalController {
       model: identity.model,
       app: identity.app,
       macAddress: identity.mac,
-      components,
+      components: componentEvidence.components,
+      observations: [...(target.observations || []), ...componentEvidence.observations],
       discoveredAt: observedAt,
     }
 

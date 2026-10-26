@@ -98,7 +98,7 @@ describe('DeviceMqttMessageRouter', () => {
     return registry;
   };
 
-  it('discovers an unknown Shelly without approving it, and preserves physical evidence', async () => {
+  it('keeps an unknown Shelly MQTT identity claim as evidence only', async () => {
     const registry = new DeviceRegistryService();
     const observation = new DeviceObservationService();
     const capture = jest.fn();
@@ -115,19 +115,15 @@ describe('DeviceMqttMessageRouter', () => {
       params: { ts: 1791676800, 'switch:0': { output: true, apower: 42 } },
     }));
 
-    await result?.physicalDiscovery;
-    expect(registry.getDevices().find(device => device.id === `${shellyId}:switch:0`))
-      .toEqual(expect.objectContaining({ trustStatus: 'discovered' }));
+    expect(result?.observationAdmission).toEqual({ outcome: 'rejected', reasonCode: 'shelly_observation_runtime_unavailable' });
+    expect(result?.physicalDiscovery).toBeUndefined();
+    expect(registry.getDevices().find(device => device.id === `${shellyId}:switch:0`)).toBeUndefined();
     expect(observation.getDevice(`${shellyId}:switch:0`)).toBeNull();
     expect(capture).not.toHaveBeenCalled();
-    expect(discover).toHaveBeenCalledWith(expect.objectContaining({
-      scope: expect.objectContaining({ tenantId: expect.any(String), siteId: expect.any(String) }),
-      identity: { namespace: 'mqtt:shelly-protocol-id', value: shellyId },
-      components: [{ key: 'switch:0', capabilities: ['power', 'switch'] }],
-    }));
+    expect(discover).not.toHaveBeenCalled();
   });
 
-  it('resolves an enrolled Shelly component by its exact protocol identity before applying telemetry', async () => {
+  it('does not use enrollment alone to authorize Shelly MQTT telemetry', async () => {
     const registry = approvedShellyRegistry(['switch:0']);
     const observation = new DeviceObservationService();
     const capture = jest.fn().mockResolvedValue(undefined);
@@ -144,21 +140,54 @@ describe('DeviceMqttMessageRouter', () => {
     }));
     await result?.persisted;
     await result?.physicalDiscovery;
-
-    expect(enrollment.find).toHaveBeenCalledWith(expect.objectContaining({ deviceId: 'shelly-logical-0' }));
-    expect(ingest).toHaveBeenCalledWith(expect.objectContaining({
-      deviceId: 'shelly-logical-0', values: { on: true, power: 42 },
-    }));
-    expect(ingest.mock.calls[0][0]).not.toHaveProperty('target');
-    expect(capture).toHaveBeenCalledTimes(1);
-    expect(observation.getDevice('shelly-logical-0')).not.toBeNull();
-    expect(discover).toHaveBeenCalledWith(expect.objectContaining({
-      identity: { namespace: 'mqtt:shelly-protocol-id', value: shellyId },
-      components: [{ key: 'switch:0', capabilities: ['power', 'switch'] }],
-    }));
+    expect(result?.observationAdmission).toMatchObject({ outcome: 'rejected' });
+    expect(enrollment.find).not.toHaveBeenCalled();
+    expect(ingest).not.toHaveBeenCalled();
+    expect(capture).not.toHaveBeenCalled();
+    expect(observation.getDevice('shelly-logical-0')).toBeNull();
+    expect(discover).not.toHaveBeenCalled();
   });
 
-  it('keeps multiple Shelly components under one protocol identity and routes each enrolled component', async () => {
+  it('uses the exact LAN-verified installation ingress before projecting approved power to electrical history', async () => {
+    const deviceId = `${shellyId}:switch:0`;
+    const device = {
+      id: deviceId, tenantId: 'tenant-a', siteId: 'site-a', kind: 'physical', trustStatus: 'approved',
+      adapter: { protocol: 'http', driver: 'shelly-lan' },
+      metadata: { physicalId: shellyId, component: 'switch:0' },
+    };
+    const registry = { getDevices: jest.fn().mockReturnValue([device]) };
+    const observation = new DeviceObservationService();
+    const capture = jest.fn().mockResolvedValue(undefined);
+    const approvedObservationRuntime = {
+      ingestShellyMqttObservation: jest.fn().mockResolvedValue({
+        outcome: 'processed', accepted: true, deviceId,
+        scope: { tenantId: 'tenant-a', siteId: 'site-a' },
+      }),
+    };
+    const router = new DeviceMqttMessageRouter(
+      registry as any, observation,
+      { capture } as unknown as TelemetryIngestService,
+      undefined, undefined, undefined, approvedObservationRuntime as any,
+    );
+    const payload = { src: shellyId, params: { ts: 1791676800, 'switch:0': { output: false, apower: 42 } } };
+    const result = await router.route(shellyMessage(payload));
+    await result?.persisted;
+    expect(approvedObservationRuntime.ingestShellyMqttObservation).toHaveBeenCalledWith(expect.objectContaining({
+      topic: `${shellyId}/events/rpc`, physicalId: shellyId, componentKey: 'switch:0', values: { on: false, power: 42 },
+      evidenceId: expect.any(String),
+    }));
+    expect(result?.observationAdmission).toEqual({ outcome: 'admitted' });
+    expect(result?.effects).toEqual([]);
+    expect(capture).toHaveBeenCalledWith(expect.objectContaining({
+      deviceId,
+      tenantId: 'tenant-a',
+      siteId: 'site-a',
+      readings: [expect.objectContaining({ metric: 'power', value: 42 })],
+    }), device, 'shelly-mqtt');
+    expect(observation.getDevice(deviceId)).toBeNull();
+  });
+
+  it('does not route MQTT-reported Shelly components without explicit installed bindings', async () => {
     const registry = approvedShellyRegistry(['switch:0', 'switch:1']);
     const enrollment = { find: jest.fn().mockResolvedValue({ status: 'enrolled' }) };
     const router = new DeviceMqttMessageRouter(
@@ -173,16 +202,13 @@ describe('DeviceMqttMessageRouter', () => {
       },
     }));
 
-    expect(enrollment.find).toHaveBeenCalledTimes(2);
-    expect(result?.physicalDiscoveries?.map(item => item.identity)).toEqual([
-      { namespace: 'mqtt:shelly-protocol-id', value: shellyId },
-      { namespace: 'mqtt:shelly-protocol-id', value: shellyId },
-    ]);
+    expect(enrollment.find).not.toHaveBeenCalled();
+    expect(result?.observationAdmissions).toHaveLength(2);
+    expect(result?.observationAdmissions?.every(item => item.outcome === 'rejected')).toBe(true);
+    expect(result?.physicalDiscovery).toBeUndefined();
   });
 
-  it.each(['suspended', 'retired'] as const)(
-    'blocks Shelly telemetry for a %s enrollment without mutating Registry or telemetry state',
-    async status => {
+  it('does not infer an authorized Shelly source from suspended or retired enrollment state', async () => {
       const registry = approvedShellyRegistry(['switch:0']);
       const ingest = jest.spyOn(registry, 'ingestDeviceTelemetry');
       const observation = new DeviceObservationService();
@@ -193,7 +219,7 @@ describe('DeviceMqttMessageRouter', () => {
         { capture } as unknown as TelemetryIngestService,
         undefined,
         undefined,
-        { find: async () => ({ status }) } as any,
+        { find: async () => ({ status: 'enrolled' }) } as any,
       );
       const before = registry.getDevices().find(device => device.id === 'shelly-logical-0')?.state.values;
 
@@ -202,13 +228,12 @@ describe('DeviceMqttMessageRouter', () => {
         params: { ts: 1791676800, 'switch:0': { output: true, apower: 42 } },
       }));
 
-      expect(result?.observationAdmission).toEqual({ outcome: 'rejected', reasonCode: 'device_not_enrolled' });
+      expect(result?.observationAdmission).toEqual({ outcome: 'rejected', reasonCode: 'shelly_observation_runtime_unavailable' });
       expect(ingest).not.toHaveBeenCalled();
       expect(observation.getDevice('shelly-logical-0')).toBeNull();
       expect(capture).not.toHaveBeenCalled();
       expect(registry.getDevices().find(device => device.id === 'shelly-logical-0')?.state.values).toEqual(before);
-    },
-  );
+  });
 
   it('blocks telemetry admission for a retired enrollment despite stale registry state', async () => {
     const registry = new DeviceRegistryService();

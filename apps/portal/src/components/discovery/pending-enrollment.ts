@@ -6,7 +6,7 @@ export interface PendingCandidateInput {
   trustStatus: 'discovered' | 'approved' | 'blocked';
   kind: string;
   capabilities: Array<{ kind: string; actions: string[] }>;
-  adapter: { protocol: string; target?: string };
+  adapter: { protocol: string; target?: string; driver?: string };
   discovery?: {
     source: string;
     confidence: number;
@@ -68,6 +68,7 @@ export interface PendingCandidateDetails {
   reason: string;
   retired: boolean;
   requiresEnrollmentPlacement: boolean;
+  requiresShellyLanVerification: boolean;
   brokerObservedPeerIpAddress: string | null;
   brokerObservedAt: string | null;
   brokerIdentityVerification: string | null;
@@ -212,6 +213,15 @@ function detail(
   candidate: PendingCandidateInput,
   identity: PendingIdentityInput | undefined,
 ): PendingCandidateDetails {
+  const shelly = /^shelly[a-z0-9._-]{1,114}$/i.test(String(candidate.metadata?.physicalId || identity?.physicalHardwareId || ''));
+  const identityVerifiedAt = Date.parse(String(candidate.metadata?.identityVerifiedAt || ''));
+  const componentVerifiedAt = Date.parse(String(candidate.metadata?.componentVerifiedAt || ''));
+  const freshLanEvidence = candidate.adapter.driver === 'shelly-lan' &&
+    candidate.metadata?.identityEvidenceSource === 'verified_shelly_http_rpc' &&
+    candidate.metadata?.componentEvidenceSource === 'verified_shelly_component_status_rpc' &&
+    Number.isFinite(identityVerifiedAt) && Number.isFinite(componentVerifiedAt) &&
+    Date.now() >= identityVerifiedAt && Date.now() >= componentVerifiedAt &&
+    Date.now() - identityVerifiedAt <= 15 * 60_000 && Date.now() - componentVerifiedAt <= 15 * 60_000;
   return {
     candidateId: candidate.id,
     logicalCandidateId: candidate.id,
@@ -230,7 +240,8 @@ function detail(
     networkAddressStatus: identity?.networkAddressStatus ?? null,
     reason: identity?.reason || 'Backend identity evidence is unavailable.',
     retired: candidate.metadata?.previouslyEnrolledRetired === true,
-    requiresEnrollmentPlacement: candidate.metadata?.observationApprovalRequired === true,
+    requiresEnrollmentPlacement: candidate.metadata?.observationApprovalRequired === true || candidate.metadata?.requiresEnrollmentPlacement === true,
+    requiresShellyLanVerification: shelly && !freshLanEvidence,
     brokerObservedPeerIpAddress: identity?.brokerObservedPeerIpAddress ?? null,
     brokerObservedAt: identity?.brokerObservedAt ?? null,
     brokerIdentityVerification: identity?.brokerIdentityVerification ?? null,

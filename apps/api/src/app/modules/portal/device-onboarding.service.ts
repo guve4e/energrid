@@ -13,6 +13,8 @@ import { DEVICE_ENROLLMENT_SERVICE } from '../devices/enrollment/device-enrollme
 import { PHYSICAL_DEVICE_INVENTORY_SERVICE } from '../devices/enrollment/device-enrollment.module';
 import type { PhysicalDeviceInventoryService } from '../devices/enrollment/physical-device-inventory.service';
 
+export const SHELLY_ONBOARDING_EVIDENCE_MAX_AGE_MS = 15 * 60_000;
+
 /**
  * Coordinates explicit onboarding across the existing installation
  * store and PostgreSQL enrollment.
@@ -47,6 +49,12 @@ export class DeviceOnboardingService {
 
     if (!candidate) {
       throw new NotFoundException('Device candidate not found');
+    }
+
+    if (isShellyCandidate(candidate) && !hasFreshVerifiedShellyLanEvidence(candidate)) {
+      throw new ConflictException(
+        'Fresh Shelly LAN identity and component RPC verification is required before enrollment; MQTT identity claims alone are not sufficient',
+      );
     }
 
     if (candidate.tenantId !== tenant.id || candidate.siteId !== site.id ||
@@ -225,4 +233,29 @@ export class DeviceOnboardingService {
       device => device.id === candidate.id,
     ) ?? approved;
   }
+}
+
+function isShellyCandidate(device: RegisteredDevice): boolean {
+  return typeof device.metadata?.physicalId === 'string' &&
+    /^shelly[a-z0-9._-]{1,114}$/i.test(device.metadata.physicalId) &&
+    typeof device.metadata?.component === 'string';
+}
+
+function hasFreshVerifiedShellyLanEvidence(device: RegisteredDevice, now = Date.now()): boolean {
+  const component = String(device.metadata?.component || '');
+  const channel = /^(switch|em1):(\d+)$/.exec(component);
+  const expectedMethod = channel
+    ? `${channel[1] === 'switch' ? 'Switch' : 'EM1'}.GetStatus?id=${channel[2]}`
+    : '';
+  const identityAt = Date.parse(String(device.metadata?.identityVerifiedAt || ''));
+  const componentAt = Date.parse(String(device.metadata?.componentVerifiedAt || ''));
+  return device.adapter.driver === 'shelly-lan' &&
+    device.metadata?.identityEvidenceSource === 'verified_shelly_http_rpc' &&
+    device.metadata?.identityVerificationMethod === 'GET /rpc/Shelly.GetDeviceInfo' &&
+    device.metadata?.componentEvidenceSource === 'verified_shelly_component_status_rpc' &&
+    device.metadata?.componentVerificationMethod === expectedMethod &&
+    Number.isFinite(identityAt) && Number.isFinite(componentAt) &&
+    identityAt <= now && componentAt <= now &&
+    now - identityAt <= SHELLY_ONBOARDING_EVIDENCE_MAX_AGE_MS &&
+    now - componentAt <= SHELLY_ONBOARDING_EVIDENCE_MAX_AGE_MS;
 }

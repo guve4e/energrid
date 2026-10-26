@@ -4,6 +4,7 @@ import { authFetch } from '../../auth/auth-client';
 import DeviceMeasurementHistory from './DeviceMeasurementHistory.vue';
 import DeviceElectricalHistory from './DeviceElectricalHistory.vue';
 import DeviceObservationApproval from './DeviceObservationApproval.vue';
+import DeviceShellyObservationApproval from './DeviceShellyObservationApproval.vue';
 import DeviceRelayStatus from './DeviceRelayStatus.vue';
 import DeviceSwitchControl from './DeviceSwitchControl.vue';
 import type { ControlSetupDevice } from './device-control';
@@ -31,6 +32,11 @@ const emit = defineEmits<{
 }>();
 const boundMetrics = ref<Array<'temperature' | 'humidity'>>([]);
 const authorizedBindings = ref<Array<'temperature' | 'humidity'>>([]);
+const shellyPowerAuthorized = ref(false);
+const shellyApprovalRequired = computed(() =>
+  props.device.adapter.driver === 'shelly-lan' &&
+  props.device.metadata?.shellyMqttObservationApprovalRequired === true,
+);
 const presentation = computed(() => deviceDetailPresentation(props.device, boundMetrics.value, authorizedBindings.value));
 let authorityController: AbortController | undefined;
 let authorityRevision = 0;
@@ -99,6 +105,16 @@ onBeforeUnmount(() => authorityController?.abort());
       :access-token="accessToken"
       @approved="emit('approved')"
     />
+    <DeviceShellyObservationApproval
+      v-if="shellyApprovalRequired"
+      :key="`${device.id}-shelly-observation-approval`"
+      :device-id="device.id"
+      :enabled="shellyApprovalRequired"
+      :api-base="apiBase"
+      :access-token="accessToken"
+      @authorization="shellyPowerAuthorized = $event"
+      @approved="emit('approved')"
+    />
     <DeviceMeasurementHistory
       v-if="presentation.climateMetrics.length"
       :key="`${device.id}-${approvalRevision}`"
@@ -109,7 +125,7 @@ onBeforeUnmount(() => authorityController?.abort());
       :access-token="accessToken"
     />
     <DeviceElectricalHistory
-      v-if="presentation.showElectrical"
+      v-if="presentation.showElectrical && (!shellyApprovalRequired || shellyPowerAuthorized)"
       :key="`${device.id}-electrical`"
       :device-id="device.id"
       :device-status="device.state.status"

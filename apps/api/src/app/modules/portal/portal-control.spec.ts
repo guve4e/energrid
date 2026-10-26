@@ -395,15 +395,29 @@ describe('portal control configuration authorization', () => {
           status: 'online',
           discoveredAt: '2026-10-22T12:00:00.000Z',
           components: [{ component: 'switch:0', channel: 0 }],
+          observations: [
+            { source: 'http_rpc', attribute: 'shelly.component_status', value: 'switch:0',
+              method: 'Switch.GetStatus?id=0', observedAt: '2026-10-22T12:00:00.000Z', scopeId: 'home-lan' },
+            { source: 'http_rpc', attribute: 'shelly.measurement_capability', value: 'switch:0:power',
+              method: 'Switch.GetStatus?id=0', observedAt: '2026-10-22T12:00:00.000Z', scopeId: 'home-lan' },
+          ],
         },
         { id: 'camera', vendor: 'Ring', status: 'online' },
       ],
     });
-    await controller.scanNetwork({ scopeIds: ['home-lan'], fullSubnetConfirmed: true }, {
-      method: 'POST',
-      url: '/',
-      headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 },
-    });
+    const originalFetch = global.fetch;
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ components: [{ key: 'switch:0' }] }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 0, output: false, apower: 6.2 }) }) as unknown as typeof fetch;
+    try {
+      await controller.scanNetwork({ scopeIds: ['home-lan'], fullSubnetConfirmed: true }, {
+        method: 'POST',
+        url: '/',
+        headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 },
+      });
+    } finally {
+      global.fetch = originalFetch;
+    }
     expect(registerDiscoveredDevice).toHaveBeenCalledTimes(1);
     expect(registerDiscoveredDevice).toHaveBeenCalledWith(
       expect.objectContaining({

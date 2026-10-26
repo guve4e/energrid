@@ -108,6 +108,7 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
       approvedObservations?.route,
       physicalInventory,
       enrollment,
+      approvedObservations,
     );
   }
 

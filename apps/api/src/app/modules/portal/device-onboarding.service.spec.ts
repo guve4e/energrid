@@ -168,6 +168,7 @@ describe('DeviceOnboardingService', () => {
 
   it('onboards a LAN-verified Shelly Plus 1 through the existing installation and enrollment stores', async () => {
     const deviceId = 'shellyplus1-8813bfcdc8bc:switch:0';
+    const verifiedAt = new Date().toISOString();
     const physicalInventory = {
       discover: jest.fn().mockResolvedValue({ physicalDeviceId: 'physical-plus1' }),
       forLogicalDevice: jest.fn().mockResolvedValue(null),
@@ -182,6 +183,12 @@ describe('DeviceOnboardingService', () => {
       networkScope: 'gateway-unknown:home-lan',
       networkObservedAt: '2026-10-22T12:00:00.000Z',
       macAddress: '88:13:bf:cd:c8:bc',
+      identityEvidenceSource: 'verified_shelly_http_rpc',
+      identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo',
+      identityVerifiedAt: verifiedAt,
+      componentEvidenceSource: 'verified_shelly_component_status_rpc',
+      componentVerificationMethod: 'Switch.GetStatus?id=0',
+      componentVerifiedAt: verifiedAt,
     }, deviceId, 'http');
 
     await service.approve(deviceId);
@@ -251,6 +258,13 @@ describe('DeviceOnboardingService', () => {
     const { service, enrollment } = createHarness(physicalInventory, {
       physicalId: 'shellypro3em-001122334455',
       component: 'em1:0',
+      httpBaseUrl: 'http://192.168.1.204',
+      identityEvidenceSource: 'verified_shelly_http_rpc',
+      identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo',
+      identityVerifiedAt: new Date().toISOString(),
+      componentEvidenceSource: 'verified_shelly_component_status_rpc',
+      componentVerificationMethod: 'EM1.GetStatus?id=0',
+      componentVerifiedAt: new Date().toISOString(),
     });
 
     await service.approve(identity.deviceId);
@@ -278,6 +292,12 @@ describe('DeviceOnboardingService', () => {
     const { service, enrollment } = createHarness(physicalInventory, {
       physicalId: 'shellypro3em-001122334455',
       component: 'em1:0',
+      identityEvidenceSource: 'verified_shelly_http_rpc',
+      identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo',
+      identityVerifiedAt: new Date().toISOString(),
+      componentEvidenceSource: 'verified_shelly_component_status_rpc',
+      componentVerificationMethod: 'EM1.GetStatus?id=0',
+      componentVerifiedAt: new Date().toISOString(),
       httpBaseUrl: 'http://192.168.1.204',
       ipAddress: '192.168.1.204',
       macAddress: '00:11:22:33:44:55',
@@ -329,6 +349,35 @@ describe('DeviceOnboardingService', () => {
       service.approve(identity.deviceId),
     ).rejects.toThrow('Installation storage unavailable');
 
+    expect(enrollment.enroll).not.toHaveBeenCalled();
+  });
+
+  it('rejects MQTT-only Shelly identity claims before enrollment', async () => {
+    const deviceId = 'shellypro2pm-aabbccddeeff:switch:0';
+    const { service, registry, enrollment } = createHarness(undefined, {
+      physicalId: 'shellypro2pm-aabbccddeeff',
+      component: 'switch:0',
+      mqttCommandTopic: 'shellypro2pm-aabbccddeeff/rpc',
+      mqttEvidenceCandidate: true,
+    }, deviceId);
+    await expect(service.approve(deviceId)).rejects.toThrow('Fresh Shelly LAN identity');
+    expect(registry.approveDiscoveredDevice).not.toHaveBeenCalled();
+    expect(registry.persistInstallation).not.toHaveBeenCalled();
+    expect(enrollment.enroll).not.toHaveBeenCalled();
+  });
+
+  it('rejects Shelly candidates whose verified LAN evidence is older than fifteen minutes', async () => {
+    const deviceId = 'shellypro2pm-aabbccddeeff:switch:1';
+    const stale = new Date(Date.now() - 16 * 60_000).toISOString();
+    const { service, registry, enrollment } = createHarness(undefined, {
+      physicalId: 'shellypro2pm-aabbccddeeff', component: 'switch:1',
+      identityEvidenceSource: 'verified_shelly_http_rpc',
+      identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo', identityVerifiedAt: stale,
+      componentEvidenceSource: 'verified_shelly_component_status_rpc',
+      componentVerificationMethod: 'Switch.GetStatus?id=1', componentVerifiedAt: stale,
+    }, deviceId, 'http');
+    await expect(service.approve(deviceId)).rejects.toThrow('Fresh Shelly LAN identity');
+    expect(registry.approveDiscoveredDevice).not.toHaveBeenCalled();
     expect(enrollment.enroll).not.toHaveBeenCalled();
   });
 

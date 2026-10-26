@@ -109,7 +109,7 @@ function toggleReview(cardKey: string) {
                   <option v-for="zone in zones" :key="zone.id" :value="zone.id">{{ zone.name }}</option>
                 </select>
               </label>
-              <button type="button" :disabled="!!busyByCandidateId[item.candidateId] || (item.requiresEnrollmentPlacement && !zones.length)" @click="emit('decide', item.candidateId, 'approve', item.requiresEnrollmentPlacement ? (selectedZoneByCandidate[item.candidateId] || zones[0]?.id) : undefined)">
+              <button type="button" :disabled="!!busyByCandidateId[item.candidateId] || item.requiresShellyLanVerification || (item.requiresEnrollmentPlacement && !zones.length)" @click="emit('decide', item.candidateId, 'approve', item.requiresEnrollmentPlacement ? (selectedZoneByCandidate[item.candidateId] || zones[0]?.id) : undefined)">
                 {{ busyByCandidateId[item.candidateId] === 'approve' ? 'Enrolling…' : item.requiresEnrollmentPlacement ? 'Enroll device' : item.retired ? 'Approve reenrollment' : 'Approve' }}
               </button>
               <button type="button" :disabled="!!busyByCandidateId[item.candidateId]" @click="emit('rename', item.candidateId)">Rename</button>
@@ -118,6 +118,9 @@ function toggleReview(cardKey: string) {
               </button>
             </div>
           </header>
+          <p v-if="item.requiresShellyLanVerification" class="shelly-verification-required" role="status">
+            Fresh Shelly LAN identity and component verification is required before enrollment. MQTT identity claims alone are not enough. Run a configured-scope scan and review the new evidence.
+          </p>
           <dl>
             <div><dt>Logical candidate</dt><dd><code>{{ item.logicalCandidateId }}</code></dd></div>
             <div><dt>Physical hardware</dt><dd>{{ item.physicalHardwareId || 'Not established' }}</dd></div>
@@ -167,6 +170,7 @@ function toggleReview(cardKey: string) {
 .pending-secondary-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .pending-secondary-actions button { min-height: 34px; padding: 5px 10px; border: 1px solid var(--discovery-border); border-radius: 7px; background: transparent; color: var(--discovery-text); font-size: 11px; cursor: pointer; }
 .pending-secondary-actions button:disabled { opacity: 0.55; cursor: wait; }
+.shelly-verification-required { margin: 10px 0 0; color: var(--discovery-muted); font-size: 12px; }
 .pending-room-choice { display: grid; gap: 3px; color: var(--discovery-muted); font-size: 10px; }
 .pending-room-choice select { min-height: 34px; border: 1px solid var(--discovery-border); border-radius: 7px; background: var(--discovery-surface); color: var(--discovery-text); padding: 4px 8px; }
 .pending-channel-detail dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 18px; margin: 12px 0 0; }

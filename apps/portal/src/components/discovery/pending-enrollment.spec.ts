@@ -109,6 +109,33 @@ describe('Pending Enrollment presentation', () => {
     });
   });
 
+  it('marks MQTT-only Shelly candidates as not ready for enrollment until fresh LAN RPC evidence exists', () => {
+    const shelly = candidate(`${physicalId}:switch:0`, 'switch:0');
+    const [card] = buildPendingEnrollmentCards([shelly], {
+      [shelly.id]: identity(shelly.id, 'switch:0'),
+    });
+    expect(card.details[0].requiresShellyLanVerification).toBe(true);
+    expect(card.details[0].requiresEnrollmentPlacement).toBe(false);
+  });
+
+  it('allows room selection only after recent LAN identity and component RPC verification', () => {
+    const now = new Date().toISOString();
+    const shelly: PendingCandidateInput = {
+      ...candidate(`${physicalId}:switch:0`, 'switch:0'),
+      adapter: { protocol: 'http', driver: 'shelly-lan', target: 'http://192.168.1.220/rpc/Switch.GetStatus?id=0' },
+      metadata: {
+        physicalId, component: 'switch:0',
+        identityEvidenceSource: 'verified_shelly_http_rpc', identityVerifiedAt: now,
+        componentEvidenceSource: 'verified_shelly_component_status_rpc', componentVerifiedAt: now,
+        requiresEnrollmentPlacement: true,
+      },
+    };
+    const [card] = buildPendingEnrollmentCards([shelly], {
+      [shelly.id]: identity(shelly.id, 'switch:0', { discoverySource: 'http', protocol: 'http', verificationStatus: 'verified', status: 'correlated', networkAddressStatus: 'current' }),
+    });
+    expect(card.details[0]).toMatchObject({ requiresShellyLanVerification: false, requiresEnrollmentPlacement: true });
+  });
+
   it('shows broker peer evidence separately without treating it as a verified LAN address', () => {
     const device = candidate(`${physicalId}:em1:0`, 'em1:0');
     const [card] = buildPendingEnrollmentCards([device], {

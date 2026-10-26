@@ -32,6 +32,7 @@ export type ApprovedMqttObservationResult =
         | 'publisher_identity_mismatch'
         | 'invalid_sample'
         | 'observation_policy_rejected'
+        | 'shelly_observation_runtime_unavailable'
     }
 
 /**

@@ -1,8 +1,6 @@
 import { execFile } from 'node:child_process';
 import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { DeviceRegistryService } from './device-registry.service';
-import { DeviceObservationService } from './device-observation.service';
-import { DeviceMqttMessageRouter } from './mqtt/device-mqtt-message-router';
 import { DeviceControlService } from './device-control.service';
 
 const activeEnrollment = { find: async () => ({ status: 'enrolled' }) } as any;
@@ -26,20 +24,32 @@ const binding = {
 };
 async function discover() {
   const registry = new DeviceRegistryService();
-  const router = new DeviceMqttMessageRouter(
-    registry,
-    new DeviceObservationService(),
-    undefined,
-    undefined,
-    undefined,
-    activeEnrollment,
-  );
-  await router.route({
-    topic: 'shelly/kitchen/events/rpc',
-    payloadText: '{}',
-    payload: {
-      src: physicalId,
-      params: { 'switch:0': { output: false }, 'switch:1': { output: true } },
+  // Seed the control-service tests with the result of a verified LAN review.
+  // MQTT claims alone no longer create onboarding candidates.
+  registry.registerDiscoveredDevice({
+    id,
+    displayName: `${physicalId} switch:1`,
+    protocol: 'http',
+    transport: 'http',
+    driver: 'shelly-lan',
+    target: 'http://192.168.1.220/rpc/Switch.GetStatus?id=1',
+    capabilities: ['switch'],
+    source: 'http',
+    confidence: 0.9,
+    reason: 'Shelly identity and channel confirmed by read-only LAN RPC evidence.',
+    metadata: {
+      physicalId,
+      component: 'switch:1',
+      channel: 1,
+      ipAddress: '192.168.1.220',
+      httpBaseUrl: 'http://192.168.1.220',
+      identityEvidenceSource: 'verified_shelly_http_rpc',
+      identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo',
+      identityVerifiedAt: new Date().toISOString(),
+      componentEvidenceSource: 'verified_shelly_component_status_rpc',
+      componentVerificationMethod: 'Switch.GetStatus?id=1',
+      componentVerifiedAt: new Date().toISOString(),
+      networkObservedAt: new Date().toISOString(),
     },
   });
   return registry;
@@ -61,7 +71,6 @@ describe('discovery, approval and control are separate', () => {
         physicalId,
         channel: 1,
         component: 'switch:1',
-        mqttCommandTopic: 'shelly/kitchen/rpc',
       }),
     );
     expect(approved.control?.status).toBe('needs-setup');
@@ -127,7 +136,7 @@ describe('discovery, approval and control are separate', () => {
       kind: 'shelly-http',
       baseUrl: 'http://192.168.7.15',
     });
-    expect(configured.adapter.protocol).toBe('mqtt');
+    expect(configured.adapter.protocol).toBe('http');
     expect(configured.control?.binding?.kind).toBe('shelly-http');
     expect(service.configure(id, null).control?.status).toBe('needs-setup');
     expect(execFile).not.toHaveBeenCalled();

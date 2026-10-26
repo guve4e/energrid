@@ -200,7 +200,7 @@ describe('DeviceMqttIngestService', () => {
       }),
     );
   });
-  it('maps native Shelly NotifyStatus into approved device telemetry', async () => {
+  it('does not treat a Shelly MQTT identity claim as approved telemetry without a LAN binding', async () => {
     process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify([
       {
         deviceId: 'kitchen.light.island.led',
@@ -243,28 +243,21 @@ describe('DeviceMqttIngestService', () => {
       .getDevices()
       .find((candidate) => candidate.id === 'kitchen.light.island.led');
 
-    expect(device?.state).toEqual(
-      expect.objectContaining({
-        source: 'shelly-mqtt',
-        status: 'online',
-        values: expect.objectContaining({
-          on: true,
-          power: 11.8,
-          current: 0.05,
-          voltage: 231.2,
-        }),
-      }),
-    );
+    expect(device?.state).toEqual(expect.objectContaining({
+      source: 'shelly',
+      status: 'unknown',
+      values: {},
+    }));
 
     expect(service.getDebugState().recentMessages[0]).toEqual(
       expect.objectContaining({
         handled: true,
-        reason: 'shelly telemetry',
+        reason: 'Shelly MQTT identity is evidence only; no authorized measurement binding matched',
       }),
     );
   });
 
-  it('acknowledges a pending command from native Shelly telemetry', async () => {
+  it('does not acknowledge a pending command from an unbound Shelly MQTT identity claim', async () => {
     process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify([
       {
         deviceId: 'kitchen.light.island.led',
@@ -311,11 +304,7 @@ describe('DeviceMqttIngestService', () => {
       .find((candidate) => candidate.id === 'kitchen.light.island.led')
       ?.state.command;
 
-    expect(command).toEqual(
-      expect.objectContaining({
-        status: 'acked',
-      }),
-    );
+    expect(command).toEqual(expect.objectContaining({ status: 'pending' }));
   });
 
   it('does not acknowledge a command from another Shelly channel', () => {
