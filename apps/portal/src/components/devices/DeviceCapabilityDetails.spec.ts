@@ -130,7 +130,7 @@ describe('capability-driven Device Details', () => {
   });
   it('keeps source-bound sensor measurements visible while awaiting observation approval', async () => {
     const missingApproval = { ...approvedClimateBinding, approved: false, approvalStatus: 'missing' };
-    installFetch({}, missingApproval);
+    const fetchMock = installFetch({}, missingApproval);
     const page = await render({
       ...baseDevice,
       adapter: { protocol: 'http', driver: 'energrid-esp8266', target: 'http://device.local/api/v1/status' },
@@ -139,9 +139,11 @@ describe('capability-driven Device Details', () => {
       supportedCapabilities: [],
     });
     expect(page.text()).toContain('Measurement approval required');
-    expect(page.text()).toContain('Temperature');
-    expect(page.text()).toContain('Humidity');
+    await page.findAll('button').find(button => button.text() === 'Review measurement proposal')!.trigger('click');
+    expect(page.text()).toContain('temperatureC → temperature (°C)');
+    expect(page.text()).toContain('humidityPct → humidity (%RH)');
     expect(page.text()).toContain('No authorized temperature or humidity observations are available');
+    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining('/observation-approval'), expect.objectContaining({ method: 'POST' }));
   });
   it('restores readings authorized by a read capability when the support list is incomplete', async () => {
     installFetch({ temperature: { value: 21.4, sourceId: 'approved', receivedAt: currentTime, ageSeconds: 1, freshness: 'fresh', authority: 'approved' } });

@@ -23,13 +23,14 @@ const forecast = { location: 'Vidin', fetchedAt: new Date().toISOString(), summa
 let wrapper: ReturnType<typeof mount> | undefined;
 afterEach(() => { wrapper?.unmount(); wrapper = undefined; vi.unstubAllGlobals(); vi.useRealTimers(); });
 function responses(weather: object = { status: 'awaiting-observations', summary: [], pending: { scheduled: 4, awaitingObservations: 2 } }, dashboard: object = forecast) {
-  return vi.fn(async (url: string) => ({ ok: true, json: async () => url.endsWith('/dashboard') ? dashboard : url.endsWith('/river-performance') ? { summary: [] } : weather }));
+  return vi.fn(async (url: string) => ({ ok: true, json: async () => url.endsWith('/dashboard') ? dashboard : url.endsWith('/river-performance') ? { summary: [] } : url.endsWith('/investigator/findings') ? [] : weather }));
 }
 function responsesWithRiver(river: object) {
   return vi.fn(async (url: string) => ({
     ok: true,
     json: async () => url.endsWith('/dashboard') ? forecast :
       url.endsWith('/river-performance') ? river :
+        url.endsWith('/investigator/findings') ? [] :
         { status: 'awaiting-observations', summary: [], pending: { scheduled: 4, awaitingObservations: 2 } },
   }));
 }
@@ -80,7 +81,7 @@ describe('weather page', () => {
     expect(wrapper.get('#selected-day-panel').text()).toContain('Cautious · models differ');
     expect(wrapper.get('#selected-day-panel').text()).toContain('NOAA GFS');
     expect(wrapper.get('.weather-metrics').text()).toContain('20.0 °C');
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(4);
     expect(wrapper.get('#selected-day-panel').text()).toContain('Hourly details unavailable');
   });
   it('preserves a selected day on refresh and falls back when that day leaves the horizon', async () => {
