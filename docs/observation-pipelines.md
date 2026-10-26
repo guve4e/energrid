@@ -1,5 +1,7 @@
 # Observation and identity flows
 
+This focused guide explains selected observation paths. For the complete current collection schedule, MQTT route distinctions, discovery lifecycle, scope behavior and open architecture work, see [Collection and ingestion](collection-and-ingestion.md).
+
 This page describes the repository implementation at the documentation base commit. It does not define firmware guarantees beyond the API's accepted contracts.
 
 ## MQTT ingestion

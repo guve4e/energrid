@@ -4,6 +4,7 @@ const handbook = [
   { text: 'Start here', items: [
     { text: 'Handbook index', link: '/docs/index' },
     { text: 'Architecture overview', link: '/docs/architecture-overview' },
+    { text: 'Collection and ingestion', link: '/docs/collection-and-ingestion' },
     { text: 'Device model and lifecycle', link: '/docs/device-model-lifecycle' },
     { text: 'Observation and identity flows', link: '/docs/observation-pipelines' },
     { text: 'Commands, authorization and audit', link: '/docs/commands-and-authority' },
@@ -11,6 +12,13 @@ const handbook = [
     { text: 'Operations and deployment', link: '/docs/operations' },
     { text: 'Device Lab integration', link: '/docs/device-lab-integration' },
     { text: 'Audit and remaining gaps', link: '/docs/audit-and-gaps' },
+  ] },
+  { text: 'Architecture decisions', items: [
+    { text: 'Reusable collection coordination', link: '/docs/decisions/0001-reusable-collection-coordination' },
+    { text: 'Shared observation rules', link: '/docs/decisions/0002-shared-observation-rules' },
+    { text: 'Discovery separate from polling', link: '/docs/decisions/0003-discovery-separate-from-polling' },
+    { text: 'Observer reachability semantics', link: '/docs/decisions/0004-observer-reachability' },
+    { text: 'Explicit ownership for background ingestion', link: '/docs/decisions/0005-background-ingestion-ownership' },
   ] },
   { text: 'Devices and operations', items: [
     { text: 'Device control', link: '/docs/device-control' },
