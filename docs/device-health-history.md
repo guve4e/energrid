@@ -166,17 +166,36 @@ returned metric vocabulary and semantics rather than selecting charts by model n
 other device families need their own authorized diagnostic evidence contract before
 their metrics can appear here.
 
-## Assistant integration boundary
+## Assistant Device Health query
 
-The existing scoped assistant tool boundary is `LettaHouseAgentAdapter.deviceTools`
-in `apps/api/src/app/modules/llm/letta-house-agent.adapter.ts`. It currently exposes
-device descriptions, live observations and room measurements, but does not expose
-`DeviceHealthQueryService` or historical diagnostic evidence. No assistant health
-analysis is implemented by this UI milestone.
+The existing site-scoped assistant exposes `read_device_health_history` through
+`LettaHouseAgentAdapter.deviceTools` in
+`apps/api/src/app/modules/llm/letta-house-agent.adapter.ts`. The tool accepts an
+enrolled device name, room, or exact logical ID and one of `1h`, `24h`, `7d`, or
+`30d` (default `24h`). It is read-only. The API derives tenant/site from the
+authenticated assistant request; the model cannot supply or override those IDs.
 
-A future read-only assistant tool should accept a device identifier and bounded time
-range, resolve tenant/site from the authenticated server-side assistant scope, verify
-the device is approved for that scope, and call the same Core query service used by
-the Portal. Its result should include units, evidence sources, coverage, timestamp
-bases, missing data and uncertainty. It must not read LevelDB directly or grant
-collection, enrollment, or control authority.
+`DeviceHealthAssistantQueryService` resolves the request against approved, durable
+enrollments in that server scope, rejects unknown/ambiguous devices, and calls the
+existing firmware diagnostic history adapter and `DeviceHealthQueryService`. It
+does not implement statistics or open a database itself. Results include the
+selected device and site, UTC range and display timezone, Core statistics, coverage,
+missing samples, bounded failures/events, provenance and timestamp bases, current
+diagnostic evidence, approved measurement freshness, and observer collection
+failures. A response mismatch in scope or device is rejected.
+
+The current tool supports the enrolled physical Energrid ESP8266 diagnostic
+contract. Missing history and unsupported data remain explicit. Device-reported
+Wi-Fi state and observer reachability are separate facts; an HTTP/TCP timeout is not
+evidence that the device lost power or Wi-Fi. A boot-session transition is reported
+at server detection time, while uptime-derived boot time is labelled as an estimate.
+The assistant may summarize the deterministic result in Bulgarian or English, but
+it must distinguish recorded facts from hypotheses and cannot initiate probes,
+collection, enrollment, or device control through this health tool. Device-provided
+text is treated as untrusted evidence, not as instructions.
+
+The broader query service remains provider-independent; the current conversational
+extension is registered through the existing Letta adapter and scoped conversation
+boundary. No separate assistant, direct LevelDB/PostgreSQL access, or duplicate
+analytics implementation is introduced. Other device families need a supported
+diagnostic contract before their health history is available to this capability.
