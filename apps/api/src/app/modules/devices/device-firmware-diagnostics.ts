@@ -13,7 +13,7 @@ import {
   type DeviceHealthObservation,
   utcBucketStart,
 } from './device-health-history';
-import { queryDeviceHealthEvidence, type DeviceHealthQueryDataset } from '@energrid/domain-devices';
+import { DeviceHealthQueryService, type DeviceHealthQueryDataset } from '@energrid/domain-devices';
 
 export interface FirmwareDiagnosticScope {
   tenantId: string;
@@ -196,6 +196,9 @@ export const FIRMWARE_DIAGNOSTICS_STORE_DIRECTORY = Symbol('FIRMWARE_DIAGNOSTICS
 const eventLimit = 100;
 const failureLimit = 1_440;
 const restartWindowMs = 10 * 60_000;
+const maxQueryRecordsPerPrefix = 20_000;
+const maxQuerySiteDevices = 100;
+const deviceHealthQueryService = new DeviceHealthQueryService();
 
 export interface DeviceHealthRetentionOptions {
   rawSampleDays: number;
@@ -404,6 +407,28 @@ function inRange(at: string, from: number, to: number): boolean {
   return Number.isFinite(time) && time >= from && time <= to;
 }
 
+function historyRecordCursor(granularity: DeviceHealthHistoryQuery['granularity'], value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null;
+  const row = value as Record<string, unknown>;
+  const deviceId = String(row.deviceId || '');
+  const id = String(row.id || '');
+  if (granularity === 'raw') {
+    const collectedAt = String(row.collectedAt || '');
+    const sample = row.sample as FirmwareDiagnosticSample | undefined;
+    if (!deviceId || !sample || !collectedAt) return null;
+    const snapshot = row as unknown as FirmwareDiagnosticSnapshot;
+    const observation = observationFor({ tenantId: String(row.tenantId), siteId: String(row.siteId) },
+      deviceId, String(row.physicalDeviceId), snapshot);
+    return `${observation.observedAt}|${deviceId}|${observation.sampleId}`;
+  }
+  if (granularity === 'hourly' || granularity === 'daily') {
+    const bucket = row as unknown as DeviceHealthBucketSummary;
+    return `${bucket.bucketStartAt}|${bucket.deviceId}|${bucket.bucketStartAt}:${bucket.granularity}`;
+  }
+  const at = String(granularity === 'events' ? row.observedAt : row.attemptedAt || '');
+  return deviceId && id && at ? `${at}|${deviceId}|${id}` : null;
+}
+
 @Injectable()
 export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
   private readonly db: ClassicLevel<string, unknown>;
@@ -413,7 +438,7 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
 
   constructor(
     @Optional() @Inject(FIRMWARE_DIAGNOSTICS_STORE_DIRECTORY) directory?: string,
-    retention: Partial<DeviceHealthRetentionOptions> = {},
+    @Optional() retention: Partial<DeviceHealthRetentionOptions> = {},
   ) {
     this.db = new ClassicLevel(directory?.trim() || process.env.HOME_FIRMWARE_DIAGNOSTICS_DIRECTORY?.trim() ||
       join(homedir(), '.energrid', 'device-firmware-diagnostics'), { valueEncoding: 'json' });
@@ -623,13 +648,19 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
     });
   }
 
-  async queryHistory(scope: FirmwareDiagnosticScope, query: DeviceHealthHistoryQuery): Promise<DeviceHealthHistoryPage> {
+  async queryHistory(scope: FirmwareDiagnosticScope, query: DeviceHealthHistoryQuery,
+    authorizedDevices?: Array<{ deviceId: string; physicalDeviceId: string }>): Promise<DeviceHealthHistoryPage> {
     if (!scope.tenantId.trim() || !scope.siteId.trim() ||
         !['raw', 'hourly', 'daily', 'events', 'failures'].includes(query.granularity)) {
       throw new Error('Invalid device health history query');
     }
-    const toAt = query.to || new Date().toISOString();
-    const fromAt = query.from || new Date(Date.parse(toAt) - 24 * 60 * 60_000).toISOString();
+    const now = Date.now();
+    const aggregateWidth = query.granularity === 'daily' ? 86_400_000 : 3_600_000;
+    const defaultTo = query.granularity === 'daily' || query.granularity === 'hourly'
+      ? Math.floor(now / aggregateWidth) * aggregateWidth : now;
+    const toAt = query.to || new Date(defaultTo).toISOString();
+    const defaultRange = query.granularity === 'daily' ? 30 * 86_400_000 : 24 * 60 * 60_000;
+    const fromAt = query.from || new Date(Date.parse(toAt) - defaultRange).toISOString();
     const from = Date.parse(fromAt);
     const to = Date.parse(toAt);
     if (!Number.isFinite(from) || !Number.isFinite(to) || from > to || to - from > 730 * 86_400_000) {
@@ -638,16 +669,23 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
     const limit = query.limit === undefined ? 500 : Math.max(1, Math.min(1000, Math.floor(query.limit)));
     return this.serialize(async () => {
       await this.open();
-      const deviceIds = query.deviceId ? [query.deviceId] : await this.siteDeviceIds(scope);
+      const authorizedIds = authorizedDevices?.map(item => item.deviceId) || [];
+      if (authorizedDevices !== undefined && query.deviceId && !authorizedIds.includes(query.deviceId)) {
+        throw new Error('Invalid device health history query: device is not authorized in this site');
+      }
+      const deviceIds = query.deviceId ? [query.deviceId] : authorizedDevices !== undefined
+        ? [...new Set(authorizedIds)] : await this.siteDeviceIds(scope);
+      if (deviceIds.length > maxQuerySiteDevices) throw new Error('Invalid device health history query: site has more than 100 diagnostic devices; select one device');
       const records: Array<{ at: string; value: unknown }> = [];
       const dataset: DeviceHealthQueryDataset = {
         observations: [], buckets: [], events: [], failures: [], expectedIntervalMs: this.retention.expectedIntervalMs,
+        authorizedDevices: (authorizedDevices || []).map(item => ({ ...scope, ...item })),
         supportedMetrics: [
-          { name: 'wifi.rssi', unit: 'dBm' }, { name: 'memory.free_heap', unit: 'bytes' },
-          { name: 'memory.fragmentation', unit: '%' }, { name: 'memory.largest_free_block', unit: 'bytes' },
-          { name: 'uptime', unit: 'ms' }, { name: 'wifi.disconnect_count', unit: 'count' },
-          { name: 'wifi.reconnect_count', unit: 'count' }, { name: 'sensor.sample_count', unit: 'count' },
-          { name: 'sensor.read_failure_count', unit: 'count' },
+          { name: 'wifi.rssi', unit: 'dBm', semantics: 'gauge' }, { name: 'memory.free_heap', unit: 'bytes', semantics: 'gauge' },
+          { name: 'memory.fragmentation', unit: '%', semantics: 'gauge' }, { name: 'memory.largest_free_block', unit: 'bytes', semantics: 'gauge' },
+          { name: 'uptime', unit: 'ms', semantics: 'counter' }, { name: 'wifi.disconnect_count', unit: 'count', semantics: 'counter' },
+          { name: 'wifi.reconnect_count', unit: 'count', semantics: 'counter' }, { name: 'sensor.sample_count', unit: 'count', semantics: 'counter' },
+          { name: 'sensor.read_failure_count', unit: 'count', semantics: 'counter' },
         ],
       };
       for (const deviceId of deviceIds) {
@@ -665,7 +703,10 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
         for (const { value } of await this.readPrefix(summaryPrefix)) {
           const bucket = value as DeviceHealthBucketSummary;
           if (bucket.tenantId === scope.tenantId && bucket.siteId === scope.siteId && bucket.deviceId === deviceId &&
-              inRequestedRange(bucket.bucketStartAt)) dataset.buckets.push(bucket);
+              inRequestedRange(bucket.bucketStartAt)) {
+            dataset.buckets.push(bucket);
+            if (query.granularity === summaryKind) records.push({ at: bucket.bucketStartAt, value: bucket });
+          }
         }
         for (const kind of ['event', 'failure'] as const) {
           const storedRows = await this.readPrefix(healthKey(kind, scope, deviceId));
@@ -688,11 +729,16 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
                 source: item.source && typeof item.source === 'object' ? 'http:GET:/api/v1/diagnostics' : null,
                 summary: String(item.summary || ''), explanation: String(item.explanation || '') };
               dataset.events.push(eventRecord);
+              if (query.granularity === 'events') records.push({ at, value: {
+                tenantId: scope.tenantId, siteId: scope.siteId, deviceId, physicalDeviceId, ...item,
+              } });
             } else {
               const at = String(item.attemptedAt || '');
               if (!inRequestedRange(at)) continue;
-              dataset.failures.push({ tenantId: scope.tenantId, siteId: scope.siteId, id: String(item.id), deviceId, physicalDeviceId, attemptedAt: at,
-                reason: String(item.reason || 'unknown') });
+              const failureRecord = { tenantId: scope.tenantId, siteId: scope.siteId, id: String(item.id), deviceId, physicalDeviceId, attemptedAt: at,
+                reason: String(item.reason || 'unknown'), source: 'http:GET:/api/v1/diagnostics', requestDurationMs: null };
+              dataset.failures.push(failureRecord);
+              if (query.granularity === 'failures') records.push({ at, value: failureRecord });
             }
           }
         }
@@ -702,38 +748,26 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
               value: { tenantId: scope.tenantId, siteId: scope.siteId, deviceId,
                 physicalDeviceId: snapshot.sample.deviceId, ...snapshot } });
           }
-        } else if (query.granularity === 'events' || query.granularity === 'failures') {
-          const kind = query.granularity === 'events' ? 'event' : 'failure';
-          const keyPrefix = healthKey(kind, scope, deviceId);
-          const stored = await this.readPrefix(keyPrefix);
-          const projected = query.granularity === 'events' ? (view.events || []).map(withEventProvenance) : view.collectionFailures || [];
-          const byId = new Map<string, unknown>();
-          for (const item of projected) byId.set(item.id, item);
-          for (const { value } of stored) {
-            if (value && typeof value === 'object' && 'id' in value) byId.set(String((value as { id: unknown }).id), value);
-          }
-          for (const item of byId.values()) {
-            const at = query.granularity === 'events'
-              ? String((item as FirmwareHealthEvent).observedAt)
-              : String((item as FirmwareDiagnosticCollectionFailure).attemptedAt);
-            if (inRequestedRange(at)) records.push({ at, value: {
-              tenantId: scope.tenantId, siteId: scope.siteId, deviceId,
-              physicalDeviceId: view.current?.deviceId || null, ...item as object,
-            } });
-          }
-        } else {
-          const keyPrefix = healthKey(query.granularity === 'hourly' ? 'hourly' : 'daily', scope, deviceId);
-          for (const { value } of await this.readPrefix(keyPrefix)) {
-            const bucket = value as DeviceHealthBucketSummary;
-            if (inRequestedRange(bucket.bucketStartAt)) records.push({ at: bucket.bucketStartAt, value: bucket });
-          }
+        }
+        if (dataset.observations.length + dataset.buckets.length + dataset.events.length + dataset.failures.length > 20_000) {
+          throw new Error('Invalid device health history query: evidence exceeds the bounded analysis limit');
         }
       }
       records.sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
-      const analysis = queryDeviceHealthEvidence(scope, {
+      const analysis = deviceHealthQueryService.query(scope, {
         from: fromAt, to: toAt, timezone: query.timezone, granularity: query.granularity,
         deviceId: query.deviceId, metrics: query.metrics, limit, cursor: query.cursor,
       }, dataset);
+      const analysisPageKeys = new Set(analysis.series.map(item => {
+        if ('sampleId' in item) return `${item.observedAt}|${item.deviceId}|${item.sampleId}`;
+        if ('bucketStartAt' in item) return `${item.bucketStartAt}|${item.deviceId}|${item.bucketStartAt}:${item.granularity}`;
+        if ('attemptedAt' in item) return `${item.attemptedAt}|${item.deviceId}|${item.id}`;
+        return `${item.observedAt}|${item.deviceId}|${item.id}`;
+      }));
+      const pagedRecords = records.filter(item => {
+        const cursor = historyRecordCursor(query.granularity, item.value);
+        return cursor !== null && analysisPageKeys.has(cursor);
+      }).map(item => item.value);
       return {
         schemaVersion: 1,
         tenantId: scope.tenantId,
@@ -741,7 +775,7 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
         granularity: query.granularity,
         from: fromAt,
         to: toAt,
-        records: records.slice(-limit).map(item => item.value),
+        records: pagedRecords,
         analysis,
       };
     });
@@ -811,7 +845,10 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
 
   private async readPrefix(prefix: string): Promise<Array<{ key: string; value: unknown }>> {
     const rows: Array<{ key: string; value: unknown }> = [];
-    for await (const [key, value] of this.db.iterator({ gte: prefix, lte: `${prefix}\xff` })) rows.push({ key, value });
+    for await (const [key, value] of this.db.iterator({ gte: prefix, lte: `${prefix}\xff` })) {
+      if (rows.length >= maxQueryRecordsPerPrefix) throw new Error('Invalid device health history query: stored series exceeds the bounded read limit');
+      rows.push({ key, value });
+    }
     return rows;
   }
 
@@ -820,12 +857,14 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
     const indexPrefix = siteDeviceIndexPrefix(scope);
     for await (const [key] of this.db.iterator({ gte: indexPrefix, lte: `${indexPrefix}\xff` })) {
       ids.add(decodeURIComponent(String(key).slice(indexPrefix.length)));
+      if (ids.size > maxQuerySiteDevices) throw new Error('Invalid device health history query: site has more than 100 diagnostic devices; select one device');
     }
     // Legacy V1 records are discoverable before the next scheduled collection
     // writes their site index; this read does not mutate or reassign them.
     const legacyPrefix = `firmware-diagnostics:${encodedPart(scope.tenantId)}:${encodedPart(scope.siteId)}:`;
     for await (const [key] of this.db.iterator({ gte: legacyPrefix, lte: `${legacyPrefix}\xff` })) {
       ids.add(decodeURIComponent(String(key).slice(legacyPrefix.length)));
+      if (ids.size > maxQuerySiteDevices) throw new Error('Invalid device health history query: site has more than 100 diagnostic devices; select one device');
     }
     return [...ids];
   }
