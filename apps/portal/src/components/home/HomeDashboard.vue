@@ -14,6 +14,13 @@ type Device = {
     values: Record<string, number | boolean | string | null>;
     observedAt: string | null;
     status: 'online' | 'offline' | 'unknown';
+    observerReachability?: {
+      status: 'reachable' | 'unreachable';
+      checkedAt: string;
+      targetIpAddress: string;
+      networkScopeId: string;
+      observer: { host: string };
+    };
     command?: { status?: string };
   };
 };
@@ -113,6 +120,9 @@ const actionFeedback = ref<Record<string, string>>({});
 const onlineCount = computed(() =>
   devices.value.filter((device) => device.state.status === 'online').length,
 );
+const observerUnreachableCount = computed(() =>
+  devices.value.filter((device) => device.state.observerReachability?.status === 'unreachable').length,
+);
 
 function fresh(device: Device): boolean {
   const observedAt = device.state.observedAt;
@@ -140,7 +150,12 @@ function reading(device: Device, capability: string, digits = 1): string {
 }
 
 function freshnessLabel(device: Device): string {
-  if (!device.state.observedAt) return 'No observations';
+  const observerReachability = device.state.observerReachability;
+  if (!device.state.observedAt) {
+    return observerReachability?.status === 'unreachable'
+      ? `Observer cannot reach ${observerReachability.targetIpAddress} · no measurements yet`
+      : 'No observations';
+  }
 
   const timestamp = Date.parse(device.state.observedAt);
   if (!Number.isFinite(timestamp)) return 'Unknown observation time';
@@ -150,12 +165,26 @@ function freshnessLabel(device: Device): string {
     Math.floor((Date.now() - timestamp) / 60000),
   );
 
+  if (observerReachability?.status === 'unreachable') {
+    const ageLabel = minutes < 1 ? 'updated just now' : `last reading ${minutes}m ago`;
+    const checkedAt = Date.parse(observerReachability.checkedAt);
+    const checkAge = Number.isFinite(checkedAt)
+      ? `check ${Math.max(0, Math.floor((Date.now() - checkedAt) / 60000))}m ago`
+      : 'check time unavailable';
+    return `${observerReachability.observer.host} could not reach ${observerReachability.targetIpAddress} · ${checkAge} · ${ageLabel}`;
+  }
+
   if (device.state.status === 'offline') return `Device unreachable · ${minutes}m ago`;
   if (!fresh(device)) return `Measurement stale · ${minutes}m ago`;
   if (!Object.values(device.state.values).some(value => value !== null)) return 'No measurement available';
   if (minutes < 1) return 'Updated just now';
 
   return `Updated ${minutes}m ago`;
+}
+
+function deviceConnectivityLabel(device: Device): string {
+  if (device.state.observerReachability?.status === 'unreachable') return freshnessLabel(device);
+  return device.state.status === 'offline' ? 'Device unreachable' : freshnessLabel(device);
 }
 
 function relayValue(device: Device): string {
@@ -318,8 +347,11 @@ onBeforeUnmount(() => {
       <div class="hero-status">
         <p class="eyebrow">YOUR HOME AT A GLANCE</p>
         <div class="hero-status-value">{{ onlineCount }}</div>
-        <p>Devices reporting online</p>
+        <p>Devices last reported online</p>
         <span>{{ devices.length }} registered devices</span>
+        <span v-if="observerUnreachableCount" class="observer-reachability-summary">
+          Observer could not reach {{ observerUnreachableCount }} endpoint{{ observerUnreachableCount === 1 ? '' : 's' }}; device power and Wi-Fi are unknown.
+        </span>
       </div>
     </section>
 
@@ -383,7 +415,7 @@ onBeforeUnmount(() => {
           <div>
             <strong>{{ device.zoneName || device.displayName }}</strong>
             <span>{{ device.displayName }}</span>
-            <small>{{ relayValue(device) }} · {{ device.state.status === 'offline' ? 'Device unreachable' : freshnessLabel(device) }}</small>
+            <small>{{ relayValue(device) }} · {{ deviceConnectivityLabel(device) }}</small>
           </div>
           <div class="relay-actions">
             <button type="button" :disabled="!!actionBusy[device.id]" @click="sendRelayAction(device, 'turn_on')">On</button>

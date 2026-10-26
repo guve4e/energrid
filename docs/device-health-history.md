@@ -35,6 +35,23 @@ cannot leave a completion marker without its rows and retrying is idempotent. Th
 compatibility arrays remain in place; migration does not delete them. The ordinary
 retention sweep may later expire rows outside the configured windows.
 
+## Observer-relative collection failures
+
+For the scheduled Energrid ESP8266 identity/status and firmware-diagnostics collectors,
+a failed request is evidence about the observer's attempt to contact a configured
+endpoint, not proof that the physical device lost power or Wi-Fi. Device-reported Wi-Fi
+connectivity and the last successful health snapshot remain unchanged when collection
+fails. New failure records may include the observer host/platform and its local IPv4
+interface scopes, plus the selected endpoint, target address, configured network scope,
+server attempt time, and known failure category. These fields describe where the
+collector was when it failed; they do not reassign the device or its saved network
+scope. Historical failures without this context remain readable with provenance
+unknown. Portal summaries show last device status, measurement freshness, and observer
+reachability as separate facts. A timeout from a Mac on another subnet should therefore
+read as “observer could not reach the endpoint,” not “device offline.” Generic JSON HTTP
+polling still has the older offline-on-request-failure behavior and is not changed by
+this ESP8266-specific correction.
+
 ## Aggregation and recovery
 
 UTC hour/day boundaries are used for storage. Gauge summaries preserve min, max, sum,

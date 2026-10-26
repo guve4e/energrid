@@ -1542,6 +1542,7 @@ export class DeviceRegistryService implements OnModuleInit {
       observedAt,
       source: 'approved-observation',
       status: live?.status || 'unknown',
+      observerReachability: live?.observerReachability,
     });
   }
 
@@ -1579,6 +1580,7 @@ export class DeviceRegistryService implements OnModuleInit {
       observedAt: payload.observedAt,
       source: 'approved-observation',
       status: live?.status || 'unknown',
+      observerReachability: live?.observerReachability,
     });
 
     this.observeCommandTelemetry(
@@ -1655,6 +1657,7 @@ export class DeviceRegistryService implements OnModuleInit {
       status: normalizeOnlineStatus(
         raw.state?.status || raw.status || 'online',
       ),
+      observerReachability: this.liveStateByDeviceId.get(id)?.observerReachability,
     });
     this.observeCommandTelemetry(
       id,
@@ -1709,6 +1712,24 @@ export class DeviceRegistryService implements OnModuleInit {
         raw.observedAt || current?.observedAt || new Date().toISOString(),
       source: current?.source || 'mqtt-status',
       status: normalizeOnlineStatus(raw.status),
+      observerReachability: current?.observerReachability,
+    });
+  }
+
+  recordObserverReachability(
+    deviceId: string,
+    observerReachability: NonNullable<RegisteredDeviceState['observerReachability']>,
+  ): void {
+    const id = safeId(deviceId);
+    if (!id) return;
+    const current = this.liveStateByDeviceId.get(id);
+    this.liveStateByDeviceId.set(id, {
+      values: current?.values || {},
+      observedAt: current?.observedAt || null,
+      source: current?.source || 'unknown',
+      status: current?.status || 'unknown',
+      command: current?.command,
+      observerReachability,
     });
   }
 

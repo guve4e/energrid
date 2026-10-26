@@ -89,6 +89,21 @@ export interface RegisteredDeviceState {
   observedAt: string | null;
   source: string;
   status: DeviceOnlineStatus;
+  /** Reachability from this Energrid observer; distinct from device-reported Wi-Fi and sample freshness. */
+  observerReachability?: {
+    status: 'reachable' | 'unreachable';
+    checkedAt: string;
+    endpoint: string;
+    targetIpAddress: string;
+    networkScopeId: string;
+    observer: {
+      id: string;
+      host: string;
+      platform: string;
+      localScopes: Array<{ interfaceName: string; cidr: string; address: string }>;
+    };
+    reason?: string;
+  };
   command?: {
     id: string;
     action: DeviceCapabilityAction;

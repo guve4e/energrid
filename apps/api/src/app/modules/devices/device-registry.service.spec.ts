@@ -409,6 +409,33 @@ describe('DeviceRegistryService', () => {
     ).toEqual(expect.objectContaining({ status: 'acked' }));
   });
 
+  it('records observer reachability without replacing last successful telemetry or device status', () => {
+    const deviceId = 'observer-relative-test';
+    process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({ devices: [{
+      deviceId, protocol: 'http', driver: 'http-json-sensor', capabilities: ['temperature'],
+    }] });
+    const service = new DeviceRegistryService();
+    const observedAt = '2026-10-26T05:20:00.000Z';
+    service.ingestDeviceTelemetry({
+      deviceId, values: { temperature: 22.5 }, observedAt, protocol: 'http',
+      state: { source: 'http-poll', status: 'online' },
+    });
+
+    service.recordObserverReachability(deviceId, {
+      status: 'unreachable', checkedAt: '2026-10-26T06:20:00.000Z',
+      endpoint: 'http://192.168.7.48', targetIpAddress: '192.168.7.48', networkScopeId: 'eero-lan',
+      observer: { id: 'Mac-LAB/darwin', host: 'Mac-LAB', platform: 'darwin', localScopes: [
+        { interfaceName: 'en0', cidr: '192.168.1.25/24', address: '192.168.1.25' },
+      ] },
+      reason: 'request_timeout',
+    });
+
+    expect(service.getSnapshot().devices.find(device => device.id === deviceId)?.state).toMatchObject({
+      values: { temperature: 22.5 }, observedAt, source: 'http-poll', status: 'online',
+      observerReachability: { status: 'unreachable', targetIpAddress: '192.168.7.48', networkScopeId: 'eero-lan' },
+    });
+  });
+
   it('stores a running diagnosis when an execution is created', () => {
     const service = new DeviceRegistryService();
 

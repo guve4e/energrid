@@ -63,4 +63,41 @@ describe('device firmware diagnostics', () => {
     expect(wrapper.get('[role="alert"]').text()).toContain('could not be loaded');
     expect(wrapper.text()).not.toContain('Findings recorded');
   });
+
+  it('shows observer-relative failure beside the preserved device-reported snapshot', async () => {
+    setAuthenticatedSession({ accessToken: 'portal-test-token', expiresIn: 900, user: { id: 'admin', email: 'admin@example.test', name: 'Admin', role: 'admin' } });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({
+      deviceId,
+      sampledAt: '2026-10-26T05:20:00.000Z',
+      lastSuccessfulContactAt: '2026-10-26T05:20:00.000Z',
+      lastAttemptAt: '2026-10-26T06:20:00.000Z',
+      collectionStatus: 'failed',
+      current: {
+        firmwareVersion: '0.3.0', bootSessionId: 'esp8266-324b44-1234abcd', uptimeMs: 3_600_000,
+        reset: { reason: 'Power On', reasonCode: 1, exception: null },
+        memory: { freeHeapBytes: 7000, heapFragmentationPct: 12, largestFreeBlockBytes: 4000 },
+        wifi: { connected: true, rssiDbm: -62, disconnectCount: 0, reconnectCount: 0 },
+        sensor: { sampleCount: 20, readFailureCount: 0 },
+      },
+      snapshots: [{}], events: [], restartCount10m: 0, connectivity: 'connected',
+      collectionFailures: [{
+        id: 'failure-1', attemptedAt: '2026-10-26T06:20:00.000Z', reason: 'request_timeout',
+        context: {
+          observer: { id: 'Mac-LAB/darwin', host: 'Mac-LAB', platform: 'darwin', localScopes: [{ interfaceName: 'en0', cidr: '192.168.1.25/24', address: '192.168.1.25' }] },
+          target: { endpoint: 'http://192.168.7.48', ipAddress: '192.168.7.48', networkScopeId: 'eero-lan', networkScopeName: 'Eero LAN' },
+        },
+      }],
+    }) }));
+    wrapper = mount(DeviceFirmwareDiagnostics, { props: { deviceId, apiBase: '', accessToken: 'portal-test-token' } });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain('last successful device snapshot is retained');
+    expect(wrapper.text()).toContain('does not establish that the ESP lost power or Wi-Fi');
+    expect(wrapper.text()).toContain('Wi-Fi connected');
+    expect(wrapper.text()).toContain('Mac-LAB');
+    expect(wrapper.text()).toContain('192.168.1.25/24');
+    expect(wrapper.text()).toContain('192.168.7.48');
+    expect(wrapper.text()).toContain('Eero LAN');
+    expect(wrapper.text()).toContain('request_timeout');
+  });
 });

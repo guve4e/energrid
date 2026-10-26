@@ -1,7 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common'
 import { DeviceRegistryService } from './device-registry.service'
-import type { RegisteredDevice } from './device-registry.types'
-import type { NetworkDiscoveredDevice } from './device-registry.types'
+import type { NetworkDiscoveryZone, NetworkDiscoveredDevice, RegisteredDevice } from './device-registry.types'
 import type { KnownNetworkDevice } from './device-discovery-memory.store'
 import { DeviceDiscoveryMemoryStore } from './device-discovery-memory.store'
 import { DeviceLanDiscoveryService } from './device-lan-discovery.service'
@@ -16,9 +15,14 @@ import {
   resolveEnergridHttpEndpoint,
 } from './adapters/inbound/energrid/energrid-http-observation.adapter'
 import { parseEnergridIdentity } from './adapters/outbound/network/energrid-http-identity.adapter'
-import { DeviceFirmwareDiagnosticsService, type FirmwareDiagnosticFailureReason } from './device-firmware-diagnostics'
+import {
+  DeviceFirmwareDiagnosticsService,
+  type FirmwareDiagnosticCollectionContext,
+  type FirmwareDiagnosticFailureReason,
+} from './device-firmware-diagnostics'
 import { EnergridFirmwareDiagnosticsHttpAdapter, FirmwareDiagnosticsCollectionError } from './adapters/outbound/network/energrid-firmware-diagnostics-http.adapter'
 import { performance } from 'node:perf_hooks'
+import { hostname, networkInterfaces } from 'node:os'
 
 @Injectable()
 export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
@@ -138,13 +142,14 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
   private async pollEnergridDevice(device: RegisteredDevice): Promise<void> {
     const scope = { tenantId: device.tenantId, siteId: device.siteId }
     const physicalId = String(device.metadata?.physicalId || '').toLowerCase()
+    let collectionContext: FirmwareDiagnosticCollectionContext | undefined
     if (!scope.tenantId || !scope.siteId || !physicalId || !this.discovery || !this.observations) {
       this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=trusted_http_ingress_unavailable`)
       return
     }
     const diagnosticsDue = this.claimDiagnosticsCollection(scope, device.id)
     const recordFailure = (reason: FirmwareDiagnosticFailureReason) => diagnosticsDue
-      ? this.recordFirmwareDiagnosticsFailure(scope, device.id, physicalId, reason)
+      ? this.recordFirmwareDiagnosticsFailure(scope, device.id, physicalId, reason, collectionContext)
       : Promise.resolve()
 
     let records: KnownNetworkDevice[]
@@ -176,6 +181,23 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=verified_endpoint_missing_or_out_of_scope`)
       return
     }
+    collectionContext = buildFirmwareDiagnosticCollectionContext(
+      endpoint.identityUrl,
+      endpoint.record.device.ipAddress,
+      configuredZone || scannedZones.find(zone => zone.id === networkScope),
+    )
+    const recordObserverReachability = (status: 'reachable' | 'unreachable', reason?: string) => {
+      if (!collectionContext || typeof this.registry.recordObserverReachability !== 'function') return
+      this.registry.recordObserverReachability(device.id, {
+        status,
+        checkedAt: new Date().toISOString(),
+        endpoint: collectionContext.target.endpoint,
+        targetIpAddress: collectionContext.target.ipAddress,
+        networkScopeId: collectionContext.target.networkScopeId,
+        observer: collectionContext.observer,
+        ...(reason ? { reason } : {}),
+      })
+    }
 
     const virtualLabPoll = configuredZone?.collectionSource === 'virtual-lab'
     if (virtualLabPoll) {
@@ -197,6 +219,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     // bounded GETs, while local Home sensors keep their existing HTTP timeout.
     const timeout = setTimeout(() => controller.abort(), virtualLabPoll ? 12_000 : httpPollTimeoutMs())
     let phase: 'identity' | 'status' | 'observation' = 'identity'
+    let targetResponded = false
     try {
       const virtualEvidence = virtualLabPoll
         ? await this.lanDiscovery!.readVirtualLabEnergridHttpEvidence(
@@ -205,6 +228,8 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         : null
       let identityPayload: unknown
       if (virtualEvidence) {
+        targetResponded = true
+        recordObserverReachability('reachable', 'http_response')
         if (virtualEvidence.identity.status >= 300 && virtualEvidence.identity.status < 400) throw new Error('identity_redirect_rejected')
         if (virtualEvidence.identity.status !== 200) throw new Error(`identity_http_${virtualEvidence.identity.status}`)
         identityPayload = virtualEvidence.identity.body
@@ -214,13 +239,15 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
           redirect: 'manual',
           headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
         })
+        targetResponded = true
+        recordObserverReachability('reachable', 'http_response')
         if (identityResponse.status >= 300 && identityResponse.status < 400) throw new Error('identity_redirect_rejected')
         if (!identityResponse.ok) throw new Error(`identity_http_${identityResponse.status}`)
         identityPayload = await readJsonResponse(identityResponse, 4 * 1024)
       }
       const identity = parseEnergridIdentity(identityPayload)
       if (!identity) {
-        this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'offline', observedAt: new Date().toISOString() })
+        this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'unknown', observedAt: new Date().toISOString() })
         await recordFailure('identity_request_failed')
         this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=invalid_firmware_identity_response`)
         return
@@ -313,8 +340,9 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=${result.reasonCode}`)
       }
     } catch (error) {
-      if (phase !== 'observation') {
-        this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'offline', observedAt: new Date().toISOString() })
+      const transportFailure = error instanceof Error && (error.name === 'AbortError' || error instanceof TypeError)
+      if (transportFailure && !targetResponded) {
+        recordObserverReachability('unreachable', error instanceof Error && error.name === 'AbortError' ? 'request_timeout' : 'request_failed')
       }
       const reason = error instanceof Error && error.name === 'AbortError'
         ? 'request_timeout'
@@ -347,7 +375,16 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`[DEVICE FIRMWARE DIAGNOSTICS] ${device.id} recorded boot=${sample.bootSessionId} uptimeMs=${sample.uptimeMs} restartCount10m=${view.restartCount10m}`);
     } catch (error) {
       const reason = error instanceof FirmwareDiagnosticsCollectionError ? error.reason : 'collector_error';
-      await this.recordFirmwareDiagnosticsFailure(scope, device.id, physicalId, reason);
+      const networkScope = String(device.metadata?.networkScope || '');
+      const zone = this.lanDiscovery?.getConfiguredZone?.(networkScope) ||
+        this.lanDiscovery?.getZones().find(item => item.id === networkScope);
+      const diagnosticsEndpoint = `${new URL(verifiedIdentityUrl).origin}/api/v1/diagnostics`;
+      const context = buildFirmwareDiagnosticCollectionContext(
+        diagnosticsEndpoint,
+        new URL(verifiedIdentityUrl).hostname,
+        zone,
+      );
+      await this.recordFirmwareDiagnosticsFailure(scope, device.id, physicalId, reason, context);
       this.logger.warn(`[DEVICE FIRMWARE DIAGNOSTICS] ${device.id} skipped reason=${reason}`);
     } finally {
       clearTimeout(timeout);
@@ -372,14 +409,60 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     deviceId: string,
     physicalId: string,
     reason: FirmwareDiagnosticFailureReason,
+    context?: FirmwareDiagnosticCollectionContext,
   ): Promise<void> {
     if (!this.firmwareDiagnostics) return;
     try {
-      await this.firmwareDiagnostics.recordFailure(scope, deviceId, physicalId, reason);
+      await this.firmwareDiagnostics.recordFailure(scope, deviceId, physicalId, reason, new Date().toISOString(), context);
     } catch {
       this.logger.warn(`[DEVICE FIRMWARE DIAGNOSTICS] ${deviceId} failure_record_unavailable`);
     }
   }
+}
+
+export function buildFirmwareDiagnosticCollectionContext(
+  endpointUrl: string,
+  ipAddress: string,
+  zone: NetworkDiscoveryZone | undefined,
+  interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces(),
+  observerHost = hostname(),
+  observerPlatform = process.platform,
+): FirmwareDiagnosticCollectionContext {
+  const localScopes = Object.entries(interfaces).flatMap(([interfaceName, addresses]) =>
+    (addresses || []).flatMap(address => {
+      if (address.internal || address.family !== 'IPv4') return []
+      const prefix = ipv4NetmaskPrefix(address.netmask)
+      if (prefix === null) return []
+      return [{ interfaceName: interfaceName.slice(0, 64), cidr: `${address.address}/${prefix}`, address: address.address }]
+    }),
+  ).slice(0, 32)
+  let endpoint = ipAddress
+  try {
+    const url = new URL(endpointUrl);
+    endpoint = `${url.origin}${url.pathname}`;
+  } catch { /* Keep the verified endpoint IP only. */ }
+  return {
+    observer: {
+      id: `${observerHost}/${observerPlatform}`,
+      host: observerHost.slice(0, 128),
+      platform: observerPlatform.slice(0, 32),
+      localScopes,
+    },
+    target: {
+      endpoint,
+      ipAddress,
+      networkScopeId: zone?.id || '',
+      networkScopeName: zone?.name || '',
+    },
+  }
+}
+
+function ipv4NetmaskPrefix(netmask: string): number | null {
+  const octets = netmask.split('.').map(Number)
+  if (octets.length !== 4 || octets.some(value => !Number.isInteger(value) || value < 0 || value > 255)) return null
+  const bits = octets.map(value => value.toString(2).padStart(8, '0')).join('')
+  if (!/^1*0*$/.test(bits)) return null
+  return bits.indexOf('0') === -1 ? 32 : bits.indexOf('0')
 }
 
 async function readJsonResponse(response: Response, maxBytes = 16 * 1024): Promise<unknown> {

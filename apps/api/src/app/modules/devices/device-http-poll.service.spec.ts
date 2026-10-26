@@ -1,4 +1,4 @@
-import { DeviceHttpPollService } from './device-http-poll.service'
+import { buildFirmwareDiagnosticCollectionContext, DeviceHttpPollService } from './device-http-poll.service'
 import { DeviceRegistryService } from './device-registry.service'
 import type { NetworkDiscoveryZone, RegisteredDevice } from './device-registry.types'
 import type { KnownNetworkDevice } from './device-discovery-memory.store'
@@ -335,7 +335,7 @@ describe('DeviceHttpPollService', () => {
     expect(registry.ingestDeviceStatus).toHaveBeenCalledWith(expect.objectContaining({ deviceId: device.id, status: 'unknown' }))
   })
 
-  it('keeps a missing-memory endpoint untrusted when its last-known address is unreachable', async () => {
+  it('keeps a missing-memory endpoint untrusted without marking the enrolled device offline when unreachable', async () => {
     const device = {
       id: 'device:upstream-lan:esp8266:324864', tenantId: 'tenant-demo', siteId: 'site-home',
       trustStatus: 'approved', kind: 'physical',
@@ -344,8 +344,10 @@ describe('DeviceHttpPollService', () => {
     } as unknown as RegisteredDevice
     const discovery = { listIdentityEvidence: jest.fn().mockResolvedValue([]), recordIdentityObservation: jest.fn() }
     const observations = { sourceSampleEvidenceId: jest.fn(), ingestHttpObservation: jest.fn() }
-    const registry = { getDevices: jest.fn().mockReturnValue([device]), ingestDeviceStatus: jest.fn() }
-    global.fetch = jest.fn().mockRejectedValue(new Error('connect ECONNREFUSED')) as unknown as typeof fetch
+    const registry = { getDevices: jest.fn().mockReturnValue([device]), ingestDeviceStatus: jest.fn(), recordObserverReachability: jest.fn() }
+    const timeoutError = new Error('The operation was aborted');
+    timeoutError.name = 'AbortError';
+    global.fetch = jest.fn().mockRejectedValue(timeoutError) as unknown as typeof fetch
     const poller = new DeviceHttpPollService(
       registry as unknown as DeviceRegistryService, observations as never, discovery as never,
       { getZones: () => [upstreamZone] } as never,
@@ -356,7 +358,11 @@ describe('DeviceHttpPollService', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1)
     expect(discovery.recordIdentityObservation).not.toHaveBeenCalled()
     expect(observations.ingestHttpObservation).not.toHaveBeenCalled()
-    expect(registry.ingestDeviceStatus).toHaveBeenCalledWith(expect.objectContaining({ deviceId: device.id, status: 'offline' }))
+    expect(registry.ingestDeviceStatus).not.toHaveBeenCalledWith(expect.objectContaining({ deviceId: device.id, status: 'offline' }))
+    expect(registry.recordObserverReachability).toHaveBeenCalledWith(device.id, expect.objectContaining({
+      status: 'unreachable', targetIpAddress: '192.168.1.198', networkScopeId: 'upstream-lan', reason: 'request_timeout',
+      observer: expect.objectContaining({ host: expect.any(String), localScopes: expect.any(Array) }),
+    }))
   })
 
   it('records only same-identity firmware diagnostics without blocking accepted observations when diagnostics fail', async () => {
@@ -427,6 +433,10 @@ describe('DeviceHttpPollService', () => {
     expect(diagnostics.record).toHaveBeenCalledTimes(1)
     expect(diagnostics.recordFailure).toHaveBeenCalledWith(
       { tenantId: 'tenant-demo', siteId: 'site-home' }, device.id, 'esp8266:324864', 'diagnostics_http_error',
+      expect.any(String), expect.objectContaining({
+        observer: expect.objectContaining({ host: expect.any(String), localScopes: expect.any(Array) }),
+        target: expect.objectContaining({ endpoint: 'http://192.168.1.198/api/v1/diagnostics', ipAddress: '192.168.1.198', networkScopeId: 'upstream-lan' }),
+      }),
     )
     expect(observations.ingestHttpObservation).toHaveBeenCalledTimes(2)
   })
@@ -514,8 +524,8 @@ describe('DeviceHttpPollService', () => {
       },
     }]), recordIdentityObservation: jest.fn() }
     const observations = { sourceSampleEvidenceId: jest.fn(), ingestHttpObservation: jest.fn() }
-    const registry = { getDevices: jest.fn().mockReturnValue([device]), ingestDeviceStatus: jest.fn() }
-    global.fetch = jest.fn().mockRejectedValue(new Error('connect ECONNREFUSED')) as unknown as typeof fetch
+    const registry = { getDevices: jest.fn().mockReturnValue([device]), ingestDeviceStatus: jest.fn(), recordObserverReachability: jest.fn() }
+    global.fetch = jest.fn().mockRejectedValue(new TypeError('fetch failed')) as unknown as typeof fetch
     const poller = new DeviceHttpPollService(
       registry as unknown as DeviceRegistryService, observations as never, discovery as never,
       { getZones: () => [upstreamZone] } as never,
@@ -526,7 +536,10 @@ describe('DeviceHttpPollService', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1)
     expect(discovery.recordIdentityObservation).not.toHaveBeenCalled()
     expect(observations.ingestHttpObservation).not.toHaveBeenCalled()
-    expect(registry.ingestDeviceStatus).toHaveBeenCalledWith(expect.objectContaining({ deviceId: device.id, status: 'offline' }))
+    expect(registry.ingestDeviceStatus).not.toHaveBeenCalledWith(expect.objectContaining({ deviceId: device.id, status: 'offline' }))
+    expect(registry.recordObserverReachability).toHaveBeenCalledWith(device.id, expect.objectContaining({
+      status: 'unreachable', targetIpAddress: '192.168.1.198', networkScopeId: 'upstream-lan',
+    }))
   })
 
   it('does not ingest status data when the endpoint firmware identity differs', async () => {
@@ -594,7 +607,7 @@ describe('DeviceHttpPollService', () => {
     expect(observations.ingestHttpObservation).not.toHaveBeenCalled()
   })
 
-  it('marks the physical sensor offline and rejects ingestion when its status endpoint fails', async () => {
+  it('keeps observer reachability distinct when identity responds but the status endpoint fails', async () => {
     const device = {
       id: 'device:upstream-lan:esp8266:324864', tenantId: 'valentin', siteId: 'boyana-home',
       trustStatus: 'approved', kind: 'physical',
@@ -621,6 +634,27 @@ describe('DeviceHttpPollService', () => {
     const poller = new DeviceHttpPollService(registry as unknown as DeviceRegistryService, observations as never, discovery as never, { getZones: () => [upstreamZone] } as never)
     await poller.pollOnce()
     expect(observations.ingestHttpObservation).not.toHaveBeenCalled()
-    expect(registry.ingestDeviceStatus).toHaveBeenCalledWith(expect.objectContaining({ deviceId: device.id, status: 'offline' }))
+    expect(registry.ingestDeviceStatus).toHaveBeenCalledWith(expect.objectContaining({ deviceId: device.id, status: 'online' }))
+    expect(registry.ingestDeviceStatus).not.toHaveBeenCalledWith(expect.objectContaining({ deviceId: device.id, status: 'offline' }))
+  })
+
+  it('keeps a saved Eero endpoint distinct from the Mac observer scope when the observer moves to HouseNet', () => {
+    const eeroZone: NetworkDiscoveryZone = { id: 'eero-lan', name: 'Eero LAN', cidr: '192.168.7.0/24', seedIps: [] }
+    const interfaces = (address: string) => ({ en0: [{
+      address, netmask: '255.255.255.0', family: 'IPv4', internal: false, mac: '00:00:00:00:00:01', cidr: `${address}/24` as `${string}/${number}`, scopeid: 0,
+    }] })
+    const before = buildFirmwareDiagnosticCollectionContext(
+      'http://192.168.7.48/api/v1/identity', '192.168.7.48', eeroZone, interfaces('192.168.7.25'), 'Mac-LAB', 'darwin',
+    )
+    const after = buildFirmwareDiagnosticCollectionContext(
+      'http://192.168.7.48/api/v1/identity', '192.168.7.48', eeroZone, interfaces('192.168.1.25'), 'Mac-LAB', 'darwin',
+    )
+
+    expect(before.target).toMatchObject({ ipAddress: '192.168.7.48', networkScopeId: 'eero-lan' })
+    expect(before.target.endpoint).toBe('http://192.168.7.48/api/v1/identity')
+    expect(after.target).toEqual(before.target)
+    expect(before.observer.localScopes).toContainEqual(expect.objectContaining({ cidr: '192.168.7.25/24' }))
+    expect(after.observer.localScopes).toContainEqual(expect.objectContaining({ cidr: '192.168.1.25/24' }))
+    expect(after.observer.localScopes).not.toContainEqual(expect.objectContaining({ cidr: '192.168.7.25/24' }))
   })
 })

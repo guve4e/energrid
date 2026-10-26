@@ -116,16 +116,22 @@ describe('firmware diagnostics', () => {
     const first = new DeviceFirmwareDiagnosticsService(directory);
     const successAt = '2026-10-24T10:00:00.000Z';
     const failedAt = '2026-10-24T10:01:00.000Z';
+    const context = {
+      observer: { id: 'Mac-LAB/darwin', host: 'Mac-LAB', platform: 'darwin', localScopes: [
+        { interfaceName: 'en0', cidr: '192.168.1.25/24', address: '192.168.1.25' },
+      ] },
+      target: { endpoint: 'http://192.168.7.48', ipAddress: '192.168.7.48', networkScopeId: 'eero-lan', networkScopeName: 'Eero LAN' },
+    };
     try {
       await first.record(scope, deviceId, 'esp8266:324864', sample(), successAt);
-      const afterFailure = await first.recordFailure(scope, deviceId, 'esp8266:324864', 'request_timeout', failedAt);
+      const afterFailure = await first.recordFailure(scope, deviceId, 'esp8266:324864', 'request_timeout', failedAt, context);
       expect(afterFailure.current).toEqual(sample());
       expect(afterFailure.snapshots).toHaveLength(1);
       expect(afterFailure.lastSuccessfulContactAt).toBe(successAt);
       expect(afterFailure.lastAttemptAt).toBe(failedAt);
       expect(afterFailure.collectionStatus).toBe('failed');
       expect(afterFailure.collectionFailures).toEqual([
-        expect.objectContaining({ attemptedAt: failedAt, reason: 'request_timeout' }),
+        expect.objectContaining({ attemptedAt: failedAt, reason: 'request_timeout', context }),
       ]);
       // A remote communications failure is not evidence that device Wi-Fi disconnected.
       expect(afterFailure.connectivity).toBe('connected');
@@ -144,6 +150,7 @@ describe('firmware diagnostics', () => {
         path: '/api/v1/diagnostics',
       }));
       expect(afterRestart?.collectionFailures[0].reason).toBe('request_timeout');
+      expect(afterRestart?.collectionFailures[0].context).toEqual(context);
       expect(afterRestart?.lastSuccessfulContactAt).toBe(successAt);
     } finally {
       await recovered.onModuleDestroy();

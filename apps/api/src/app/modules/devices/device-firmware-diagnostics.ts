@@ -126,6 +126,23 @@ export interface FirmwareDiagnosticCollectionFailure {
   id: string;
   attemptedAt: string;
   reason: FirmwareDiagnosticFailureReason;
+  /** Local observer and selected endpoint context at failure time; legacy failures omit it. */
+  context?: FirmwareDiagnosticCollectionContext;
+}
+
+export interface FirmwareDiagnosticCollectionContext {
+  observer: {
+    id: string;
+    host: string;
+    platform: string;
+    localScopes: Array<{ interfaceName: string; cidr: string; address: string }>;
+  };
+  target: {
+    endpoint: string;
+    ipAddress: string;
+    networkScopeId: string;
+    networkScopeName: string;
+  };
 }
 
 /** Accept only the bounded V1 firmware contract and the expected physical identity. */
@@ -585,6 +602,7 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
     physicalId: string,
     reason: FirmwareDiagnosticFailureReason,
     attemptedAt = new Date().toISOString(),
+    context?: FirmwareDiagnosticCollectionContext,
   ): Promise<FirmwareDiagnosticsView> {
     if (!/^esp8266:[0-9a-f]{6}$/i.test(physicalId) || !scope.tenantId.trim() || !scope.siteId.trim() ||
         !Number.isFinite(Date.parse(attemptedAt))) {
@@ -599,6 +617,7 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
         : null;
       const failure: FirmwareDiagnosticCollectionFailure = {
         id: failureId(deviceId, attemptedAt, reason), attemptedAt, reason,
+        ...(context ? { context } : {}),
       };
       const failures = [...(previousView?.collectionFailures || []), failure].slice(-failureLimit);
       const view: StoredView = {

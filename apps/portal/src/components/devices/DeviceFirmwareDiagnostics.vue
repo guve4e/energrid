@@ -26,10 +26,18 @@ type FirmwareView = {
   lastSuccessfulContactAt: string | null;
   collectionStatus: 'success' | 'failed';
   snapshots?: unknown[];
-  collectionFailures: Array<{ id: string; attemptedAt: string; reason: string }>;
+  collectionFailures: Array<{
+    id: string;
+    attemptedAt: string;
+    reason: string;
+    context?: {
+      observer: { id: string; host: string; platform: string; localScopes: Array<{ interfaceName: string; cidr: string; address: string }> };
+      target: { endpoint: string; ipAddress: string; networkScopeId: string; networkScopeName: string };
+    };
+  }>;
   events: FirmwareEvent[];
   restartCount10m: number;
-  connectivity: 'connected' | 'disconnected';
+  connectivity: 'connected' | 'disconnected' | 'unknown';
 };
 
 const props = defineProps<{ deviceId: string; apiBase: string; accessToken: string }>();
@@ -66,6 +74,13 @@ function timestamp(value: string): string {
   return Number.isFinite(date.getTime()) ? new Intl.DateTimeFormat(undefined, {
     month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
   }).format(date) : 'Unknown time';
+}
+
+function observerEvidence(failure: FirmwareView['collectionFailures'][number]): string {
+  const context = failure.context;
+  if (!context) return 'Observer and target context were not recorded for this historical failure.';
+  const scopes = context.observer.localScopes.map(scope => `${scope.interfaceName} ${scope.cidr}`).join(', ') || 'local scope unavailable';
+  return `Observer ${context.observer.host} (${context.observer.platform}; ${scopes}) could not complete a collection request to ${context.target.endpoint} in ${context.target.networkScopeName || context.target.networkScopeId || 'unknown scope'}.`;
 }
 
 async function load() {
@@ -116,20 +131,24 @@ onBeforeUnmount(() => {
       </div>
     </div>
     <p v-if="error" class="firmware-diagnostics-error" role="alert">{{ error }}</p>
-    <p v-else-if="loading && !data" class="firmware-diagnostics-empty" role="status">Loading firmware diagnostics…</p>
-    <p v-else-if="!available && !loading" class="firmware-diagnostics-empty">
+    <p v-if="!error && data?.collectionStatus === 'failed' && data.current" class="firmware-diagnostics-note" role="status">
+      The latest collection failed from the Energrid observer. The last successful device snapshot is retained below; this collector failure does not establish that the ESP lost power or Wi-Fi.
+    </p>
+    <p v-if="!error && loading && !data" class="firmware-diagnostics-empty" role="status">Loading firmware diagnostics…</p>
+    <p v-if="!error && !available && !loading" class="firmware-diagnostics-empty">
       No diagnostic snapshot is available. This requires firmware with the read-only diagnostics endpoint; connectivity and measurement freshness are reported separately.
     </p>
-    <template v-else-if="data && !data.current">
+    <template v-if="!error && data && !data.current">
       <p class="firmware-diagnostics-note">No successful firmware snapshot has been collected yet. A failed HTTP attempt does not establish device power or Wi-Fi state.</p>
       <ul v-if="data.collectionFailures.length" class="firmware-diagnostics-events" aria-label="Recent collection failures">
         <li v-for="failure in [...data.collectionFailures].reverse().slice(0, 8)" :key="failure.id">
           <strong>Diagnostic collection failed · {{ failure.reason }}</strong>
+          <p>{{ observerEvidence(failure) }}</p>
           <time :datetime="failure.attemptedAt">{{ timestamp(failure.attemptedAt) }}</time>
         </li>
       </ul>
     </template>
-    <template v-else-if="data && data.current">
+    <template v-else-if="!error && data && data.current">
       <section class="firmware-diagnostics-section" aria-labelledby="firmware-health-heading">
         <div class="firmware-section-heading">
           <h5 id="firmware-health-heading">Device health</h5>
@@ -200,6 +219,7 @@ onBeforeUnmount(() => {
         <ul v-if="data.collectionFailures?.length" class="firmware-diagnostics-events" aria-label="Recent collection failures">
           <li v-for="failure in [...data.collectionFailures].reverse().slice(0, 8)" :key="failure.id">
             <strong>Diagnostic collection failed · {{ failure.reason }}</strong>
+            <p>{{ observerEvidence(failure) }}</p>
             <time :datetime="failure.attemptedAt">{{ timestamp(failure.attemptedAt) }}</time>
           </li>
         </ul>
