@@ -179,7 +179,8 @@ export function queryDeviceHealthEvidence(scope: DeviceHealthQueryScope,
     .filter(item => inRange(item.attemptedAt, fromMs, toMs));
   const deviceIds = new Set([...observations.map(item => item.deviceId), ...buckets.map(item => item.deviceId),
     ...events.map(item => item.deviceId), ...failures.map(item => item.deviceId),
-    ...(dataset.authorizedDevices || []).filter(item => scopeMatches(scope, item)).map(item => item.deviceId)]);
+    ...(dataset.authorizedDevices || []).filter(item => scopeMatches(scope, item) &&
+      (!request.deviceId || item.deviceId === request.deviceId)).map(item => item.deviceId)]);
   if (deviceIds.size > maxSiteDevices || observations.length + buckets.length + events.length + failures.length > maxEvidenceRows) {
     throw new Error('Device health query exceeds bounded result size');
   }

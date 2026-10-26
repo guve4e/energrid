@@ -45,6 +45,18 @@ describe('Core device health query', () => {
     expect(device.missingSampleCount).toBe(1);
   });
 
+  it('limits authorized-device analysis to the requested device while preserving site-wide queries', () => {
+    const authorizedDevices = [
+      { tenantId: scope.tenantId, siteId: scope.siteId, deviceId: 'device-a', physicalDeviceId: 'esp8266:324864' },
+      { tenantId: scope.tenantId, siteId: scope.siteId, deviceId: 'device-b', physicalDeviceId: 'esp8266:324b44' },
+    ];
+    const selected = queryDeviceHealthEvidence(scope, { ...request, deviceId: 'device-a' },
+      { ...dataset, authorizedDevices });
+    expect(selected.devices.map(device => device.deviceId)).toEqual(['device-a']);
+    const site = queryDeviceHealthEvidence(scope, request, { ...dataset, authorizedDevices });
+    expect(site.devices.map(device => device.deviceId)).toEqual(['device-a', 'device-b']);
+  });
+
   it('correlates failures with a later observed recovery and exposes boot transitions with provenance', () => {
     const result = queryDeviceHealthEvidence(scope, request, dataset);
     expect(result.devices[0].failures[0]).toMatchObject({ recoveryObservedAt: '2026-10-25T20:03:00.000Z', recoveryObservedAfterMs: 60_000 });

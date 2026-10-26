@@ -131,3 +131,52 @@ explicitly `null` rather than estimated.
 
 This V1 endpoint exposes stored history only. It does not collect diagnostics, infer
 device availability, or change enrollment or device state.
+
+## Portal Device Health V1
+
+The approved device detail view presents a simple homeowner summary and an optional
+installer view. The summary separates the latest successful diagnostic contact,
+device-reported Wi-Fi state at the last snapshot, and the latest Energrid observer
+request. A failed observer request preserves the previous device snapshot and is not
+shown as proof that the device lost power or Wi-Fi. Communication failure counts and
+coverage are read from the Core query response.
+
+The installer view requests the same authenticated, site-authorized history endpoint
+for four ranges: one hour uses raw samples, 24 hours and seven days use hourly
+summaries, and 30 days uses daily summaries. UTC-aligned ranges are sent to Core; the
+browser's timezone is supplied only for presentation. The UI consumes Core's metric
+availability and min/max/average/count statistics rather than calculating a second
+set of historical statistics. Summary charts plot the latest observation in each
+bucket, show the bucket's min/max range, and split lines across missing intervals.
+Reported events and collection failures are marked separately. Hover details retain
+the point timestamp, unit and source. Counter histories remain grouped by boot session
+and are never averaged across sessions.
+
+Event details distinguish server detection time from inferred boot time. A legacy
+event with no timestamp provenance is labelled as unknown. An uptime-derived boot
+estimate is explicitly presented as an estimate, not the physical reboot time.
+Unavailable metrics distinguish no sample in the selected range from unsupported
+metrics when the Core response reports that status.
+
+The current API authorization and collection adapter are intentionally narrower than
+the presentation: `GET /portal/device-health/history` currently admits approved
+Energrid ESP8266 diagnostic devices, and the scheduled firmware diagnostics collector
+is the implementation that populates these metric names. The Portal renders the
+returned metric vocabulary and semantics rather than selecting charts by model name;
+other device families need their own authorized diagnostic evidence contract before
+their metrics can appear here.
+
+## Assistant integration boundary
+
+The existing scoped assistant tool boundary is `LettaHouseAgentAdapter.deviceTools`
+in `apps/api/src/app/modules/llm/letta-house-agent.adapter.ts`. It currently exposes
+device descriptions, live observations and room measurements, but does not expose
+`DeviceHealthQueryService` or historical diagnostic evidence. No assistant health
+analysis is implemented by this UI milestone.
+
+A future read-only assistant tool should accept a device identifier and bounded time
+range, resolve tenant/site from the authenticated server-side assistant scope, verify
+the device is approved for that scope, and call the same Core query service used by
+the Portal. Its result should include units, evidence sources, coverage, timestamp
+bases, missing data and uncertainty. It must not read LevelDB directly or grant
+collection, enrollment, or control authority.
