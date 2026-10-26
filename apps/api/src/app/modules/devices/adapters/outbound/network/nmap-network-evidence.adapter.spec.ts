@@ -116,6 +116,12 @@ describe('Nmap XML evidence adapter', () => {
 
     expect(result.capability).toEqual({ available: true, version: '7.95' });
     expect(result.scopes).toEqual([expect.objectContaining({ scopeId: 'eero', complete: true, targetCount: 1 })]);
+    expect(result.scopes[0].hostDiscovery).toMatchObject({
+      startedAt: '2026-10-21T00:00:00.000Z', completedAt: '2026-10-21T00:00:00.000Z',
+    });
+    expect(result.scopes[0].serviceEnrichment).toMatchObject({
+      startedAt: '2026-10-21T00:00:00.000Z', completedAt: '2026-10-21T00:00:00.000Z',
+    });
     expect(result.hosts).toHaveLength(1);
     expect(calls[0]).toMatchObject({ command: 'nmap', args: ['--version'] });
     expect(calls[1].args).toContain('-sn');
@@ -258,6 +264,32 @@ describe('Nmap XML evidence adapter', () => {
     expect(result.cancelled).toBe(true);
     expect(result.scopes[0].complete).toBe(false);
     expect(result.failures).toContain('Nmap scan was cancelled by the operator.');
+  });
+
+  it('passes cancellation to route-interface inspection before starting a scan', async () => {
+    const controller = new AbortController();
+    const resolveRoute = jest.fn(async (_target: string, signal?: AbortSignal) => {
+      expect(signal).toBe(controller.signal);
+      controller.abort();
+      return {};
+    });
+    const adapter = new NmapNetworkEvidenceAdapter(
+      async (_command, args) => args[0] === '--version'
+        ? { stdout: 'Nmap version 7.95', stderr: '' }
+        : { stdout: '<nmaprun><runstats><finished exit="success"/><hosts up="0" down="1" total="1"/></runstats></nmaprun>', stderr: '' },
+      () => ({}),
+      () => new Date('2026-10-21T00:00:00.000Z'),
+      resolveRoute,
+    );
+
+    const result = await adapter.scan([{ ...scope, cidr: '192.168.7.21/32', interfaceName: undefined }], {
+      enabled: true,
+      signal: controller.signal,
+    });
+
+    expect(resolveRoute).toHaveBeenCalledTimes(1);
+    expect(result.cancelled).toBe(true);
+    expect(result.scopes[0].complete).toBe(false);
   });
 
   it('records a process timeout as incomplete coverage rather than absence', async () => {

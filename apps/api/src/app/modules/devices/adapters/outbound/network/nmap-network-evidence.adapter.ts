@@ -60,13 +60,15 @@ export interface NmapStageCoverage {
   complete: boolean;
   targetCount: number;
   hostsReported: number;
+  startedAt?: string;
+  completedAt?: string;
   failure?: string;
 }
 
 export interface RouteInterfaceEvidence {
   interfaceName?: string;
 }
-export type RouteInterfaceResolver = (target: string) => Promise<RouteInterfaceEvidence>;
+export type RouteInterfaceResolver = (target: string, signal?: AbortSignal) => Promise<RouteInterfaceEvidence>;
 
 export interface NmapScanResult {
   capability: NmapCapability;
@@ -225,9 +227,14 @@ export class NmapNetworkEvidenceAdapter {
 
       const targetInfo = plan;
       const interfaceInfo = localInterfaceForScope(scope, this.readInterfaces());
-      const routeInfo = interfaceInfo ? {} : await this.resolveRoute(targetInfo.targets[0]);
+      const routeInfo = interfaceInfo ? {} : await this.resolveRoute(targetInfo.targets[0], options.signal);
+      if (options.signal?.aborted) {
+        result.cancelled = true;
+        break;
+      }
       const observingInterface = interfaceInfo?.name || routeInfo.interfaceName;
       const discoveredAt = this.now().toISOString();
+      const hostDiscoveryStarted = this.now();
       const hostDiscoveryStartedAt = Date.now();
       const hostDiscoveryTargets = targetInfo.targets;
       const discoveredHosts: NmapHostEvidence[] = [];
@@ -258,6 +265,7 @@ export class NmapNetworkEvidenceAdapter {
         hostDiscovery = {
           durationMs: elapsedMs(hostDiscoveryStartedAt), complete,
           targetCount: hostDiscoveryTargets.length, hostsReported: parsed.hosts.length,
+          startedAt: hostDiscoveryStarted.toISOString(), completedAt: this.now().toISOString(),
           ...(!complete ? { failure: 'Nmap host discovery did not report successful results for every selected address.' } : {}),
         };
       } catch (error) {
@@ -267,6 +275,7 @@ export class NmapNetworkEvidenceAdapter {
         hostDiscovery = {
           durationMs: elapsedMs(hostDiscoveryStartedAt), complete: false,
           targetCount: hostDiscoveryTargets.length, hostsReported: 0, failure,
+          startedAt: hostDiscoveryStarted.toISOString(), completedAt: this.now().toISOString(),
         };
       }
 
@@ -280,6 +289,7 @@ export class NmapNetworkEvidenceAdapter {
       };
       const enrichedHosts: NmapHostEvidence[] = [];
       if (serviceTargets.length && !options.signal?.aborted) {
+        const serviceStarted = this.now();
         const serviceStartedAt = Date.now();
         if (!result.methods.includes('nmap_tcp_connect_service_scan')) result.methods.push('nmap_tcp_connect_service_scan');
         try {
@@ -306,6 +316,7 @@ export class NmapNetworkEvidenceAdapter {
           serviceEnrichment = {
             durationMs: elapsedMs(serviceStartedAt), complete,
             targetCount: serviceTargets.length, hostsReported: parsed.hosts.length,
+            startedAt: serviceStarted.toISOString(), completedAt: this.now().toISOString(),
             ...(!complete ? { failure: 'Nmap service enrichment did not report successful results for every selected host.' } : {}),
           };
         } catch (error) {
@@ -325,6 +336,7 @@ export class NmapNetworkEvidenceAdapter {
           serviceEnrichment = {
             durationMs: elapsedMs(serviceStartedAt), complete: false,
             targetCount: serviceTargets.length, hostsReported: partial.length, failure,
+            startedAt: serviceStarted.toISOString(), completedAt: this.now().toISOString(),
           };
         }
       } else if (options.signal?.aborted) {
@@ -566,13 +578,13 @@ function localInterfaceForScope(
   return match ? { name: match[0] } : undefined;
 }
 
-async function defaultRouteInterface(target: string): Promise<RouteInterfaceEvidence> {
+async function defaultRouteInterface(target: string, signal?: AbortSignal): Promise<RouteInterfaceEvidence> {
   const platform = process.platform;
   const command = platform === 'darwin' ? 'route' : platform === 'linux' ? 'ip' : undefined;
   if (!command) return {};
   const args = platform === 'darwin' ? ['-n', 'get', target] : ['-j', 'route', 'get', target];
   try {
-    const result = await defaultRunner(command, args, { timeout: 2_000, maxBuffer: 16 * 1024 });
+    const result = await defaultRunner(command, args, { timeout: 2_000, maxBuffer: 16 * 1024, ...(signal ? { signal } : {}) });
     const interfaceName = platform === 'darwin'
       ? /^\s*interface:\s*(\S+)/m.exec(result.stdout)?.[1]
       : (JSON.parse(result.stdout) as Array<{ dev?: string }>)[0]?.dev;

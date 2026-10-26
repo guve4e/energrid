@@ -19,6 +19,14 @@
         }
       }
     },
+    "build-site-local-observer": {
+      "cache": false,
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "webpack-cli build --config site-local-observer.webpack.config.js && node scripts/package-site-local-observer.js",
+        "cwd": "apps/api"
+      }
+    },
     "prune-lockfile": {
       "dependsOn": ["build"],
       "cache": true,

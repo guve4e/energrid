@@ -20,6 +20,7 @@ import { DeviceInstallationStore } from './device-installation.store'
 import { DeviceFirmwareDiagnosticsService } from './device-firmware-diagnostics'
 import { DeviceHealthAssistantQueryService } from './device-health-assistant-query.service'
 import { DeviceDiscoveryMemoryStore } from './device-discovery-memory.store'
+import { DEVICE_DISCOVERY_MEMORY_STORE, DEVICE_REGISTRY_SERVICE } from './device-runtime.tokens'
 import { TelemetryModule } from '../telemetry/telemetry.module'
 import { ApprovedMqttObservationRuntime } from './mqtt/approved-mqtt-observation.runtime'
 import { MqttEvidenceCaptureService } from './mqtt/mqtt-evidence-capture.service'
@@ -34,6 +35,7 @@ import { EnergridHttpIdentityAdapter } from './adapters/outbound/network/energri
   imports: [TelemetryModule, DeviceEnrollmentModule],
   providers: [
     DeviceRegistryService,
+    { provide: DEVICE_REGISTRY_SERVICE, useExisting: DeviceRegistryService },
     ApprovedMqttObservationRuntime,
     DeviceMqttIngestService,
     MqttEvidenceCaptureService,
@@ -46,6 +48,7 @@ import { EnergridHttpIdentityAdapter } from './adapters/outbound/network/energri
     { provide: LocalNetworkRuntimeAdapter, useFactory: () => new LocalNetworkRuntimeAdapter() },
     DeviceLanDiscoveryService,
     DeviceDiscoveryMemoryStore,
+    { provide: DEVICE_DISCOVERY_MEMORY_STORE, useExisting: DeviceDiscoveryMemoryStore },
     DeviceControlService,
     DeviceAssistantLightingService,
     DeviceDiagnosticsService,
@@ -63,11 +66,13 @@ import { EnergridHttpIdentityAdapter } from './adapters/outbound/network/energri
   exports: [
     AuthorizedDeviceObservationReader,
     DeviceRegistryService,
+    DEVICE_REGISTRY_SERVICE,
     ApprovedMqttObservationRuntime,
     DeviceMqttIngestService,
     MqttEvidenceCaptureService,
     DeviceLanDiscoveryService,
     DeviceDiscoveryMemoryStore,
+    DEVICE_DISCOVERY_MEMORY_STORE,
     DeviceControlService,
     DeviceAssistantLightingService,
     DeviceDiagnosticsService,

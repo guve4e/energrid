@@ -1,10 +1,10 @@
 import { BadRequestException, Inject, Injectable, Logger, Optional } from '@nestjs/common'
 import {
   dedupeNetworkEndpoints,
-  DeviceDiscoveryMemoryStore,
   normalizeNetworkHostname,
-  type DiscoveryOwnership,
-} from './device-discovery-memory.store'
+} from './network-discovery-evidence-utils'
+import type { DeviceDiscoveryMemoryStore, DiscoveryOwnership } from './device-discovery-memory.store'
+import { DEVICE_DISCOVERY_MEMORY_STORE, DEVICE_REGISTRY_SERVICE } from './device-runtime.tokens'
 import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { hostname as localHostname, networkInterfaces } from 'node:os'
@@ -17,10 +17,8 @@ import type {
   NetworkDiscoveredDevice,
   NetworkDiscoveryZone,
 } from './device-registry.types'
-import { DeviceRegistryService } from './device-registry.service'
-import {
-  PHYSICAL_DEVICE_INVENTORY_SERVICE,
-} from './enrollment/device-enrollment.module'
+import type { DeviceRegistryService } from './device-registry.service'
+import { PHYSICAL_DEVICE_INVENTORY_SERVICE } from './enrollment/physical-device-inventory.token'
 import type { PhysicalDeviceInventoryService } from './enrollment/physical-device-inventory.service'
 import type { PhysicalLanObservation } from './enrollment/physical-device-inventory.repository'
 import { shellyLanCandidates } from './adapters/inbound/shelly/shelly-lan-candidates'
@@ -64,6 +62,17 @@ export type NetworkCandidate = {
   observations?: NetworkDiscoveredDevice['observations']
 }
 
+/** Explicit collection controls for isolated observer callers. Defaults preserve API scan behavior. */
+export interface DeviceLanEvidenceCollectionOptions {
+  nmapEnabled?: boolean
+  maxHosts?: number
+  timeoutMs?: number
+  allowActiveScanFallback?: boolean
+  includeNeighborTable?: boolean
+  includeRouterClientSources?: boolean
+  includeConfiguredSeedTargets?: boolean
+}
+
 @Injectable()
 export class DeviceLanNetworkEvidenceCollector {
   constructor(
@@ -72,29 +81,42 @@ export class DeviceLanNetworkEvidenceCollector {
     @Optional() private readonly energridIdentityAdapter: EnergridHttpIdentityAdapter = new EnergridHttpIdentityAdapter(),
   ) {}
 
-  async getNmapCapability(): Promise<NmapCapability & { enabled: boolean }> {
-    const capability = await (this.nmapAdapter || new NmapNetworkEvidenceAdapter()).getCapability()
-    return { ...capability, enabled: process.env.HOME_NMAP_ENABLED === 'true' }
+  async getNmapCapability(
+    nmapEnabled = process.env.HOME_NMAP_ENABLED === 'true',
+    signal?: AbortSignal,
+  ): Promise<NmapCapability & { enabled: boolean }> {
+    const capability = await (this.nmapAdapter || new NmapNetworkEvidenceAdapter()).getCapability(signal)
+    return { ...capability, enabled: nmapEnabled }
   }
 
-  async collectEvidence(zones: NetworkDiscoveryZone[], signal?: AbortSignal): Promise<{
+  async collectEvidence(
+    zones: NetworkDiscoveryZone[],
+    signal?: AbortSignal,
+    options: DeviceLanEvidenceCollectionOptions = {},
+  ): Promise<{
     candidates: NetworkCandidate[]
     nmap: NmapScanResult
     runtime?: LocalNetworkRuntimeReport
   }> {
-    const nmapEnabled = process.env.HOME_NMAP_ENABLED === 'true'
+    const nmapEnabled = options.nmapEnabled ?? process.env.HOME_NMAP_ENABLED === 'true'
     const nmapAdapter = this.nmapAdapter || new NmapNetworkEvidenceAdapter()
     const runtimePromise = this.runtimeAdapter?.inspect(zones)
     const nmap = await nmapAdapter.scan(zones, {
       enabled: nmapEnabled,
-      maxHosts: Number(process.env.HOME_NMAP_MAX_HOSTS) || 254,
-      timeoutMs: Number(process.env.HOME_NMAP_TIMEOUT_MS) || 120_000,
+      maxHosts: options.maxHosts ?? (Number(process.env.HOME_NMAP_MAX_HOSTS) || 254),
+      timeoutMs: options.timeoutMs ?? (Number(process.env.HOME_NMAP_TIMEOUT_MS) || 120_000),
       signal,
     })
     const nmapHostDiscoveryUsed = nmapEnabled && nmap.capability.available
-    const reachableDevices = nmapHostDiscoveryUsed ? [] : await activeScanZones(zones)
-    const tcpDevices = nmapHostDiscoveryUsed ? [] : await tcpDiscoverZones(zones, reachableDevices)
-    const [arpDevices, routerClients] = await Promise.all([readNeighborTable(), readRouterClientCandidates()])
+    const allowActiveScanFallback = options.allowActiveScanFallback ?? true
+    const reachableDevices = nmapHostDiscoveryUsed || !allowActiveScanFallback ? [] : await activeScanZones(zones)
+    const tcpDevices = nmapHostDiscoveryUsed || !allowActiveScanFallback ? [] : await tcpDiscoverZones(zones, reachableDevices)
+    const [arpDevices, routerClients] = await Promise.all([
+      options.includeNeighborTable === false
+        ? Promise.resolve([])
+        : readNeighborTable(options.includeConfiguredSeedTargets ?? true),
+      options.includeRouterClientSources === false ? Promise.resolve([]) : readRouterClientCandidates(),
+    ])
     const runtime = await runtimePromise
     if (runtime) {
       runtime.capabilities.push({
@@ -106,8 +128,8 @@ export class DeviceLanNetworkEvidenceCollector {
       })
       runtime.capabilities.push({
         id: 'active_probing',
-        available: process.env.HOME_LAN_ACTIVE_SCAN_ENABLED !== 'false',
-        detail: process.env.HOME_LAN_ACTIVE_SCAN_ENABLED === 'false' ? 'Active ICMP/TCP subnet probes are disabled.' : 'Bounded active probes are available and require explicit operator approval.',
+        available: allowActiveScanFallback && process.env.HOME_LAN_ACTIVE_SCAN_ENABLED !== 'false',
+        detail: !allowActiveScanFallback || process.env.HOME_LAN_ACTIVE_SCAN_ENABLED === 'false' ? 'Active ICMP/TCP subnet probes are disabled.' : 'Bounded active probes are available and require explicit operator approval.',
       })
     }
     const stamp = (candidates: NetworkCandidate[], source: string) => candidates.map(candidate => ({
@@ -187,7 +209,9 @@ export class DeviceLanDiscoveryService {
   private lastZones: NetworkDiscoveryZone[] = []
 
   constructor(
+    @Inject(DEVICE_DISCOVERY_MEMORY_STORE)
     private readonly discoveryMemory: DeviceDiscoveryMemoryStore,
+    @Inject(DEVICE_REGISTRY_SERVICE)
     private readonly registry: DeviceRegistryService,
     private readonly evidenceCollector: DeviceLanNetworkEvidenceCollector,
     @Optional()
@@ -494,7 +518,7 @@ export function parseRouterClientsJson(value: string | undefined): NetworkCandid
   }
 }
 
-async function readNeighborTable(): Promise<Array<{
+async function readNeighborTable(includeConfiguredSeeds = true): Promise<Array<{
   ipAddress: string
   macAddress?: string
   hostname?: string
@@ -509,7 +533,7 @@ async function readNeighborTable(): Promise<Array<{
       const { stdout } = await execFileAsync(command, args, { timeout: 10000 })
       const devices = [
         ...parseArpOutput(stdout),
-        ...configuredSeedHosts(),
+        ...(includeConfiguredSeeds ? configuredSeedHosts() : []),
       ]
       if (devices.length > 0) return devices
     } catch {
@@ -517,7 +541,7 @@ async function readNeighborTable(): Promise<Array<{
     }
   }
 
-  return configuredSeedHosts()
+  return includeConfiguredSeeds ? configuredSeedHosts() : []
 }
 
 async function readRouterClientCandidates(): Promise<NetworkCandidate[]> {

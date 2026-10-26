@@ -5,12 +5,13 @@ import { DeviceEnrollmentService } from './device-enrollment.service';
 import { PostgresDeviceEnrollmentRepository } from './postgres-device-enrollment.repository';
 import { PhysicalDeviceInventoryService } from './physical-device-inventory.service';
 import { PostgresPhysicalDeviceInventoryRepository } from './postgres-physical-device-inventory.repository';
+import { PHYSICAL_DEVICE_INVENTORY_SERVICE } from './physical-device-inventory.token';
+
+export { PHYSICAL_DEVICE_INVENTORY_SERVICE } from './physical-device-inventory.token';
 
 export const DEVICE_ENROLLMENT_SERVICE = Symbol(
   'DEVICE_ENROLLMENT_SERVICE',
 );
-export const PHYSICAL_DEVICE_INVENTORY_SERVICE = Symbol('PHYSICAL_DEVICE_INVENTORY_SERVICE');
-
 const ENROLLMENT_POOL = Symbol('ENROLLMENT_POOL');
 
 function createEnrollmentPool(): Pool {
