@@ -68,10 +68,42 @@ export interface FirmwareDiagnosticsView {
   tenantId: string;
   siteId: string;
   sampledAt: string;
-  current: FirmwareDiagnosticSample;
+  current: FirmwareDiagnosticSample | null;
+  snapshots: FirmwareDiagnosticSnapshot[];
+  lastAttemptAt: string;
+  lastSuccessfulContactAt: string | null;
+  collectionStatus: 'success' | 'failed';
+  collectionFailures: FirmwareDiagnosticCollectionFailure[];
   events: FirmwareHealthEvent[];
   restartCount10m: number;
-  connectivity: 'connected' | 'disconnected';
+  connectivity: 'connected' | 'disconnected' | 'unknown';
+}
+
+export interface FirmwareDiagnosticSnapshot {
+  collectedAt: string;
+  /** Current firmware has no wall-clock sample timestamp; do not infer one from uptime. */
+  deviceObservedAt: null;
+  protocol: 'http';
+  method: 'GET';
+  path: '/api/v1/diagnostics';
+  identityVerifiedAt: string;
+  sample: FirmwareDiagnosticSample;
+}
+
+export type FirmwareDiagnosticFailureReason =
+  | 'request_timeout'
+  | 'identity_mismatch'
+  | 'identity_request_failed'
+  | 'endpoint_unverified'
+  | 'scope_rejected'
+  | 'diagnostics_http_error'
+  | 'response_invalid'
+  | 'collector_error';
+
+export interface FirmwareDiagnosticCollectionFailure {
+  id: string;
+  attemptedAt: string;
+  reason: FirmwareDiagnosticFailureReason;
 }
 
 /** Accept only the bounded V1 firmware contract and the expected physical identity. */
@@ -144,6 +176,8 @@ interface StoredView extends FirmwareDiagnosticsView {
 export const FIRMWARE_DIAGNOSTICS_STORE_DIRECTORY = Symbol('FIRMWARE_DIAGNOSTICS_STORE_DIRECTORY');
 
 const eventLimit = 100;
+const snapshotLimit = 1_440;
+const failureLimit = 1_440;
 const restartWindowMs = 10 * 60_000;
 
 function diagnosticsKey(scope: FirmwareDiagnosticScope, deviceId: string): string {
@@ -155,6 +189,10 @@ function diagnosticsKey(scope: FirmwareDiagnosticScope, deviceId: string): strin
 
 function eventId(kind: FirmwareHealthEventKind, bootSessionId: string): string {
   return createHash('sha256').update(`${kind}\0${bootSessionId}`).digest('hex').slice(0, 24);
+}
+
+function failureId(deviceId: string, attemptedAt: string, reason: FirmwareDiagnosticFailureReason): string {
+  return createHash('sha256').update(`${deviceId}\0${attemptedAt}\0${reason}`).digest('hex').slice(0, 24);
 }
 
 function event(
@@ -185,8 +223,9 @@ export function deriveFirmwareHealthEvents(
   const created: FirmwareHealthEvent[] = [];
   const reset = current.reset.reasonCode;
 
-  const sessionChanged = previous && previous.current.bootSessionId !== current.bootSessionId;
-  const uptimeReset = previous && current.uptimeMs < previous.current.uptimeMs;
+  const priorSample = previous?.current || null;
+  const sessionChanged = priorSample && priorSample.bootSessionId !== current.bootSessionId;
+  const uptimeReset = priorSample && current.uptimeMs < priorSample.uptimeMs;
   if (sessionChanged || uptimeReset) {
     created.push(event('reboot-detected', current, observedAt,
       'A new firmware boot session was detected.',
@@ -293,9 +332,64 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
         siteId: scope.siteId,
         sampledAt: observedAt,
         current: sample,
+        snapshots: [...(previousView?.snapshots || []), {
+          collectedAt: observedAt,
+          deviceObservedAt: null,
+          protocol: 'http' as const,
+          method: 'GET' as const,
+          path: '/api/v1/diagnostics' as const,
+          identityVerifiedAt: observedAt,
+          sample,
+        }].slice(-snapshotLimit),
+        lastAttemptAt: observedAt,
+        lastSuccessfulContactAt: observedAt,
+        collectionStatus: 'success',
+        collectionFailures: previousView?.collectionFailures || [],
         events,
         restartCount10m,
         connectivity: sample.wifi.connected ? 'connected' : 'disconnected',
+      };
+      await this.db.put(key, view);
+      return stripSchema(view);
+    });
+  }
+
+  async recordFailure(
+    scope: FirmwareDiagnosticScope,
+    deviceId: string,
+    physicalId: string,
+    reason: FirmwareDiagnosticFailureReason,
+    attemptedAt = new Date().toISOString(),
+  ): Promise<FirmwareDiagnosticsView> {
+    if (!/^esp8266:[0-9a-f]{6}$/i.test(physicalId) || !scope.tenantId.trim() || !scope.siteId.trim() ||
+        !Number.isFinite(Date.parse(attemptedAt))) {
+      throw new Error('Invalid firmware diagnostics collection failure');
+    }
+    return this.serialize(async () => {
+      await this.open();
+      const key = diagnosticsKey(scope, deviceId);
+      const previous = await this.getValue(key);
+      const previousView = previous && previous.tenantId === scope.tenantId && previous.siteId === scope.siteId && previous.deviceId === deviceId
+        ? previous
+        : null;
+      const failure: FirmwareDiagnosticCollectionFailure = {
+        id: failureId(deviceId, attemptedAt, reason), attemptedAt, reason,
+      };
+      const view: StoredView = {
+        schemaVersion: 1,
+        deviceId,
+        tenantId: scope.tenantId,
+        siteId: scope.siteId,
+        sampledAt: previousView?.sampledAt || '',
+        current: previousView?.current || null,
+        snapshots: previousView?.snapshots || [],
+        lastAttemptAt: attemptedAt,
+        lastSuccessfulContactAt: previousView?.lastSuccessfulContactAt || null,
+        collectionStatus: 'failed',
+        collectionFailures: [...(previousView?.collectionFailures || []), failure].slice(-failureLimit),
+        events: previousView?.events || [],
+        restartCount10m: previousView?.restartCount10m || 0,
+        connectivity: previousView?.connectivity || 'unknown',
       };
       await this.db.put(key, view);
       return stripSchema(view);
@@ -314,8 +408,26 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
   private async getValue(key: string): Promise<StoredView | null> {
     try {
       const value: unknown = await this.db.get(key);
-      return value && typeof value === 'object' && (value as StoredView).schemaVersion === 1
-        ? value as StoredView : null;
+      if (!value || typeof value !== 'object' || (value as StoredView).schemaVersion !== 1) return null;
+      const stored = value as StoredView;
+      // Preserve pre-history records when an older V1 store is opened.
+      return {
+        ...stored,
+        snapshots: stored.snapshots || (stored.current ? [{
+          collectedAt: stored.sampledAt,
+          deviceObservedAt: null,
+          protocol: 'http' as const,
+          method: 'GET' as const,
+          path: '/api/v1/diagnostics' as const,
+          identityVerifiedAt: stored.sampledAt,
+          sample: stored.current,
+        }] : []),
+        lastAttemptAt: stored.lastAttemptAt || stored.sampledAt || '',
+        lastSuccessfulContactAt: stored.lastSuccessfulContactAt || stored.sampledAt || null,
+        collectionStatus: stored.collectionStatus || 'success',
+        collectionFailures: stored.collectionFailures || [],
+        connectivity: stored.connectivity || 'unknown',
+      };
     } catch (error) {
       if (error && typeof error === 'object' && 'code' in error && error.code === 'LEVEL_NOT_FOUND') return null;
       throw error;

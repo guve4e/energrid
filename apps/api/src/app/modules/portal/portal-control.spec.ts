@@ -32,6 +32,7 @@ describe('portal control configuration authorization', () => {
     const setEnrollmentStatus = jest.fn();
     const getState = jest.fn().mockReturnValue({ site: { id: 'site-home' } });
     const listIdentityEvidence = jest.fn().mockResolvedValue([]);
+    const portalSites = { list: jest.fn().mockResolvedValue([]) };
     return {
       configure,
       execute,
@@ -61,6 +62,16 @@ describe('portal control configuration authorization', () => {
         {} as never,
         { listIdentityEvidence } as never,
         enrollment,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        portalSites as never,
       ),
     };
   }
@@ -123,7 +134,7 @@ describe('portal control configuration authorization', () => {
     await expect(controller.getState({ method: 'GET', url: '/?token=unit-only', headers: {} })).rejects.toThrow(UnauthorizedException);
     expect(getState).not.toHaveBeenCalled();
     await expect(controller.getState({ method: 'GET', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 } }))
-      .resolves.toEqual({ site: { id: 'site-home' }, devices: [], pendingDeviceIdentities: {} });
+      .resolves.toEqual({ site: { id: 'site-home' }, devices: [], pendingDeviceIdentities: {}, sites: [] });
   });
 
   it('rebuilds the physical Energrid pending candidate from persisted discovery memory after API restart', async () => {
@@ -164,6 +175,8 @@ describe('portal control configuration authorization', () => {
         { listIdentityEvidence: jest.fn(async (owner: { tenantId: string; siteId: string }) =>
           owner.tenantId === record.ownership.tenantId && owner.siteId === record.ownership.siteId ? [record] : [],
         ) } as never,
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        { list: jest.fn().mockResolvedValue([]) } as never,
       );
       return { controller, registry };
     };
@@ -216,6 +229,8 @@ describe('portal control configuration authorization', () => {
       {} as never, {} as never, {} as never, {} as never,
       { listIdentityEvidence: jest.fn().mockResolvedValue([]) } as never,
       undefined, undefined, { list: inventoryList } as never,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      { list: jest.fn().mockResolvedValue([]) } as never,
     );
 
     const result = await controller.getState({

@@ -184,6 +184,7 @@ describe('HomeAutomationService', () => {
           origin: 'shelly',
           physicalId: 'shellyplus1-bathroom',
           channel: 0,
+          capabilities: ['switch'],
           groups: ['bath.lights'],
           aliases: ['bathroom lights', 'лампи в банята'],
         },

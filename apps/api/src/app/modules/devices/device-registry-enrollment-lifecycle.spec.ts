@@ -19,7 +19,7 @@ describe('DeviceRegistryService enrollment lifecycle projection', () => {
       updatedAt: '2026-10-20T06:00:00.000Z',
     } as any;
     const installationStore = {
-      list: jest.fn().mockResolvedValue([record]),
+      listAll: jest.fn().mockResolvedValue([record]),
     } as unknown as DeviceInstallationStore;
     const enrollment = {
       list: jest.fn().mockResolvedValue([{ deviceId: 'temp-kitchen', status: 'retired' }]),
@@ -53,7 +53,7 @@ describe('DeviceRegistryService enrollment lifecycle projection', () => {
       capabilities: [{ kind: 'temperature', actions: ['read'] }], state: { values: {} }, metadata: {},
     };
     const registry = new DeviceRegistryService(undefined, {
-      list: jest.fn().mockResolvedValue([{
+      listAll: jest.fn().mockResolvedValue([{
         schemaVersion: 1, device,
         physicalOutcome: { status: 'not_confirmed', confirmedAt: null, confirmedBy: null },
         updatedAt: '2026-10-20T06:00:00.000Z',

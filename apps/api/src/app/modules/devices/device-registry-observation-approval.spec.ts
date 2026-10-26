@@ -16,7 +16,10 @@ function registry(observationAuthority?: unknown) {
   const instance = Object.assign(Object.create(DeviceRegistryService.prototype), {
     ensureInstallationsLoaded: jest.fn(async () => undefined),
     getDevices: jest.fn(() => [device]),
-    persistedInstallations: new Map([[deviceId, record]]),
+    persistedInstallations: new Map([[
+      `${encodeURIComponent(tenantId)}:${encodeURIComponent(siteId)}:${encodeURIComponent(deviceId)}`,
+      record,
+    ]]),
     installationStore,
     enrollment,
   }) as DeviceRegistryService;

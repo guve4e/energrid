@@ -142,13 +142,31 @@ describe('explicit device control UI', () => {
       (page.get('input[type="url"]').element as HTMLInputElement).value,
     ).toBe('http://192.168.7.99');
   });
+  it('labels an HTTP route as unverified until its read-only identity check passes', () => {
+    const http = {
+      ...device,
+      control: {
+        status: 'ready' as const,
+        reason: 'Explicit control route configured.',
+        binding: {
+          kind: 'shelly-http' as const,
+          enabled: true,
+          physicalId,
+          channel: 1,
+          baseUrl: 'http://192.168.7.21',
+        },
+      },
+    };
+    const { page } = render(http);
+    expect(page.text()).toContain('Route configured · identity not verified');
+  });
   it('requests address discovery explicitly and uses the result only in the unsaved draft', async () => {
     const { page, fetch } = render();
     await page.get('select').setValue('http');
     await page.get('input[type="url"]').setValue('http://192.168.7.99');
     await page
       .findAll('button')
-      .find((b) => b.text() === 'Find address')!
+      .find((b) => b.text() === 'Refresh network evidence')!
       .trigger('click');
     expect(page.emitted('find-address')).toHaveLength(1);
     await page.setProps({ findingAddress: true });
@@ -174,7 +192,7 @@ describe('explicit device control UI', () => {
     expect(page.text()).toContain('No local address is known');
     await page
       .findAll('button')
-      .find((b) => b.text() === 'Find address')!
+      .find((b) => b.text() === 'Refresh network evidence')!
       .trigger('click');
     await page.setProps({ findingAddress: true });
     await page.setProps({ findingAddress: false });
@@ -199,7 +217,7 @@ describe('explicit device control UI', () => {
     await page.get('select').setValue('http');
     await page
       .findAll('button')
-      .find((b) => b.text() === 'Find address')!
+      .find((b) => b.text() === 'Refresh network evidence')!
       .trigger('click');
     await page.setProps({ findingAddress: true });
     const nextPhysicalId = 'shellyplus1-aabbccddeeff';
@@ -242,7 +260,7 @@ describe('explicit device control UI', () => {
     const { page, fetch } = render(configured);
     await page
       .findAll('button')
-      .find((b) => b.text() === 'Find address')!
+      .find((b) => b.text() === 'Refresh network evidence')!
       .trigger('click');
     await page.setProps({ findingAddress: true });
     await page.setProps({
@@ -338,7 +356,7 @@ describe('explicit device control UI', () => {
     expect(page.text()).toContain('ReadingsMQTT');
     expect(page.text()).toContain('Control not configured');
     expect(page.text()).toContain('Relay channel1');
-    expect(page.text()).toContain('Runtime session');
+    expect(page.text()).toContain('Local persistent store');
     expect(page.get('select').element.value).toBe('none');
     expect(fetch).not.toHaveBeenCalled();
     expect(canSwitchDevice(device)).toBe(false);
@@ -525,5 +543,24 @@ describe('explicit device control UI', () => {
         adapter: { ...device.adapter, protocol: 'simulated' },
       }),
     ).toBe('Simulation');
+  });
+
+  it('does not treat a configured Shelly HTTP route as ready before exact identity verification', () => {
+    const http = {
+      ...device,
+      control: {
+        status: 'ready' as const,
+        reason: 'Explicit control route configured.',
+        binding: {
+          kind: 'shelly-http' as const,
+          enabled: true,
+          physicalId,
+          channel: 1,
+          baseUrl: 'http://192.168.7.21',
+        },
+      },
+    };
+    expect(canSwitchDevice(http)).toBe(false);
+    expect(canSwitchDevice(http, true)).toBe(true);
   });
 });

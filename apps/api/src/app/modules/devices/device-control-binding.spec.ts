@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { ForbiddenException } from '@nestjs/common';
+import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { DeviceRegistryService } from './device-registry.service';
 import { DeviceObservationService } from './device-observation.service';
 import { DeviceMqttMessageRouter } from './mqtt/device-mqtt-message-router';
@@ -282,9 +282,13 @@ describe('discovery, approval and control are separate', () => {
       },
     ]);
     const service = controlService(new DeviceRegistryService());
-    expect(() => service.configure('foreign', binding)).toThrow('site');
+    // The active-site registry projection hides foreign-site records, so the
+    // generic not-approved response avoids revealing that such a device exists.
+    expect(() => service.configure('foreign', binding)).toThrow(
+      'Approve this device before configuring control.',
+    );
     await expect(service.execute('foreign', 'turn_on')).rejects.toBeInstanceOf(
-      ForbiddenException,
+      NotFoundException,
     );
     expect(execFile).not.toHaveBeenCalled();
   });

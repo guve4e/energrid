@@ -2,6 +2,8 @@ import type { DeviceControlState } from '@energrid/domain-devices';
 
 export interface ControlSetupDevice {
   id: string;
+  tenantId?: string;
+  siteId?: string;
   trustStatus: string;
   capabilities: Array<{ actions: string[] }>;
   adapter: { protocol: string; driver: string; target?: string };
@@ -10,7 +12,12 @@ export interface ControlSetupDevice {
   memberDeviceIds?: string[];
 }
 
-export function canSwitchDevice(device: ControlSetupDevice): boolean {
+export function canSwitchDevice(
+  device: ControlSetupDevice,
+  httpIdentityVerified = false,
+): boolean {
+  const binding = device.control?.binding;
+  if (binding?.kind === 'shelly-http' && !httpIdentityVerified) return false;
   return (
     device.trustStatus === 'approved' &&
     device.control?.status === 'ready' &&

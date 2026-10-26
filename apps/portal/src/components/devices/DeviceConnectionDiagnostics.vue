@@ -9,6 +9,9 @@ const props = defineProps<{
   apiBase: string;
   accessToken: string;
 }>();
+const emit = defineEmits<{
+  'identity-verification': [result: { tenantId?: string; siteId?: string; deviceId: string; route: string; verified: boolean }];
+}>();
 const report = ref<DeviceConnectionReport | null>(null);
 const busy = ref(false);
 const error = ref('');
@@ -27,6 +30,7 @@ const routingWarning = computed(
 );
 
 function reset() {
+  reportIdentity(false);
   request?.abort();
   request = null;
   clearTimeout(expires);
@@ -34,6 +38,17 @@ function reset() {
   busy.value = false;
   error.value = '';
   expired.value = false;
+}
+function reportIdentity(verified: boolean) {
+  const binding = props.device.control?.binding;
+  if (binding?.kind === 'shelly-http')
+    emit('identity-verification', {
+      deviceId: props.device.id,
+      ...(props.device.tenantId ? { tenantId: props.device.tenantId } : {}),
+      ...(props.device.siteId ? { siteId: props.device.siteId } : {}),
+      route: binding.baseUrl,
+      verified,
+    });
 }
 watch(
   [
@@ -54,6 +69,7 @@ async function check() {
   busy.value = true;
   error.value = '';
   report.value = null;
+  reportIdentity(false);
   clearTimeout(expires);
   const timeout = setTimeout(() => controller.abort(), 25000);
   try {
@@ -65,27 +81,38 @@ async function check() {
         signal: controller.signal,
       },
     );
-    if (!response.ok)
-      throw new Error(
-        'Connection check unavailable. Try again when the Energrid service is reachable.',
-      );
-    const result = (await response.json()) as DeviceConnectionReport;
+    if (!response.ok) {
+      const known: Record<number, string> = {
+        401: 'Your Portal session expired. Sign in again and retry.',
+        403: 'This device is not eligible for a connection check in the selected site.',
+        404: 'The enrolled device record was not found.',
+        429: 'Connection checks are busy. Wait briefly before trying again.',
+        503: 'The connection diagnostic service is unavailable.',
+      };
+      error.value = known[response.status] || `Connection check failed (HTTP ${response.status}). No device command was sent.`;
+      return;
+    }
+    const result = await response.json().catch(() => null) as DeviceConnectionReport | null;
     if (
-      result.deviceId !== deviceId ||
-      result.readOnly !== true ||
-      !Array.isArray(result.checks)
-    )
-      throw new Error('Connection check returned an invalid response.');
+      !result || result.deviceId !== deviceId ||
+      result.readOnly !== true || !Array.isArray(result.checks)
+    ) {
+      error.value = 'Connection check returned an invalid response. Device reachability remains unknown; no command was sent.';
+      return;
+    }
     if (request !== controller) return;
     report.value = result;
+    reportIdentity(result.checks.some(check => check.id === 'identity' && check.status === 'passed'));
     expired.value = false;
     expires = setTimeout(() => {
       expired.value = true;
+      reportIdentity(false);
     }, 60000);
   } catch {
     if (request === controller)
-      error.value =
-        'Connection check could not finish. The device state is still unknown; no command was sent.';
+      error.value = controller.signal.aborted
+          ? 'Connection check timed out after 25 seconds. Device reachability remains unknown; no command was sent.'
+          : 'Energrid could not be reached for the connection check. Device reachability remains unknown; no command was sent.';
   } finally {
     clearTimeout(timeout);
     if (request === controller) {

@@ -193,6 +193,22 @@ describe('device onboarding page workflow with mocked services', () => {
     expect(JSON.stringify(scanCall?.[1]?.body)).not.toContain('192.168.')
   });
 
+  it('explains a network-scan authorization failure instead of showing a generic lookup error', async () => {
+    const zones = [{ id: 'lan', name: 'LAN', cidr: '192.168.7.0/24', seedIps: [] }];
+    const state = { ...data(), networkZones: zones };
+    const fetch = vi.fn(async (url: string) => {
+      if (url === '/portal/network/scan') return { ok: false, status: 403, json: async () => ({}) };
+      if (url === '/portal/state') return { ok: true, json: async () => structuredClone(state) };
+      if (url === '/portal/devices/enrollments') return { ok: true, json: async () => ({ enrollments: [] }) };
+      if (url === '/portal/network/capabilities') return { ok: true, json: async () => ({ nmap: { available: true, enabled: true }, observer: null }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    await render('/network-intelligence/', fetch);
+    await button('Scan network').trigger('click');
+    await flushPromises();
+    expect(page!.text()).toContain('not authorized for the selected network scope');
+  });
+
   it('shows backend network identity evidence and an explicit missing-evidence reason in Pending Enrollment', async () => {
     const physicalId = 'shellyproem50-8c4f00dbd258';
     const shellyCandidate = {
@@ -441,7 +457,7 @@ describe('device onboarding page workflow with mocked services', () => {
     await setup.get('select').setValue('http');
     expect((setup.get('input[type="url"]').element as HTMLInputElement).value).toBe('');
     expect(fetch.mock.calls.filter(([url]) => url === '/portal/network/scan')).toHaveLength(0);
-    await button('Find address').trigger('click');
+    await button('Refresh network evidence').trigger('click');
     await flushPromises();
     expect((setup.get('input[type="url"]').element as HTMLInputElement).value).toBe('http://192.168.7.21');
     expect(setup.get('select').element.value).toBe('http');
@@ -501,6 +517,7 @@ describe('device onboarding page workflow with mocked services', () => {
         ];
         return { ok: true, json: async () => ({ persistence: 'runtime' }) };
       }
+      if (url.endsWith('/diagnostics')) return { ok: true, json: async () => ({ deviceId: id, checkedAt: '2026-10-25T10:00:00Z', readOnly: true, code: 'identity-verified', title: 'Identity verified', summary: 'Expected Shelly identity matched.', nextAction: 'Continue.', checks: [{ id: 'identity', label: 'Device over HTTP', status: 'passed', detail: 'Exact Shelly identity matched.', checkedAt: '2026-10-25T10:00:00Z' }], currentRelay: { on: false, checkedAt: '2026-10-25T10:00:00Z' }, lastCommand: null }) };
       if (url.includes('/devices/enrollments')) return { ok: true, json: async () => ({ enrollments: enrollmentsFor(state) }) };
       return {
         ok: true,
@@ -533,6 +550,8 @@ describe('device onboarding page workflow with mocked services', () => {
     ).toBe('http://192.168.7.21');
     await form.get('input[type="checkbox"]').setValue(true);
     await form.get('form').trigger('submit');
+    await flushPromises();
+    await button('Check connection').trigger('click');
     await flushPromises();
     expect(page!.find('.device-switch-control').exists()).toBe(true);
     expect(fetch.mock.calls.some(([url]) => url.endsWith('/actions'))).toBe(

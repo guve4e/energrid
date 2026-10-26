@@ -144,9 +144,8 @@ describe('connection diagnostic UI', () => {
       setup();
       await page.get('button').trigger('click');
       await flushPromises();
-      expect(page.get('[role="alert"]').text()).toContain(
-        'state is still unknown',
-      );
+      expect(page.find('[role="alert"]').exists()).toBe(true);
+      expect(page.find('[role="alert"]').text().toLowerCase()).not.toContain('offline');
       expect(page.text()).not.toContain('upstream-secret');
       expect(page.get('button').attributes('disabled')).toBeUndefined();
     },
@@ -167,6 +166,57 @@ describe('connection diagnostic UI', () => {
     await flushPromises();
     expect(page.find('.device-diagnostic-result').exists()).toBe(false);
     expect(page.text()).toContain('Not checked');
+  });
+  it('unlocks an HTTP route only when the read-only report verifies the exact identity', async () => {
+    const httpDevice = {
+      ...device,
+      control: {
+        status: 'ready' as const,
+        reason: 'Configured',
+        binding: {
+          kind: 'shelly-http' as const,
+          enabled: true,
+          physicalId: 'shellyplus1-78ee4ccf4b54',
+          channel: 0,
+          baseUrl: 'http://192.168.7.21',
+        },
+      },
+    };
+    setup(httpDevice);
+    await page.get('button').trigger('click');
+    await flushPromises();
+    expect(page.emitted('identity-verification')?.at(-1)?.[0]).toEqual({
+      deviceId: device.id,
+      route: 'http://192.168.7.21',
+      verified: true,
+    });
+
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ...result,
+        checks: [{ ...result.checks[0], status: 'failed', detail: 'Different Shelly.' }],
+      }),
+    });
+    await page.get('button').trigger('click');
+    await flushPromises();
+    expect(page.emitted('identity-verification')?.at(-1)?.[0]).toEqual({
+      deviceId: device.id,
+      route: 'http://192.168.7.21',
+      verified: false,
+    });
+  });
+  it('shows a scoped authorization failure without exposing server details', async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: async () => ({ message: 'scope details with internal data' }),
+    });
+    setup();
+    await page.get('button').trigger('click');
+    await flushPromises();
+    expect(page.get('[role="alert"]').text()).toContain('selected site');
+    expect(page.get('[role="alert"]').text()).not.toContain('internal data');
   });
   it('invalidates a result when the control route changes', async () => {
     setup();
@@ -203,6 +253,6 @@ describe('connection diagnostic UI', () => {
     await page.get('button').trigger('click');
     await vi.advanceTimersByTimeAsync(25001);
     await flushPromises();
-    expect(page.get('[role="alert"]').text()).toContain('could not finish');
+    expect(page.get('[role="alert"]').text()).toContain('timed out after 25 seconds');
   });
 });

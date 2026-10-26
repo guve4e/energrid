@@ -96,4 +96,60 @@ describe('firmware diagnostics', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it('retains successful snapshots when a bounded collection failure is recorded and recovers both after restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'energrid-fw-failure-'));
+    const first = new DeviceFirmwareDiagnosticsService(directory);
+    const successAt = '2026-10-24T10:00:00.000Z';
+    const failedAt = '2026-10-24T10:01:00.000Z';
+    try {
+      await first.record(scope, deviceId, 'esp8266:324864', sample(), successAt);
+      const afterFailure = await first.recordFailure(scope, deviceId, 'esp8266:324864', 'request_timeout', failedAt);
+      expect(afterFailure.current).toEqual(sample());
+      expect(afterFailure.snapshots).toHaveLength(1);
+      expect(afterFailure.lastSuccessfulContactAt).toBe(successAt);
+      expect(afterFailure.lastAttemptAt).toBe(failedAt);
+      expect(afterFailure.collectionStatus).toBe('failed');
+      expect(afterFailure.collectionFailures).toEqual([
+        expect.objectContaining({ attemptedAt: failedAt, reason: 'request_timeout' }),
+      ]);
+      // A remote communications failure is not evidence that device Wi-Fi disconnected.
+      expect(afterFailure.connectivity).toBe('connected');
+    } finally {
+      await first.onModuleDestroy();
+    }
+    const recovered = new DeviceFirmwareDiagnosticsService(directory);
+    try {
+      const afterRestart = await recovered.get(scope, deviceId);
+      expect(afterRestart?.current).toEqual(sample());
+      expect(afterRestart?.snapshots[0]).toEqual(expect.objectContaining({
+        collectedAt: successAt,
+        deviceObservedAt: null,
+        protocol: 'http',
+        method: 'GET',
+        path: '/api/v1/diagnostics',
+      }));
+      expect(afterRestart?.collectionFailures[0].reason).toBe('request_timeout');
+      expect(afterRestart?.lastSuccessfulContactAt).toBe(successAt);
+    } finally {
+      await recovered.onModuleDestroy();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('stores a failure without fabricating a successful sample', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'energrid-fw-first-failure-'));
+    const store = new DeviceFirmwareDiagnosticsService(directory);
+    try {
+      const view = await store.recordFailure(scope, deviceId, 'esp8266:324864', 'endpoint_unverified', '2026-10-24T10:00:00.000Z');
+      expect(view.current).toBeNull();
+      expect(view.snapshots).toEqual([]);
+      expect(view.lastSuccessfulContactAt).toBeNull();
+      expect(view.connectivity).toBe('unknown');
+      expect(view.collectionFailures[0].reason).toBe('endpoint_unverified');
+    } finally {
+      await store.onModuleDestroy();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });

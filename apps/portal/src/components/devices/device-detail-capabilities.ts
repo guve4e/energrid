@@ -50,10 +50,10 @@ export function relayStateFreshness(
   now = Date.now(),
   staleAfterMs = 5 * 60_000,
 ): 'offline' | 'unknown' | 'stale' | 'fresh' {
-  if (['offline', 'disconnected'].includes(status.toLowerCase())) return 'offline';
   const timestamp = observedAt ? Date.parse(observedAt) : Number.NaN;
   if (!Number.isFinite(timestamp) || timestamp > now + 30_000) return 'unknown';
   if (now - timestamp > staleAfterMs) return 'stale';
+  if (['offline', 'disconnected'].includes(status.toLowerCase())) return 'offline';
   return ['online', 'healthy', 'connected'].includes(status.toLowerCase()) ? 'fresh' : 'unknown';
 }
 

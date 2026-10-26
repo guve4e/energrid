@@ -382,7 +382,10 @@ describe('DeviceHttpPollService', () => {
       sourceSampleEvidenceId: jest.fn().mockResolvedValue('evidence'),
       ingestHttpObservation: jest.fn().mockResolvedValue({ outcome: 'processed', accepted: true, stage: 'observation', reason: 'accepted', updatedKeys: ['temperature', 'humidity'], rejectedFields: [], state: null }),
     }
-    const diagnostics = { record: jest.fn().mockResolvedValue({ restartCount10m: 0 }) }
+    const diagnostics = {
+      record: jest.fn().mockResolvedValue({ restartCount10m: 0 }),
+      recordFailure: jest.fn().mockResolvedValue({}),
+    }
     const registry = { getDevices: jest.fn().mockReturnValue([device]), ingestDeviceStatus: jest.fn() }
     const diagnosticsSample = {
       schemaVersion: 1, deviceId: 'esp8266:324864', firmwareVersion: '0.3.0',
@@ -394,11 +397,11 @@ describe('DeviceHttpPollService', () => {
     }
     global.fetch = jest.fn()
       .mockResolvedValueOnce({ ok: true, headers: { get: () => '120' }, json: async () => verifiedIdentity() })
+      .mockResolvedValueOnce({ ok: true, status: 200, headers: { get: () => '400' }, json: async () => diagnosticsSample })
       .mockResolvedValueOnce({ ok: true, json: async () => ({
         schemaVersion: 1, deviceId: 'esp8266:324864', uptimeMs: 20_000, sampleIntervalMs: 2000,
         sensor: { state: 'ok', sampleCount: 10, lastSampleUptimeMs: 18_000, readingAgeMs: 2000, temperatureC: 22.5, humidityPct: 48 },
-      }) })
-      .mockResolvedValueOnce({ ok: true, headers: { get: () => '400' }, json: async () => diagnosticsSample }) as unknown as typeof fetch
+      }) }) as unknown as typeof fetch
     const poller = new DeviceHttpPollService(
       registry as unknown as DeviceRegistryService, observations as never, discovery as never,
       { getZones: () => [upstreamZone] } as never, diagnostics as never,
@@ -415,13 +418,16 @@ describe('DeviceHttpPollService', () => {
     )
     global.fetch = jest.fn()
       .mockResolvedValueOnce({ ok: true, headers: { get: () => '120' }, json: async () => verifiedIdentity() })
+      .mockResolvedValueOnce({ ok: false, status: 404 })
       .mockResolvedValueOnce({ ok: true, json: async () => ({
         schemaVersion: 1, deviceId: 'esp8266:324864', uptimeMs: 22_000, sampleIntervalMs: 2000,
         sensor: { state: 'ok', sampleCount: 11, lastSampleUptimeMs: 20_000, readingAgeMs: 2000, temperatureC: 22.6, humidityPct: 48.1 },
-      }) })
-      .mockResolvedValueOnce({ ok: false, status: 404 }) as unknown as typeof fetch
+      }) }) as unknown as typeof fetch
     await nextPoller.pollOnce()
     expect(diagnostics.record).toHaveBeenCalledTimes(1)
+    expect(diagnostics.recordFailure).toHaveBeenCalledWith(
+      { tenantId: 'tenant-demo', siteId: 'site-home' }, device.id, 'esp8266:324864', 'diagnostics_http_error',
+    )
     expect(observations.ingestHttpObservation).toHaveBeenCalledTimes(2)
   })
 

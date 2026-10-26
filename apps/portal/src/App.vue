@@ -507,6 +507,7 @@ const stateError = ref('');
 const siteSwitchBusy = ref(false);
 const siteSwitchError = ref('');
 const scanningNetwork = ref(false);
+const verifiedHttpControlRoutes = ref<Record<string, boolean>>({});
 const scanStartedAt = ref(0);
 const scanElapsedSeconds = ref(0);
 const scanFeedback = ref('');
@@ -997,7 +998,7 @@ const inventoryDeviceSummary = computed(() => {
   return {
     total: devices.length,
     approved: devices.length,
-    controllable: devices.filter(canSwitchDevice).length,
+    controllable: devices.filter(canUseDeviceControl).length,
     sensors: devices.filter(device =>
       device.capabilities.some(capability =>
         capability.actions.includes('read'),
@@ -1037,7 +1038,7 @@ const filteredInventoryDevices = computed(() => filterInventoryDevices(enrolledI
   capability: deviceCapabilityFilter.value,
   zone: deviceZoneFilter.value,
   status: deviceStatusFilter.value,
-}));
+}, canUseDeviceControl));
 const hasInventoryFilters = computed(() => !!deviceSearch.value || deviceSourceFilter.value !== 'site' || deviceCapabilityFilter.value !== 'all' || deviceZoneFilter.value !== 'all' || deviceStatusFilter.value !== 'all');
 
 watch([deviceSearch, deviceSourceFilter, deviceCapabilityFilter, deviceZoneFilter, deviceStatusFilter, deviceApprovalFilter], () => {
@@ -1098,7 +1099,7 @@ const deviceSourceStats = computed(() => {
       device.adapter.transport || device.adapter.protocol,
     ),
   ).length;
-  const needsSetup = deviceCards.value.filter(needsControlSetup).length;
+  const needsSetup = deviceCards.value.filter(device => needsControlSetup(device, canUseDeviceControl)).length;
   return [
     {
       label: 'Received',
@@ -2457,7 +2458,18 @@ async function scanNetwork(scopeIds?: string[]) {
       body: JSON.stringify({ scopeIds: selectedScopeIds, fullSubnetConfirmed }),
       signal: networkScanAbortController.signal,
     });
-    if (!response.ok) throw new Error('Network scan unavailable');
+    if (!response.ok) {
+      const failures: Record<number, string> = {
+        401: 'Your Portal session expired. Sign in again before scanning.',
+        403: 'This scan is not authorized for the selected network scope.',
+        404: 'The selected network scope is no longer available. Refresh the Portal and try again.',
+        409: 'Another network scan is already running. Wait for it to finish.',
+        429: 'Network discovery is busy. Wait briefly before trying again.',
+        503: 'The network discovery collector is unavailable.',
+        504: 'Network discovery exceeded its server time limit. Completed evidence remains in its snapshot.',
+      };
+      throw new Error(failures[response.status] || `Network discovery failed (HTTP ${response.status}). No new snapshot was saved.`);
+    }
     const result = await response.json() as {
       zones?: NonNullable<PortalState['networkZones']>; devices: NetworkDevice[];
       snapshot: NetworkSnapshot; comparison: NetworkSnapshotDiff | null;
@@ -2789,7 +2801,7 @@ function deviceCommandLabel(device: PortalDevice) {
 function deviceStatusClass(device: PortalDevice) {
   if (device.trustStatus !== 'approved') return 'amber';
   if (inventoryConnectionStatus(device) === 'online') return 'green';
-  if (inventoryConnectionStatus(device) === 'offline') return 'amber';
+  if (['offline', 'stale'].includes(inventoryConnectionStatus(device))) return 'amber';
   return device.adapter.configured ? 'blue' : 'amber';
 }
 
@@ -2885,14 +2897,29 @@ function deviceValuePreview(device: PortalDevice) {
 }
 
 function deviceStateDetail(device: PortalDevice) {
+  const freshness = inventoryConnectionStatus(device);
+  if (freshness === 'stale') return 'Last observation is stale · current reachability unknown';
+  if (freshness === 'unknown' && device.state.observedAt)
+    return 'Current reachability unknown';
   const command = device.state.command;
   if (command?.status === 'pending') return 'waiting for device ack';
   if (command?.status === 'acked') return 'confirmed by telemetry';
   if (command?.status === 'no_ack') return 'published, no telemetry ack';
   if (command?.status === 'failed') return 'publish failed';
-  if (Object.keys(device.state.values).length > 0) return 'latest state received';
+  if (Object.keys(device.state.values).length > 0)
+    return freshness === 'online'
+      ? 'Recent observation · current connectivity not confirmed'
+      : 'Latest state received';
   if (device.state.observedAt !== null) return device.state.status;
   return device.adapter.configured ? 'configured · no state yet' : 'not configured';
+}
+
+function deviceObservedStatus(device: PortalDevice): string {
+  const freshness = inventoryConnectionStatus(device);
+  if (freshness === 'stale') return 'Stale · current reachability unknown';
+  if (freshness === 'unknown') return 'Unknown · no recent reachability evidence';
+  if (freshness === 'offline') return 'Last reported offline';
+  return 'Recent observation · current connectivity not confirmed';
 }
 
 function expectedOnLabel(
@@ -2921,9 +2948,37 @@ function canToggleDevice(device: PortalDevice) {
 
 function canSendToggle(device: PortalDevice) {
   return (
-    canSwitchDevice(device) &&
+    canUseDeviceControl(device) &&
     device.state.command?.status !== 'pending'
   );
+}
+
+function controlRouteIdentityKey(device: PortalDevice): string | null {
+  const binding = device.control?.binding;
+  return binding?.kind === 'shelly-http'
+    ? `${device.tenantId}|${device.siteId}|${device.id}|${binding.baseUrl}`
+    : null;
+}
+
+function canUseDeviceControl(device: PortalDevice): boolean {
+  const key = controlRouteIdentityKey(device);
+  return canSwitchDevice(device, !key || verifiedHttpControlRoutes.value[key] === true);
+}
+
+function routeIdentityVerified(device: PortalDevice): boolean {
+  const key = controlRouteIdentityKey(device);
+  return !key || verifiedHttpControlRoutes.value[key] === true;
+}
+
+function updateHttpIdentityVerification(result: { tenantId?: string; siteId?: string; deviceId: string; route: string; verified: boolean }) {
+  const owner = state.value?.devices?.find(device => device.id === result.deviceId);
+  const tenantId = result.tenantId || owner?.tenantId || state.value?.tenant?.id || '';
+  const siteId = result.siteId || owner?.siteId || state.value?.site?.id || '';
+  const key = `${tenantId}|${siteId}|${result.deviceId}|${result.route}`;
+  verifiedHttpControlRoutes.value = {
+    ...verifiedHttpControlRoutes.value,
+    [key]: result.verified,
+  };
 }
 
 async function sendDeviceAction(
@@ -3108,6 +3163,7 @@ async function logout() {
     notificationsOpen.value = false;
     mobileMenuOpen.value = false;
     clearAuthenticatedSession();
+    verifiedHttpControlRoutes.value = {};
     accessToken.value = '';
     user.value = null;
     state.value = null;
@@ -3268,6 +3324,7 @@ async function switchPortalSite(event: Event) {
   const siteId = (event.target as HTMLSelectElement | null)?.value;
   if (!siteId || siteId === state.value?.site.id) return;
   siteSwitchBusy.value = true;
+  verifiedHttpControlRoutes.value = {};
   siteSwitchError.value = '';
   try {
     const response = await authFetch(`${apiBase}/portal/site-selection`, {
@@ -3975,6 +4032,7 @@ async function restorePortalSession() {
 
 function handleAuthExpired() {
   clearAuthenticatedSession();
+  verifiedHttpControlRoutes.value = {};
   accessToken.value = '';
   user.value = null;
 }
@@ -4746,14 +4804,15 @@ onBeforeUnmount(() => {
                   </td>
                   <td data-label="Control">
                     <DeviceSwitchControl
-                      v-if="canSwitchDevice(device)"
+                      v-if="canUseDeviceControl(device)"
                       :device="device"
+                      :identity-verified="routeIdentityVerified(device)"
                       :busy="deviceActionBusy[device.id]"
                       :error="deviceActionError[device.id]"
                       @action="sendDeviceAction(device, $event)"
                     />
                     <button v-else-if="device.trustStatus !== 'approved'" type="button" class="ghost" @click.stop="selectDevice(device)">Review device</button>
-                    <button v-else-if="canToggleDevice(device)" type="button" class="secondary" @click.stop="selectDevice(device)">{{ device.memberDeviceIds?.length ? 'Set up members' : 'Configure control' }}</button>
+                    <button v-else-if="canToggleDevice(device)" type="button" class="secondary" @click.stop="selectDevice(device)">{{ device.memberDeviceIds?.length ? 'Set up members' : device.control?.binding?.kind === 'shelly-http' ? 'Verify route' : 'Configure control' }}</button>
                     <span v-else class="trust-pill approved">Read only</span>
                     <span v-if="canToggleDevice(device)">{{ controlRouteLabel(device) }}</span>
                   </td>
@@ -4800,7 +4859,8 @@ onBeforeUnmount(() => {
               :api-base="apiBase"
               :access-token="accessToken"
               :approval-revision="measurementApprovalRevision"
-              :control-ready="canSwitchDevice(selectedDevice)"
+              :control-ready="canUseDeviceControl(selectedDevice)"
+              :control-identity-verified="routeIdentityVerified(selectedDevice)"
               :busy="deviceActionBusy[selectedDevice.id]"
               :error="deviceActionError[selectedDevice.id]"
               @action="sendDeviceAction(selectedDevice, $event)"
@@ -4840,8 +4900,8 @@ onBeforeUnmount(() => {
                     :api-base="apiBase"
                     :access-token="accessToken"
                   />
-                  <DeviceConnectionDiagnostics v-if="canToggleDevice(selectedDevice)" :key="selectedDevice.id" :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" />
-                  <DeviceControlSetup v-if="canToggleDevice(selectedDevice)" :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" :network-devices="networkDevices" :finding-address="scanningNetwork" :address-search-error="stateError" @find-address="scanNetwork" @saved="loadState" />
+                  <DeviceConnectionDiagnostics v-if="canToggleDevice(selectedDevice)" :key="selectedDevice.id" :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" @identity-verification="updateHttpIdentityVerification" />
+                  <DeviceControlSetup v-if="canToggleDevice(selectedDevice)" :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" :network-devices="networkDevices" :finding-address="scanningNetwork" :address-search-error="stateError" :http-identity-verified="routeIdentityVerified(selectedDevice)" @find-address="scanNetwork" @saved="loadState" />
                 </div>
               </details>
 
@@ -4866,7 +4926,7 @@ onBeforeUnmount(() => {
               <div>
                 <dt>Status</dt>
                 <dd>
-                  {{ selectedDevice.trustStatus === 'approved' ? (selectedDevice.state.observedAt === null ? 'no state received yet' : selectedDevice.state.status) : 'awaiting approval' }}
+                  {{ selectedDevice.trustStatus === 'approved' ? (selectedDevice.state.observedAt === null ? 'no state received yet' : deviceObservedStatus(selectedDevice)) : 'awaiting approval' }}
                 </dd>
               </div>
               <div>
@@ -4915,7 +4975,7 @@ onBeforeUnmount(() => {
                   {{
                     Object.keys(selectedDevice.state.values).length
                       ? JSON.stringify(selectedDevice.state.values)
-                      : (selectedDevice.state.observedAt === null ? 'unknown - no readings yet' : selectedDevice.state.status)
+                      : (selectedDevice.state.observedAt === null ? 'unknown - no readings yet' : deviceObservedStatus(selectedDevice))
                   }}
                 </dd>
               </div>

@@ -23,7 +23,7 @@ const relay: InventoryDevice = {
     mqttCommandTopic: 'kitchen/lights/rpc',
   },
   control: { status: 'needs-setup', binding: null, reason: 'No route' },
-  state: { status: 'online' },
+  state: { status: 'online', observedAt: new Date(Date.now() - 60_000).toISOString() },
 };
 const filters: InventoryFilters = {
   approval: 'approved',
@@ -45,7 +45,17 @@ describe('inventory filtering', () => {
     const unknown = { ...relay, state: { status: 'offline', observedAt: null } };
     expect(inventoryConnectionStatus(unknown)).toBe('unknown');
     expect(filterInventoryDevices([unknown], { ...filters, status: 'offline' })).toEqual([]);
-    expect(inventoryConnectionStatus({ state: { status: 'offline', observedAt: '2026-10-13T08:00:00Z' } })).toBe('offline');
+    expect(inventoryConnectionStatus({ state: { status: 'offline', observedAt: new Date(Date.now() - 60_000).toISOString() } })).toBe('offline');
+    expect(inventoryConnectionStatus({ state: { status: 'offline', observedAt: '2026-10-13T08:00:00Z' } })).toBe('stale');
+  });
+  it('does not treat stale MQTT state as current reachability or online inventory', () => {
+    const stale = {
+      ...relay,
+      state: { status: 'online', observedAt: new Date(Date.now() - 10 * 60_000).toISOString() },
+    };
+    expect(inventoryConnectionStatus(stale)).toBe('stale');
+    expect(filterInventoryDevices([stale], { ...filters, status: 'online' })).toEqual([]);
+    expect(filterInventoryDevices([stale], { ...filters, status: 'offline' })).toEqual([]);
   });
   it('keeps pending, blocked, and examples out of the default approved site view', () => {
     expect(

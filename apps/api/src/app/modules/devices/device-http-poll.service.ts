@@ -16,7 +16,8 @@ import {
   resolveEnergridHttpEndpoint,
 } from './adapters/inbound/energrid/energrid-http-observation.adapter'
 import { parseEnergridIdentity } from './adapters/outbound/network/energrid-http-identity.adapter'
-import { DeviceFirmwareDiagnosticsService, parseFirmwareDiagnosticSample } from './device-firmware-diagnostics'
+import { DeviceFirmwareDiagnosticsService, type FirmwareDiagnosticFailureReason } from './device-firmware-diagnostics'
+import { EnergridFirmwareDiagnosticsHttpAdapter, FirmwareDiagnosticsCollectionError } from './adapters/outbound/network/energrid-firmware-diagnostics-http.adapter'
 import { performance } from 'node:perf_hooks'
 
 @Injectable()
@@ -25,6 +26,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
   private timer: NodeJS.Timeout | null = null
   private polling = false
   private readonly diagnosticsPollAt = new Map<string, number>()
+  private readonly firmwareDiagnosticsAdapter = new EnergridFirmwareDiagnosticsHttpAdapter()
 
   constructor(
     private readonly registry: DeviceRegistryService,
@@ -140,12 +142,17 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=trusted_http_ingress_unavailable`)
       return
     }
+    const diagnosticsDue = this.claimDiagnosticsCollection(scope, device.id)
+    const recordFailure = (reason: FirmwareDiagnosticFailureReason) => diagnosticsDue
+      ? this.recordFirmwareDiagnosticsFailure(scope, device.id, physicalId, reason)
+      : Promise.resolve()
 
     let records: KnownNetworkDevice[]
     try {
       records = await this.discovery.listIdentityEvidence(scope)
     } catch {
       this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'unknown', observedAt: new Date().toISOString() })
+      await recordFailure('endpoint_unverified')
       this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=trusted_identity_evidence_unavailable`)
       return
     }
@@ -165,6 +172,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       resolveEnrolledEnergridHttpEndpoint(device, endpointZones)
     if (!endpoint) {
       this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'unknown', observedAt: new Date().toISOString() })
+      await recordFailure('endpoint_unverified')
       this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=verified_endpoint_missing_or_out_of_scope`)
       return
     }
@@ -178,6 +186,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         }
       } catch {
         this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'unknown', observedAt: new Date().toISOString() })
+        await recordFailure('scope_rejected')
         this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=virtual_lab_target_not_configured`)
         return
       }
@@ -212,6 +221,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       const identity = parseEnergridIdentity(identityPayload)
       if (!identity) {
         this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'offline', observedAt: new Date().toISOString() })
+        await recordFailure('identity_request_failed')
         this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=invalid_firmware_identity_response`)
         return
       }
@@ -220,6 +230,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         // Keep device reachability unknown instead of labeling it offline or
         // allowing the reused address to supply measurements.
         this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'unknown', observedAt: new Date().toISOString() })
+        await recordFailure('identity_mismatch')
         this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=firmware_identity_mismatch`)
         return
       }
@@ -253,6 +264,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         }
       }
       this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'online', observedAt: new Date().toISOString() })
+      if (diagnosticsDue) await this.pollFirmwareDiagnostics(device, endpoint.identityUrl, physicalId, scope)
 
       phase = 'status'
       let payload: unknown
@@ -274,7 +286,6 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       if (!parsed.accepted) {
         this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'online', observedAt: new Date().toISOString() })
         this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=${parsed.reason}`)
-        await this.pollFirmwareDiagnostics(device, endpoint.identityUrl, physicalId, scope)
         return
       }
 
@@ -301,7 +312,6 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       } else {
         this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=${result.reasonCode}`)
       }
-      await this.pollFirmwareDiagnostics(device, endpoint.identityUrl, physicalId, scope)
     } catch (error) {
       if (phase !== 'observation') {
         this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'offline', observedAt: new Date().toISOString() })
@@ -314,6 +324,9 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
             : phase === 'identity' ? 'identity_request_failed'
               : 'request_failed'
       this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=${reason}`)
+      if (phase === 'identity') {
+        await recordFailure(reason === 'request_timeout' ? 'request_timeout' : 'identity_request_failed')
+      }
     } finally {
       clearTimeout(timeout)
     }
@@ -326,39 +339,45 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     scope: { tenantId: string; siteId: string },
   ): Promise<void> {
     if (!this.firmwareDiagnostics) return;
-    const now = performance.now();
-    const lastPoll = this.diagnosticsPollAt.get(device.id) ?? Number.NEGATIVE_INFINITY;
-    if (now - lastPoll < firmwareDiagnosticsIntervalMs()) return;
-    if (!this.diagnosticsPollAt.has(device.id) && this.diagnosticsPollAt.size >= 512) {
-      const oldest = this.diagnosticsPollAt.keys().next().value;
-      if (oldest) this.diagnosticsPollAt.delete(oldest);
-    }
-    this.diagnosticsPollAt.set(device.id, now);
-
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), httpPollTimeoutMs());
     try {
-      const url = new URL('/api/v1/diagnostics', verifiedIdentityUrl).toString();
-      const response = await fetch(url, {
-        signal: controller.signal,
-        redirect: 'manual',
-        headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
-      });
-      if (response.status >= 300 && response.status < 400) throw new Error('diagnostics_redirect_rejected');
-      if (!response.ok) throw new Error(`diagnostics_http_${response.status}`);
-      const sample = parseFirmwareDiagnosticSample(await readJsonResponse(response, 4 * 1024), physicalId);
-      if (!sample) throw new Error('invalid_or_mismatched_diagnostics_identity');
+      const sample = await this.firmwareDiagnosticsAdapter.collect(verifiedIdentityUrl, physicalId, controller.signal);
       const view = await this.firmwareDiagnostics.record(scope, device.id, physicalId, sample);
       this.logger.log(`[DEVICE FIRMWARE DIAGNOSTICS] ${device.id} recorded boot=${sample.bootSessionId} uptimeMs=${sample.uptimeMs} restartCount10m=${view.restartCount10m}`);
     } catch (error) {
-      const reason = error instanceof Error && error.name === 'AbortError'
-        ? 'request_timeout'
-        : error instanceof Error && /^(diagnostics_http_\d+|diagnostics_redirect_rejected|response_too_large|invalid_response_json|invalid_or_mismatched_diagnostics_identity)$/.test(error.message)
-          ? error.message
-          : 'diagnostics_unavailable';
+      const reason = error instanceof FirmwareDiagnosticsCollectionError ? error.reason : 'collector_error';
+      await this.recordFirmwareDiagnosticsFailure(scope, device.id, physicalId, reason);
       this.logger.warn(`[DEVICE FIRMWARE DIAGNOSTICS] ${device.id} skipped reason=${reason}`);
     } finally {
       clearTimeout(timeout);
+    }
+  }
+
+  private claimDiagnosticsCollection(scope: { tenantId: string; siteId: string }, deviceId: string): boolean {
+    const key = `${scope.tenantId}\0${scope.siteId}\0${deviceId}`;
+    const now = performance.now();
+    const lastPoll = this.diagnosticsPollAt.get(key) ?? Number.NEGATIVE_INFINITY;
+    if (now - lastPoll < firmwareDiagnosticsIntervalMs()) return false;
+    if (!this.diagnosticsPollAt.has(key) && this.diagnosticsPollAt.size >= 512) {
+      const oldest = this.diagnosticsPollAt.keys().next().value;
+      if (oldest) this.diagnosticsPollAt.delete(oldest);
+    }
+    this.diagnosticsPollAt.set(key, now);
+    return true;
+  }
+
+  private async recordFirmwareDiagnosticsFailure(
+    scope: { tenantId: string; siteId: string },
+    deviceId: string,
+    physicalId: string,
+    reason: FirmwareDiagnosticFailureReason,
+  ): Promise<void> {
+    if (!this.firmwareDiagnostics) return;
+    try {
+      await this.firmwareDiagnostics.recordFailure(scope, deviceId, physicalId, reason);
+    } catch {
+      this.logger.warn(`[DEVICE FIRMWARE DIAGNOSTICS] ${deviceId} failure_record_unavailable`);
     }
   }
 }

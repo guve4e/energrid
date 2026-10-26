@@ -1,4 +1,5 @@
 import { canSwitchDevice, type ControlSetupDevice } from './device-control';
+import { relayStateFreshness } from './device-detail-capabilities';
 
 export interface InventoryDevice extends ControlSetupDevice {
   displayName: string;
@@ -25,7 +26,11 @@ export interface InventoryFilters {
 }
 
 export function inventoryConnectionStatus(device: Pick<InventoryDevice, 'state'>): string {
-  return device.state.observedAt === null ? 'unknown' : device.state.status;
+  const freshness = relayStateFreshness(
+    device.state.status,
+    device.state.observedAt ?? null,
+  );
+  return freshness === 'fresh' ? 'online' : freshness;
 }
 
 export function isExampleDevice(device: ControlSetupDevice): boolean {
@@ -35,19 +40,23 @@ export function isExampleDevice(device: ControlSetupDevice): boolean {
   );
 }
 
-export function needsControlSetup(device: ControlSetupDevice): boolean {
+export function needsControlSetup<T extends ControlSetupDevice>(
+  device: T,
+  isControllable: (device: T) => boolean = canSwitchDevice,
+): boolean {
   return (
     device.trustStatus === 'approved' &&
     device.capabilities.some(
       (c) => c.actions.includes('turn_on') && c.actions.includes('turn_off'),
     ) &&
-    !canSwitchDevice(device)
+    !isControllable(device)
   );
 }
 
 export function filterInventoryDevices<T extends InventoryDevice>(
   devices: T[],
   filters: InventoryFilters,
+  isControllable: (device: T) => boolean = canSwitchDevice,
 ): T[] {
   const search = filters.search.trim().toLowerCase();
   return devices
@@ -68,9 +77,9 @@ export function filterInventoryDevices<T extends InventoryDevice>(
         inventoryConnectionStatus(device) !== filters.status
       )
         return false;
-      if (filters.status === 'controllable' && !canSwitchDevice(device))
+      if (filters.status === 'controllable' && !isControllable(device))
         return false;
-      if (filters.status === 'needs_setup' && !needsControlSetup(device))
+      if (filters.status === 'needs_setup' && !needsControlSetup(device, isControllable))
         return false;
       if (!search) return true;
       return [

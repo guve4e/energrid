@@ -12,13 +12,14 @@ const props = defineProps<{
   };
   busy?: boolean;
   error?: string;
+  identityVerified?: boolean;
 }>();
 const emit = defineEmits<{ action: [action: 'turn_on' | 'turn_off'] }>();
 const pending = computed(
   () => props.device.state.command?.status === 'pending',
 );
 const disabled = computed(
-  () => props.busy || pending.value || !canSwitchDevice(props.device),
+  () => props.busy || pending.value || !canSwitchDevice(props.device, props.identityVerified),
 );
 const reportedOn = computed(() => {
   const v = props.device.state.values;

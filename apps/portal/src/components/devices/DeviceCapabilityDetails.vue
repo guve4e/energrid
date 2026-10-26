@@ -20,6 +20,7 @@ const props = defineProps<{
   accessToken: string;
   approvalRevision: number;
   controlReady: boolean;
+  controlIdentityVerified?: boolean;
   busy?: boolean;
   error?: string;
 }>();
@@ -80,7 +81,7 @@ onBeforeUnmount(() => authorityController?.abort());
 <template>
   <section v-if="presentation.showRelayState" class="device-observation-overview" aria-label="Switch status and control">
     <DeviceRelayStatus :values="device.state.values" :status="device.state.status" :observed-at="device.state.observedAt" :command="device.state.command" />
-    <DeviceSwitchControl v-if="controlReady" :device="device" :busy="busy" :error="error" @action="emit('action', $event)" />
+    <DeviceSwitchControl v-if="controlReady" :device="device" :identity-verified="controlIdentityVerified" :busy="busy" :error="error" @action="emit('action', $event)" />
     <p v-if="device.adapter.protocol === 'mqtt'" class="device-observation-route">MQTT endpoint <code>{{ device.adapter.target }}</code></p>
   </section>
 

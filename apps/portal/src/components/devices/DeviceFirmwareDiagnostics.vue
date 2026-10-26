@@ -20,7 +20,13 @@ type FirmwareView = {
     reset: { reason: string; reasonCode: number; exception: unknown };
     memory: { freeHeapBytes: number | null; heapFragmentationPct: number | null; largestFreeBlockBytes: number | null };
     wifi: { connected: boolean; rssiDbm: number | null; disconnectCount: number; reconnectCount: number };
-  };
+    sensor: { sampleCount: number; readFailureCount: number };
+  } | null;
+  lastAttemptAt: string;
+  lastSuccessfulContactAt: string | null;
+  collectionStatus: 'success' | 'failed';
+  snapshots?: unknown[];
+  collectionFailures: Array<{ id: string; attemptedAt: string; reason: string }>;
   events: FirmwareEvent[];
   restartCount10m: number;
   connectivity: 'connected' | 'disconnected';
@@ -35,13 +41,14 @@ let timer: ReturnType<typeof setInterval> | undefined;
 let controller: AbortController | undefined;
 const healthLabel = computed(() => {
   if (!data.value) return 'Unavailable';
-  if (data.value.connectivity !== 'connected') return 'Device unreachable';
+  if (!data.value.current) return 'No successful snapshot yet';
+  if (data.value.collectionStatus === 'failed') return 'Latest collection failed';
   if (data.value.events.some(event => event.confidence === 'confirmed')) return 'Findings recorded';
   if (data.value.events.length) return 'Review possible findings';
   return 'No findings recorded';
 });
 const healthTone = computed(() => {
-  if (!data.value || data.value.connectivity !== 'connected') return 'is-warning';
+  if (!data.value || !data.value.current || data.value.collectionStatus === 'failed') return 'is-warning';
   return data.value.events.length ? 'is-warning' : 'is-healthy';
 });
 
@@ -113,7 +120,16 @@ onBeforeUnmount(() => {
     <p v-else-if="!available && !loading" class="firmware-diagnostics-empty">
       No diagnostic snapshot is available. This requires firmware with the read-only diagnostics endpoint; connectivity and measurement freshness are reported separately.
     </p>
-    <template v-else-if="data">
+    <template v-else-if="data && !data.current">
+      <p class="firmware-diagnostics-note">No successful firmware snapshot has been collected yet. A failed HTTP attempt does not establish device power or Wi-Fi state.</p>
+      <ul v-if="data.collectionFailures.length" class="firmware-diagnostics-events" aria-label="Recent collection failures">
+        <li v-for="failure in [...data.collectionFailures].reverse().slice(0, 8)" :key="failure.id">
+          <strong>Diagnostic collection failed · {{ failure.reason }}</strong>
+          <time :datetime="failure.attemptedAt">{{ timestamp(failure.attemptedAt) }}</time>
+        </li>
+      </ul>
+    </template>
+    <template v-else-if="data && data.current">
       <section class="firmware-diagnostics-section" aria-labelledby="firmware-health-heading">
         <div class="firmware-section-heading">
           <h5 id="firmware-health-heading">Device health</h5>
@@ -148,6 +164,14 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
+      <section class="firmware-diagnostics-section" aria-labelledby="firmware-sensor-heading">
+        <div class="firmware-section-heading"><h5 id="firmware-sensor-heading">Sensor diagnostics</h5></div>
+        <div class="firmware-health-grid firmware-memory-grid">
+          <article class="firmware-metric-card"><span>Firmware sample count</span><strong>{{ data.current.sensor?.sampleCount?.toLocaleString() ?? 'Unavailable' }}</strong></article>
+          <article class="firmware-metric-card"><span>Sensor read failures</span><strong>{{ data.current.sensor?.readFailureCount?.toLocaleString() ?? 'Unavailable' }}</strong></article>
+        </div>
+      </section>
+
       <details class="firmware-technical-details">
         <summary>Boot session and reset evidence</summary>
         <dl class="firmware-technical-grid">
@@ -160,7 +184,7 @@ onBeforeUnmount(() => {
       <section class="firmware-diagnostics-section" aria-labelledby="firmware-events-heading">
         <div class="firmware-section-heading">
           <h5 id="firmware-events-heading">Diagnostic history</h5>
-          <span>{{ data.events.length }} recorded</span>
+          <span>{{ data.snapshots?.length ?? 0 }} snapshots · {{ data.events.length }} findings · {{ data.collectionFailures?.length ?? 0 }} collection failures</span>
         </div>
         <ul v-if="data.events.length" class="firmware-diagnostics-events" aria-label="Recent diagnostic events">
           <li v-for="event in [...data.events].reverse().slice(0, 8)" :key="event.id">
@@ -173,9 +197,15 @@ onBeforeUnmount(() => {
           </li>
         </ul>
         <p v-else class="firmware-diagnostics-empty">No diagnostic events recorded.</p>
+        <ul v-if="data.collectionFailures?.length" class="firmware-diagnostics-events" aria-label="Recent collection failures">
+          <li v-for="failure in [...data.collectionFailures].reverse().slice(0, 8)" :key="failure.id">
+            <strong>Diagnostic collection failed · {{ failure.reason }}</strong>
+            <time :datetime="failure.attemptedAt">{{ timestamp(failure.attemptedAt) }}</time>
+          </li>
+        </ul>
       </section>
 
-      <p class="firmware-diagnostics-sampled">Diagnostics sampled {{ timestamp(data.sampledAt) }}. Historical events are not treated as a live trend.</p>
+      <p class="firmware-diagnostics-sampled">Last successful snapshot {{ timestamp(data.lastSuccessfulContactAt || data.sampledAt) }}; last attempt {{ timestamp(data.lastAttemptAt || data.sampledAt) }}. The firmware reports no wall-clock sample time, so this is the server collection time.</p>
     </template>
   </section>
 </template>

@@ -18,6 +18,7 @@ const props = defineProps<{
   networkDevices?: NetworkIdentity[];
   findingAddress?: boolean;
   addressSearchError?: string;
+  httpIdentityVerified?: boolean;
 }>();
 const emit = defineEmits<{ saved: []; 'find-address': [] }>();
 const mode = ref<'none' | 'mqtt' | 'http'>('none');
@@ -62,16 +63,21 @@ const identityComplete = computed(
       Number.isInteger(channel.value) &&
       !!physicalId.value),
 );
-const statusLabel = computed(
-  () =>
+const statusLabel = computed(() => {
+  if (props.device.control?.binding?.kind === 'shelly-http')
+    return props.httpIdentityVerified
+      ? 'Identity verified · route configured'
+      : 'Route configured · identity not verified';
+  return (
     ({
       ready: 'Switching configured',
       disabled: 'Switching disabled',
       'needs-setup': 'Control not configured',
       'read-only': 'Read only',
       unapproved: 'Approval required',
-    })[props.device.control?.status || 'needs-setup'],
-);
+    })[props.device.control?.status || 'needs-setup']
+  );
+});
 
 watch(
   [
@@ -242,7 +248,7 @@ async function save() {
       </div>
       <div v-if="editable">
         <dt>Settings storage</dt>
-        <dd>Runtime session</dd>
+        <dd>Local persistent store</dd>
       </div>
     </dl>
     <form v-if="editable" @submit.prevent="save">
@@ -275,6 +281,7 @@ async function save() {
             :spellcheck="false"
         /></label>
         <div class="address-discovery">
+          <p class="muted">This refreshes discovery for the selected configured scope; it is not a device-only probe.</p>
           <p v-if="!knownAddress && !addressSearchRequested">
             No local address is known for this device.
           </p>
@@ -299,7 +306,7 @@ async function save() {
             :disabled="busy || findingAddress"
             @click="findAddress"
           >
-            {{ findingAddress ? 'Finding address...' : 'Find address' }}
+            {{ findingAddress ? 'Refreshing network evidence...' : 'Refresh network evidence' }}
           </button>
         </div>
         <label
