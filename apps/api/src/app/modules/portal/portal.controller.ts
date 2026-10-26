@@ -89,6 +89,7 @@ import { AuthConfig } from '../auth/auth-config'
 import { PortalDeviceMeasurementsService } from './portal-device-measurements.service'
 import { PortalDeviceElectricalMeasurementsService } from './portal-device-electrical-measurements.service'
 import { DeviceFirmwareDiagnosticsService } from '../devices/device-firmware-diagnostics'
+import type { DeviceHealthHistoryQuery } from '../devices/device-health-history'
 import { WeatherAssistantQueryService } from './weather-assistant-query.service'
 import { PortalSiteService, portalSiteProjection } from './portal-site.service'
 
@@ -516,6 +517,54 @@ export class PortalController {
     if (!enrolled) throw new NotFoundException('Approved Energrid device was not found in this site')
     const result = await this.firmwareDiagnostics.get({ tenantId: tenant.id, siteId: site.id }, deviceId)
     return result ?? { deviceId, available: false, events: [], restartCount10m: 0 }
+  }
+
+  @Get('device-health/history')
+  async getDeviceHealthHistory(
+    @Query('deviceId') deviceId: unknown,
+    @Query('from') from: unknown,
+    @Query('to') to: unknown,
+    @Query('granularity') granularity: unknown,
+    @Query('limit') limit: unknown,
+    @Query('timezone') timezone: unknown,
+    @Query('cursor') cursor: unknown,
+    @Query('metrics') metrics: unknown,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalAdministrator(request)
+    if (!this.firmwareDiagnostics) throw new ServiceUnavailableException('Device health history is unavailable')
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+    const selectedGranularity = typeof granularity === 'string' ? granularity : 'hourly'
+    if (!['raw', 'hourly', 'daily', 'events', 'failures'].includes(selectedGranularity)) {
+      throw new BadRequestException('Unsupported device health history granularity')
+    }
+    const parsedLimit = limit === undefined ? undefined : Number(limit)
+    if (parsedLimit !== undefined && (!Number.isSafeInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 1000)) {
+      throw new BadRequestException('Device health history limit must be between 1 and 1000')
+    }
+    if ((typeof cursor === 'string' && cursor.length > 600) ||
+        (typeof metrics === 'string' && metrics.split(',').length > 25)) {
+      throw new BadRequestException('Device health history cursor or metric selection is too large')
+    }
+    const query: DeviceHealthHistoryQuery = {
+      granularity: selectedGranularity as DeviceHealthHistoryQuery['granularity'],
+      ...(typeof deviceId === 'string' && deviceId.trim() ? { deviceId: deviceId.trim() } : {}),
+      ...(typeof from === 'string' ? { from } : {}),
+      ...(typeof to === 'string' ? { to } : {}),
+      ...(typeof timezone === 'string' ? { timezone } : {}),
+      ...(typeof cursor === 'string' ? { cursor } : {}),
+      ...(typeof metrics === 'string' && metrics.trim() ? { metrics: metrics.split(',').map(value => value.trim()).filter(Boolean) } : {}),
+      ...(parsedLimit !== undefined ? { limit: parsedLimit } : {}),
+    }
+    try {
+      return await this.firmwareDiagnostics.queryHistory({ tenantId: tenant.id, siteId: site.id }, query)
+    } catch (error) {
+      if (error instanceof Error && (error.message.startsWith('Invalid device health history') ||
+          error.message.startsWith('Invalid device health query'))) {
+        throw new BadRequestException(error.message)
+      }
+      throw error
+    }
   }
 
   @Post('devices/:deviceId/component-assignment')

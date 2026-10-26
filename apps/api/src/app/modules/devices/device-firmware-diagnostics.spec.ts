@@ -1,12 +1,19 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { ClassicLevel } from 'classic-level';
 import {
   DeviceFirmwareDiagnosticsService,
   deriveFirmwareHealthEvents,
   parseFirmwareDiagnosticSample,
   type FirmwareDiagnosticSample,
 } from './device-firmware-diagnostics';
+import {
+  applyDeviceHealthObservation,
+  summarizeDailyFromHourly,
+  type DeviceHealthBucketSummary,
+  type DeviceHealthObservation,
+} from './device-health-history';
 
 const deviceId = 'device:upstream-lan:esp8266:324864';
 const scope = { tenantId: 'tenant-demo', siteId: 'site-home' };
@@ -91,6 +98,9 @@ describe('firmware diagnostics', () => {
           new Date(Date.parse('2026-10-24T10:01:00.000Z') + index * 1000).toISOString());
       }
       expect((await recovered.get(scope, deviceId))?.events.length).toBeLessThanOrEqual(100);
+      const durableEvents = await recovered.queryHistory(scope, { deviceId, granularity: 'events', limit: 1000 });
+      expect(durableEvents.records.length).toBeGreaterThan(100);
+      expect(new Set(durableEvents.records.map(item => (item as { id: string }).id)).size).toBe(durableEvents.records.length);
     } finally {
       await recovered.onModuleDestroy();
       await rm(directory, { recursive: true, force: true });
@@ -150,6 +160,196 @@ describe('firmware diagnostics', () => {
     } finally {
       await store.onModuleDestroy();
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('creates idempotent UTC summaries with gauge extrema, weighted counts, missing coverage, and boot-scoped counters', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'energrid-health-summary-'));
+    const store = new DeviceFirmwareDiagnosticsService(directory, { expectedIntervalMs: 60_000 });
+    try {
+      await store.record(scope, deviceId, 'esp8266:324864', sample({
+        memory: { freeHeapBytes: 20_000, heapFragmentationPct: null, largestFreeBlockBytes: 15_000 },
+        wifi: { connected: true, rssiDbm: -50, disconnectCount: 4, reconnectCount: 2 },
+        uptimeMs: 10_000,
+      }), '2026-10-24T10:00:00.000Z');
+      const second = sample({
+        memory: { freeHeapBytes: 18_000, heapFragmentationPct: 20, largestFreeBlockBytes: 12_000 },
+        wifi: { connected: true, rssiDbm: -70, disconnectCount: 5, reconnectCount: 2 },
+        uptimeMs: 70_000,
+      });
+      await store.record(scope, deviceId, 'esp8266:324864', second, '2026-10-24T10:02:00.000Z');
+      // Reprocessing the same stored observation is idempotent.
+      const view = await store.get(scope, deviceId);
+      const duplicate = view!.snapshots[1];
+      await store.record(scope, deviceId, 'esp8266:324864', duplicate.sample, duplicate.collectedAt);
+      const hourly = await store.queryHistory(scope, { deviceId, granularity: 'hourly' });
+      const hour = hourly.records[0] as { sampleCount: number; expectedSampleCount: number; missingSampleCount: number;
+        metrics: Record<string, { minimum: number; maximum: number; sum: number; sampleCount: number; missingSampleCount: number }>;
+        counters: Record<string, Array<{ bootSessionId: string; delta: number | null }>> };
+      expect(hour.sampleCount).toBe(2);
+      expect(hour.expectedSampleCount).toBe(3);
+      expect(hour.missingSampleCount).toBe(1);
+      expect(hour.metrics['wifi.rssi']).toMatchObject({ minimum: -70, maximum: -50, sum: -120, sampleCount: 2, missingSampleCount: 1 });
+      expect(hour.metrics['memory.fragmentation']).toMatchObject({ minimum: 20, maximum: 20, sampleCount: 1, missingSampleCount: 2 });
+      expect(hour.counters.uptime).toHaveLength(1);
+      expect(hour.counters.uptime[0]).toMatchObject({ bootSessionId: sample().bootSessionId, delta: 60_000 });
+      const daily = await store.queryHistory(scope, { deviceId, granularity: 'daily' });
+      expect((daily.records[0] as { sampleCount: number }).sampleCount).toBe(2);
+      expect((await store.queryHistory({ ...scope, siteId: 'site-device-lab' }, { granularity: 'hourly' })).records).toEqual([]);
+      expect((await store.queryHistory(scope, { deviceId, granularity: 'raw' })).records).toHaveLength(2);
+    } finally {
+      await store.onModuleDestroy();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves daily evidence and independent incidents across raw/hourly expiry and process restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'energrid-health-retention-'));
+    const options = { rawSampleDays: 1, hourlySummaryDays: 2, dailySummaryDays: 30,
+      significantEventDays: 3650, communicationFailureDays: 5, expectedIntervalMs: 60_000,
+      retentionSweepIntervalMs: 0 };
+    const first = new DeviceFirmwareDiagnosticsService(directory, options);
+    try {
+      await first.record(scope, deviceId, 'esp8266:324864', sample({
+        reset: { reason: 'Exception', reasonCode: 2, exception: null },
+      }), '2026-10-20T10:00:00.000Z');
+      await first.recordFailure(scope, deviceId, 'esp8266:324864', 'request_timeout', '2026-10-20T10:01:00.000Z');
+      await first.record(scope, deviceId, 'esp8266:324864', sample({ uptimeMs: 200_000 }), '2026-10-26T10:00:00.000Z');
+    } finally {
+      await first.onModuleDestroy();
+    }
+    const recovered = new DeviceFirmwareDiagnosticsService(directory, options);
+    try {
+      expect((await recovered.queryHistory(scope, { deviceId, granularity: 'raw' })).records).toHaveLength(1);
+      expect((await recovered.queryHistory(scope, { deviceId, granularity: 'hourly' })).records)
+        .toEqual(expect.arrayContaining([expect.objectContaining({ bucketStartAt: '2026-10-26T10:00:00.000Z' })]));
+      expect((await recovered.queryHistory(scope, { deviceId, granularity: 'hourly' })).records)
+        .not.toEqual(expect.arrayContaining([expect.objectContaining({ bucketStartAt: '2026-10-20T10:00:00.000Z' })]));
+      expect((await recovered.queryHistory(scope, { deviceId, granularity: 'daily' })).records)
+        .toEqual(expect.arrayContaining([expect.objectContaining({ bucketStartAt: '2026-10-20T00:00:00.000Z', sampleCount: 1 })]));
+      const events = await recovered.queryHistory(scope, { deviceId, granularity: 'events' });
+      expect(events.records).toEqual(expect.arrayContaining([expect.objectContaining({
+        kind: 'exception-reset', tenantId: scope.tenantId, siteId: scope.siteId,
+        physicalDeviceId: 'esp8266:324864', observedAtBasis: 'server-detection-time',
+      })]));
+      expect((await recovered.queryHistory(scope, { deviceId, granularity: 'failures' })).records)
+        .toEqual(expect.arrayContaining([expect.objectContaining({ reason: 'request_timeout', physicalDeviceId: 'esp8266:324864' })]));
+    } finally {
+      await recovered.onModuleDestroy();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('migrates the existing event and failure arrays into independently retained history without changing timestamps', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'energrid-health-legacy-migration-'));
+    const legacyAt = '2026-10-24T08:59:30.172Z';
+    const oldEvents = Array.from({ length: 87 }, (_, index) => ({
+      id: `legacy-event-${index}`,
+      kind: index < 45 ? 'reboot-detected' : index < 80 ? 'repeated-reboots' : index < 86 ? 'exception-reset' : 'wifi-instability',
+      observedAt: new Date(Date.parse(legacyAt) + index * 1000).toISOString(),
+      bootSessionId: `legacy-boot-${index}`,
+      confidence: 'confirmed',
+      summary: `Legacy event ${index}`,
+      explanation: 'Redacted migration fixture.',
+    }));
+    const oldFailures = Array.from({ length: 8 }, (_, index) => ({
+      id: `legacy-failure-${index}`,
+      attemptedAt: new Date(Date.parse(legacyAt) + index * 60_000).toISOString(),
+      reason: 'request_timeout',
+    }));
+    const seed = new ClassicLevel<string, unknown>(directory, { valueEncoding: 'json' });
+    await seed.open();
+    await seed.put(`firmware-diagnostics:${scope.tenantId}:${scope.siteId}:${encodeURIComponent(deviceId)}`, {
+      schemaVersion: 1, deviceId, tenantId: scope.tenantId, siteId: scope.siteId,
+      sampledAt: legacyAt, current: sample(),
+      snapshots: [{ collectedAt: legacyAt, deviceObservedAt: null, protocol: 'http', method: 'GET',
+        path: '/api/v1/diagnostics', identityVerifiedAt: legacyAt, sample: sample() }],
+      lastAttemptAt: legacyAt, lastSuccessfulContactAt: legacyAt, collectionStatus: 'success',
+      collectionFailures: oldFailures, events: oldEvents, restartCount10m: 0, connectivity: 'connected',
+    });
+    await seed.close();
+    const store = new DeviceFirmwareDiagnosticsService(directory);
+    try {
+      await store.record(scope, deviceId, 'esp8266:324864', sample(), '2026-10-26T10:00:00.000Z');
+      const events = await store.queryHistory(scope, { deviceId, granularity: 'events', limit: 1000 });
+      const failures = await store.queryHistory(scope, { deviceId, granularity: 'failures', limit: 1000 });
+      expect(events.records).toHaveLength(87);
+      expect(events.records[0]).toMatchObject({
+        id: 'legacy-event-0', observedAt: legacyAt,
+        source: { protocol: 'http', method: 'GET', path: '/api/v1/diagnostics' },
+        observedAtBasis: 'server-detection-time', deduplicationKey: 'reboot-detected:legacy-boot-0',
+        tenantId: scope.tenantId, siteId: scope.siteId, physicalDeviceId: 'esp8266:324864',
+      });
+      expect(failures.records).toHaveLength(8);
+      expect(failures.records[0]).toMatchObject({ id: 'legacy-failure-0', attemptedAt: legacyAt, reason: 'request_timeout' });
+    } finally {
+      await store.onModuleDestroy();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('faithfully rolls up the sanitized first-night capture without retaining local identities or absolute timestamps', async () => {
+    const fixturePath = join(__dirname, 'fixtures', 'device-health-overnight-redacted.json');
+    const fixture = JSON.parse(await readFile(fixturePath, 'utf8')) as {
+      expectedIntervalMs: number;
+      devices: Array<{ alias: string; samples: Array<Record<string, unknown>>; events: unknown[]; failures: unknown[] }>;
+    };
+    const serializedFixture = JSON.stringify(fixture);
+    expect(serializedFixture).not.toContain('324864');
+    expect(serializedFixture).not.toContain('324b44');
+    expect(serializedFixture).not.toContain('3254b7');
+    expect(serializedFixture).not.toContain('192.168.');
+    expect(fixture.devices.reduce((count, item) => count + item.samples.length, 0)).toBe(1510);
+    expect(fixture.devices.reduce((count, item) => count + item.failures.length, 0)).toBe(8);
+    expect(fixture.devices.map(item => item.events.length)).toEqual([87, 1, 11]);
+    const metricKeys = [
+      ['wifi.rssi', 'rssiDbm', 'dBm', 'gauge'],
+      ['memory.free_heap', 'freeHeapBytes', 'bytes', 'gauge'],
+      ['memory.fragmentation', 'heapFragmentationPct', '%', 'gauge'],
+      ['memory.largest_free_block', 'largestFreeBlockBytes', 'bytes', 'gauge'],
+      ['uptime', 'uptimeMs', 'ms', 'counter'],
+      ['wifi.disconnect_count', 'disconnectCount', 'count', 'counter'],
+      ['wifi.reconnect_count', 'reconnectCount', 'count', 'counter'],
+      ['sensor.sample_count', 'sensorSampleCount', 'count', 'counter'],
+      ['sensor.read_failure_count', 'sensorReadFailureCount', 'count', 'counter'],
+    ] as const;
+    const syntheticBase = Date.UTC(2026, 0, 1);
+    for (const item of fixture.devices) {
+      const hourly = new Map<string, DeviceHealthBucketSummary>();
+      const directValues = new Map<string, number[]>();
+      for (const row of item.samples) {
+        const observedAt = new Date(syntheticBase + Number(row.offsetMs)).toISOString();
+        const observation: DeviceHealthObservation = {
+          tenantId: 'fixture-tenant', siteId: 'fixture-site', deviceId: `device:${item.alias}`,
+          physicalDeviceId: 'esp8266:aaaaaa', sampleId: `${item.alias}:${row.offsetMs}`,
+          observedAt, bootSessionId: String(row.bootSession),
+          metrics: metricKeys.map(([name, field, unit, semantics]) => ({ name,
+            value: typeof row[field] === 'number' ? Number(row[field]) : null,
+            unit, semantics, source: 'http:GET:/api/v1/diagnostics' })),
+        };
+        for (const [name, field, , semantics] of metricKeys) {
+          if (semantics === 'gauge' && typeof row[field] === 'number') {
+            const values = directValues.get(name) || [];
+            values.push(Number(row[field]));
+            directValues.set(name, values);
+          }
+        }
+        const bucketStart = new Date(Date.parse(observedAt) - Date.parse(observedAt) % 3_600_000).toISOString();
+        hourly.set(bucketStart, applyDeviceHealthObservation(hourly.get(bucketStart) || null,
+          observation, 'hourly', fixture.expectedIntervalMs));
+      }
+      const days = new Set([...hourly.values()].map(bucket => bucket.bucketStartAt.slice(0, 10)));
+      const daily = [...days].map(day => summarizeDailyFromHourly([...hourly.values()], `${day}T00:00:00.000Z`, fixture.expectedIntervalMs))
+        .filter((bucket): bucket is DeviceHealthBucketSummary => !!bucket);
+      const hourlyCount = [...hourly.values()].reduce((sum, bucket) => sum + bucket.sampleCount, 0);
+      expect(hourlyCount).toBe(item.samples.length);
+      expect(daily.reduce((sum, bucket) => sum + bucket.sampleCount, 0)).toBe(item.samples.length);
+      for (const [name, values] of directValues) {
+        const dailyMetric = daily.flatMap(bucket => bucket.metrics[name] ? [bucket.metrics[name]] : []);
+        expect(dailyMetric.reduce((sum, metric) => sum + metric.sum, 0)).toBe(values.reduce((sum, value) => sum + value, 0));
+        expect(Math.min(...dailyMetric.map(metric => metric.minimum))).toBe(Math.min(...values));
+        expect(Math.max(...dailyMetric.map(metric => metric.maximum))).toBe(Math.max(...values));
+      }
     }
   });
 });

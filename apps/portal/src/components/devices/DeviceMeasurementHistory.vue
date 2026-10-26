@@ -48,6 +48,7 @@ const currentError = ref('');
 const historyLoading = ref(false);
 const historyError = ref('');
 const history = ref<Partial<Record<Metric, HistoryResponse>>>({});
+const hoveredPoints = ref<Partial<Record<Metric, Measurement>>>({});
 const snapshotClock = ref(0);
 const clockTick = ref(0);
 let currentController: AbortController | undefined;
@@ -96,31 +97,80 @@ function timeLabel(value: string): string {
   }).format(date);
 }
 
-function pointPosition(metric: Metric, item: Measurement) {
-  const rows = history.value[metric]?.measurements.filter(row =>
-    row.quality === 'measured' && typeof row.value === 'number' && Number.isFinite(row.value),
-  ) ?? [];
-  const value = item.value ?? 0;
-  const times = selectedRangeDefinition.value.milliseconds;
-  const now = Date.now();
-  const age = Math.max(0, Math.min(times, now - Date.parse(item.observedAt)));
-  const x = 42 + ((times - age) / times) * 246;
-  const values = rows.map(row => row.value as number);
-  const min = Math.min(...values, value);
-  const max = Math.max(...values, value);
-  const pad = Math.max((max - min) * 0.15, Math.abs(max || 1) * 0.02, 0.05);
-  const y = 92 - ((value - (min - pad)) / ((max + pad) - (min - pad))) * 66;
-  return { x, y };
+function axisTimeLabel(value: string): string {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return 'Unknown time';
+  return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric' }).format(date);
+}
+
+function chartRows(metric: Metric): Measurement[] {
+  return (history.value[metric]?.measurements ?? [])
+    .filter(row => row.quality === 'measured' && typeof row.value === 'number' && Number.isFinite(row.value) &&
+      Number.isFinite(Date.parse(row.observedAt)))
+    .sort((left, right) => Date.parse(left.observedAt) - Date.parse(right.observedAt));
+}
+
+function chartStatistics(metric: Metric) {
+  const values = chartRows(metric).map(row => row.value as number).sort((left, right) => left - right);
+  if (!values.length) return null;
+  const middle = Math.floor(values.length / 2);
+  const median = values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
+  return { minimum: values[0], median, maximum: values[values.length - 1], count: values.length };
+}
+
+function measurementValue(item: Measurement | undefined): string {
+  return typeof item?.value === 'number' && Number.isFinite(item.value) ? item.value.toFixed(1) : '—';
+}
+
+function setHoveredPoint(metric: Metric, item?: Measurement) {
+  hoveredPoints.value = { ...hoveredPoints.value, [metric]: item };
+}
+
+function pointAriaLabel(metric: Metric, item: Measurement): string {
+  return `${labelFor(metric)} ${measurementValue(item)} ${historyUnit(metric)} at ${timeLabel(item.observedAt)}`;
 }
 
 function chartBounds(metric: Metric) {
-  const values = (history.value[metric]?.measurements ?? [])
-    .filter(row => row.quality === 'measured' && typeof row.value === 'number' && Number.isFinite(row.value))
-    .map(row => row.value as number);
+  const values = chartRows(metric).map(row => row.value as number);
+  if (!values.length) return { low: 0, middle: 0.5, high: 1 };
   const min = Math.min(...values);
   const max = Math.max(...values);
-  const pad = Math.max((max - min) * 0.15, Math.abs(max || 1) * 0.02, 0.05);
-  return { low: min - pad, high: max + pad };
+  const pad = Math.max((max - min) * 0.12, Math.abs(max || 1) * 0.01, 0.1);
+  const low = min - pad;
+  const high = max + pad;
+  return { low, middle: (low + high) / 2, high };
+}
+
+function pointPosition(metric: Metric, item: Measurement) {
+  const range = selectedRangeDefinition.value.milliseconds;
+  const age = Math.max(0, Math.min(range, Date.now() - Date.parse(item.observedAt)));
+  const x = 46 + ((range - age) / range) * 304;
+  const bounds = chartBounds(metric);
+  const y = 136 - (((item.value as number) - bounds.low) / (bounds.high - bounds.low)) * 112;
+  return { x, y };
+}
+
+/** Draw lines only across nearby observations; large collection gaps remain visibly disconnected. */
+function chartSegments(metric: Metric): Array<{ key: string; path: string }> {
+  const rows = chartRows(metric);
+  const maximumConnectedGap = Math.max(5 * 60_000, selectedRangeDefinition.value.milliseconds / 20);
+  const groups: Measurement[][] = [];
+  for (const row of rows) {
+    const previousGroup = groups.at(-1);
+    const previous = previousGroup?.at(-1);
+    if (!previousGroup || !previous || Date.parse(row.observedAt) - Date.parse(previous.observedAt) > maximumConnectedGap) {
+      groups.push([row]);
+    } else {
+      previousGroup.push(row);
+    }
+  }
+  return groups.filter(group => group.length > 1).map(group => ({
+    key: `${group[0].observedAt}-${group.at(-1)?.observedAt}`,
+    path: group.map((row, index) => {
+      const point = pointPosition(metric, row);
+      return `${index === 0 ? 'M' : 'L'} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
+    }).join(' '),
+  }));
 }
 
 const selectedRangeDefinition = computed(() => ranges.find(range => range.value === selectedRange.value) ?? ranges[1]);
@@ -234,7 +284,6 @@ onBeforeUnmount(() => {
     <p v-if="currentError" class="measurement-error" role="alert">{{ currentError }}</p>
     <div class="current-measurement-grid">
       <article v-for="metric in metrics" :key="metric" class="current-measurement">
-        <span>{{ labelFor(metric) }}</span>
         <strong>{{ currentLoading ? '…' : currentValue(metric) }}<small v-if="currentValue(metric) !== '—'"> {{ unitFor(metric) }}</small></strong>
         <span :class="['freshness-state', `freshness-${freshnessLabel(metric).toLowerCase()}`]">{{ currentLoading ? 'Loading' : freshnessLabel(metric) }}</span>
         <time v-if="observationTimestamp(fields[metric])" :datetime="observationTimestamp(fields[metric]) || undefined">
@@ -259,22 +308,43 @@ onBeforeUnmount(() => {
       <article v-for="metric in authorizedMetrics" :key="metric" class="measurement-chart">
         <header><h6>{{ labelFor(metric) }}</h6><span>{{ historyUnit(metric) }}</span></header>
         <template v-if="(history[metric]?.measurements.length || 0) > 0">
-          <svg viewBox="0 0 300 112" role="img" :aria-label="`${labelFor(metric)} history, ${selectedRangeDefinition.label}`">
-            <line x1="42" y1="94" x2="288" y2="94" class="chart-axis" />
-            <text x="2" y="20">{{ chartBounds(metric).high.toFixed(1) }}</text>
-            <text x="2" y="93">{{ chartBounds(metric).low.toFixed(1) }}</text>
+          <div class="chart-plot">
+          <svg viewBox="0 0 360 180" role="group" :aria-label="`${labelFor(metric)} history, ${selectedRangeDefinition.label}`">
+            <line v-for="tick in [chartBounds(metric).high, chartBounds(metric).middle, chartBounds(metric).low]"
+              :key="`grid-${tick}`" x1="46" :y1="pointPosition(metric, { observedAt: new Date().toISOString(), value: tick, unit: '', quality: 'measured' }).y"
+              x2="350" :y2="pointPosition(metric, { observedAt: new Date().toISOString(), value: tick, unit: '', quality: 'measured' }).y" class="chart-grid" />
+            <text x="1" y="18">{{ chartBounds(metric).high.toFixed(1) }}</text>
+            <text x="1" y="137">{{ chartBounds(metric).low.toFixed(1) }}</text>
+            <path v-for="segment in chartSegments(metric)" :key="segment.key" :d="segment.path" class="chart-line-segment" />
             <circle
-              v-for="item in history[metric]?.measurements.filter(row => row.quality === 'measured' && typeof row.value === 'number')"
+              v-for="item in chartRows(metric)"
               :key="`${item.observedAt}-${item.value}`"
               :cx="pointPosition(metric, item).x"
               :cy="pointPosition(metric, item).y"
-              r="3.5"
+              r="4.2"
               class="chart-point"
-            ><title>{{ timeLabel(item.observedAt) }} · {{ item.value }} {{ unitFor(metric) }}</title></circle>
-            <text x="42" y="109">{{ timeLabel(new Date(Date.now() - selectedRangeDefinition.milliseconds).toISOString()) }}</text>
-            <text x="288" y="109" text-anchor="end">{{ timeLabel(new Date().toISOString()) }}</text>
+              tabindex="0"
+              :aria-label="pointAriaLabel(metric, item)"
+              @pointerenter="setHoveredPoint(metric, item)"
+              @pointerleave="setHoveredPoint(metric)"
+              @focus="setHoveredPoint(metric, item)"
+              @blur="setHoveredPoint(metric)"
+            ><title>{{ pointAriaLabel(metric, item) }}</title></circle>
+            <line x1="46" y1="136" x2="350" y2="136" class="chart-axis" />
+            <text x="46" y="162">{{ axisTimeLabel(new Date(Date.now() - selectedRangeDefinition.milliseconds).toISOString()) }}</text>
+            <text x="350" y="162" text-anchor="end">{{ axisTimeLabel(new Date().toISOString()) }}</text>
           </svg>
-          <p class="chart-sampling-note">Each point is a stored measurement; gaps are not interpolated.</p>
+          <div v-if="hoveredPoints[metric]" class="chart-tooltip" role="status">
+            <strong>{{ measurementValue(hoveredPoints[metric]) }} {{ historyUnit(metric) }}</strong>
+            <time>{{ timeLabel(hoveredPoints[metric]!.observedAt) }}</time>
+          </div>
+          </div>
+          <div v-if="chartStatistics(metric)" class="chart-summary" :aria-label="`${labelFor(metric)} summary for ${selectedRangeDefinition.label}`">
+            <div><span>Min</span><strong>{{ chartStatistics(metric)!.minimum.toFixed(1) }} <small>{{ historyUnit(metric) }}</small></strong></div>
+            <div><span>Median</span><strong>{{ chartStatistics(metric)!.median.toFixed(1) }} <small>{{ historyUnit(metric) }}</small></strong></div>
+            <div><span>Max</span><strong>{{ chartStatistics(metric)!.maximum.toFixed(1) }} <small>{{ historyUnit(metric) }}</small></strong></div>
+          </div>
+          <p class="chart-sampling-note">Blue dots are saved readings. Lines connect nearby readings; long gaps stay unconnected.</p>
         </template>
         <p v-else class="measurement-muted">No {{ labelFor(metric).toLowerCase() }} history in this range.</p>
       </article>
@@ -305,10 +375,22 @@ onBeforeUnmount(() => {
 .measurement-range { display: flex; flex-wrap: wrap; gap: 4px; }
 .measurement-range button { min-height: 40px; border: 1px solid var(--eg-border, #d8e0ec); background: var(--eg-surface, #fff); border-radius: var(--eg-control-radius, 8px); padding: 6px 9px; color: inherit; font: inherit; font-size: 11px; cursor: pointer; }
 .measurement-range button[aria-pressed="true"] { border-color: var(--eg-blue, #2863e6); background: var(--eg-blue-soft, #eef4ff); color: var(--eg-blue, #2863e6); }
+.chart-plot { position: relative; }
 .measurement-chart svg { display: block; width: 100%; height: auto; margin-top: 8px; overflow: visible; }
-.chart-axis { stroke: var(--eg-border, #d8e0ec); stroke-width: 1; }
-.chart-point { fill: var(--eg-blue, #2863e6); stroke: var(--eg-surface, #fff); stroke-width: 1.5; }
-.measurement-chart svg text { fill: var(--eg-muted, #58677e); font-size: 8px; }
+.chart-axis { stroke: var(--eg-border, #d8e0ec); stroke-width: 1.25; }
+.chart-grid { stroke: var(--eg-border, #d8e0ec); stroke-width: 1; stroke-dasharray: 3 5; opacity: .75; }
+.chart-line-segment { fill: none; stroke: var(--eg-blue, #2863e6); stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.chart-point { fill: var(--eg-blue, #2863e6); stroke: var(--eg-surface, #fff); stroke-width: 1.5; cursor: crosshair; vector-effect: non-scaling-stroke; }
+.chart-point:focus { outline: none; stroke: var(--eg-text, #111827); stroke-width: 2.5; }
+.measurement-chart svg text { fill: var(--eg-muted, #58677e); font-size: 12px; }
+.chart-tooltip { position: absolute; z-index: 1; top: 8px; right: 8px; display: grid; gap: 2px; border: 1px solid var(--eg-border, #d8e0ec); border-radius: 8px; background: var(--eg-surface, #fff); box-shadow: 0 4px 16px rgb(15 23 42 / 12%); padding: 7px 10px; font-size: 12px; pointer-events: none; }
+.chart-tooltip strong { color: var(--eg-text, #111827); font-size: 14px; }
+.chart-tooltip time { color: var(--eg-muted, #58677e); }
+.chart-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin-top: 4px; }
+.chart-summary > div { display: grid; gap: 3px; min-width: 0; border: 1px solid var(--eg-border, #d8e0ec); border-radius: 8px; background: var(--eg-surface-soft, #f5f8fc); padding: 7px 9px; }
+.chart-summary span { color: var(--eg-muted, #58677e); font-size: 12px; }
+.chart-summary strong { color: var(--eg-text, #111827); font-size: 15px; white-space: nowrap; }
+.chart-summary small { color: var(--eg-muted, #58677e); font-size: 11px; font-weight: 600; }
 .measurement-muted { margin: 0; color: var(--eg-muted, #58677e); font-size: 12px; }
 .measurement-error { margin: 0; color: var(--eg-danger, #b42318); font-size: 12px; }
 .measurement-range button:focus-visible { outline: 2px solid var(--eg-blue, #2863e6); outline-offset: 2px; }

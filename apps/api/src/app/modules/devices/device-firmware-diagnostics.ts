@@ -3,6 +3,17 @@ import { ClassicLevel } from 'classic-level';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import {
+  applyDeviceHealthObservation,
+  summarizeDailyFromHourly,
+  type DeviceHealthBucketSummary,
+  type DeviceHealthHistoryPage,
+  type DeviceHealthHistoryQuery,
+  type DeviceHealthMetricObservation,
+  type DeviceHealthObservation,
+  utcBucketStart,
+} from './device-health-history';
+import { queryDeviceHealthEvidence, type DeviceHealthQueryDataset } from '@energrid/domain-devices';
 
 export interface FirmwareDiagnosticScope {
   tenantId: string;
@@ -61,6 +72,11 @@ export interface FirmwareHealthEvent {
   confidence: 'confirmed' | 'possible';
   summary: string;
   explanation: string;
+  /** Server-side evidence source. Legacy events may omit it. */
+  source?: { protocol: 'http'; method: 'GET'; path: '/api/v1/diagnostics' };
+  /** observedAt is when the collector detected this event, not device wall-clock time. */
+  observedAtBasis?: 'server-detection-time';
+  deduplicationKey?: string;
 }
 
 export interface FirmwareDiagnosticsView {
@@ -171,14 +187,51 @@ function nullableMetric(value: unknown, minimum: number, maximum: number): numbe
 
 interface StoredView extends FirmwareDiagnosticsView {
   schemaVersion: 1;
+  historyBackfilledThroughAt?: string;
+  lastRetentionSweepAt?: string;
 }
 
 export const FIRMWARE_DIAGNOSTICS_STORE_DIRECTORY = Symbol('FIRMWARE_DIAGNOSTICS_STORE_DIRECTORY');
 
 const eventLimit = 100;
-const snapshotLimit = 1_440;
 const failureLimit = 1_440;
 const restartWindowMs = 10 * 60_000;
+
+export interface DeviceHealthRetentionOptions {
+  rawSampleDays: number;
+  hourlySummaryDays: number;
+  dailySummaryDays: number;
+  significantEventDays: number;
+  communicationFailureDays: number;
+  expectedIntervalMs: number;
+  retentionSweepIntervalMs: number;
+}
+
+const defaultRetention: DeviceHealthRetentionOptions = {
+  rawSampleDays: 7,
+  hourlySummaryDays: 90,
+  dailySummaryDays: 730,
+  significantEventDays: 3650,
+  communicationFailureDays: 90,
+  expectedIntervalMs: 60_000,
+  retentionSweepIntervalMs: 24 * 60 * 60_000,
+};
+
+function configuredRetention(overrides: Partial<DeviceHealthRetentionOptions> = {}): DeviceHealthRetentionOptions {
+  const fromEnv = (key: string, fallback: number, minimum: number, maximum: number) => {
+    const value = Number(process.env[key]);
+    return Number.isSafeInteger(value) && value >= minimum && value <= maximum ? value : fallback;
+  };
+  return {
+    rawSampleDays: overrides.rawSampleDays ?? fromEnv('HOME_DEVICE_HEALTH_RAW_DAYS', 7, 1, 30),
+    hourlySummaryDays: overrides.hourlySummaryDays ?? fromEnv('HOME_DEVICE_HEALTH_HOURLY_DAYS', 90, 1, 3650),
+    dailySummaryDays: overrides.dailySummaryDays ?? fromEnv('HOME_DEVICE_HEALTH_DAILY_DAYS', 730, 1, 7300),
+    significantEventDays: overrides.significantEventDays ?? fromEnv('HOME_DEVICE_HEALTH_EVENT_DAYS', 3650, 365, 7300),
+    communicationFailureDays: overrides.communicationFailureDays ?? fromEnv('HOME_DEVICE_HEALTH_FAILURE_DAYS', 90, 1, 3650),
+    expectedIntervalMs: overrides.expectedIntervalMs ?? fromEnv('HOME_FIRMWARE_DIAGNOSTICS_INTERVAL_MS', 60_000, 15_000, 900_000),
+    retentionSweepIntervalMs: overrides.retentionSweepIntervalMs ?? defaultRetention.retentionSweepIntervalMs,
+  };
+}
 
 function diagnosticsKey(scope: FirmwareDiagnosticScope, deviceId: string): string {
   if (!scope.tenantId.trim() || !scope.siteId.trim() || !deviceId.trim()) {
@@ -211,6 +264,9 @@ function event(
     confidence,
     summary,
     explanation,
+    source: { protocol: 'http', method: 'GET', path: '/api/v1/diagnostics' },
+    observedAtBasis: 'server-detection-time',
+    deduplicationKey: `${kind}:${sample.bootSessionId}`,
   };
 }
 
@@ -281,17 +337,87 @@ export function deriveFirmwareHealthEvents(
   return created;
 }
 
+function encodedPart(value: string): string { return encodeURIComponent(value); }
+
+function healthKey(kind: string, scope: FirmwareDiagnosticScope, deviceId: string, suffix = ''): string {
+  return `device-health:${kind}:${encodedPart(scope.tenantId)}:${encodedPart(scope.siteId)}:${encodedPart(deviceId)}:${suffix}`;
+}
+
+function siteDeviceIndexPrefix(scope: FirmwareDiagnosticScope): string {
+  return `device-health:index:${encodedPart(scope.tenantId)}:${encodedPart(scope.siteId)}:`;
+}
+
+function observationFor(
+  scope: FirmwareDiagnosticScope,
+  deviceId: string,
+  physicalId: string,
+  snapshot: FirmwareDiagnosticSnapshot,
+): DeviceHealthObservation {
+  const sample = snapshot.sample;
+  const source = 'http:GET:/api/v1/diagnostics';
+  const metric = (name: string, value: number | null, unit: string,
+    semantics: DeviceHealthMetricObservation['semantics'] = 'gauge'): DeviceHealthMetricObservation =>
+    ({ name, value, unit, semantics, source });
+  return {
+    tenantId: scope.tenantId,
+    siteId: scope.siteId,
+    deviceId,
+    physicalDeviceId: physicalId,
+    sampleId: createHash('sha256').update(`${snapshot.collectedAt}\0${JSON.stringify(sample)}`).digest('hex').slice(0, 32),
+    observedAt: snapshot.collectedAt,
+    bootSessionId: sample.bootSessionId,
+    resetEvidence: { reason: sample.reset.reason, code: sample.reset.reasonCode,
+      details: sample.reset.exception ? { ...sample.reset.exception } : null, source },
+    metrics: [
+      metric('wifi.rssi', sample.wifi.rssiDbm, 'dBm'),
+      metric('memory.free_heap', sample.memory.freeHeapBytes, 'bytes'),
+      metric('memory.fragmentation', sample.memory.heapFragmentationPct, '%'),
+      metric('memory.largest_free_block', sample.memory.largestFreeBlockBytes, 'bytes'),
+      metric('uptime', sample.uptimeMs, 'ms', 'counter'),
+      metric('wifi.disconnect_count', sample.wifi.disconnectCount, 'count', 'counter'),
+      metric('wifi.reconnect_count', sample.wifi.reconnectCount, 'count', 'counter'),
+      metric('sensor.sample_count', sample.sensor.sampleCount, 'count', 'counter'),
+      metric('sensor.read_failure_count', sample.sensor.readFailureCount, 'count', 'counter'),
+    ],
+  };
+}
+
+function withEventProvenance(item: FirmwareHealthEvent): FirmwareHealthEvent {
+  return {
+    ...item,
+    source: item.source || { protocol: 'http', method: 'GET', path: '/api/v1/diagnostics' },
+    observedAtBasis: item.observedAtBasis || 'server-detection-time',
+    deduplicationKey: item.deduplicationKey || `${item.kind}:${item.bootSessionId}`,
+  };
+}
+
+function isNotFound(error: unknown): boolean {
+  return !!error && typeof error === 'object' && 'code' in error && error.code === 'LEVEL_NOT_FOUND';
+}
+
+function utcBucketKeyPart(observedAt: string, granularity: 'hourly' | 'daily'): string {
+  return utcBucketStart(observedAt, granularity);
+}
+
+function inRange(at: string, from: number, to: number): boolean {
+  const time = Date.parse(at);
+  return Number.isFinite(time) && time >= from && time <= to;
+}
+
 @Injectable()
 export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
   private readonly db: ClassicLevel<string, unknown>;
+  private readonly retention: DeviceHealthRetentionOptions;
   private tail: Promise<void> = Promise.resolve();
   private opened?: Promise<void>;
 
   constructor(
     @Optional() @Inject(FIRMWARE_DIAGNOSTICS_STORE_DIRECTORY) directory?: string,
+    retention: Partial<DeviceHealthRetentionOptions> = {},
   ) {
     this.db = new ClassicLevel(directory?.trim() || process.env.HOME_FIRMWARE_DIAGNOSTICS_DIRECTORY?.trim() ||
       join(homedir(), '.energrid', 'device-firmware-diagnostics'), { valueEncoding: 'json' });
+    this.retention = configuredRetention(retention);
   }
 
   async onModuleDestroy(): Promise<void> {
@@ -318,13 +444,30 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
         ? previous
         : null;
       const newEvents = deriveFirmwareHealthEvents(previousView, sample, observedAt, previousView?.events || []);
-      const events = [...(previousView?.events || []), ...newEvents]
+      const allEvents = [...(previousView?.events || []).map(withEventProvenance), ...newEvents.map(withEventProvenance)]
         .filter((item, index, all) => all.findIndex(other => other.id === item.id) === index)
         .sort((left, right) => Date.parse(left.observedAt) - Date.parse(right.observedAt))
-        .slice(-eventLimit);
-      const restartCount10m = events.filter(item => item.kind === 'reboot-detected' &&
+      const events = allEvents.slice(-eventLimit);
+      const restartCount10m = allEvents.filter(item => item.kind === 'reboot-detected' &&
         Date.parse(observedAt) - Date.parse(item.observedAt) >= 0 &&
         Date.parse(observedAt) - Date.parse(item.observedAt) <= restartWindowMs).length;
+      const snapshot: FirmwareDiagnosticSnapshot = {
+        collectedAt: observedAt,
+        deviceObservedAt: null,
+        protocol: 'http',
+        method: 'GET',
+        path: '/api/v1/diagnostics',
+        identityVerifiedAt: observedAt,
+        sample,
+      };
+      const snapshots = [...(previousView?.snapshots || []), snapshot]
+        .filter((item, index, all) => all.findIndex(other => other.collectedAt === item.collectedAt &&
+          JSON.stringify(other.sample) === JSON.stringify(item.sample)) === index)
+        .sort((left, right) => Date.parse(left.collectedAt) - Date.parse(right.collectedAt));
+      const cutoff = Date.parse(observedAt) - this.retention.rawSampleDays * 86_400_000;
+      const maxRawSamples = Math.min(100_000, Math.ceil(this.retention.rawSampleDays * 86_400_000 /
+        this.retention.expectedIntervalMs * 1.25));
+      const retainedSnapshots = snapshots.filter(item => Date.parse(item.collectedAt) >= cutoff).slice(-maxRawSamples);
       const view: StoredView = {
         schemaVersion: 1,
         deviceId,
@@ -332,15 +475,7 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
         siteId: scope.siteId,
         sampledAt: observedAt,
         current: sample,
-        snapshots: [...(previousView?.snapshots || []), {
-          collectedAt: observedAt,
-          deviceObservedAt: null,
-          protocol: 'http' as const,
-          method: 'GET' as const,
-          path: '/api/v1/diagnostics' as const,
-          identityVerifiedAt: observedAt,
-          sample,
-        }].slice(-snapshotLimit),
+        snapshots: retainedSnapshots,
         lastAttemptAt: observedAt,
         lastSuccessfulContactAt: observedAt,
         collectionStatus: 'success',
@@ -348,8 +483,62 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
         events,
         restartCount10m,
         connectivity: sample.wifi.connected ? 'connected' : 'disconnected',
+        historyBackfilledThroughAt: snapshots.at(-1)?.collectedAt || previousView?.historyBackfilledThroughAt || '',
+        lastRetentionSweepAt: previousView?.lastRetentionSweepAt,
       };
-      await this.db.put(key, view);
+
+      const pendingBuckets = new Map<string, DeviceHealthBucketSummary>();
+      const operations: Array<{ type: 'put' | 'del'; key: string; value?: unknown }> = [];
+      const affectedDays = new Set<string>();
+      const legacySnapshots = previousView?.historyBackfilledThroughAt
+        ? [] : (previousView?.snapshots || []);
+      const hourlyCutoff = Date.parse(observedAt) - this.retention.hourlySummaryDays * 86_400_000;
+      for (const item of [...legacySnapshots, snapshot]) {
+        if (Date.parse(item.collectedAt) < hourlyCutoff) {
+          affectedDays.add(utcBucketKeyPart(item.collectedAt, 'daily'));
+          await this.stageLateDaily(scope, deviceId, physicalId, item, pendingBuckets, operations);
+        } else {
+          await this.stageObservation(scope, deviceId, physicalId, item, pendingBuckets, operations, affectedDays);
+        }
+      }
+      for (const dayStartAt of affectedDays) {
+        // Daily rows are rebuilt from their hourly children while those children
+        // are retained. Older late evidence amends the daily row idempotently above.
+        const hourly = await this.readUtcDayHours(scope, deviceId, dayStartAt, pendingBuckets);
+        if (Date.parse(dayStartAt) < hourlyCutoff) continue;
+        const daily = summarizeDailyFromHourly(hourly, dayStartAt, this.retention.expectedIntervalMs);
+        if (daily) pendingBuckets.set(healthKey('daily', scope, deviceId, dayStartAt), daily);
+      }
+      for (const [bucketKey, bucket] of pendingBuckets) operations.push({ type: 'put', key: bucketKey, value: bucket });
+      operations.push({ type: 'put', key: siteDeviceIndexPrefix(scope) + encodedPart(deviceId), value: {
+        tenantId: scope.tenantId, siteId: scope.siteId, deviceId, physicalDeviceId: physicalId,
+      } });
+      const eventMigrationKey = healthKey('meta', scope, deviceId, 'events-v1-migrated');
+      const failureMigrationKey = healthKey('meta', scope, deviceId, 'failures-v1-migrated');
+      const migrateEvents = !(await this.readValue(eventMigrationKey));
+      const migrateFailures = !(await this.readValue(failureMigrationKey));
+      const eventsToPersist = migrateEvents ? allEvents : newEvents.map(withEventProvenance);
+      const failuresToPersist = migrateFailures ? (previousView?.collectionFailures || []) : [];
+      for (const item of eventsToPersist) operations.push({ type: 'put',
+        key: healthKey('event', scope, deviceId, item.id), value: {
+          tenantId: scope.tenantId, siteId: scope.siteId, deviceId, physicalDeviceId: physicalId,
+          ...withEventProvenance(item),
+        } });
+      for (const item of failuresToPersist) operations.push({ type: 'put',
+        key: healthKey('failure', scope, deviceId, item.id), value: {
+          tenantId: scope.tenantId, siteId: scope.siteId, deviceId, physicalDeviceId: physicalId, ...item,
+        } });
+      if (migrateEvents) operations.push({ type: 'put', key: eventMigrationKey, value: { completedAt: observedAt } });
+      if (migrateFailures) operations.push({ type: 'put', key: failureMigrationKey, value: { completedAt: observedAt } });
+      const sweepAt = this.shouldSweep(view.lastRetentionSweepAt, observedAt);
+      if (sweepAt) {
+        operations.push(...await this.retentionDeletes(scope, deviceId, observedAt));
+        view.lastRetentionSweepAt = observedAt;
+      }
+      operations.push({ type: 'put', key, value: view });
+      // LevelDB batch is atomic: new rollups and their idempotency markers are committed
+      // with the raw-window update, so raw evidence is never removed before its rollup.
+      await this.db.batch(operations as never);
       return stripSchema(view);
     });
   }
@@ -375,6 +564,7 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
       const failure: FirmwareDiagnosticCollectionFailure = {
         id: failureId(deviceId, attemptedAt, reason), attemptedAt, reason,
       };
+      const failures = [...(previousView?.collectionFailures || []), failure].slice(-failureLimit);
       const view: StoredView = {
         schemaVersion: 1,
         deviceId,
@@ -386,12 +576,40 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
         lastAttemptAt: attemptedAt,
         lastSuccessfulContactAt: previousView?.lastSuccessfulContactAt || null,
         collectionStatus: 'failed',
-        collectionFailures: [...(previousView?.collectionFailures || []), failure].slice(-failureLimit),
-        events: previousView?.events || [],
+        collectionFailures: failures,
+        events: (previousView?.events || []).map(withEventProvenance),
         restartCount10m: previousView?.restartCount10m || 0,
         connectivity: previousView?.connectivity || 'unknown',
+        historyBackfilledThroughAt: previousView?.historyBackfilledThroughAt,
+        lastRetentionSweepAt: previousView?.lastRetentionSweepAt,
       };
-      await this.db.put(key, view);
+      const operations: Array<{ type: 'put' | 'del'; key: string; value?: unknown }> = [
+        { type: 'put', key: siteDeviceIndexPrefix(scope) + encodedPart(deviceId), value: {
+          tenantId: scope.tenantId, siteId: scope.siteId, deviceId, physicalDeviceId: physicalId,
+        } },
+      ];
+      const eventMigrationKey = healthKey('meta', scope, deviceId, 'events-v1-migrated');
+      const failureMigrationKey = healthKey('meta', scope, deviceId, 'failures-v1-migrated');
+      const migrateEvents = !(await this.readValue(eventMigrationKey));
+      const migrateFailures = !(await this.readValue(failureMigrationKey));
+      const eventsToPersist = migrateEvents ? view.events : [];
+      const failuresToPersist = [...(migrateFailures ? (previousView?.collectionFailures || []) : []), failure];
+      operations.push(...eventsToPersist.map(item => ({ type: 'put' as const,
+        key: healthKey('event', scope, deviceId, item.id), value: {
+          tenantId: scope.tenantId, siteId: scope.siteId, deviceId, physicalDeviceId: physicalId, ...item,
+        } })));
+      operations.push(...failuresToPersist.map(item => ({ type: 'put' as const,
+        key: healthKey('failure', scope, deviceId, item.id), value: {
+          tenantId: scope.tenantId, siteId: scope.siteId, deviceId, physicalDeviceId: physicalId, ...item,
+        } })));
+      if (migrateEvents) operations.push({ type: 'put', key: eventMigrationKey, value: { completedAt: attemptedAt } });
+      if (migrateFailures) operations.push({ type: 'put', key: failureMigrationKey, value: { completedAt: attemptedAt } });
+      if (this.shouldSweep(view.lastRetentionSweepAt, attemptedAt)) {
+        operations.push(...await this.retentionDeletes(scope, deviceId, attemptedAt));
+        view.lastRetentionSweepAt = attemptedAt;
+      }
+      operations.push({ type: 'put', key, value: view });
+      await this.db.batch(operations as never);
       return stripSchema(view);
     });
   }
@@ -401,8 +619,247 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
       await this.open();
       const record = await this.getValue(diagnosticsKey(scope, deviceId));
       if (!record || record.tenantId !== scope.tenantId || record.siteId !== scope.siteId || record.deviceId !== deviceId) return null;
-      return stripSchema(record);
+      return stripSchema({ ...record, events: (record.events || []).map(withEventProvenance) });
     });
+  }
+
+  async queryHistory(scope: FirmwareDiagnosticScope, query: DeviceHealthHistoryQuery): Promise<DeviceHealthHistoryPage> {
+    if (!scope.tenantId.trim() || !scope.siteId.trim() ||
+        !['raw', 'hourly', 'daily', 'events', 'failures'].includes(query.granularity)) {
+      throw new Error('Invalid device health history query');
+    }
+    const toAt = query.to || new Date().toISOString();
+    const fromAt = query.from || new Date(Date.parse(toAt) - 24 * 60 * 60_000).toISOString();
+    const from = Date.parse(fromAt);
+    const to = Date.parse(toAt);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from > to || to - from > 730 * 86_400_000) {
+      throw new Error('Invalid device health history time range');
+    }
+    const limit = query.limit === undefined ? 500 : Math.max(1, Math.min(1000, Math.floor(query.limit)));
+    return this.serialize(async () => {
+      await this.open();
+      const deviceIds = query.deviceId ? [query.deviceId] : await this.siteDeviceIds(scope);
+      const records: Array<{ at: string; value: unknown }> = [];
+      const dataset: DeviceHealthQueryDataset = {
+        observations: [], buckets: [], events: [], failures: [], expectedIntervalMs: this.retention.expectedIntervalMs,
+        supportedMetrics: [
+          { name: 'wifi.rssi', unit: 'dBm' }, { name: 'memory.free_heap', unit: 'bytes' },
+          { name: 'memory.fragmentation', unit: '%' }, { name: 'memory.largest_free_block', unit: 'bytes' },
+          { name: 'uptime', unit: 'ms' }, { name: 'wifi.disconnect_count', unit: 'count' },
+          { name: 'wifi.reconnect_count', unit: 'count' }, { name: 'sensor.sample_count', unit: 'count' },
+          { name: 'sensor.read_failure_count', unit: 'count' },
+        ],
+      };
+      for (const deviceId of deviceIds) {
+        const view = await this.getValue(diagnosticsKey(scope, deviceId));
+        if (!view || view.tenantId !== scope.tenantId || view.siteId !== scope.siteId || view.deviceId !== deviceId) continue;
+        const inRequestedRange = (at: string) => inRange(at, from, to);
+        for (const snapshot of view.snapshots || []) {
+          if (inRequestedRange(snapshot.collectedAt)) {
+            const observation = observationFor(scope, deviceId, snapshot.sample.deviceId, snapshot);
+            dataset.observations.push(observation);
+          }
+        }
+        const summaryKind = query.granularity === 'daily' ? 'daily' : 'hourly';
+        const summaryPrefix = healthKey(summaryKind, scope, deviceId);
+        for (const { value } of await this.readPrefix(summaryPrefix)) {
+          const bucket = value as DeviceHealthBucketSummary;
+          if (bucket.tenantId === scope.tenantId && bucket.siteId === scope.siteId && bucket.deviceId === deviceId &&
+              inRequestedRange(bucket.bucketStartAt)) dataset.buckets.push(bucket);
+        }
+        for (const kind of ['event', 'failure'] as const) {
+          const storedRows = await this.readPrefix(healthKey(kind, scope, deviceId));
+          const projected = kind === 'event' ? (view.events || []).map(withEventProvenance) : view.collectionFailures || [];
+          const byId = new Map<string, Record<string, unknown>>();
+          for (const item of projected) byId.set(item.id, item as unknown as Record<string, unknown>);
+          for (const row of storedRows) {
+            if (row.value && typeof row.value === 'object' && 'id' in row.value) byId.set(String((row.value as { id: unknown }).id), row.value as Record<string, unknown>);
+          }
+          for (const item of byId.values()) {
+            const physicalDeviceId = String(item.physicalDeviceId || view.current?.deviceId || '');
+            if (item.tenantId && item.tenantId !== scope.tenantId || item.siteId && item.siteId !== scope.siteId ||
+                item.deviceId && item.deviceId !== deviceId || (physicalDeviceId && !/^esp8266:[0-9a-f]{6}$/i.test(physicalDeviceId))) continue;
+            if (kind === 'event') {
+              const at = String(item.observedAt || '');
+              if (!inRequestedRange(at)) continue;
+              const eventRecord = { tenantId: scope.tenantId, siteId: scope.siteId, id: String(item.id), deviceId, physicalDeviceId, observedAt: at,
+                kind: String(item.kind || 'unknown'), bootSessionId: String(item.bootSessionId || ''),
+                confidence: item.confidence === 'possible' ? 'possible' as const : 'confirmed' as const,
+                source: item.source && typeof item.source === 'object' ? 'http:GET:/api/v1/diagnostics' : null,
+                summary: String(item.summary || ''), explanation: String(item.explanation || '') };
+              dataset.events.push(eventRecord);
+            } else {
+              const at = String(item.attemptedAt || '');
+              if (!inRequestedRange(at)) continue;
+              dataset.failures.push({ tenantId: scope.tenantId, siteId: scope.siteId, id: String(item.id), deviceId, physicalDeviceId, attemptedAt: at,
+                reason: String(item.reason || 'unknown') });
+            }
+          }
+        }
+        if (query.granularity === 'raw') {
+          for (const snapshot of view.snapshots || []) {
+            if (inRequestedRange(snapshot.collectedAt)) records.push({ at: snapshot.collectedAt,
+              value: { tenantId: scope.tenantId, siteId: scope.siteId, deviceId,
+                physicalDeviceId: snapshot.sample.deviceId, ...snapshot } });
+          }
+        } else if (query.granularity === 'events' || query.granularity === 'failures') {
+          const kind = query.granularity === 'events' ? 'event' : 'failure';
+          const keyPrefix = healthKey(kind, scope, deviceId);
+          const stored = await this.readPrefix(keyPrefix);
+          const projected = query.granularity === 'events' ? (view.events || []).map(withEventProvenance) : view.collectionFailures || [];
+          const byId = new Map<string, unknown>();
+          for (const item of projected) byId.set(item.id, item);
+          for (const { value } of stored) {
+            if (value && typeof value === 'object' && 'id' in value) byId.set(String((value as { id: unknown }).id), value);
+          }
+          for (const item of byId.values()) {
+            const at = query.granularity === 'events'
+              ? String((item as FirmwareHealthEvent).observedAt)
+              : String((item as FirmwareDiagnosticCollectionFailure).attemptedAt);
+            if (inRequestedRange(at)) records.push({ at, value: {
+              tenantId: scope.tenantId, siteId: scope.siteId, deviceId,
+              physicalDeviceId: view.current?.deviceId || null, ...item as object,
+            } });
+          }
+        } else {
+          const keyPrefix = healthKey(query.granularity === 'hourly' ? 'hourly' : 'daily', scope, deviceId);
+          for (const { value } of await this.readPrefix(keyPrefix)) {
+            const bucket = value as DeviceHealthBucketSummary;
+            if (inRequestedRange(bucket.bucketStartAt)) records.push({ at: bucket.bucketStartAt, value: bucket });
+          }
+        }
+      }
+      records.sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+      const analysis = queryDeviceHealthEvidence(scope, {
+        from: fromAt, to: toAt, timezone: query.timezone, granularity: query.granularity,
+        deviceId: query.deviceId, metrics: query.metrics, limit, cursor: query.cursor,
+      }, dataset);
+      return {
+        schemaVersion: 1,
+        tenantId: scope.tenantId,
+        siteId: scope.siteId,
+        granularity: query.granularity,
+        from: fromAt,
+        to: toAt,
+        records: records.slice(-limit).map(item => item.value),
+        analysis,
+      };
+    });
+  }
+
+  private async stageObservation(
+    scope: FirmwareDiagnosticScope,
+    deviceId: string,
+    physicalId: string,
+    snapshot: FirmwareDiagnosticSnapshot,
+    pending: Map<string, DeviceHealthBucketSummary>,
+    operations: Array<{ type: 'put' | 'del'; key: string; value?: unknown }>,
+    affectedDays: Set<string>,
+  ): Promise<void> {
+    const observation = observationFor(scope, deviceId, physicalId, snapshot);
+    const marker = healthKey('marker', scope, deviceId, `hourly:${observation.observedAt}:${observation.sampleId}`);
+    const bucketKey = healthKey('hourly', scope, deviceId, utcBucketKeyPart(observation.observedAt, 'hourly'));
+    const markedInBatch = operations.some(operation => operation.key === marker);
+    if (!markedInBatch && !(await this.readValue(marker))) {
+      const previous = pending.get(bucketKey) || await this.readValue<DeviceHealthBucketSummary>(bucketKey);
+      pending.set(bucketKey, applyDeviceHealthObservation(previous, observation, 'hourly', this.retention.expectedIntervalMs));
+      operations.push({ type: 'put', key: marker, value: { sampleId: observation.sampleId,
+        bucketKey, observedAt: observation.observedAt } });
+    }
+    affectedDays.add(utcBucketKeyPart(observation.observedAt, 'daily'));
+  }
+
+  private async stageLateDaily(
+    scope: FirmwareDiagnosticScope,
+    deviceId: string,
+    physicalId: string,
+    snapshot: FirmwareDiagnosticSnapshot,
+    pending: Map<string, DeviceHealthBucketSummary>,
+    operations: Array<{ type: 'put' | 'del'; key: string; value?: unknown }>,
+  ): Promise<void> {
+    const observation = observationFor(scope, deviceId, physicalId, snapshot);
+    const marker = healthKey('marker', scope, deviceId,
+      `late-daily:${observation.observedAt}:${observation.sampleId}`);
+    if (operations.some(operation => operation.key === marker) || await this.readValue(marker)) return;
+    const bucketKey = healthKey('daily', scope, deviceId, utcBucketKeyPart(observation.observedAt, 'daily'));
+    const previous = pending.get(bucketKey) || await this.readValue<DeviceHealthBucketSummary>(bucketKey);
+    pending.set(bucketKey, applyDeviceHealthObservation(previous, observation, 'daily', this.retention.expectedIntervalMs));
+    operations.push({ type: 'put', key: marker, value: { sampleId: observation.sampleId,
+      bucketKey, observedAt: observation.observedAt } });
+  }
+
+  private async readUtcDayHours(
+    scope: FirmwareDiagnosticScope,
+    deviceId: string,
+    dayStartAt: string,
+    pending: Map<string, DeviceHealthBucketSummary>,
+  ): Promise<DeviceHealthBucketSummary[]> {
+    const start = Date.parse(dayStartAt);
+    const hours: DeviceHealthBucketSummary[] = [];
+    for (let hour = 0; hour < 24; hour++) {
+      const at = new Date(start + hour * 3_600_000).toISOString();
+      const key = healthKey('hourly', scope, deviceId, at);
+      const item = pending.get(key) || await this.readValue<DeviceHealthBucketSummary>(key);
+      if (item) hours.push(item);
+    }
+    return hours;
+  }
+
+  private async readValue<T>(key: string): Promise<T | null> {
+    try { return await this.db.get(key) as T; } catch (error) { if (isNotFound(error)) return null; throw error; }
+  }
+
+  private async readPrefix(prefix: string): Promise<Array<{ key: string; value: unknown }>> {
+    const rows: Array<{ key: string; value: unknown }> = [];
+    for await (const [key, value] of this.db.iterator({ gte: prefix, lte: `${prefix}\xff` })) rows.push({ key, value });
+    return rows;
+  }
+
+  private async siteDeviceIds(scope: FirmwareDiagnosticScope): Promise<string[]> {
+    const ids = new Set<string>();
+    const indexPrefix = siteDeviceIndexPrefix(scope);
+    for await (const [key] of this.db.iterator({ gte: indexPrefix, lte: `${indexPrefix}\xff` })) {
+      ids.add(decodeURIComponent(String(key).slice(indexPrefix.length)));
+    }
+    // Legacy V1 records are discoverable before the next scheduled collection
+    // writes their site index; this read does not mutate or reassign them.
+    const legacyPrefix = `firmware-diagnostics:${encodedPart(scope.tenantId)}:${encodedPart(scope.siteId)}:`;
+    for await (const [key] of this.db.iterator({ gte: legacyPrefix, lte: `${legacyPrefix}\xff` })) {
+      ids.add(decodeURIComponent(String(key).slice(legacyPrefix.length)));
+    }
+    return [...ids];
+  }
+
+  private shouldSweep(lastSweep: string | undefined, now: string): boolean {
+    return !lastSweep || Date.parse(now) - Date.parse(lastSweep) >= this.retention.retentionSweepIntervalMs;
+  }
+
+  private async retentionDeletes(scope: FirmwareDiagnosticScope, deviceId: string, now: string) {
+    const instant = Date.parse(now);
+    const policies: Array<[string, number, string]> = [
+      ['hourly', this.retention.hourlySummaryDays, 'bucketStartAt'],
+      ['daily', this.retention.dailySummaryDays, 'bucketStartAt'],
+      ['event', this.retention.significantEventDays, 'observedAt'],
+      ['failure', this.retention.communicationFailureDays, 'attemptedAt'],
+    ];
+    const deletes: Array<{ type: 'del'; key: string }> = [];
+    for (const [kind, days, timestampField] of policies) {
+      const prefix = healthKey(kind, scope, deviceId);
+      for await (const [key, value] of this.db.iterator({ gte: prefix, lte: `${prefix}\xff` })) {
+        const timestamp = value && typeof value === 'object' ? Date.parse(String((value as Record<string, unknown>)[timestampField] || '')) : NaN;
+        if (Number.isFinite(timestamp) && timestamp < instant - days * 86_400_000) deletes.push({ type: 'del', key: String(key) });
+      }
+    }
+    for (const [markerKind, days] of [['hourly', this.retention.hourlySummaryDays],
+      ['late-daily', this.retention.dailySummaryDays]] as const) {
+      const markerPrefix = healthKey('marker', scope, deviceId, `${markerKind}:`);
+      const markerCutoff = new Date(instant - days * 86_400_000).toISOString();
+      const throughCutoff = `${markerPrefix}${markerCutoff}\xff`;
+      for await (const [key] of this.db.iterator({ gte: markerPrefix, lte: throughCutoff })) {
+        deletes.push({ type: 'del', key: String(key) });
+      }
+    }
+    return deletes;
   }
 
   private async getValue(key: string): Promise<StoredView | null> {
@@ -426,6 +883,8 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
         lastSuccessfulContactAt: stored.lastSuccessfulContactAt || stored.sampledAt || null,
         collectionStatus: stored.collectionStatus || 'success',
         collectionFailures: stored.collectionFailures || [],
+        events: stored.events || [],
+        restartCount10m: stored.restartCount10m || 0,
         connectivity: stored.connectivity || 'unknown',
       };
     } catch (error) {
