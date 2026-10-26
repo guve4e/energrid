@@ -59,7 +59,10 @@ describe('firmware diagnostics', () => {
     const previous = { current: sample(), deviceId, tenantId: scope.tenantId, siteId: scope.siteId,
       sampledAt: at, events: [], restartCount10m: 0, connectivity: 'connected' as const };
     const next = sample({ bootSessionId: 'esp8266-324864-1234abce', uptimeMs: 100 });
-    expect(deriveFirmwareHealthEvents(previous, next, at).map(item => item.kind)).toContain('reboot-detected');
+    const transition = deriveFirmwareHealthEvents(previous, next, at).find(item => item.kind === 'reboot-detected');
+    expect(transition).toMatchObject({ observedAt: at, observedAtBasis: 'server-detection-time', detectedAt: at,
+      inferredBootAt: { at: '2026-10-24T09:59:59.900Z', basis: 'collected-at-minus-reported-uptime' },
+      evidenceReferences: [{ type: 'firmware-diagnostic-snapshot', observedAt: at, bootSessionId: next.bootSessionId }] });
     expect(deriveFirmwareHealthEvents(previous, sample({ uptimeMs: 100 }), at)
       .find(item => item.kind === 'reboot-detected')?.explanation).toContain('uptime decreased');
     const rebootEvents = [
@@ -98,7 +101,8 @@ describe('firmware diagnostics', () => {
           new Date(Date.parse('2026-10-24T10:01:00.000Z') + index * 1000).toISOString());
       }
       expect((await recovered.get(scope, deviceId))?.events.length).toBeLessThanOrEqual(100);
-      const durableEvents = await recovered.queryHistory(scope, { deviceId, granularity: 'events', limit: 1000 });
+      const durableEvents = await recovered.queryHistory(scope, { deviceId, granularity: 'events', limit: 1000,
+        from: '2026-10-24T10:00:00.000Z', to: '2026-10-24T10:10:00.000Z' });
       expect(durableEvents.records.length).toBeGreaterThan(100);
       expect(new Set(durableEvents.records.map(item => (item as { id: string }).id)).size).toBe(durableEvents.records.length);
     } finally {
@@ -147,6 +151,43 @@ describe('firmware diagnostics', () => {
     }
   });
 
+  it('exposes typed Core statistics and recovery correlation through the scoped history adapter', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'energrid-fw-query-'));
+    const store = new DeviceFirmwareDiagnosticsService(directory, { expectedIntervalMs: 60_000 });
+    const firstAt = '2026-10-25T20:00:00.000Z';
+    const failedAt = '2026-10-25T20:01:00.000Z';
+    const recoveredAt = '2026-10-25T20:02:00.000Z';
+    try {
+      await store.record(scope, deviceId, 'esp8266:324864', sample({ wifi: { ...sample().wifi, rssiDbm: -70 } }), firstAt);
+      await store.recordFailure(scope, deviceId, 'esp8266:324864', 'request_timeout', failedAt);
+      await store.record(scope, deviceId, 'esp8266:324864', sample({ wifi: { ...sample().wifi, rssiDbm: -50 },
+        bootSessionId: 'esp8266-324864-1234abce' }), recoveredAt);
+      const result = await store.queryHistory(scope, { deviceId, granularity: 'hourly',
+        from: firstAt, to: '2026-10-25T21:00:00.000Z', timezone: 'Europe/Sofia' });
+      expect(result.analysis).toMatchObject({ tenantId: scope.tenantId, siteId: scope.siteId,
+        timezone: 'Europe/Sofia', site: { deviceCount: 1, failureCount: 1 } });
+      const device = result.analysis!.devices[0];
+      expect(device.metrics.find(metric => metric.name === 'wifi.rssi')?.statistics)
+        .toMatchObject({ minimum: -70, maximum: -50, average: -60, count: 2, unit: 'dBm' });
+      expect(device.failures[0]).toMatchObject({ recoveryObservedAt: recoveredAt, recoveryObservedAfterMs: 60_000 });
+      expect(device.bootSessionTransitions).toHaveLength(1);
+      const firstPage = await store.queryHistory(scope, { deviceId, granularity: 'raw', from: firstAt, to: recoveredAt, limit: 1 });
+      const nextPage = await store.queryHistory(scope, { deviceId, granularity: 'raw', from: firstAt, to: recoveredAt,
+        limit: 1, cursor: firstPage.analysis!.page.nextCursor! });
+      expect(firstPage.records).toHaveLength(1);
+      expect(nextPage.records).toHaveLength(1);
+      expect((firstPage.records[0] as { collectedAt: string }).collectedAt)
+        .not.toBe((nextPage.records[0] as { collectedAt: string }).collectedAt);
+      expect((await store.queryHistory({ ...scope, siteId: 'site-device-lab' }, { deviceId, granularity: 'hourly',
+        from: firstAt, to: '2026-10-25T21:00:00.000Z' })).analysis?.devices).toEqual([]);
+      expect((await store.queryHistory(scope, { granularity: 'hourly', from: firstAt,
+        to: '2026-10-25T21:00:00.000Z' }, [])).analysis?.devices).toEqual([]);
+    } finally {
+      await store.onModuleDestroy();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('stores a failure without fabricating a successful sample', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'energrid-fw-first-failure-'));
     const store = new DeviceFirmwareDiagnosticsService(directory);
@@ -182,7 +223,8 @@ describe('firmware diagnostics', () => {
       const view = await store.get(scope, deviceId);
       const duplicate = view!.snapshots[1];
       await store.record(scope, deviceId, 'esp8266:324864', duplicate.sample, duplicate.collectedAt);
-      const hourly = await store.queryHistory(scope, { deviceId, granularity: 'hourly' });
+      const range = { from: '2026-10-24T10:00:00.000Z', to: '2026-10-24T11:00:00.000Z' };
+      const hourly = await store.queryHistory(scope, { deviceId, granularity: 'hourly', ...range });
       const hour = hourly.records[0] as { sampleCount: number; expectedSampleCount: number; missingSampleCount: number;
         metrics: Record<string, { minimum: number; maximum: number; sum: number; sampleCount: number; missingSampleCount: number }>;
         counters: Record<string, Array<{ bootSessionId: string; delta: number | null }>> };
@@ -193,10 +235,11 @@ describe('firmware diagnostics', () => {
       expect(hour.metrics['memory.fragmentation']).toMatchObject({ minimum: 20, maximum: 20, sampleCount: 1, missingSampleCount: 2 });
       expect(hour.counters.uptime).toHaveLength(1);
       expect(hour.counters.uptime[0]).toMatchObject({ bootSessionId: sample().bootSessionId, delta: 60_000 });
-      const daily = await store.queryHistory(scope, { deviceId, granularity: 'daily' });
+      const daily = await store.queryHistory(scope, { deviceId, granularity: 'daily',
+        from: '2026-10-24T00:00:00.000Z', to: '2026-10-25T00:00:00.000Z' });
       expect((daily.records[0] as { sampleCount: number }).sampleCount).toBe(2);
-      expect((await store.queryHistory({ ...scope, siteId: 'site-device-lab' }, { granularity: 'hourly' })).records).toEqual([]);
-      expect((await store.queryHistory(scope, { deviceId, granularity: 'raw' })).records).toHaveLength(2);
+      expect((await store.queryHistory({ ...scope, siteId: 'site-device-lab' }, { granularity: 'hourly', ...range })).records).toEqual([]);
+      expect((await store.queryHistory(scope, { deviceId, granularity: 'raw', ...range })).records).toHaveLength(2);
     } finally {
       await store.onModuleDestroy();
       await rm(directory, { recursive: true, force: true });
@@ -220,19 +263,22 @@ describe('firmware diagnostics', () => {
     }
     const recovered = new DeviceFirmwareDiagnosticsService(directory, options);
     try {
-      expect((await recovered.queryHistory(scope, { deviceId, granularity: 'raw' })).records).toHaveLength(1);
-      expect((await recovered.queryHistory(scope, { deviceId, granularity: 'hourly' })).records)
+      const recent = { from: '2026-10-26T00:00:00.000Z', to: '2026-10-26T11:00:00.000Z' };
+      const retained = { from: '2026-10-20T00:00:00.000Z', to: '2026-10-26T12:00:00.000Z' };
+      expect((await recovered.queryHistory(scope, { deviceId, granularity: 'raw', ...recent })).records).toHaveLength(1);
+      expect((await recovered.queryHistory(scope, { deviceId, granularity: 'hourly', ...retained })).records)
         .toEqual(expect.arrayContaining([expect.objectContaining({ bucketStartAt: '2026-10-26T10:00:00.000Z' })]));
-      expect((await recovered.queryHistory(scope, { deviceId, granularity: 'hourly' })).records)
+      expect((await recovered.queryHistory(scope, { deviceId, granularity: 'hourly', ...retained })).records)
         .not.toEqual(expect.arrayContaining([expect.objectContaining({ bucketStartAt: '2026-10-20T10:00:00.000Z' })]));
-      expect((await recovered.queryHistory(scope, { deviceId, granularity: 'daily' })).records)
+      expect((await recovered.queryHistory(scope, { deviceId, granularity: 'daily',
+        from: '2026-10-20T00:00:00.000Z', to: '2026-10-27T00:00:00.000Z' })).records)
         .toEqual(expect.arrayContaining([expect.objectContaining({ bucketStartAt: '2026-10-20T00:00:00.000Z', sampleCount: 1 })]));
-      const events = await recovered.queryHistory(scope, { deviceId, granularity: 'events' });
+      const events = await recovered.queryHistory(scope, { deviceId, granularity: 'events', ...retained });
       expect(events.records).toEqual(expect.arrayContaining([expect.objectContaining({
         kind: 'exception-reset', tenantId: scope.tenantId, siteId: scope.siteId,
         physicalDeviceId: 'esp8266:324864', observedAtBasis: 'server-detection-time',
       })]));
-      expect((await recovered.queryHistory(scope, { deviceId, granularity: 'failures' })).records)
+      expect((await recovered.queryHistory(scope, { deviceId, granularity: 'failures', ...retained })).records)
         .toEqual(expect.arrayContaining([expect.objectContaining({ reason: 'request_timeout', physicalDeviceId: 'esp8266:324864' })]));
     } finally {
       await recovered.onModuleDestroy();
@@ -240,7 +286,7 @@ describe('firmware diagnostics', () => {
     }
   });
 
-  it('migrates the existing event and failure arrays into independently retained history without changing timestamps', async () => {
+  it('migrates legacy history on a failed poll, preserves unknown legacy provenance, and keeps migrated events beyond the view limit', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'energrid-health-legacy-migration-'));
     const legacyAt = '2026-10-24T08:59:30.172Z';
     const oldEvents = Array.from({ length: 87 }, (_, index) => ({
@@ -270,20 +316,67 @@ describe('firmware diagnostics', () => {
     await seed.close();
     const store = new DeviceFirmwareDiagnosticsService(directory);
     try {
-      await store.record(scope, deviceId, 'esp8266:324864', sample(), '2026-10-26T10:00:00.000Z');
-      const events = await store.queryHistory(scope, { deviceId, granularity: 'events', limit: 1000 });
-      const failures = await store.queryHistory(scope, { deviceId, granularity: 'failures', limit: 1000 });
+      // A failed poll is sufficient to migrate history; no successful response from the device is needed.
+      await store.recordFailure(scope, deviceId, 'esp8266:324864', 'request_timeout', '2026-10-26T10:00:00.000Z');
+    } finally {
+      await store.onModuleDestroy();
+    }
+    const recovered = new DeviceFirmwareDiagnosticsService(directory);
+    let recoveredClosed = false;
+    try {
+      const legacyRange = { from: '2026-10-24T00:00:00.000Z', to: '2026-10-26T11:00:00.000Z' };
+      const events = await recovered.queryHistory(scope, { deviceId, granularity: 'events', limit: 1000, ...legacyRange });
+      const failures = await recovered.queryHistory(scope, { deviceId, granularity: 'failures', limit: 1000, ...legacyRange });
       expect(events.records).toHaveLength(87);
       expect(events.records[0]).toMatchObject({
         id: 'legacy-event-0', observedAt: legacyAt,
-        source: { protocol: 'http', method: 'GET', path: '/api/v1/diagnostics' },
-        observedAtBasis: 'server-detection-time', deduplicationKey: 'reboot-detected:legacy-boot-0',
+        deduplicationKey: 'reboot-detected:legacy-boot-0',
         tenantId: scope.tenantId, siteId: scope.siteId, physicalDeviceId: 'esp8266:324864',
       });
-      expect(failures.records).toHaveLength(8);
+      expect(events.records[0]).not.toHaveProperty('source');
+      expect(events.records[0]).not.toHaveProperty('observedAtBasis');
+      expect(events.analysis?.devices[0].events[0]).toMatchObject({
+        source: null, observedAtBasis: null, detectedAt: null, inferredBootAt: null, evidenceReferences: [],
+      });
+      expect(failures.records).toHaveLength(9); // eight historical rows plus the unavailable-device attempt
       expect(failures.records[0]).toMatchObject({ id: 'legacy-failure-0', attemptedAt: legacyAt, reason: 'request_timeout' });
+
+      // More than 100 subsequent events can trim the compatibility view without evicting
+      // independently persisted legacy event rows.
+      for (let index = 0; index < 110; index++) {
+        await recovered.record(scope, deviceId, 'esp8266:324864', sample({
+          bootSessionId: `new-session-${index.toString().padStart(3, '0')}`, uptimeMs: 1,
+        }), new Date(Date.parse('2026-10-26T10:01:00.000Z') + index * 1000).toISOString());
+      }
+      expect((await recovered.get(scope, deviceId))?.events.length).toBeLessThanOrEqual(100);
+      const durableAfterRotation = await recovered.queryHistory(scope, { deviceId, granularity: 'events', limit: 1000, ...legacyRange });
+      expect(durableAfterRotation.records.filter(item => String((item as { id: string }).id).startsWith('legacy-event-'))).toHaveLength(87);
+      expect(durableAfterRotation.records.length).toBeGreaterThan(100);
+      expect(new Set(durableAfterRotation.records.map(item => (item as { id: string }).id)).size).toBe(durableAfterRotation.records.length);
+      await recovered.onModuleDestroy();
+      recoveredClosed = true;
+      const audit = new ClassicLevel<string, unknown>(directory, { valueEncoding: 'json' });
+      await audit.open();
+      try {
+        const devicePart = encodeURIComponent(deviceId);
+        expect(await audit.get(`device-health:meta:${scope.tenantId}:${scope.siteId}:${devicePart}:events-v1-migrated`))
+          .toEqual({ completedAt: '2026-10-26T10:00:00.000Z' });
+        expect(await audit.get(`device-health:meta:${scope.tenantId}:${scope.siteId}:${devicePart}:failures-v1-migrated`))
+          .toEqual({ completedAt: '2026-10-26T10:00:00.000Z' });
+        let durableLegacyEventRows = 0;
+        for await (const [_key, value] of audit.iterator({
+          gte: `device-health:event:${scope.tenantId}:${scope.siteId}:${devicePart}:`,
+          lte: `device-health:event:${scope.tenantId}:${scope.siteId}:${devicePart}:\xff`,
+        })) {
+          if (value && typeof value === 'object' && 'id' in value &&
+              String((value as { id: unknown }).id).startsWith('legacy-event-')) durableLegacyEventRows++;
+        }
+        expect(durableLegacyEventRows).toBe(87);
+      } finally {
+        await audit.close();
+      }
     } finally {
-      await store.onModuleDestroy();
+      if (!recoveredClosed) await recovered.onModuleDestroy();
       await rm(directory, { recursive: true, force: true });
     }
   });

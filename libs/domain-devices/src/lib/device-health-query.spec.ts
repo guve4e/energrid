@@ -1,5 +1,5 @@
 import { queryDeviceHealthEvidence, type DeviceHealthQueryDataset } from './device-health-query';
-import type { DeviceHealthObservation } from './device-health-history';
+import { applyDeviceHealthObservation, type DeviceHealthObservation } from './device-health-history';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -14,13 +14,18 @@ const dataset: DeviceHealthQueryDataset = {
   observations: [observed('2026-10-25T20:00:00.000Z', -70), observed('2026-10-25T20:01:00.000Z', null),
     observed('2026-10-25T20:03:00.000Z', -50, 'boot-b')],
   buckets: [], events: [{ tenantId: scope.tenantId, siteId: scope.siteId, id: 'boot-event', deviceId: 'device-a', physicalDeviceId: 'esp8266:324864',
-    observedAt: '2026-10-25T20:03:00.000Z', kind: 'reboot-detected', bootSessionId: 'boot-b', confidence: 'confirmed',
-    source: 'http:GET:/api/v1/diagnostics', summary: 'boot change', explanation: 'session changed' },
+    observedAt: '2026-10-25T20:02:30.000Z', kind: 'reboot-detected', bootSessionId: 'boot-b', confidence: 'confirmed',
+    source: 'http:GET:/api/v1/diagnostics', summary: 'boot change', explanation: 'session changed',
+    observedAtBasis: 'server-detection-time', detectedAt: '2026-10-25T20:02:30.000Z',
+    inferredBootAt: { at: '2026-10-25T19:59:00.000Z', basis: 'collected-at-minus-reported-uptime' },
+    evidenceReferences: [{ type: 'firmware-diagnostic-snapshot', observedAt: '2026-10-25T20:02:30.000Z', bootSessionId: 'boot-b' }] },
   { tenantId: scope.tenantId, siteId: scope.siteId, id: 'reset-event', deviceId: 'device-a', physicalDeviceId: 'esp8266:324864',
     observedAt: '2026-10-25T20:03:00.000Z', kind: 'exception-reset', bootSessionId: 'boot-b', confidence: 'confirmed',
-    source: 'http:GET:/api/v1/diagnostics', summary: 'reset', explanation: 'reported exception' }],
+    source: 'http:GET:/api/v1/diagnostics', summary: 'reset', explanation: 'reported exception',
+    observedAtBasis: 'server-detection-time', detectedAt: '2026-10-25T20:03:00.000Z', inferredBootAt: null,
+    evidenceReferences: [{ type: 'firmware-diagnostic-snapshot', observedAt: '2026-10-25T20:03:00.000Z', bootSessionId: 'boot-b' }] }],
   failures: [{ tenantId: scope.tenantId, siteId: scope.siteId, id: 'failure-1', deviceId: 'device-a', physicalDeviceId: 'esp8266:324864',
-    attemptedAt: '2026-10-25T20:02:00.000Z', reason: 'request_timeout' }],
+    attemptedAt: '2026-10-25T20:02:00.000Z', reason: 'request_timeout', source: 'http:GET:/api/v1/diagnostics' }],
   expectedIntervalMs: 60_000, supportedMetrics: [{ name: 'wifi.rssi', unit: 'dBm' }, { name: 'memory.free_heap', unit: 'bytes' }],
 };
 const request = { from: '2026-10-25T20:00:00.000Z', to: '2026-10-25T20:04:00.000Z', granularity: 'raw' as const };
@@ -44,9 +49,49 @@ describe('Core device health query', () => {
     const result = queryDeviceHealthEvidence(scope, request, dataset);
     expect(result.devices[0].failures[0]).toMatchObject({ recoveryObservedAt: '2026-10-25T20:03:00.000Z', recoveryObservedAfterMs: 60_000 });
     expect(result.devices[0].bootSessionTransitions).toEqual([
-      { from: 'boot-a', to: 'boot-b', observedAt: '2026-10-25T20:03:00.000Z', eventId: 'boot-event' },
+      { from: 'boot-a', to: 'boot-b', observedAt: '2026-10-25T20:03:00.000Z',
+        observedAtBasis: 'sample-collected', eventId: 'boot-event', evidenceReferences: dataset.events[0].evidenceReferences },
     ]);
+    expect(result.devices[0].events[0]).toMatchObject({
+      observedAtBasis: 'server-detection-time', detectedAt: '2026-10-25T20:02:30.000Z',
+      inferredBootAt: { at: '2026-10-25T19:59:00.000Z', basis: 'collected-at-minus-reported-uptime' },
+      evidenceReferences: [{ type: 'firmware-diagnostic-snapshot', observedAt: '2026-10-25T20:02:30.000Z', bootSessionId: 'boot-b' }],
+    });
     expect(result.devices[0].resetEvidence[0]).toMatchObject({ code: 6, reason: 'External System', source: 'http:GET:/api/v1/diagnostics' });
+  });
+
+  it('keeps counters partitioned by boot session instead of averaging them as gauges', () => {
+    const counterObservation = (at: string, value: number, boot: string): DeviceHealthObservation => ({
+      ...observed(at, value, boot), metrics: [{ name: 'uptime', value, unit: 'ms', semantics: 'counter', source: 'http:GET:/api/v1/diagnostics' }],
+    });
+    const result = queryDeviceHealthEvidence(scope, request, { ...dataset,
+      observations: [counterObservation('2026-10-25T20:00:00.000Z', 10, 'boot-a'),
+        counterObservation('2026-10-25T20:01:00.000Z', 70, 'boot-a'),
+        counterObservation('2026-10-25T20:03:00.000Z', 5, 'boot-b')],
+      supportedMetrics: [{ name: 'uptime', unit: 'ms', semantics: 'counter' }],
+    });
+    const uptime = result.devices[0].metrics[0];
+    expect(uptime.statistics).toBeUndefined();
+    expect(uptime.counterSeries).toEqual([
+      expect.objectContaining({ bootSessionId: 'boot-a', firstValue: 10, lastValue: 70, delta: 60, orderingComplete: true }),
+      expect.objectContaining({ bootSessionId: 'boot-b', firstValue: 5, lastValue: 5, delta: 0 }),
+    ]);
+  });
+
+  it('combines older rollups with raw history without double-counting the overlapping bucket', () => {
+    const old = observed('2026-10-24T20:00:00.000Z', -80);
+    const oldBucket = applyDeviceHealthObservation(null, old, 'hourly', 60_000);
+    const overlappingBucket = applyDeviceHealthObservation(null, observed('2026-10-25T20:00:00.000Z', -70), 'hourly', 60_000);
+    const result = queryDeviceHealthEvidence(scope, { from: '2026-10-24T20:00:00.000Z',
+      to: '2026-10-25T21:00:00.000Z', granularity: 'hourly' }, { ...dataset,
+      observations: [observed('2026-10-25T20:00:00.000Z', -70), observed('2026-10-25T20:01:00.000Z', -50)],
+      buckets: [oldBucket, overlappingBucket],
+    });
+    const rssi = result.devices[0].metrics.find(metric => metric.name === 'wifi.rssi')?.statistics;
+    expect(rssi).toMatchObject({ minimum: -80, maximum: -50, count: 3 });
+    expect(rssi?.average).toBeCloseTo(-200 / 3, 5);
+    expect(result.devices[0].observedSampleCount).toBe(3);
+    expect(result.devices[0].firstObservedAt).toBe(old.observedAt);
   });
 
   it('composes site statistics from trusted same-site records and rejects records from other scopes', () => {
@@ -102,22 +147,35 @@ describe('Core device health query', () => {
         id: `${device.alias}:${row.deduplicationKey}`, deviceId: device.alias,
         physicalDeviceId: `esp8266:${device.alias.slice(-6)}`, observedAt: new Date(baseAt + Number(row.offsetMs)).toISOString(),
         kind: String(row.kind), bootSessionId: String(row.bootSession),
-        confidence: row.confidence === 'possible' ? 'possible' : 'confirmed', source: String(row.source), summary: String(row.kind), explanation: '' });
+        confidence: row.confidence === 'possible' ? 'possible' : 'confirmed', source: String(row.source), summary: String(row.kind), explanation: '',
+        observedAtBasis: 'server-detection-time', detectedAt: new Date(baseAt + Number(row.offsetMs)).toISOString(),
+        inferredBootAt: null,
+        evidenceReferences: [{ type: 'firmware-diagnostic-snapshot', observedAt: new Date(baseAt + Number(row.offsetMs)).toISOString(),
+          bootSessionId: String(row.bootSession) }] });
       for (const row of device.failures) failures.push({ tenantId: scope.tenantId, siteId: scope.siteId,
         id: `${device.alias}:${row.offsetMs}`, deviceId: device.alias,
         physicalDeviceId: `esp8266:${device.alias.slice(-6)}`, attemptedAt: new Date(baseAt + Number(row.offsetMs)).toISOString(),
-        reason: String(row.reason) });
+        reason: String(row.reason), source: 'http:GET:/api/v1/diagnostics' });
     }
-    const from = new Date(baseAt).toISOString();
+    const from = new Date(baseAt - 36 * 60 * 60_000).toISOString();
     const to = new Date(baseAt + 8 * 60 * 60_000 + 40 * 60_000).toISOString();
     const report = queryDeviceHealthEvidence(scope, { from, to, timezone: 'Europe/Sofia', granularity: 'raw', limit: 1000 }, {
       observations, buckets: [], events, failures, expectedIntervalMs: fixture.expectedIntervalMs,
-      supportedMetrics: metricFields.map(([name, , unit]) => ({ name, unit })),
+      supportedMetrics: metricFields.map(([name, , unit, semantics]) => ({ name, unit, semantics })),
     });
     expect(report.site).toMatchObject({ deviceCount: 3, observedSampleCount: 1510, failureCount: 8 });
     expect(report.devices.map(device => device.observedSampleCount).sort((a, b) => a - b)).toEqual([500, 504, 506]);
     expect(report.devices.reduce((count, device) => count + device.resetEvidence.length, 0)).toBe(1510);
-    expect(report.devices.reduce((count, device) => count + device.resetEvents.length, 0)).toBe(99);
+    expect(report.devices.reduce((count, device) => count + device.events.length, 0)).toBe(99);
+    for (const fixtureDevice of fixture.devices) {
+      const analysis = report.devices.find(device => device.deviceId === fixtureDevice.alias)!;
+      for (const [metricName, field] of [['wifi.rssi', 'rssiDbm'], ['memory.free_heap', 'freeHeapBytes']] as const) {
+        const values = fixtureDevice.samples.map(row => Number(row[field]));
+        const statistics = analysis.metrics.find(metric => metric.name === metricName)?.statistics;
+        expect(statistics).toMatchObject({ minimum: Math.min(...values), maximum: Math.max(...values), count: values.length });
+        expect(statistics?.average).toBeCloseTo(values.reduce((sum, value) => sum + value, 0) / values.length, 5);
+      }
+    }
     expect(report.timezone).toBe('Europe/Sofia');
   });
 });

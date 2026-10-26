@@ -556,8 +556,19 @@ export class PortalController {
       ...(typeof metrics === 'string' && metrics.trim() ? { metrics: metrics.split(',').map(value => value.trim()).filter(Boolean) } : {}),
       ...(parsedLimit !== undefined ? { limit: parsedLimit } : {}),
     }
+    const authorizedDevices = this.deviceRegistry.getDevices().flatMap(device => {
+      const physicalDeviceId = String(device.metadata?.physicalId || '').toLowerCase()
+      const networkScope = String(device.metadata?.networkScope || '')
+      return device.tenantId === tenant.id && device.siteId === site.id && device.trustStatus === 'approved' &&
+        device.adapter.driver === 'energrid-esp8266' && /^esp8266:[0-9a-f]{6}$/.test(physicalDeviceId) &&
+        device.id === `device:${networkScope}:${physicalDeviceId}`
+        ? [{ deviceId: device.id, physicalDeviceId }] : []
+    })
+    if (query.deviceId && !authorizedDevices.some(device => device.deviceId === query.deviceId)) {
+      throw new NotFoundException('Approved diagnostic device was not found in this site')
+    }
     try {
-      return await this.firmwareDiagnostics.queryHistory({ tenantId: tenant.id, siteId: site.id }, query)
+      return await this.firmwareDiagnostics.queryHistory({ tenantId: tenant.id, siteId: site.id }, query, authorizedDevices)
     } catch (error) {
       if (error instanceof Error && (error.message.startsWith('Invalid device health history') ||
           error.message.startsWith('Invalid device health query'))) {

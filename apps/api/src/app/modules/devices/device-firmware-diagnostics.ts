@@ -13,7 +13,7 @@ import {
   type DeviceHealthObservation,
   utcBucketStart,
 } from './device-health-history';
-import { DeviceHealthQueryService, type DeviceHealthQueryDataset } from '@energrid/domain-devices';
+import { DeviceHealthQueryService, type DeviceHealthEventEvidence, type DeviceHealthQueryDataset } from '@energrid/domain-devices';
 
 export interface FirmwareDiagnosticScope {
   tenantId: string;
@@ -76,6 +76,12 @@ export interface FirmwareHealthEvent {
   source?: { protocol: 'http'; method: 'GET'; path: '/api/v1/diagnostics' };
   /** observedAt is when the collector detected this event, not device wall-clock time. */
   observedAtBasis?: 'server-detection-time';
+  /** Explicit copy of the server detection instant. Absent on legacy events. */
+  detectedAt?: string;
+  /** Estimate only: collection time minus firmware-reported uptime. Never a physical timestamp. */
+  inferredBootAt?: { at: string; basis: 'collected-at-minus-reported-uptime' };
+  /** Identifies the diagnostic sample that supported this event. */
+  evidenceReferences?: Array<{ type: 'firmware-diagnostic-snapshot'; observedAt: string; bootSessionId: string }>;
   deduplicationKey?: string;
 }
 
@@ -259,6 +265,7 @@ function event(
   explanation: string,
   confidence: FirmwareHealthEvent['confidence'] = 'confirmed',
 ): FirmwareHealthEvent {
+  const isBootEvent = kind === 'reboot-detected';
   return {
     id: eventId(kind, sample.bootSessionId),
     kind,
@@ -269,6 +276,12 @@ function event(
     explanation,
     source: { protocol: 'http', method: 'GET', path: '/api/v1/diagnostics' },
     observedAtBasis: 'server-detection-time',
+    detectedAt: observedAt,
+    ...(isBootEvent ? { inferredBootAt: {
+      at: new Date(Date.parse(observedAt) - sample.uptimeMs).toISOString(),
+      basis: 'collected-at-minus-reported-uptime' as const,
+    } } : {}),
+    evidenceReferences: [{ type: 'firmware-diagnostic-snapshot', observedAt, bootSessionId: sample.bootSessionId }],
     deduplicationKey: `${kind}:${sample.bootSessionId}`,
   };
 }
@@ -388,8 +401,6 @@ function observationFor(
 function withEventProvenance(item: FirmwareHealthEvent): FirmwareHealthEvent {
   return {
     ...item,
-    source: item.source || { protocol: 'http', method: 'GET', path: '/api/v1/diagnostics' },
-    observedAtBasis: item.observedAtBasis || 'server-detection-time',
     deduplicationKey: item.deduplicationKey || `${item.kind}:${item.bootSessionId}`,
   };
 }
@@ -666,6 +677,9 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
     if (!Number.isFinite(from) || !Number.isFinite(to) || from > to || to - from > 730 * 86_400_000) {
       throw new Error('Invalid device health history time range');
     }
+    if (query.granularity === 'raw' && from < Date.now() - this.retention.rawSampleDays * 86_400_000) {
+      throw new Error('Invalid device health history time range: raw samples are outside the configured retention window; use hourly or daily summaries');
+    }
     const limit = query.limit === undefined ? 500 : Math.max(1, Math.min(1000, Math.floor(query.limit)));
     return this.serialize(async () => {
       await this.open();
@@ -726,7 +740,19 @@ export class DeviceFirmwareDiagnosticsService implements OnModuleDestroy {
               const eventRecord = { tenantId: scope.tenantId, siteId: scope.siteId, id: String(item.id), deviceId, physicalDeviceId, observedAt: at,
                 kind: String(item.kind || 'unknown'), bootSessionId: String(item.bootSessionId || ''),
                 confidence: item.confidence === 'possible' ? 'possible' as const : 'confirmed' as const,
-                source: item.source && typeof item.source === 'object' ? 'http:GET:/api/v1/diagnostics' : null,
+                source: typeof item.source === 'string' ? item.source :
+                  item.source && typeof item.source === 'object' ? 'http:GET:/api/v1/diagnostics' : null,
+                observedAtBasis: item.observedAtBasis === 'server-detection-time' ? 'server-detection-time' as const : null,
+                detectedAt: typeof item.detectedAt === 'string' ? item.detectedAt :
+                  item.observedAtBasis === 'server-detection-time' ? at : null,
+                inferredBootAt: (() => {
+                  const inferred = item.inferredBootAt as { at?: unknown; basis?: unknown } | null | undefined;
+                  return inferred && typeof inferred.at === 'string' && inferred.basis === 'collected-at-minus-reported-uptime'
+                    ? inferred as NonNullable<DeviceHealthEventEvidence['inferredBootAt']> : null;
+                })(),
+                evidenceReferences: Array.isArray(item.evidenceReferences) ? item.evidenceReferences.filter(reference =>
+                  reference && typeof reference === 'object' && reference.type === 'firmware-diagnostic-snapshot' &&
+                  typeof reference.observedAt === 'string' && typeof reference.bootSessionId === 'string') as DeviceHealthEventEvidence['evidenceReferences'] : [],
                 summary: String(item.summary || ''), explanation: String(item.explanation || '') };
               dataset.events.push(eventRecord);
               if (query.granularity === 'events') records.push({ at, value: {
