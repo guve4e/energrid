@@ -4,6 +4,9 @@
   "license": "MIT",
   "scripts": {
     "api": "nx serve api",
+    "docs:dev": "vitepress dev .",
+    "docs:build": "vitepress build .",
+    "docs:preview": "vitepress preview .",
     "auth:dev:setup": "node apps/api/scripts/auth-local-setup.js",
     "auth:bootstrap-admin": "node apps/api/scripts/auth-admin-account.js bootstrap",
     "auth:recover-admin": "node apps/api/scripts/auth-admin-account.js recover",
@@ -86,6 +89,7 @@
     "jest-util": "^30.0.2",
     "jiti": "2.4.2",
     "jsdom": "~22.1.0",
+    "mermaid": "^12.2.0",
     "node-pg-migrate": "^9.0.0",
     "nx": "22.6.0",
     "prettier": "~3.6.2",
@@ -95,6 +99,7 @@
     "typescript": "~5.9.2",
     "typescript-eslint": "^8.40.0",
     "vite": "^7.0.0",
+    "vitepress": "^1.6.4",
     "vitest": "~4.0.0",
     "vue-tsc": "^2.2.8",
     "webpack-cli": "^5.1.4"
