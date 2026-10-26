@@ -1,0 +1,16 @@
+.vp-doc pre.mermaid {
+  overflow-x: auto;
+  background: var(--vp-c-bg-soft);
+  text-align: center;
+}
+
+.vp-doc pre.mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+@media (max-width: 640px) {
+  .vp-doc pre.mermaid svg {
+    min-width: 34rem;
+  }
+}
