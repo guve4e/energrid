@@ -3,6 +3,7 @@ import { configuredShellyMqttBroker, isShellyMqttObservationApproval, shellyMqtt
 
 const physicalId = 'shellypro2pm-aabbccddeeff';
 const deviceId = `${physicalId}:switch:0`;
+const evidenceAt = new Date().toISOString();
 const device = {
   id: deviceId,
   tenantId: 'tenant-demo',
@@ -24,11 +25,13 @@ const device = {
     identityEvidenceSource: 'verified_shelly_http_rpc',
     componentEvidenceSource: 'verified_shelly_component_status_rpc',
     shellyMqttObservationApprovalRequired: true,
-    verifiedMeasurementFields: 'power',
+    verifiedMeasurementFields: 'power,energy_import_total,energy_export_total',
+    identityVerifiedAt: evidenceAt,
+    componentVerifiedAt: evidenceAt,
   },
 };
 
-function setup(options: { siteId?: string; hasPowerEvidence?: boolean; authority?: unknown; siteLocal?: boolean } = {}) {
+function setup(options: { siteId?: string; hasPowerEvidence?: boolean; authority?: unknown; siteLocal?: boolean; evidenceAt?: string } = {}) {
   const siteId = options.siteId || 'site-device-lab';
   const storedDevice = { ...device, siteId, metadata: {
     ...device.metadata,
@@ -36,7 +39,12 @@ function setup(options: { siteId?: string; hasPowerEvidence?: boolean; authority
       identityEvidenceSource: 'verified_site_local_shelly_rpc',
       componentEvidenceSource: 'verified_site_local_shelly_rpc',
       siteLocalObserverId: 'pi-housenet-observer',
+      siteLocalEvidenceScanId: 'site-observer-12345678',
+      ipAddress: '192.168.1.166',
+      networkScope: 'upstream-lan:192.168.1.0/24',
     } : {}),
+    identityVerifiedAt: options.evidenceAt || evidenceAt,
+    componentVerifiedAt: options.evidenceAt || evidenceAt,
     ...(options.hasPowerEvidence === false ? { verifiedMeasurementFields: '' } : {}),
   } };
   const installation = {
@@ -70,10 +78,11 @@ function setup(options: { siteId?: string; hasPowerEvidence?: boolean; authority
 describe('site-scoped Shelly observation approval', () => {
   it('supports separately approved switch power and cumulative energy fields without control authority', () => {
     const switchId = 'shellypro2pm-ec6260888084:switch:1';
-    const authority = shellyMqttObservationApproval(switchId, ['power', 'energy_import_total']);
+    const authority = shellyMqttObservationApproval(switchId, ['power', 'energy_import_total', 'energy_export_total']);
     expect(authority.bindings[0]).toMatchObject({
       deviceId: switchId, selector: 'shellypro2pm-ec6260888084/events/rpc',
-      fields: { power: { rawKey: 'power', type: 'number' }, energy_import_total: { rawKey: 'energy_import_total', type: 'number' } },
+      fields: { power: { rawKey: 'power', type: 'number' }, energy_import_total: { rawKey: 'energy_import_total', type: 'number' },
+        energy_export_total: { rawKey: 'energy_export_total', type: 'number' } },
     });
     expect(authority.bindings[0].fields).not.toHaveProperty('output');
     expect(authority.bindings[0].fields).not.toHaveProperty('command');
@@ -85,11 +94,15 @@ describe('site-scoped Shelly observation approval', () => {
     try {
       await h.registry.ensureInstallationsLoaded();
       const proposal = await h.registry.getShellyObservationApproval('tenant-demo', 'site-device-lab', deviceId);
-      expect(proposal).toMatchObject({ approved: false, approvalStatus: 'missing', sourceId: 'shelly-mqtt', selector: '' });
+      expect(proposal).toMatchObject({ approved: false, approvalStatus: 'missing', sourceId: 'shelly-mqtt', selector: '', evidenceFresh: true,
+        evidence: { provenance: 'direct_shelly_http_rpc', identityVerifiedAt: evidenceAt, componentVerifiedAt: evidenceAt },
+        fields: [{ metric: 'power', unit: 'W' }, { metric: 'energy_import_total', unit: 'kWh' }, { metric: 'energy_export_total', unit: 'kWh' }] });
       const mqttTopic = 'shelly/washer@other/events/rpc';
       const saved = await h.registry.approveShellyObservations('tenant-demo', 'site-device-lab', deviceId,
         'operator@example.test', ['power'], mqttTopic, configuredShellyMqttBroker());
-      expect(saved).toMatchObject({ approved: true, approvalStatus: 'approved', fields: [{ metric: 'power', unit: 'W' }] });
+      expect(saved).toMatchObject({ approved: false, approvalStatus: 'partially_approved', fields: [
+        { metric: 'power', unit: 'W' }, { metric: 'energy_import_total', unit: 'kWh' }, { metric: 'energy_export_total', unit: 'kWh' },
+      ] });
       expect(h.installationStore.save).toHaveBeenCalledWith(expect.objectContaining({
         observationAuthority: {
           bindings: [{ deviceId, sourceId: 'shelly-mqtt', selector: mqttTopic, fields: { power: { rawKey: 'power', type: 'number' } } }],
@@ -101,6 +114,21 @@ describe('site-scoped Shelly observation approval', () => {
         deviceId, kind: 'observation_authority_approved', actor: 'operator@example.test',
         evidence: { sourceId: 'shelly-mqtt', broker: configuredShellyMqttBroker(), selector: mqttTopic, fields: 'power' },
       }));
+    } finally { h.restore(); }
+  });
+
+  it('keeps stale accepted identity evidence reviewable but refuses to write measurement authority', async () => {
+    const h = setup({ siteLocal: true, evidenceAt: '2026-10-26T08:00:00.000Z' });
+    try {
+      await h.registry.ensureInstallationsLoaded();
+      const proposal = await h.registry.getShellyObservationApproval('tenant-demo', 'site-device-lab', deviceId);
+      expect(proposal).toMatchObject({ approved: false, approvalStatus: 'missing', evidenceFresh: false,
+        evidence: { provenance: 'operator_attested_site_local_shelly_rpc_report', observerId: 'pi-housenet-observer',
+          snapshotId: 'site-observer-12345678', endpoint: '192.168.1.166', networkScope: 'upstream-lan:192.168.1.0/24' } });
+      await expect(h.registry.approveShellyObservations('tenant-demo', 'site-device-lab', deviceId,
+        'operator@example.test', ['power'], 'shelly/washer@other/events/rpc', configuredShellyMqttBroker()))
+        .rejects.toThrow(/Fresh site-local Shelly identity and component evidence/);
+      expect(h.installationStore.save).not.toHaveBeenCalled();
     } finally { h.restore(); }
   });
 
@@ -123,7 +151,9 @@ describe('site-scoped Shelly observation approval', () => {
     try {
       await h.registry.ensureInstallationsLoaded();
       await expect(h.registry.getShellyObservationApproval('tenant-demo', 'site-device-lab', deviceId))
-        .resolves.toMatchObject({ approved: false, fields: [{ metric: 'power' }] });
+        .resolves.toMatchObject({ approved: false, evidenceFresh: true, fields: [
+          { metric: 'power' }, { metric: 'energy_import_total' }, { metric: 'energy_export_total' },
+        ] });
     } finally { h.restore(); }
   });
 

@@ -50,6 +50,7 @@ type LoginResponse = {
 type ShellyReconciliationProposal = {
   deviceId: string; displayName: string; room: string; physicalId: string; component: string;
   evidenceScanId: string; observerId: string; observedAt: string; endpoint: string; model: string;
+  physicalInventoryId: string; identityVerifiedAt: string; componentVerifiedAt: string; evidenceFresh: boolean;
   firmwareVersion: string; verifiedMeasurementFields: string[]; currentIdentitySource: string;
   currentDriver: string; mqttTopicRequiresOperatorBinding: true; reconciled?: boolean;
 };
@@ -1454,6 +1455,22 @@ async function importSiteLocalShellyEvidence(request: { report?: unknown; error?
     await loadNetworkSnapshots();
   } catch (cause) {
     siteLocalEvidenceImportError.value = cause instanceof Error ? cause.message : 'Site-local Shelly evidence import failed.';
+  } finally { siteLocalEvidenceImportBusy.value = false; }
+}
+
+async function reviewSavedSiteLocalShellyEvidence(scanId: string): Promise<void> {
+  if (siteLocalEvidenceImportBusy.value) return;
+  siteLocalEvidenceImportBusy.value = true;
+  siteLocalEvidenceImportError.value = '';
+  try {
+    const response = await authFetch(`${apiBase}/portal/network/site-local-shelly-evidence/${encodeURIComponent(scanId)}/review`, {
+      headers: { Authorization: `Bearer ${accessToken.value}` },
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(typeof result.message === 'string' ? result.message : `Saved evidence review failed (${response.status})`);
+    siteLocalEvidenceImport.value = result as SiteLocalEvidenceImport;
+  } catch (cause) {
+    siteLocalEvidenceImportError.value = cause instanceof Error ? cause.message : 'Saved evidence review failed.';
   } finally { siteLocalEvidenceImportBusy.value = false; }
 }
 
@@ -5210,6 +5227,7 @@ onBeforeUnmount(() => {
             @open-device="openEnrolledDevice"
             @investigate-endpoint="investigateSnapshotEndpoint"
             @refresh-endpoint-identity="refreshSnapshotEndpointIdentity"
+            @review-saved-site-local-evidence="reviewSavedSiteLocalShellyEvidence"
             @probe-endpoint="probeSnapshotEndpoint"
             @import-site-local-evidence="importSiteLocalShellyEvidence"
             @reconcile-site-local-evidence="reconcileSiteLocalShellyEvidence"

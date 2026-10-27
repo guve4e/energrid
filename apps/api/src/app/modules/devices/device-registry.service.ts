@@ -728,6 +728,9 @@ export class DeviceRegistryService implements OnModuleInit {
     const approvedFields = mqttBinding?.fields || {};
     const approvedFieldNames = Object.keys(approvedFields).sort();
     const fullyApproved = approved && verifiedFields.every(field => approvedFieldNames.includes(field));
+    const identityVerifiedAt = String(device.metadata?.identityVerifiedAt || '');
+    const componentVerifiedAt = String(device.metadata?.componentVerifiedAt || '');
+    const evidenceFresh = freshSiteEvidenceTime(identityVerifiedAt) && freshSiteEvidenceTime(componentVerifiedAt);
     return {
       approved: fullyApproved,
       approvalStatus: fullyApproved ? 'approved' : approved ? 'partially_approved' : installation.observationAuthority ? 'different_authority' : 'missing',
@@ -737,6 +740,16 @@ export class DeviceRegistryService implements OnModuleInit {
       // The operator must review and bind the exact topic before approving a field.
       selector: approved ? mqttBinding?.selector || '' : '',
       approvedFields: approvedFieldNames,
+      evidenceFresh,
+      evidence: {
+        provenance: siteLocalIdentityVerified ? 'operator_attested_site_local_shelly_rpc_report' : 'direct_shelly_http_rpc',
+        observerId: typeof device.metadata?.siteLocalObserverId === 'string' ? device.metadata.siteLocalObserverId : '',
+        snapshotId: String(device.metadata?.siteLocalEvidenceScanId || ''),
+        endpoint: String(device.metadata?.ipAddress || ''),
+        networkScope: String(device.metadata?.networkScope || ''),
+        identityVerifiedAt,
+        componentVerifiedAt,
+      },
       fields: verifiedFields.map(metric => ({ metric, rawKey: metric,
         unit: metric === 'power' ? 'W' : 'kWh', displayUnit: metric === 'power' ? 'W' : 'kWh' })),
     };
@@ -749,7 +762,8 @@ export class DeviceRegistryService implements OnModuleInit {
    */
   async reconcileShellyIdentityEvidence(input: {
     tenantId: string; siteId: string; deviceId: string; physicalId: string; component: string;
-    evidenceScanId: string; observerId: string; ipAddress: string; networkScope: string;
+    physicalInventoryId: string; evidenceScanId: string; evidenceCompletedAt: string;
+    observerId: string; ipAddress: string; networkScope: string;
     identityVerifiedAt: string; componentVerifiedAt: string; verifiedMeasurementFields: string[];
   }): Promise<RegisteredDevice | null> {
     await this.ensureInstallationsLoaded();
@@ -759,15 +773,17 @@ export class DeviceRegistryService implements OnModuleInit {
         deviceId !== `${physicalId}:${component}` ||
         !input.evidenceScanId.startsWith('site-observer-') || !input.observerId ||
         !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(input.ipAddress) || !input.networkScope ||
-        !freshSiteEvidenceTime(input.identityVerifiedAt) || !freshSiteEvidenceTime(input.componentVerifiedAt) ||
+        !input.physicalInventoryId || !validHistoricalEvidenceTime(input.identityVerifiedAt, input.evidenceCompletedAt) ||
+        !validHistoricalEvidenceTime(input.componentVerifiedAt, input.evidenceCompletedAt) ||
         input.verifiedMeasurementFields.some(field => !['power', 'energy_import_total', 'energy_export_total'].includes(field))) {
-      throw new Error('Fresh, exact site-local Shelly identity evidence is required.');
+      throw new Error('Accepted, exact site-local Shelly identity evidence is required.');
     }
     const key = scopedDeviceKey(deviceId, tenantId, siteId);
     const device = this.getDevices(true).find(item => item.id === deviceId && item.tenantId === tenantId && item.siteId === siteId);
     const record = this.persistedInstallations.get(key);
     if (!device || device.kind !== 'physical' || device.trustStatus !== 'approved' ||
         device.metadata?.physicalId !== physicalId || device.metadata?.component !== component ||
+        device.metadata?.physicalInventoryId !== input.physicalInventoryId ||
         !record || record.device.tenantId !== tenantId || record.device.siteId !== siteId ||
         (this.enrollment && (await this.enrollment.find({ tenantId, siteId, deviceId }))?.status !== 'enrolled')) return null;
 
@@ -786,6 +802,8 @@ export class DeviceRegistryService implements OnModuleInit {
       componentVerificationMethod: component.startsWith('switch:')
         ? `Switch.GetStatus?id=${component.split(':')[1]}` : `EM1.GetStatus?id=${component.split(':')[1]}`,
       componentVerifiedAt: input.componentVerifiedAt,
+      siteLocalEvidenceCompletedAt: input.evidenceCompletedAt,
+      siteLocalEvidenceFreshAtReconciliation: freshSiteEvidenceTime(input.identityVerifiedAt) && freshSiteEvidenceTime(input.componentVerifiedAt),
       siteLocalObserverId: input.observerId,
       siteLocalEvidenceScanId: input.evidenceScanId,
       ipAddress: input.ipAddress,
@@ -812,7 +830,7 @@ export class DeviceRegistryService implements OnModuleInit {
     }
   }
 
-  async getShellyReconciliationTarget(tenantId: string, siteId: string, deviceId: string, physicalId: string, component: string): Promise<RegisteredDevice | null> {
+  async getShellyReconciliationTarget(tenantId: string, siteId: string, deviceId: string, physicalId: string, component: string, physicalInventoryId: string): Promise<RegisteredDevice | null> {
     await this.ensureInstallationsLoaded();
     const key = scopedDeviceKey(deviceId, tenantId, siteId);
     const device = this.getDevices(true).find(item => item.id === deviceId && item.tenantId === tenantId && item.siteId === siteId);
@@ -820,6 +838,7 @@ export class DeviceRegistryService implements OnModuleInit {
     if (!device || !record || record.device.tenantId !== tenantId || record.device.siteId !== siteId ||
         device.kind !== 'physical' || device.trustStatus !== 'approved' ||
         device.metadata?.physicalId !== physicalId || device.metadata?.component !== component ||
+        device.metadata?.physicalInventoryId !== physicalInventoryId ||
         device.id !== `${physicalId}:${component}` ||
         (this.enrollment && (await this.enrollment.find({ tenantId, siteId, deviceId }))?.status !== 'enrolled')) return null;
     return device;
@@ -836,6 +855,10 @@ export class DeviceRegistryService implements OnModuleInit {
   ) {
     const status = await this.getShellyObservationApproval(tenantId, siteId, deviceId);
     if (!status) return null;
+    if (status.approved) return status;
+    if (!status.evidenceFresh) {
+      throw new Error('Fresh site-local Shelly identity and component evidence is required before measurement authority can be recorded.');
+    }
     const key = scopedDeviceKey(deviceId, tenantId, siteId);
     const installation = this.persistedInstallations.get(key)!;
     const existingFields = installation.observationAuthority?.bindings.find(binding => binding.deviceId === deviceId &&
@@ -855,7 +878,6 @@ export class DeviceRegistryService implements OnModuleInit {
     if (existingShellyBinding && existingShellyBinding.selector !== mqttTopic) {
       throw new Error('The reviewed Shelly MQTT source topic cannot be changed through measurement approval; review the binding separately first.');
     }
-    if (status.approved) return status;
     if (!this.installationStore) throw new Error('Local device storage is unavailable.');
     if (mqttBroker !== configuredShellyMqttBroker()) throw new Error('The reviewed MQTT broker differs from the active Shelly subscriber.');
     const authority = shellyMqttObservationApproval(deviceId, mergedFields, mqttTopic, mqttBroker);
@@ -3396,4 +3418,11 @@ function numberFromEnv(name: string, fallback: number): number {
 function freshSiteEvidenceTime(value: string, now = Date.now()): boolean {
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) && timestamp <= now + 30_000 && now - timestamp <= 15 * 60_000;
+}
+
+function validHistoricalEvidenceTime(value: string, completedAt: string, now = Date.now()): boolean {
+  const timestamp = Date.parse(value);
+  const completed = Date.parse(completedAt);
+  return Number.isFinite(timestamp) && Number.isFinite(completed) &&
+    timestamp <= completed + 30_000 && completed <= now + 30_000;
 }

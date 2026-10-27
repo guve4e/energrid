@@ -46,6 +46,8 @@ describe('NetworkIntelligencePanel', () => {
       deviceId: 'shellypro2pm-ec6260888084:switch:0', displayName: 'Washer / bathroom fan', room: 'Bathroom',
       physicalId: 'shellypro2pm-ec6260888084', component: 'switch:0', evidenceScanId: 'site-observer-0123456789',
       observerId: 'pi-housenet', observedAt: '2026-10-27T07:40:00Z', endpoint: '192.168.1.166',
+      physicalInventoryId: '8e15ec60-a22b-4f8c-ab09-5e61d44030f9', identityVerifiedAt: '2026-10-27T07:39:00Z',
+      componentVerifiedAt: '2026-10-27T07:40:00Z', evidenceFresh: true,
       model: 'SPSW-202PE16EU', firmwareVersion: '2.0.0', verifiedMeasurementFields: ['power', 'energy_import_total'],
       currentIdentitySource: 'mqtt', currentDriver: 'shelly-discovered', mqttTopicRequiresOperatorBinding: true as const,
     };
@@ -58,12 +60,60 @@ describe('NetworkIntelligencePanel', () => {
     expect(panel.text()).toContain('Evidence is operator-attested');
     expect(panel.text()).toContain('Bathroom · switch:0');
     expect(panel.text()).toContain('power, energy_import_total');
+    expect(panel.text()).toContain('8e15ec60-a22b-4f8c-ab09-5e61d44030f9');
     expect(panel.text()).toContain('Exact event topic requires separate operator binding');
     expect(panel.text()).toContain('Existing enrollment, room, approvals');
     await panel.findAll('button').find(button => button.text().includes('Record verified identity'))!.trigger('click');
     expect(panel.emitted('reconcileSiteLocalEvidence')).toEqual([[{
       scanId: proposal.evidenceScanId, deviceId: proposal.deviceId, component: proposal.component,
     }]]);
+    panel.unmount();
+  });
+
+  it('labels accepted stale evidence historical and keeps approval freshness separate', () => {
+    const proposal = {
+      deviceId: 'shellypro2pm-ec6260888084:switch:1', displayName: 'Output 1', room: 'Unknown',
+      physicalId: 'shellypro2pm-ec6260888084', component: 'switch:1', evidenceScanId: 'site-observer-0123456789',
+      observerId: 'pi-housenet', observedAt: '2026-10-26T07:40:00Z', endpoint: '192.168.1.166',
+      physicalInventoryId: '8e15ec60-a22b-4f8c-ab09-5e61d44030f9', identityVerifiedAt: '2026-10-26T07:39:00Z',
+      componentVerifiedAt: '2026-10-26T07:40:00Z', evidenceFresh: false,
+      model: 'SPSW-202PE16EU', firmwareVersion: '2.0.0', verifiedMeasurementFields: ['power'],
+      currentIdentitySource: 'mqtt', currentDriver: 'shelly-discovered', mqttTopicRequiresOperatorBinding: true as const,
+    };
+    const panel = mount(NetworkIntelligencePanel, { props: {
+      scopes, snapshots: [], latest: null, comparison: null,
+      siteLocalEvidenceImport: { status: 'reconciliation_review_required', scanId: proposal.evidenceScanId,
+        observerId: proposal.observerId, physicalId: proposal.physicalId,
+        reconciliationProposals: [proposal], reconciliationConflicts: [], historicalComponentConflicts: [] },
+    } });
+    expect(panel.text()).toContain('Historical; refresh required before approving measurements');
+    expect(panel.text()).toContain('Record historical identity evidence');
+    panel.unmount();
+  });
+
+  it('lets an administrator reopen reconciliation review from a saved site-local RPC snapshot', async () => {
+    const scanId = 'site-observer-2aec6d8b2d4d25f397a572203264edd0a388de00';
+    const endpointId = 'shellypro2pm-ec6260888084';
+    const saved = {
+      ...snapshot, scanId, scopes: [{ id: 'housenet', name: 'Upstream LAN', cidr: '192.168.1.0/24', complete: false, gatewayIpsObserved: [] }],
+      endpoints: [{ id: endpointId, ipAddress: '192.168.1.166', networkZoneId: 'housenet', networkZoneName: 'Upstream LAN',
+        vendor: 'Shelly', model: 'SPSW-202PE16EU', protocol: 'http', status: 'online', discoveredAt: '2026-10-27T09:39:36Z',
+        reason: 'Site-local RPC report', components: [{ component: 'switch:0', channel: 0 }, { component: 'switch:1', channel: 1 }],
+        observations: [
+          { source: 'http_identity', attribute: 'identity.device_id', value: endpointId, observedAt: '2026-10-27T09:39:00Z' },
+          { source: 'site_local_http_rpc', attribute: 'observer.identity', value: 'pi-housenet', observedAt: '2026-10-27T09:39:00Z' },
+          { source: 'site_local_http_rpc', attribute: 'shelly.component_status', value: 'switch:0', observedAt: '2026-10-27T09:39:10Z' },
+        ],
+      }],
+    };
+    const panel = mount(NetworkIntelligencePanel, { props: {
+      scopes: [{ id: 'housenet', name: 'Upstream LAN', cidr: '192.168.1.0/24', seedIps: [] }],
+      snapshots: [saved], latest: saved, comparison: null,
+      endpointLifecycle: [{ endpointKey: `housenet:192.168.1.166:${endpointId}`, snapshotId: scanId, stage: 'enrolled', relatedRecords: 2 }],
+    } });
+    expect(panel.text()).toContain('2 enrolled logical records share this verified physical identity');
+    await panel.findAll('button').find(button => button.text().includes('Review saved RPC evidence'))!.trigger('click');
+    expect(panel.emitted('reviewSavedSiteLocalEvidence')).toEqual([[scanId]]);
     panel.unmount();
   });
 

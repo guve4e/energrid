@@ -68,6 +68,7 @@ type EndpointLifecycle = {
 type ShellyReconciliationProposal = {
   deviceId: string; displayName: string; room: string; physicalId: string; component: string;
   evidenceScanId: string; observerId: string; observedAt: string; endpoint: string; model: string;
+  physicalInventoryId: string; identityVerifiedAt: string; componentVerifiedAt: string; evidenceFresh: boolean;
   firmwareVersion: string; verifiedMeasurementFields: string[]; currentIdentitySource: string;
   currentDriver: string; mqttTopicRequiresOperatorBinding: true; reconciled?: boolean;
 };
@@ -107,6 +108,7 @@ const emit = defineEmits<{
   investigateEndpoint: [request: { scanId: string; scopeId: string; ipAddress: string; endpointId: string }];
   probeEndpoint: [request: { scanId: string; scopeId: string; ipAddress: string; endpointId: string; refreshId: string }];
   refreshEndpointIdentity: [request: { scanId: string; scopeId: string; ipAddress: string; endpointId: string }];
+  reviewSavedSiteLocalEvidence: [scanId: string];
   importSiteLocalEvidence: [request: { report?: unknown; error?: string }];
   reconcileSiteLocalEvidence: [request: { scanId: string; deviceId: string; component: string }];
 }>();
@@ -196,6 +198,14 @@ function endpointServices(endpoint: Endpoint): string[] {
     const port = /^port\.(\d+)\.open$/.exec(observation.attribute);
     return port && observation.source === 'tcp' && observation.value === true ? [`TCP ${port[1]}`] : [];
   }))];
+}
+
+function hasSiteLocalShellyRpcEvidence(endpoint: Endpoint): boolean {
+  const observations = endpoint.observations || [];
+  return endpoint.vendor === 'Shelly' &&
+    observations.some(item => item.source === 'site_local_http_rpc' && item.attribute === 'observer.identity') &&
+    observations.some(item => item.source === 'http_identity' && item.attribute === 'identity.device_id' && item.value === endpoint.id) &&
+    observations.some(item => item.source === 'site_local_http_rpc' && item.attribute === 'shelly.component_status');
 }
 
 const selectedScope = computed(() => availableScopes.value.find(scope => scope.id === selectedScopeId.value)
@@ -511,12 +521,14 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
         <article v-for="proposal in siteLocalEvidenceImport.reconciliationProposals" :key="proposal.deviceId" class="ni-reconciliation-item">
           <div><strong>{{ proposal.displayName }}</strong><span>{{ proposal.room }} · {{ proposal.component }} · {{ date(proposal.observedAt) }}</span></div>
           <dl>
-            <div><dt>Verified device</dt><dd>{{ proposal.model }} · {{ proposal.physicalId }}</dd></div>
-            <div><dt>Endpoint and observer</dt><dd>{{ proposal.endpoint }} · {{ proposal.observerId }}</dd></div>
+            <div><dt>Verified device</dt><dd>{{ proposal.model }} · {{ proposal.physicalId }} · inventory {{ proposal.physicalInventoryId }}</dd></div>
+            <div><dt>Endpoint and observer</dt><dd>{{ proposal.endpoint }} · {{ proposal.observerId }} · {{ proposal.evidenceScanId }}</dd></div>
+            <div><dt>RPC evidence times</dt><dd>Identity {{ date(proposal.identityVerifiedAt) }} · component {{ date(proposal.componentVerifiedAt) }}</dd></div>
+            <div><dt>Evidence freshness</dt><dd>{{ proposal.evidenceFresh ? 'Fresh for measurement review' : 'Historical; refresh required before approving measurements' }}</dd></div>
             <div><dt>Confirmed readings</dt><dd>{{ proposal.verifiedMeasurementFields.join(', ') || 'None' }}</dd></div>
             <div><dt>MQTT source</dt><dd>Exact event topic requires separate operator binding and per-field approval.</dd></div>
           </dl>
-          <button v-if="!proposal.reconciled" type="button" class="ni-button ni-button-primary" @click="emit('reconcileSiteLocalEvidence', { scanId: proposal.evidenceScanId, deviceId: proposal.deviceId, component: proposal.component })">Record verified identity for this existing component</button>
+          <button v-if="!proposal.reconciled" type="button" class="ni-button ni-button-primary" @click="emit('reconcileSiteLocalEvidence', { scanId: proposal.evidenceScanId, deviceId: proposal.deviceId, component: proposal.component })">{{ proposal.evidenceFresh ? 'Record verified identity for this existing component' : 'Record historical identity evidence for this existing component' }}</button>
           <span v-else class="ni-status-pill is-complete" role="status">Identity evidence recorded · no enrollment or authority granted</span>
         </article>
         <p v-if="siteLocalEvidenceImport.reconciliationConflicts.length" class="ni-review-note">Conflicts suppressed without changing records: {{ siteLocalEvidenceImport.reconciliationConflicts.map(item => `${item.component}: ${item.reason}`).join(' · ') }}</p>
@@ -631,6 +643,10 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
           <div v-else-if="lifecycleFor(selectedEndpoint)?.stage === 'enrolled'" class="ni-lifecycle-context">
             <span>{{ lifecycleFor(selectedEndpoint)?.relatedRecords && lifecycleFor(selectedEndpoint)!.relatedRecords! > 1 ? `${lifecycleFor(selectedEndpoint)!.relatedRecords} enrolled logical records share this verified physical identity.` : 'Matched to an enrolled device by verified protocol identity.' }}</span>
             <button type="button" @click="emit('openDevice', lifecycleFor(selectedEndpoint)?.recordId || '')">Open device record ›</button>
+            <button v-if="hasSiteLocalShellyRpcEvidence(selectedEndpoint) && selectedSnapshot?.ownership" type="button"
+              :disabled="siteLocalEvidenceImportBusy" @click="emit('reviewSavedSiteLocalEvidence', selectedSnapshot!.scanId)">
+              {{ siteLocalEvidenceImportBusy ? 'Loading evidence…' : 'Review saved RPC evidence' }}
+            </button>
           </div>
           <div v-else-if="lifecycleFor(selectedEndpoint)?.stage === 'ambiguous'" class="ni-lifecycle-context">
             <span>This verified identity has conflicting physical or enrollment records. No record was selected automatically.</span>
