@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { authFetch, clearAuthenticatedSession, getAccessToken, logoutRequest, onAuthState, restoreSession, setAuthenticatedSession } from './auth/auth-client';
 import NetworkDiscoveryCard from './components/discovery/NetworkDiscoveryCard.vue';
 import NetworkIntelligencePanel from './components/discovery/NetworkIntelligencePanel.vue';
@@ -33,6 +33,8 @@ import { matchNetworkDevice, hasVerifiedEnrolledNetworkIdentity } from './compon
 import { canSwitchDevice, controlRouteLabel } from './components/devices/device-control';
 import type { DeviceControlState } from '@energrid/domain-devices';
 import { pageFromPath, pathForPage } from './portal-route';
+
+const ExpensesDashboard = defineAsyncComponent(() => import('./components/expenses/ExpensesDashboard.vue'));
 
 type LoginResponse = {
   accessToken: string;
@@ -667,6 +669,7 @@ const navItems = computed(() => [
   { id: 'bus', label: 'Bus', active: activePage.value === 'bus' },
   { id: 'systems', label: 'Systems', active: activePage.value === 'systems' },
   { id: 'energy', label: 'Energy', active: activePage.value === 'energy' },
+  { id: 'expenses', label: 'Expenses', active: activePage.value === 'expenses' },
   { id: 'weather', label: 'Weather', active: activePage.value === 'weather' },
   {
     id: 'executions',
@@ -6835,6 +6838,7 @@ onBeforeUnmount(() => {
 
         <WeatherDashboard v-else-if="activePage === 'weather'" :api-base="apiBase" :access-token="accessToken" />
         <EnergyDashboard v-else-if="activePage === 'energy'" :api-base="apiBase" :access-token="accessToken" />
+        <ExpensesDashboard v-else-if="activePage === 'expenses'" :api-base="apiBase" :access-token="accessToken" />
         <section v-else class="panel workspace-panel">
           <div class="page-heading">
             <p class="eyebrow">Coming Next</p>

@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app/app.module';
 import { WsAdapter } from '@nestjs/platform-ws';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
@@ -49,9 +50,10 @@ async function bootstrap() {
   if (process.env.NODE_ENV !== 'production') {
     loadDotenv({ path: resolve(process.cwd(), '.env.auth.local'), override: true, quiet: true });
   }
-  const app = await NestFactory.create(AppModule, {
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: ['log', 'warn', 'error'],
   });
+  app.useBodyParser('json', { limit: '5mb' });
   app.use(helmet({ contentSecurityPolicy: false }));
   app.getHttpAdapter().getInstance().disable('x-powered-by');
 

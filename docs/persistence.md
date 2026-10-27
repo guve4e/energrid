@@ -75,6 +75,7 @@ Most stores are opened by the API process with `classic-level` and JSON encoding
 | Generic measurement history outbox | `~/.energrid/measurement-history-outbox`; override `TELEMETRY_HISTORY_OUTBOX_DIRECTORY` | Admitted generic measurements waiting for PostgreSQL replay; capacity is `TELEMETRY_MAX_PENDING_WRITES`, and queued history is not evicted. See [the module guide](../apps/api/src/app/modules/telemetry/generic-measurements/README.md). |
 | Device investigation history | `~/.energrid/device-investigations`; override `ENERGRID_INVESTIGATION_STORE_DIRECTORY` | Investigation records, scoped device indexes, action records and profile history. |
 | MQTT captured evidence | `HOME_MQTT_EVIDENCE_STORE_DIRECTORY` | Optional bounded, explicitly topic-bound payload evidence store; configured bindings are scoped and disabled unless supplied. |
+| Personal expenses | `~/.energrid/personal-expenses`; override `ENERGRID_PERSONAL_EXPENSES_DIRECTORY` | Account-scoped `record`, date index and legacy-source index keys. The API derives ownership from the authenticated account; the Portal cannot select another owner's data. |
 
 There are additional short-lived in-memory structures, including the basic observation/health snapshot service, device registry state, operational logs and correlation caches. The basic `DeviceHealthService` computes healthy/degraded/stale from recent in-memory observations; it is distinct from the persisted firmware diagnostics timeline in Device Health history V1.
 
