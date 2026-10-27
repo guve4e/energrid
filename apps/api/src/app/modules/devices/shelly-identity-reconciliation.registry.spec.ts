@@ -91,6 +91,9 @@ describe('site-scoped Shelly enrollment reconciliation', () => {
         snapshotId: 'site-observer-12345678', endpoint: '192.168.1.166',
         networkScope: 'upstream-lan:192.168.1.0/24', identityVerifiedAt: old, componentVerifiedAt: old },
       fields: [{ metric: 'power' }, { metric: 'energy_import_total' }] });
+    await expect(h.registry.approveShellyObservations('tenant-demo', 'site-home', deviceId,
+      'operator@example.test', ['power'], 'shelly/washer@other/events/rpc', configuredShellyMqttBroker()))
+      .rejects.toThrow('Fresh site-local Shelly identity and component evidence is required');
     expect(h.store.save).toHaveBeenCalledTimes(1);
   });
 
