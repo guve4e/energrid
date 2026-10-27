@@ -804,10 +804,18 @@ export class DeviceRegistryService implements OnModuleInit {
 
     const config = this.liveApprovedDeviceConfigs.get(key);
     if (!config) return null;
+    const hasVerifiedElectricalMeasurements = input.verifiedMeasurementFields.some(field =>
+      ['power', 'energy_import_total', 'energy_export_total'].includes(field),
+    );
     if (device.metadata?.siteLocalEvidenceScanId === input.evidenceScanId &&
         device.metadata?.identityEvidenceSource === 'verified_site_local_shelly_rpc' &&
-        device.metadata?.componentEvidenceSource === 'verified_site_local_shelly_rpc') return device;
+        device.metadata?.componentEvidenceSource === 'verified_site_local_shelly_rpc' &&
+        (!hasVerifiedElectricalMeasurements || device.supportedCapabilities?.some(capability => capability.kind === 'power'))) return device;
     const previous = config;
+    const supportedCapabilities = [...new Set([
+      ...(config.supportedCapabilities || config.capabilities || []),
+      ...(hasVerifiedElectricalMeasurements ? ['power' as const] : []),
+    ])];
     const metadata = cleanMetadata({
       ...config.metadata,
       identityEvidenceSource: 'verified_site_local_shelly_rpc',
@@ -829,7 +837,11 @@ export class DeviceRegistryService implements OnModuleInit {
         ? { verifiedMeasurementFields: [...new Set(input.verifiedMeasurementFields)].join(',') }
         : {}),
     });
-    this.liveApprovedDeviceConfigs.set(key, { ...config, metadata });
+    this.liveApprovedDeviceConfigs.set(key, {
+      ...config,
+      ...(hasVerifiedElectricalMeasurements ? { supportedCapabilities } : {}),
+      metadata,
+    });
     try {
       const updated = this.getDevices(true).find(item => item.id === deviceId && item.tenantId === tenantId && item.siteId === siteId);
       if (!updated) throw new Error('Enrolled component disappeared during reconciliation.');
@@ -924,9 +936,31 @@ export class DeviceRegistryService implements OnModuleInit {
     if (!this.installationStore) throw new Error('Local device storage is unavailable.');
     if (mqttBroker !== configuredShellyMqttBroker()) throw new Error('The reviewed MQTT broker differs from the active Shelly subscriber.');
     const authority = shellyMqttObservationApproval(deviceId, mergedFields, mqttTopic, mqttBroker);
-    const updated = { ...installation, observationAuthority: authority, updatedAt: new Date().toISOString() };
+    const withPowerRead = (capabilities: RegisteredDevice['capabilities']) => {
+      const current = capabilities || [];
+      const power = current.find(capability => capability.kind === 'power');
+      if (power?.actions.includes('read')) return current;
+      if (power) return current.map(capability => capability.kind === 'power'
+        ? { ...capability, actions: [...new Set([...capability.actions, 'read' as const])], unit: capability.unit || 'W' }
+        : capability);
+      return [...current, { kind: 'power' as const, actions: ['read' as const], unit: 'W' }];
+    };
+    const updatedDevice = {
+      ...installation.device,
+      capabilities: withPowerRead(installation.device.capabilities),
+      supportedCapabilities: withPowerRead(installation.device.supportedCapabilities || installation.device.capabilities),
+    };
+    const updated = { ...installation, device: updatedDevice, observationAuthority: authority, updatedAt: new Date().toISOString() };
     await this.installationStore.save(updated);
     this.persistedInstallations.set(key, updated);
+    const config = this.liveApprovedDeviceConfigs.get(key);
+    if (config) {
+      this.liveApprovedDeviceConfigs.set(key, {
+        ...config,
+        capabilities: [...new Set([...(config.capabilities || []), 'power' as const])],
+        supportedCapabilities: [...new Set([...(config.supportedCapabilities || config.capabilities || []), 'power' as const])],
+      });
+    }
     await this.installationStore.append({
       id: `${new Date().toISOString()}-${Math.random().toString(36).slice(2, 10)}`,
       deviceId,

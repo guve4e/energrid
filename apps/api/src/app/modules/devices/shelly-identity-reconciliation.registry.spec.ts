@@ -2,6 +2,14 @@ import { DeviceRegistryService } from './device-registry.service';
 import { findExactShellyInventoryAssignment } from '../portal/site-local-shelly-inventory-match';
 import { PortalController } from '../portal/portal.controller';
 import type { PhysicalDeviceInventoryRecord } from './enrollment/physical-device-inventory.repository';
+import { configuredShellyMqttBroker } from './adapters/inbound/shelly/shelly-mqtt-observation-approval';
+import { shellyPro2PmNotifyStatusFixture } from './adapters/inbound/shelly/__fixtures__/shelly-pro2pm-notifystatus.fixture';
+import { DeviceMqttMessageRouter } from './mqtt/device-mqtt-message-router';
+import { ApprovedMqttObservationRuntime } from './mqtt/approved-mqtt-observation.runtime';
+import { DeviceObservationService } from './device-observation.service';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const physicalId = 'shellypro2pm-ec6260888084';
 const component = 'switch:0';
@@ -253,6 +261,127 @@ describe('site-scoped Shelly enrollment reconciliation', () => {
     expect(h.device.control).toBeUndefined();
   });
 
+  it('keeps verified power as supported-only until explicit MQTT measurement approval, then enables read-only history capability', async () => {
+    const h = setup();
+    await h.registry.onModuleInit();
+    const before = h.registry.getDevices(true).find(item => item.id === deviceId)!;
+    expect(before.capabilities.map(item => item.kind)).toEqual(['switch']);
+
+    await h.registry.reconcileShellyIdentityEvidence(evidence());
+    const reconciled = h.registry.getDevices(true).find(item => item.id === deviceId)!;
+    expect(reconciled.supportedCapabilities.map(item => item.kind)).toContain('power');
+    expect(reconciled.capabilities.map(item => item.kind)).not.toContain('power');
+    expect(h.record.observationAuthority).toBeUndefined();
+
+    const status = await h.registry.getShellyObservationApproval('tenant-demo', 'site-home', deviceId);
+    expect(status).toMatchObject({ evidenceFresh: true, approved: false,
+      fields: [{ metric: 'power' }, { metric: 'energy_import_total' }] });
+    await h.registry.approveShellyObservations('tenant-demo', 'site-home', deviceId, 'operator@example.test',
+      ['power'], 'shelly/washer@other/events/rpc', configuredShellyMqttBroker());
+
+    const approved = h.registry.getDevices(true).find(item => item.id === deviceId)!;
+    expect(approved.capabilities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'switch', actions: expect.arrayContaining(['turn_on', 'turn_off']) }),
+      expect.objectContaining({ kind: 'power', actions: ['read'], unit: 'W' }),
+    ]));
+    expect(h.record.observationAuthority).toBeUndefined();
+    expect(h.store.save).toHaveBeenCalledWith(expect.objectContaining({
+      observationAuthority: expect.objectContaining({
+        bindings: [expect.objectContaining({
+          deviceId, sourceId: 'shelly-mqtt', selector: 'shelly/washer@other/events/rpc',
+          fields: { power: { rawKey: 'power', type: 'number' } },
+        })],
+      }),
+      device: expect.objectContaining({
+        capabilities: expect.arrayContaining([expect.objectContaining({ kind: 'power', actions: ['read'] })]),
+      }),
+    }));
+  });
+
+  it('reconciles and admits both existing Home components through canonical ingress only after separate explicit approval', async () => {
+    const oldEnv = { ...process.env };
+    const physicalInventoryId = '8e15ec60-a22b-4f8c-ab09-5e61d44030f9';
+    const mqttTopic = 'shelly/washer@other/events/rpc';
+    const componentKeys = ['switch:0', 'switch:1'];
+    const records = new Map(componentKeys.map((key, index) => {
+      const id = `${physicalId}:${key}`;
+      const device = { ...hDevice(id, key, index) };
+      return [`site-home:${id}`, { schemaVersion: 1, device, physicalOutcome: {
+        status: 'not_confirmed', confirmedAt: null, confirmedBy: null,
+      }, updatedAt: observedAt }];
+    }));
+    const store = {
+      listAll: jest.fn().mockImplementation(async () => [...records.values()]),
+      get: jest.fn().mockImplementation(async (siteId: string, id: string) => records.get(`${siteId}:${id}`) || null),
+      save: jest.fn().mockImplementation(async (next: any) => { records.set(`${next.device.siteId}:${next.device.id}`, next); }),
+      append: jest.fn().mockResolvedValue(undefined),
+    };
+    const enrollment = {
+      list: jest.fn().mockResolvedValue(componentKeys.map(key => ({ deviceId: `${physicalId}:${key}`, status: 'enrolled' }))),
+      find: jest.fn().mockImplementation(async ({ deviceId: id }: { deviceId: string }) =>
+        records.has(`site-home:${id}`) ? { tenantId: 'tenant-demo', siteId: 'site-home', deviceId: id, status: 'enrolled' } : null),
+    };
+    const previousStorePath = process.env.HOME_OBSERVATION_STORE_DIRECTORY;
+    const directory = await mkdtemp(join(tmpdir(), 'energrid-shelly-e2e-'));
+    let runtime: ApprovedMqttObservationRuntime | undefined;
+    try {
+      process.env.HOME_OBSERVATION_STORE_DIRECTORY = directory;
+      process.env.HOME_HTTP_POLL_ENABLED = 'true';
+      delete process.env.HOME_OBSERVATION_BINDINGS_JSON;
+      delete process.env.LAB_MQTT_OBSERVATION_BINDINGS_JSON;
+      const registry = new DeviceRegistryService(undefined, store as any, enrollment as any);
+      await registry.onModuleInit();
+      for (const componentKey of componentKeys) {
+        const id = `${physicalId}:${componentKey}`;
+        await registry.reconcileShellyIdentityEvidence({ ...evidence(), deviceId: id, component: componentKey,
+          physicalInventoryId, evidenceScanId: 'site-observer-2aec6d8b2d4d25f397a572203264edd0a388de00',
+          verifiedMeasurementFields: ['power', 'energy_import_total', 'energy_export_total'] });
+        // Reconciliation only establishes supported LAN evidence. It does not
+        // grant the read capability or any field authority.
+        expect(registry.getDevices(true).find(item => item.id === id)?.capabilities.map(item => item.kind)).toEqual(['switch']);
+        expect(registry.getDevices(true).find(item => item.id === id)?.supportedCapabilities.map(item => item.kind)).toContain('power');
+        await registry.approveShellyObservations('tenant-demo', 'site-home', id, 'operator@example.test',
+          ['power'], mqttTopic, configuredShellyMqttBroker());
+      }
+
+      const historyWriter = { persistAccepted: jest.fn().mockResolvedValue([{ field: 'power', outcome: 'stored' }]) };
+      runtime = new ApprovedMqttObservationRuntime(registry, store as any, enrollment as any, historyWriter as any);
+      const capture = jest.fn().mockResolvedValue(undefined);
+      const router = new DeviceMqttMessageRouter(registry, new DeviceObservationService(), { capture } as any,
+        undefined, undefined, enrollment as any, runtime);
+      const payload = { ...shellyPro2PmNotifyStatusFixture, params: {
+        ...shellyPro2PmNotifyStatusFixture.params,
+        'switch:0': { ...shellyPro2PmNotifyStatusFixture.params['switch:0'], current: 0.1, voltage: 230 },
+        'switch:1': { ...shellyPro2PmNotifyStatusFixture.params['switch:1'], current: 0.2, voltage: 230 },
+      } };
+      const routed = await router.route({ topic: mqttTopic, payload, payloadText: JSON.stringify(payload) });
+      await routed?.persisted;
+
+      expect(routed?.observationAdmissions).toEqual(componentKeys.map(componentKey => expect.objectContaining({
+        deviceId: `${physicalId}:${componentKey}`, outcome: 'admitted',
+      })));
+      expect(historyWriter.persistAccepted).toHaveBeenCalledTimes(2);
+      expect(historyWriter.persistAccepted).toHaveBeenCalledWith(expect.objectContaining({
+        tenantId: 'tenant-demo', siteId: 'site-home', sourceId: 'shelly-mqtt', selector: mqttTopic,
+        fields: [expect.objectContaining({ field: 'power', value: 0 })],
+      }));
+      expect(capture).toHaveBeenCalledTimes(2);
+      for (const componentKey of componentKeys) {
+        const deviceId = `${physicalId}:${componentKey}`;
+        expect(capture).toHaveBeenCalledWith(expect.objectContaining({ deviceId, tenantId: 'tenant-demo', siteId: 'site-home' }),
+          expect.objectContaining({ capabilities: expect.arrayContaining([expect.objectContaining({ kind: 'power', actions: ['read'] })]) }), 'shelly-mqtt');
+        expect(registry.getDevices(true).find(item => item.id === deviceId)?.state.values.power).toBe(0);
+      }
+      expect(registry.getDevices(true).every(item => item.id !== `${physicalId}:switch:2`)).toBe(true);
+    } finally {
+      await runtime?.onModuleDestroy();
+      if (previousStorePath === undefined) delete process.env.HOME_OBSERVATION_STORE_DIRECTORY;
+      else process.env.HOME_OBSERVATION_STORE_DIRECTORY = previousStorePath;
+      process.env = { ...oldEnv };
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('rejects identity/component mismatches and evidence outside the authorized site', async () => {
     const h = setup();
     await h.registry.onModuleInit();
@@ -271,3 +400,16 @@ describe('site-scoped Shelly enrollment reconciliation', () => {
     expect(h.store.save).not.toHaveBeenCalled();
   });
 });
+
+function hDevice(id: string, component: string, index: number) {
+  return {
+    id, tenantId: 'tenant-demo', siteId: 'site-home', siteName: 'Home',
+    displayName: index === 0 ? 'Washer / bathroom fan' : 'Existing component',
+    kind: 'physical', trustStatus: 'approved', zoneId: index === 0 ? 'bathroom' : 'unknown',
+    zoneName: index === 0 ? 'Bathroom' : 'Unknown', adapter: { id: 'mqtt', protocol: 'mqtt', transport: 'mqtt', driver: 'shelly-discovered', configured: true },
+    capabilities: [{ kind: 'switch', actions: ['turn_on', 'turn_off'] }],
+    supportedCapabilities: [{ kind: 'switch', actions: ['turn_on', 'turn_off'] }],
+    state: { values: {}, observedAt: null, source: 'mqtt', status: 'unknown' },
+    metadata: { physicalId, component, mqttEvidenceCandidate: true },
+  };
+}
