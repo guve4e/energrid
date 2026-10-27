@@ -34,7 +34,8 @@ const boundMetrics = ref<Array<'temperature' | 'humidity'>>([]);
 const authorizedBindings = ref<Array<'temperature' | 'humidity'>>([]);
 const shellyPowerAuthorized = ref(false);
 const shellyApprovalRequired = computed(() =>
-  props.device.adapter.driver === 'shelly-lan' &&
+  props.device.metadata?.identityEvidenceSource === 'verified_site_local_shelly_rpc' &&
+  props.device.metadata?.componentEvidenceSource === 'verified_site_local_shelly_rpc' &&
   props.device.metadata?.shellyMqttObservationApprovalRequired === true,
 );
 const presentation = computed(() => deviceDetailPresentation(props.device, boundMetrics.value, authorizedBindings.value));

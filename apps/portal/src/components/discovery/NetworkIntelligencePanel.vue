@@ -65,6 +65,18 @@ type EndpointLifecycle = {
   relatedRecords?: number;
   detail?: string;
 };
+type ShellyReconciliationProposal = {
+  deviceId: string; displayName: string; room: string; physicalId: string; component: string;
+  evidenceScanId: string; observerId: string; observedAt: string; endpoint: string; model: string;
+  firmwareVersion: string; verifiedMeasurementFields: string[]; currentIdentitySource: string;
+  currentDriver: string; mqttTopicRequiresOperatorBinding: true; reconciled?: boolean;
+};
+type SiteLocalEvidenceImport = {
+  status: string; scanId: string; observerId: string; physicalId: string;
+  reconciliationProposals: ShellyReconciliationProposal[];
+  reconciliationConflicts: Array<{ deviceId: string; component: string; reason: string }>;
+  historicalComponentConflicts: string[];
+};
 
 const props = withDefaults(defineProps<{
   scopes: Scope[]; snapshots: Snapshot[]; latest: Snapshot | null; comparison: Diff | null;
@@ -77,6 +89,9 @@ const props = withDefaults(defineProps<{
   endpointInvestigations?: Record<string, NetworkEndpointInvestigationState>;
   endpointHttpProbes?: Record<string, NetworkEndpointHttpProbeState>;
   endpointIdentityRefreshes?: Record<string, NetworkEndpointIdentityRefreshState>;
+  siteLocalEvidenceImport?: SiteLocalEvidenceImport | null;
+  siteLocalEvidenceImportBusy?: boolean;
+  siteLocalEvidenceImportError?: string;
   onboardingBusy?: boolean;
   busy?: boolean; error?: string;
 }>(), { enrollmentStateAvailable: true });
@@ -92,6 +107,8 @@ const emit = defineEmits<{
   investigateEndpoint: [request: { scanId: string; scopeId: string; ipAddress: string; endpointId: string }];
   probeEndpoint: [request: { scanId: string; scopeId: string; ipAddress: string; endpointId: string; refreshId: string }];
   refreshEndpointIdentity: [request: { scanId: string; scopeId: string; ipAddress: string; endpointId: string }];
+  importSiteLocalEvidence: [request: { report?: unknown; error?: string }];
+  reconcileSiteLocalEvidence: [request: { scanId: string; deviceId: string; component: string }];
 }>();
 
 const selectedScopeId = ref('');
@@ -106,11 +123,26 @@ const probeApprovalOpen = ref(false);
 const identityRefreshApprovalOpen = ref(false);
 const freshnessNow = ref(Date.now());
 const expandedDeltaCategory = ref<DeltaCategory | ''>('');
+const siteLocalEvidenceFile = ref<HTMLInputElement>();
 let mobileMediaQuery: MediaQueryList | undefined;
 let freshnessTimer: ReturnType<typeof setInterval> | undefined;
 
 function updateViewport() {
   mobileViewport.value = window.matchMedia?.('(max-width: 640px)').matches ?? window.innerWidth <= 640;
+}
+
+async function submitSiteLocalEvidence(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file) return;
+  try {
+    if (file.size > 1_000_000) throw new Error('Observer evidence report exceeds the 1 MB upload limit.');
+    const report = JSON.parse(await file.text()) as unknown;
+    emit('importSiteLocalEvidence', { report });
+  } catch (cause) {
+    emit('importSiteLocalEvidence', { error: cause instanceof Error ? cause.message : 'Invalid JSON evidence report.' });
+  }
 }
 
 onMounted(() => {
@@ -435,6 +467,10 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
         <p class="ni-subtitle">A clear view of observed endpoints and verified device identities.</p>
       </div>
       <div class="ni-header-actions">
+        <label class="ni-button ni-button-secondary ni-evidence-upload">
+          {{ siteLocalEvidenceImportBusy ? 'Reviewing evidence…' : 'Import Pi RPC evidence' }}
+          <input ref="siteLocalEvidenceFile" type="file" accept="application/json,.json" :disabled="siteLocalEvidenceImportBusy" @change="submitSiteLocalEvidence" />
+        </label>
         <label class="ni-scope-select">
           <span>Network</span>
           <select v-model="selectedScopeId" aria-label="Select network scope" :disabled="availableScopes.length === 0">
@@ -465,6 +501,29 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
     <div v-if="selectedSnapshotIsUnscoped" class="ni-legacy-snapshot" role="status">
       Legacy snapshot · ownership was not recorded. This evidence is preserved for historical viewing only and cannot create or support onboarding candidates.
     </div>
+    <section v-if="siteLocalEvidenceImportBusy || siteLocalEvidenceImportError || siteLocalEvidenceImport" class="ni-reconciliation" aria-label="Site-local Shelly reconciliation review">
+      <h2>Site-local Shelly evidence review</h2>
+      <p v-if="siteLocalEvidenceImportBusy" role="status">Validating the allowlisted Pi report and matching evidence to enrolled components…</p>
+      <p v-if="siteLocalEvidenceImportError" class="ni-error" role="alert">{{ siteLocalEvidenceImportError }}</p>
+      <template v-if="siteLocalEvidenceImport">
+        <p>Observer <code>{{ siteLocalEvidenceImport.observerId }}</code> · physical identity <code>{{ siteLocalEvidenceImport.physicalId }}</code> · report <code>{{ siteLocalEvidenceImport.scanId }}</code></p>
+        <p class="ni-review-note">Evidence is operator-attested and server-validated against the active site's observer allowlist. Existing enrollment, room, approvals, MQTT binding and control settings remain unchanged until explicitly reviewed.</p>
+        <article v-for="proposal in siteLocalEvidenceImport.reconciliationProposals" :key="proposal.deviceId" class="ni-reconciliation-item">
+          <div><strong>{{ proposal.displayName }}</strong><span>{{ proposal.room }} · {{ proposal.component }} · {{ date(proposal.observedAt) }}</span></div>
+          <dl>
+            <div><dt>Verified device</dt><dd>{{ proposal.model }} · {{ proposal.physicalId }}</dd></div>
+            <div><dt>Endpoint and observer</dt><dd>{{ proposal.endpoint }} · {{ proposal.observerId }}</dd></div>
+            <div><dt>Confirmed readings</dt><dd>{{ proposal.verifiedMeasurementFields.join(', ') || 'None' }}</dd></div>
+            <div><dt>MQTT source</dt><dd>Exact event topic requires separate operator binding and per-field approval.</dd></div>
+          </dl>
+          <button v-if="!proposal.reconciled" type="button" class="ni-button ni-button-primary" @click="emit('reconcileSiteLocalEvidence', { scanId: proposal.evidenceScanId, deviceId: proposal.deviceId, component: proposal.component })">Record verified identity for this existing component</button>
+          <span v-else class="ni-status-pill is-complete" role="status">Identity evidence recorded · no enrollment or authority granted</span>
+        </article>
+        <p v-if="siteLocalEvidenceImport.reconciliationConflicts.length" class="ni-review-note">Conflicts suppressed without changing records: {{ siteLocalEvidenceImport.reconciliationConflicts.map(item => `${item.component}: ${item.reason}`).join(' · ') }}</p>
+        <p v-if="siteLocalEvidenceImport.historicalComponentConflicts.length" class="ni-review-note">Historical component evidence preserved: {{ siteLocalEvidenceImport.historicalComponentConflicts.join(', ') }}</p>
+        <p v-if="!siteLocalEvidenceImport.reconciliationProposals.length" role="status">No exact enrolled component matched this report. No existing record was changed.</p>
+      </template>
+    </section>
 
     <nav class="ni-lifecycle-links" aria-label="Device lifecycle">
       <button type="button" class="ni-lifecycle-link" @click="emit('openPending')">
@@ -930,6 +989,17 @@ h1, h2, h3, p { margin-top: 0; }
 .ni-diagnostics-grid p { margin: 7px 0 0; }
 .ni-diagnostics-grid li strong { color: var(--ni-text); }
 .ni-diagnostics-empty { margin: 0; padding: 15px; color: var(--ni-muted); }
+.ni-evidence-upload { display: inline-flex; align-items: center; cursor: pointer; }
+.ni-evidence-upload input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.ni-reconciliation { display: grid; gap: 10px; border: 1px solid var(--ni-border); border-radius: 14px; padding: 16px; background: var(--ni-surface); }
+.ni-reconciliation h2, .ni-reconciliation p { margin: 0; }
+.ni-reconciliation-item { display: grid; gap: 10px; border: 1px solid var(--ni-border); border-radius: 10px; padding: 12px; }
+.ni-reconciliation-item > div:first-child { display: flex; gap: 8px; justify-content: space-between; flex-wrap: wrap; }
+.ni-reconciliation-item > div:first-child span, .ni-reconciliation-item dd, .ni-review-note { color: var(--ni-muted); }
+.ni-reconciliation-item dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; margin: 0; }
+.ni-reconciliation-item dl div { display: grid; gap: 3px; }
+.ni-reconciliation-item dt { font-size: 11px; color: var(--ni-muted); }
+.ni-reconciliation-item dd { margin: 0; overflow-wrap: anywhere; }
 .network-intelligence-page :is(button, select, input, summary):focus-visible { outline: 3px solid var(--ni-accent); outline-offset: 3px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @media (max-width: 900px) {

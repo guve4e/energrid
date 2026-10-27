@@ -17,7 +17,7 @@ describe('approved Shelly MQTT observation ingress', () => {
     process.env = { ...oldEnv };
   });
 
-  async function setup(options: { approved?: boolean; tenantId?: string; siteId?: string; componentKey?: string; verifiedFields?: string; approvedFields?: Array<'power' | 'energy_import_total' | 'energy_export_total'>; siteLocal?: boolean; mqttTopic?: string } = {}) {
+  async function setup(options: { approved?: boolean; tenantId?: string; siteId?: string; componentKey?: string; verifiedFields?: string; approvedFields?: Array<'power' | 'energy_import_total' | 'energy_export_total'>; siteLocal?: boolean; mqttTopic?: string; legacyMqttAdapter?: boolean; duplicateSite?: boolean } = {}) {
     directory = await mkdtemp(join(tmpdir(), 'energrid-shelly-observation-'));
     process.env.HOME_OBSERVATION_STORE_DIRECTORY = directory;
     process.env.HOME_HTTP_POLL_ENABLED = 'true';
@@ -30,7 +30,7 @@ describe('approved Shelly MQTT observation ingress', () => {
     const siteId = options.siteId || 'site-a';
     const device = {
       id: deviceId, tenantId, siteId, kind: 'physical', trustStatus: 'approved',
-      adapter: { driver: 'shelly-lan', protocol: 'http' },
+      adapter: options.legacyMqttAdapter ? { driver: 'shelly-discovered', protocol: 'mqtt' } : { driver: 'shelly-lan', protocol: 'http' },
       metadata: {
         physicalId, component: componentKey,
         identityEvidenceSource: options.siteLocal ? 'verified_site_local_shelly_rpc' : 'verified_shelly_http_rpc',
@@ -41,7 +41,7 @@ describe('approved Shelly MQTT observation ingress', () => {
     };
     const registry = {
       ensureInstallationsLoaded: jest.fn().mockResolvedValue(undefined),
-      getDevices: jest.fn().mockReturnValue([device]),
+      getDevices: jest.fn().mockReturnValue([device, ...(options.duplicateSite ? [{ ...device, tenantId: 'tenant-other', siteId: 'site-other' }] : [])]),
       projectApprovedObservation: jest.fn(),
     };
     const installation = {
@@ -97,6 +97,27 @@ describe('approved Shelly MQTT observation ingress', () => {
     expect(wrongTopic).toMatchObject({ outcome: 'rejected', reasonCode: 'observation_authority_missing' });
   });
 
+  it('rejects an otherwise approved topic if the active broker differs from the reviewed broker', async () => {
+    const h = await setup({ approved: true, mqttTopic: 'shelly/washer@other/events/rpc' });
+    process.env.HOME_MQTT_HOST = 'different-broker.example';
+    const result = await runtime!.ingestShellyMqttObservation({
+      topic: 'shelly/washer@other/events/rpc', physicalId: h.physicalId, componentKey: h.componentKey,
+      values: { power: 42 }, evidenceId: 'different-broker-message',
+    });
+    expect(result).toMatchObject({ outcome: 'rejected', reasonCode: 'observation_authority_missing' });
+  });
+
+  it('fails closed when the same physical component identity is enrolled in multiple sites', async () => {
+    const topic = 'shelly/washer@other/events/rpc';
+    const h = await setup({ approved: true, siteLocal: true, mqttTopic: topic, duplicateSite: true });
+    const result = await runtime!.ingestShellyMqttObservation({
+      topic, physicalId: h.physicalId, componentKey: h.componentKey,
+      values: { power: 12 }, evidenceId: 'ambiguous-site-message',
+    });
+    expect(result).toMatchObject({ outcome: 'rejected', reasonCode: 'shelly_observation_identity_ambiguous' });
+    expect(h.installations.get).not.toHaveBeenCalled();
+  });
+
   it('rejects topic and component identity mismatches before resolving an installation', async () => {
     const h = await setup({ approved: true });
     const wrongTopic = await runtime!.ingestShellyMqttObservation({
@@ -147,5 +168,17 @@ describe('approved Shelly MQTT observation ingress', () => {
     expect(result).toMatchObject({ outcome: 'processed', accepted: true,
       scope: { tenantId: h.tenantId, siteId: h.siteId } });
     expect(h.installations.get).toHaveBeenCalledWith(h.siteId, h.deviceId);
+  });
+
+  it('accepts a separately approved source binding after reconciling an existing MQTT-enrolled component', async () => {
+    const topic = 'shelly/washer@other/events/rpc';
+    const h = await setup({ componentKey: 'switch:0', verifiedFields: 'power,energy_import_total',
+      approved: true, approvedFields: ['power'], siteLocal: true, mqttTopic: topic, legacyMqttAdapter: true });
+    const result = await runtime!.ingestShellyMqttObservation({
+      topic, physicalId: h.physicalId, componentKey: h.componentKey,
+      values: { power: 38 }, evidenceId: 'reconciled-enrolled-component',
+    });
+    expect(result).toMatchObject({ outcome: 'processed', accepted: true, deviceId: h.deviceId,
+      scope: { tenantId: h.tenantId, siteId: h.siteId } });
   });
 });

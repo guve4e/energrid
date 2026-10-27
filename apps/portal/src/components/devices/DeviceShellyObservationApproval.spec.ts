@@ -8,6 +8,7 @@ const proposal = {
   approved: false,
   approvalStatus: 'missing' as const,
   sourceId: 'shelly-mqtt' as const,
+  broker: 'devicebroker.ddns.net:1883',
   selector: '',
   approvedFields: [],
   fields: [{ metric: 'power' as const, rawKey: 'power' as const, unit: 'W' as const, displayUnit: 'W' as const }],
@@ -50,7 +51,7 @@ describe('DeviceShellyObservationApproval', () => {
     await flushPromises();
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: 'POST' });
-    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({ confirmedDeviceId: deviceId, approvedFields: ['power'], mqttTopic: topic });
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({ confirmedDeviceId: deviceId, confirmedBroker: proposal.broker, approvedFields: ['power'], mqttTopic: topic });
     expect(wrapper.text()).toContain('All reported measurements are explicitly approved');
   });
 
@@ -76,7 +77,7 @@ describe('DeviceShellyObservationApproval', () => {
     expect(wrapper.text()).toContain('energy_import_total');
     await powerButton.trigger('click');
     await flushPromises();
-    expect(JSON.parse(String(fetchMock.mock.calls.at(-1)?.[1]?.body))).toEqual({ confirmedDeviceId: 'shellypro2pm-001122334455:switch:1', approvedFields: ['power'], mqttTopic: 'shelly/washer@other/events/rpc' });
+    expect(JSON.parse(String(fetchMock.mock.calls.at(-1)?.[1]?.body))).toEqual({ confirmedDeviceId: 'shellypro2pm-001122334455:switch:1', confirmedBroker: proposal.broker, approvedFields: ['power'], mqttTopic: 'shelly/washer@other/events/rpc' });
     await wrapper.get('button').trigger('click');
     expect(wrapper.text()).toContain('energy_import_total');
     expect(wrapper.text()).toContain('does not grant device control');

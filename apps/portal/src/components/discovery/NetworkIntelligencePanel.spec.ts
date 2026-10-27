@@ -41,6 +41,32 @@ const observer = {
 };
 
 describe('NetworkIntelligencePanel', () => {
+  it('shows exact enrolled Shelly components as reconciliation proposals without treating MQTT as identity', async () => {
+    const proposal = {
+      deviceId: 'shellypro2pm-ec6260888084:switch:0', displayName: 'Washer / bathroom fan', room: 'Bathroom',
+      physicalId: 'shellypro2pm-ec6260888084', component: 'switch:0', evidenceScanId: 'site-observer-0123456789',
+      observerId: 'pi-housenet', observedAt: '2026-10-27T07:40:00Z', endpoint: '192.168.1.166',
+      model: 'SPSW-202PE16EU', firmwareVersion: '2.0.0', verifiedMeasurementFields: ['power', 'energy_import_total'],
+      currentIdentitySource: 'mqtt', currentDriver: 'shelly-discovered', mqttTopicRequiresOperatorBinding: true as const,
+    };
+    const panel = mount(NetworkIntelligencePanel, { props: {
+      scopes, snapshots: [], latest: null, comparison: null,
+      siteLocalEvidenceImport: { status: 'reconciliation_review_required', scanId: proposal.evidenceScanId,
+        observerId: proposal.observerId, physicalId: proposal.physicalId,
+        reconciliationProposals: [proposal], reconciliationConflicts: [], historicalComponentConflicts: [] },
+    } });
+    expect(panel.text()).toContain('Evidence is operator-attested');
+    expect(panel.text()).toContain('Bathroom · switch:0');
+    expect(panel.text()).toContain('power, energy_import_total');
+    expect(panel.text()).toContain('Exact event topic requires separate operator binding');
+    expect(panel.text()).toContain('Existing enrollment, room, approvals');
+    await panel.findAll('button').find(button => button.text().includes('Record verified identity'))!.trigger('click');
+    expect(panel.emitted('reconcileSiteLocalEvidence')).toEqual([[{
+      scanId: proposal.evidenceScanId, deviceId: proposal.deviceId, component: proposal.component,
+    }]]);
+    panel.unmount();
+  });
+
   it('shows unscoped v2 history as read-only evidence without offering investigation actions', async () => {
     const { ownership: _ownership, ...legacySnapshot } = snapshot;
     const panel = mount(NetworkIntelligencePanel, {

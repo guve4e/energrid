@@ -11,6 +11,8 @@ import type {
 export interface InstallationObservationAuthority {
   bindings: ApprovedObservationBinding[];
   policy: ObservationAuthorityPolicy;
+  /** Exact broker endpoint reviewed for Shelly MQTT measurements. */
+  broker?: string;
 }
 
 export interface DeviceInstallationRecord {
@@ -51,7 +53,7 @@ export interface DeviceInstallationChangeProposal {
 export interface DeviceInstallationEvent {
   id: string;
   deviceId: string;
-  kind: 'approved' | 'observation_authority_approved' | 'control_configured' | 'installation_details_saved' | 'command' | 'physical_outcome_confirmed';
+  kind: 'approved' | 'observation_authority_approved' | 'control_configured' | 'installation_details_saved' | 'command' | 'physical_outcome_confirmed' | 'shelly_identity_evidence_reconciled';
   occurredAt: string;
   actor: string;
   evidence: Record<string, string | number | boolean | null>;

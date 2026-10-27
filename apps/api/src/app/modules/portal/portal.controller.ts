@@ -58,7 +58,7 @@ import { DeviceLanDiscoveryService } from '../devices/device-lan-discovery.servi
 import { lookupMacVendor } from '../devices/mac-vendor-lookup'
 import { compareNetworkSnapshots } from '../devices/network-discovery-snapshot'
 import { projectNetworkRoles } from '../devices/network-role-evidence'
-import { isSafeShellyMqttEventTopic } from '../devices/adapters/inbound/shelly/shelly-mqtt-observation-approval'
+import { configuredShellyMqttBroker, isSafeShellyMqttEventTopic } from '../devices/adapters/inbound/shelly/shelly-mqtt-observation-approval'
 import { configuredSiteLocalObservers, validateSiteLocalShellyEvidence } from '../devices/site-local-shelly-evidence-intake'
 import type { SiteLocalShellyEvidenceInput } from '../devices/site-local-shelly-evidence-intake'
 import type { NetworkDiscoverySnapshot } from '../devices/network-discovery-snapshot'
@@ -490,21 +490,22 @@ export class PortalController {
   @Post('devices/:deviceId/shelly-observation-approval')
   async approveShellyObservations(
     @Param('deviceId') deviceId: string,
-    @Body() body: { confirmedDeviceId?: unknown; approvedFields?: unknown; mqttTopic?: unknown },
+    @Body() body: { confirmedDeviceId?: unknown; approvedFields?: unknown; mqttTopic?: unknown; confirmedBroker?: unknown },
     @Req() request: DeviceProxyRequest,
   ) {
     assertPortalAdministrator(request)
     const allowedShellyFields = ['power', 'energy_import_total', 'energy_export_total']
     if (body?.confirmedDeviceId !== deviceId || !Array.isArray(body?.approvedFields) ||
         body.approvedFields.length < 1 || body.approvedFields.some(field => !allowedShellyFields.includes(String(field))) ||
-        new Set(body.approvedFields).size !== body.approvedFields.length || !isSafeShellyMqttEventTopic(body.mqttTopic)) {
-      throw new BadRequestException('Explicitly confirm this Shelly component, exact MQTT event topic, and each selected supported measurement.')
+        new Set(body.approvedFields).size !== body.approvedFields.length || !isSafeShellyMqttEventTopic(body.mqttTopic) ||
+        body.confirmedBroker !== configuredShellyMqttBroker()) {
+      throw new BadRequestException('Explicitly confirm this Shelly component, configured broker, exact MQTT event topic, and each selected supported measurement.')
     }
     const { tenant, site } = this.deviceRegistry.getSnapshot()
     try {
       const approval = await this.deviceRegistry.approveShellyObservations(
         tenant.id, site.id, deviceId, request.user?.email || 'portal-admin',
-        body.approvedFields as Array<'power' | 'energy_import_total' | 'energy_export_total'>, body.mqttTopic,
+        body.approvedFields as Array<'power' | 'energy_import_total' | 'energy_export_total'>, body.mqttTopic, body.confirmedBroker as string,
       )
       if (!approval) throw new NotFoundException('LAN-verified, enrolled Shelly power component was not found in this site')
       return approval
@@ -801,6 +802,7 @@ export class PortalController {
         endpoint: { protocol: 'http', kind: 'rpc', address: `http://${device.ipAddress}` },
       })
     }
+    await this.deviceRegistry.ensureInstallationsLoaded()
     const historicalComponents = [...new Set(this.deviceRegistry.getDevices(true).flatMap(existing =>
       existing.tenantId === ownership.tenantId && existing.siteId === ownership.siteId &&
       existing.metadata?.physicalId === device.id && typeof existing.metadata?.component === 'string' &&
@@ -808,16 +810,111 @@ export class PortalController {
       !device.components?.some(current => current.component === existing.metadata?.component)
         ? [existing.metadata.component] : [],
     ))].sort()
+    const reconciliationProposals: Array<Record<string, unknown>> = []
+    const reconciliationConflicts: Array<Record<string, unknown>> = []
     for (const candidate of shellyLanCandidates(device)) {
+      const component = String(candidate.metadata?.component || '')
+      const current = await this.deviceRegistry.getShellyReconciliationTarget(
+        ownership.tenantId, ownership.siteId, String(candidate.id), device.id, component,
+      )
+      if (current) {
+        reconciliationProposals.push({
+          deviceId: current.id,
+          displayName: current.displayName,
+          room: current.zoneName,
+          physicalId: device.id,
+          component,
+          evidenceScanId: snapshot.scanId,
+          observerId: validated.observer.id,
+          observedAt: device.discoveredAt,
+          endpoint: device.ipAddress,
+          model: device.model,
+          firmwareVersion: device.firmwareVersion || '',
+          verifiedMeasurementFields: String(candidate.metadata?.verifiedMeasurementFields || '').split(',').filter(Boolean),
+          currentIdentitySource: String(current.metadata?.identityEvidenceSource || 'unverified'),
+          currentDriver: current.adapter.driver,
+          mqttTopicRequiresOperatorBinding: true,
+        })
+        continue
+      }
+      const sameId = this.deviceRegistry.getDevices(true).find(existing => existing.id === candidate.id)
+      if (sameId) {
+        reconciliationConflicts.push({ deviceId: candidate.id, component,
+          reason: sameId.tenantId !== ownership.tenantId || sameId.siteId !== ownership.siteId
+            ? 'A logical device with this identity exists outside the authorized site; cross-site reconciliation and duplicate candidate creation were suppressed.'
+            : 'An existing record has different identity or enrollment state; no metadata was changed and no duplicate candidate was created.' })
+        continue
+      }
       const projected = historicalComponents.length ? { ...candidate,
         reason: `${candidate.reason} Historical component evidence ${historicalComponents.join(', ')} conflicts with the fresh RPC profile and remains preserved for operator reconciliation.`,
         metadata: { ...candidate.metadata, historicalComponentConflicts: historicalComponents.join(','), requiresProfileReconciliation: true },
       } : candidate
       this.registerOwnedDiscoveryCandidate(projected, ownership, siteName)
     }
-    return { status: 'pending_review', scanId: snapshot.scanId, ownership, observerId: validated.observer.id,
+    return { status: reconciliationProposals.length ? 'reconciliation_review_required' : 'pending_review', scanId: snapshot.scanId, ownership, observerId: validated.observer.id,
       physicalId: device.id, components: device.components, historicalComponentConflicts: historicalComponents,
+      reconciliationProposals, reconciliationConflicts,
       snapshot }
+  }
+
+  @Post('network/site-local-shelly-evidence/:scanId/reconcile')
+  async reconcileSiteLocalShellyComponent(
+    @Param('scanId') scanId: string,
+    @Body() body: { deviceId?: unknown; component?: unknown },
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalAdministrator(request)
+    const { ownership } = this.discoveryOwner()
+    if (typeof body?.deviceId !== 'string' || typeof body?.component !== 'string') {
+      throw new BadRequestException('Choose an exact enrolled component from the verified evidence report.')
+    }
+    const snapshot = await this.discoveryMemory.getSnapshot(scanId, ownership)
+    if (!snapshot || snapshot.schemaVersion < 2 || !snapshot.ownership || !sameDiscoveryOwner(snapshot.ownership, ownership)) {
+      throw new NotFoundException('Site-owned RPC evidence was not found.')
+    }
+    const observers = configuredSiteLocalObservers()
+    const raw = snapshot.rawEvidence.find(item => item.source === 'operator_attested_site_local_shelly_rpc_report')
+    const evidence = raw?.evidence as Record<string, any> | undefined
+    const observerId = typeof evidence?.observerId === 'string' ? evidence.observerId : ''
+    const observer = observers.find(item => item.id === observerId && item.tenantId === ownership.tenantId && item.siteId === ownership.siteId);
+    const selectedEndpoint = snapshot.endpoints.find(item => item.id === body.deviceId)
+    if (!observer || !selectedEndpoint || observer.scopeId !== selectedEndpoint.networkZoneId ||
+        observer.host !== snapshot.collector.host || observer.cidr !== snapshot.scopes.find(item => item.id === observer.scopeId)?.cidr) {
+      throw new BadRequestException('Evidence observer, site, and authorized network scope no longer match.')
+    }
+    const now = Date.now()
+    const fresh = (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value)) && Date.parse(value) <= now + 30_000 && now - Date.parse(value) <= 15 * 60_000
+    if (!fresh(snapshot.completedAt)) throw new ConflictException('Site-local identity evidence expired; capture it again before reconciliation.')
+    const endpoint = snapshot.endpoints.find(item => item.id === body.deviceId && item.networkZoneId === observer.scopeId)
+    if (!endpoint || endpoint.vendor !== 'Shelly' || !observer.expectedDeviceIds.some(id => id.toLowerCase() === endpoint.id.toLowerCase())) {
+      throw new BadRequestException('Evidence does not match the observer allowlist and selected physical identity.')
+    }
+    const candidate = shellyLanCandidates(endpoint).find(item => item.id === body.deviceId && item.metadata?.component === body.component)
+    if (!candidate || candidate.metadata?.identityEvidenceSource !== 'verified_site_local_shelly_rpc' ||
+        candidate.metadata?.componentEvidenceSource !== 'verified_site_local_shelly_rpc') {
+      throw new BadRequestException('The selected component lacks exact read-only RPC identity and status evidence.')
+    }
+    const identityObserved = endpoint.observations?.find(item => item.source === 'http_identity' && item.attribute === 'identity.device_id' && item.value === endpoint.id)
+    const componentObserved = endpoint.observations?.find(item => item.source === 'site_local_http_rpc' && item.attribute === 'shelly.component_status' && item.value === body.component)
+    if (!identityObserved || !componentObserved || !fresh(identityObserved.observedAt) || !fresh(componentObserved.observedAt)) {
+      throw new ConflictException('Identity or component evidence expired; capture it again before reconciliation.')
+    }
+    const fields = String(candidate.metadata?.verifiedMeasurementFields || '').split(',').filter(Boolean)
+    try {
+      const reconciled = await this.deviceRegistry.reconcileShellyIdentityEvidence({
+        tenantId: ownership.tenantId, siteId: ownership.siteId, deviceId: String(body.deviceId), physicalId: endpoint.id,
+        component: String(body.component), evidenceScanId: snapshot.scanId, observerId,
+        ipAddress: endpoint.ipAddress, networkScope: `${observer.scopeId}:${observer.cidr}`,
+        identityVerifiedAt: identityObserved.observedAt, componentVerifiedAt: componentObserved.observedAt,
+        verifiedMeasurementFields: fields,
+      })
+      if (!reconciled) throw new ConflictException('No exact enrolled component exists in the authorized site; it was not enrolled or changed.')
+      return { status: 'identity_evidence_reconciled', deviceId: reconciled.id, enrollmentChanged: false,
+        measurementAuthorityChanged: false, controlAuthorityChanged: false, device: reconciled }
+    } catch (error) {
+      if (error instanceof ConflictException || error instanceof BadRequestException) throw error
+      throw new BadRequestException(error instanceof Error ? error.message : 'Identity evidence reconciliation failed.')
+    }
   }
 
   @Post('network/snapshots/:scanId/scopes/:scopeId/endpoints/:ipAddress/:endpointId/start-onboarding')

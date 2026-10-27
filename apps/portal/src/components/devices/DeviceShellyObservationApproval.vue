@@ -6,6 +6,7 @@ interface ApprovalState {
   approved: boolean;
   approvalStatus: 'approved' | 'partially_approved' | 'missing' | 'different_authority';
   sourceId: 'shelly-mqtt';
+  broker: string;
   selector: string;
   approvedFields: string[];
   fields: Array<{ metric: 'power' | 'energy_import_total' | 'energy_export_total'; rawKey: string; unit: 'W' | 'kWh'; displayUnit: 'W' | 'kWh' }>;
@@ -37,6 +38,7 @@ async function load() {
     const result = await response.json() as ApprovalState;
     const physicalId = /^((?:shelly)[a-z0-9._-]{1,114}):(?:switch|em1):(?:[0-9]|[12][0-9]|3[01])$/i.exec(props.deviceId)?.[1];
     if (!physicalId || result.sourceId !== 'shelly-mqtt' ||
+        typeof result.broker !== 'string' || !/^[a-z0-9.-]{1,253}:\d{1,5}$/.test(result.broker) ||
         (result.selector !== '' && !validMqttTopic(result.selector)) ||
         !Array.isArray(result.fields) || !result.fields.length || !Array.isArray(result.approvedFields) ||
         result.fields.some(field => !['power', 'energy_import_total', 'energy_export_total'].includes(field.metric)) ||
@@ -54,14 +56,14 @@ async function load() {
 
 async function approve(field: ApprovalState['fields'][number]) {
   if (!state.value || state.value.approvedFields.includes(field.metric) || busy.value || !validMqttTopic(mqttTopic.value)) return;
-  if (!window.confirm(`Bind the exact MQTT topic ${mqttTopic.value} to independently RPC-verified ${props.deviceId}, then approve ${fieldLabel(field.metric)} (${field.unit})? The topic and MQTT payload are not cryptographic device identity. This does not grant device control.`)) return;
+  if (!window.confirm(`Bind broker ${state.value.broker} and exact MQTT topic ${mqttTopic.value} to independently RPC-verified ${props.deviceId}, then approve ${fieldLabel(field.metric)} (${field.unit})? The topic and MQTT payload are not cryptographic device identity. This does not grant device control.`)) return;
   busy.value = true;
   error.value = '';
   try {
     const response = await authFetch(`${props.apiBase}/portal/devices/${encodeURIComponent(props.deviceId)}/shelly-observation-approval`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${props.accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ confirmedDeviceId: props.deviceId, approvedFields: [field.metric], mqttTopic: mqttTopic.value }),
+      body: JSON.stringify({ confirmedDeviceId: props.deviceId, confirmedBroker: state.value.broker, approvedFields: [field.metric], mqttTopic: mqttTopic.value }),
     });
     if (!response.ok) throw new Error('Shelly measurement approval was not saved. Refresh and review the device state.');
     state.value = await response.json() as ApprovalState;
@@ -94,7 +96,7 @@ onMounted(() => void load());
           <input v-model.trim="mqttTopic" :readonly="!!state.selector" autocomplete="off" spellcheck="false" placeholder="shelly/washer@other/events/rpc" aria-label="Exact MQTT event topic" />
         </label>
         <p>The topic is a reviewed source selector, not proof of device identity. The device identity and component were verified independently over Shelly RPC.</p>
-        <p><b>Source:</b> <code>{{ state.sourceId }}</code> · <code>{{ validMqttTopic(mqttTopic) ? mqttTopic : 'enter an exact event topic' }}</code></p>
+        <p><b>Broker:</b> <code>{{ state.broker }}</code> · <b>Source:</b> <code>{{ state.sourceId }}</code> · <code>{{ validMqttTopic(mqttTopic) ? mqttTopic : 'enter an exact event topic' }}</code></p>
         <p v-for="field in state.fields" :key="field.metric">
           <code>{{ field.metric }}</code> → {{ fieldLabel(field.metric) }} ({{ field.unit }})
           <span v-if="state.approvedFields.includes(field.metric)" class="approval-approved"> · Approved</span>

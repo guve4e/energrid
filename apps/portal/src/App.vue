@@ -45,6 +45,19 @@ type LoginResponse = {
   };
 };
 
+type ShellyReconciliationProposal = {
+  deviceId: string; displayName: string; room: string; physicalId: string; component: string;
+  evidenceScanId: string; observerId: string; observedAt: string; endpoint: string; model: string;
+  firmwareVersion: string; verifiedMeasurementFields: string[]; currentIdentitySource: string;
+  currentDriver: string; mqttTopicRequiresOperatorBinding: true; reconciled?: boolean;
+};
+type SiteLocalEvidenceImport = {
+  status: string; scanId: string; observerId: string; physicalId: string;
+  reconciliationProposals: ShellyReconciliationProposal[];
+  reconciliationConflicts: Array<{ deviceId: string; component: string; reason: string }>;
+  historicalComponentConflicts: string[];
+};
+
 type PortalExecutionTrace = {
   id: string;
   commandId: string;
@@ -521,6 +534,9 @@ const networkSnapshots = ref<NetworkSnapshot[]>([]);
 const latestNetworkSnapshot = ref<NetworkSnapshot | null>(null);
 const networkSnapshotComparison = ref<NetworkSnapshotDiff | null>(null);
 const networkSnapshotsError = ref('');
+const siteLocalEvidenceImport = ref<SiteLocalEvidenceImport | null>(null);
+const siteLocalEvidenceImportBusy = ref(false);
+const siteLocalEvidenceImportError = ref('');
 const networkEndpointInvestigations = ref<Record<string, NetworkEndpointInvestigationState>>({});
 const networkEndpointHttpProbes = ref<Record<string, NetworkEndpointHttpProbeState>>({});
 const networkEndpointIdentityRefreshes = ref<Record<string, NetworkEndpointIdentityRefreshState>>({});
@@ -1416,6 +1432,51 @@ async function startNetworkEndpointOnboarding(request: {
   } finally {
     onboardingNetworkEndpoint.value = false;
   }
+}
+
+async function importSiteLocalShellyEvidence(request: { report?: unknown; error?: string }): Promise<void> {
+  siteLocalEvidenceImportError.value = request.error || '';
+  if (request.error || request.report === undefined || siteLocalEvidenceImportBusy.value) return;
+  siteLocalEvidenceImportBusy.value = true;
+  siteLocalEvidenceImportError.value = '';
+  try {
+    const response = await authFetch(`${apiBase}/portal/network/site-local-shelly-evidence`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken.value}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(request.report),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(typeof result.message === 'string' ? result.message : `Evidence import failed (${response.status})`);
+    siteLocalEvidenceImport.value = result as SiteLocalEvidenceImport;
+    await loadNetworkSnapshots();
+  } catch (cause) {
+    siteLocalEvidenceImportError.value = cause instanceof Error ? cause.message : 'Site-local Shelly evidence import failed.';
+  } finally { siteLocalEvidenceImportBusy.value = false; }
+}
+
+async function reconcileSiteLocalShellyEvidence(request: { scanId: string; deviceId: string; component: string }): Promise<void> {
+  if (siteLocalEvidenceImportBusy.value) return;
+  siteLocalEvidenceImportBusy.value = true;
+  siteLocalEvidenceImportError.value = '';
+  try {
+    const response = await authFetch(`${apiBase}/portal/network/site-local-shelly-evidence/${encodeURIComponent(request.scanId)}/reconcile`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken.value}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceId: request.deviceId, component: request.component }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(typeof result.message === 'string' ? result.message : `Identity reconciliation failed (${response.status})`);
+    if (siteLocalEvidenceImport.value) {
+      siteLocalEvidenceImport.value = {
+        ...siteLocalEvidenceImport.value,
+        reconciliationProposals: siteLocalEvidenceImport.value.reconciliationProposals.map(proposal =>
+          proposal.deviceId === request.deviceId ? { ...proposal, reconciled: true } : proposal),
+      };
+    }
+    await loadState();
+  } catch (cause) {
+    siteLocalEvidenceImportError.value = cause instanceof Error ? cause.message : 'Identity reconciliation failed.';
+  } finally { siteLocalEvidenceImportBusy.value = false; }
 }
 
 async function refreshSnapshotEndpointIdentity(request: {
@@ -5129,6 +5190,9 @@ onBeforeUnmount(() => {
             :endpoint-investigations="networkEndpointInvestigations"
             :endpoint-http-probes="networkEndpointHttpProbes"
             :endpoint-identity-refreshes="networkEndpointIdentityRefreshes"
+            :site-local-evidence-import="siteLocalEvidenceImport"
+            :site-local-evidence-import-busy="siteLocalEvidenceImportBusy"
+            :site-local-evidence-import-error="siteLocalEvidenceImportError"
             :busy="scanningNetwork"
             :onboarding-busy="onboardingNetworkEndpoint"
             :error="networkSnapshotsError || stateError"
@@ -5140,6 +5204,8 @@ onBeforeUnmount(() => {
             @investigate-endpoint="investigateSnapshotEndpoint"
             @refresh-endpoint-identity="refreshSnapshotEndpointIdentity"
             @probe-endpoint="probeSnapshotEndpoint"
+            @import-site-local-evidence="importSiteLocalShellyEvidence"
+            @reconcile-site-local-evidence="reconcileSiteLocalShellyEvidence"
           />
         </section>
 

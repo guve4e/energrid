@@ -1,4 +1,4 @@
-import { isSafeShellyMqttEventTopic, shellyMqttObservationApproval } from './shelly-mqtt-observation-approval';
+import { configuredShellyMqttBroker, isSafeShellyMqttEventTopic, isShellyMqttObservationApproval, shellyMqttObservationApproval } from './shelly-mqtt-observation-approval';
 
 describe('Shelly MQTT observation approval contract', () => {
   it('binds one enrolled component to its physical device event topic and power only', () => {
@@ -11,6 +11,7 @@ describe('Shelly MQTT observation approval contract', () => {
         fields: { power: { rawKey: 'power', type: 'number' } },
       }],
       policy: { deviceId: 'shellypro2pm-aabbccddeeff:switch:1', allowedSourcesByField: { power: ['shelly-mqtt'] } },
+      broker: configuredShellyMqttBroker(),
     });
   });
 
@@ -28,5 +29,14 @@ describe('Shelly MQTT observation approval contract', () => {
     expect(isSafeShellyMqttEventTopic('shelly/+/events/rpc')).toBe(false);
     expect(isSafeShellyMqttEventTopic('shelly/#/events/rpc')).toBe(false);
     expect(isSafeShellyMqttEventTopic('shelly//events/rpc')).toBe(false);
+  });
+
+  it('requires a persisted exact broker endpoint as part of the approved source binding', () => {
+    const deviceId = 'shellypro2pm-ec6260888084:switch:0';
+    const authority = shellyMqttObservationApproval(deviceId, ['power'], 'shelly/washer@other/events/rpc');
+    expect(authority.broker).toBe(configuredShellyMqttBroker());
+    expect(isShellyMqttObservationApproval(authority, deviceId)).toBe(true);
+    expect(isShellyMqttObservationApproval({ ...authority, broker: 'different-broker.example:1883' }, deviceId)).toBe(false);
+    expect(isShellyMqttObservationApproval({ ...authority, broker: undefined }, deviceId)).toBe(false);
   });
 });

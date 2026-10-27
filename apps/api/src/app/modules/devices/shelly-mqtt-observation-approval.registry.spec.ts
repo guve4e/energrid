@@ -1,5 +1,5 @@
 import { DeviceRegistryService } from './device-registry.service';
-import { isShellyMqttObservationApproval, shellyMqttObservationApproval } from './adapters/inbound/shelly/shelly-mqtt-observation-approval';
+import { configuredShellyMqttBroker, isShellyMqttObservationApproval, shellyMqttObservationApproval } from './adapters/inbound/shelly/shelly-mqtt-observation-approval';
 
 const physicalId = 'shellypro2pm-aabbccddeeff';
 const deviceId = `${physicalId}:switch:0`;
@@ -88,17 +88,18 @@ describe('site-scoped Shelly observation approval', () => {
       expect(proposal).toMatchObject({ approved: false, approvalStatus: 'missing', sourceId: 'shelly-mqtt', selector: '' });
       const mqttTopic = 'shelly/washer@other/events/rpc';
       const saved = await h.registry.approveShellyObservations('tenant-demo', 'site-device-lab', deviceId,
-        'operator@example.test', ['power'], mqttTopic);
+        'operator@example.test', ['power'], mqttTopic, configuredShellyMqttBroker());
       expect(saved).toMatchObject({ approved: true, approvalStatus: 'approved', fields: [{ metric: 'power', unit: 'W' }] });
       expect(h.installationStore.save).toHaveBeenCalledWith(expect.objectContaining({
         observationAuthority: {
           bindings: [{ deviceId, sourceId: 'shelly-mqtt', selector: mqttTopic, fields: { power: { rawKey: 'power', type: 'number' } } }],
           policy: { deviceId, allowedSourcesByField: { power: ['shelly-mqtt'] } },
+          broker: configuredShellyMqttBroker(),
         },
       }));
       expect(h.installationStore.append).toHaveBeenCalledWith(expect.objectContaining({
         deviceId, kind: 'observation_authority_approved', actor: 'operator@example.test',
-        evidence: { sourceId: 'shelly-mqtt', selector: mqttTopic, fields: 'power' },
+        evidence: { sourceId: 'shelly-mqtt', broker: configuredShellyMqttBroker(), selector: mqttTopic, fields: 'power' },
       }));
     } finally { h.restore(); }
   });

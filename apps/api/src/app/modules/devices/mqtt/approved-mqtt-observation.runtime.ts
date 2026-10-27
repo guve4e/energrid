@@ -20,7 +20,7 @@ import { DeviceIntelligenceObservationIngress, type TrustedObservationInput } fr
 import { GenericMeasurementHistoryWriter } from '../../telemetry/generic-measurements/generic-measurement-history-writer';
 import { ENERGRID_HTTP_OBSERVATION_SOURCE, ENERGRID_HTTP_STATUS_SELECTOR } from '../adapters/inbound/energrid/energrid-http-observation.adapter';
 import { resolveInstallationObservationAuthority } from '../device-observation-installation-authority';
-import { isSafeShellyMqttEventTopic, SHELLY_MQTT_OBSERVATION_SOURCE } from '../adapters/inbound/shelly/shelly-mqtt-observation-approval';
+import { configuredShellyMqttBroker, isSafeShellyMqttEventTopic, SHELLY_MQTT_OBSERVATION_SOURCE } from '../adapters/inbound/shelly/shelly-mqtt-observation-approval';
 
 /**
  * Runtime owner of explicitly configured MQTT observation profiles.
@@ -188,15 +188,14 @@ export class ApprovedMqttObservationRuntime
     }
     const deviceId = `${input.physicalId}:${input.componentKey}`;
     await this.registry.ensureInstallationsLoaded();
-    const device = this.registry.getDevices(true).find(candidate => {
+    const matchingDevices = this.registry.getDevices(true).filter(candidate => {
       const directRpcVerified = candidate.metadata?.identityEvidenceSource === 'verified_shelly_http_rpc' &&
         candidate.metadata?.componentEvidenceSource === 'verified_shelly_component_status_rpc';
       const siteLocalRpcVerified = candidate.metadata?.identityEvidenceSource === 'verified_site_local_shelly_rpc' &&
         candidate.metadata?.componentEvidenceSource === 'verified_site_local_shelly_rpc' &&
         typeof candidate.metadata?.siteLocalObserverId === 'string' && !!candidate.metadata.siteLocalObserverId;
       return candidate.id === deviceId && candidate.kind === 'physical' &&
-      candidate.trustStatus === 'approved' && candidate.adapter.driver === 'shelly-lan' &&
-      candidate.adapter.protocol === 'http' &&
+      candidate.trustStatus === 'approved' &&
       candidate.metadata?.physicalId === input.physicalId &&
       candidate.metadata?.component === input.componentKey &&
       (directRpcVerified || siteLocalRpcVerified) &&
@@ -204,10 +203,16 @@ export class ApprovedMqttObservationRuntime
       Object.keys(input.values).every(field => String(candidate.metadata?.verifiedMeasurementFields || '')
         .split(',').includes(field))
     });
-    if (!device) return rejected('shelly_lan_verified_enrollment_missing');
+    if (matchingDevices.length !== 1) return rejected(matchingDevices.length
+      ? 'shelly_observation_identity_ambiguous'
+      : 'shelly_lan_verified_enrollment_missing');
+    const device = matchingDevices[0];
     const scope = { tenantId: device.tenantId, siteId: device.siteId };
     if (!this.ingress) return rejected('observation_authority_missing');
     const installation = await this.installations.get(scope.siteId, deviceId);
+    if (installation?.observationAuthority?.broker !== configuredShellyMqttBroker()) {
+      return rejected('observation_authority_missing');
+    }
     const authorizedFields = installation?.observationAuthority?.bindings.find(binding =>
       binding.deviceId === deviceId && binding.sourceId === SHELLY_MQTT_OBSERVATION_SOURCE &&
       binding.selector === input.topic)?.fields || {};
