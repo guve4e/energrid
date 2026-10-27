@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ClassicLevel } from 'classic-level';
 import type { GenericMeasurementInput } from '@energrid/domain-telemetry';
 import { MEASUREMENT_HISTORY_OUTBOX_FACTORY, TELEMETRY_CONFIG, type MeasurementHistoryPolicy, type TelemetryConfig } from '../telemetry.config';
@@ -22,12 +22,14 @@ interface Metadata { version: 1; next: number; pending: number }
 /** Local, fsync-backed queue for accepted generic measurement history. */
 @Injectable()
 export class GenericMeasurementHistoryOutbox {
+  private readonly logger = new Logger(GenericMeasurementHistoryOutbox.name);
   private db?: HistoryOutboxDatabase;
   private opening?: Promise<void>;
   private tail: Promise<unknown> = Promise.resolve();
   private poisoned = false;
   private closed = false;
   private meta: Metadata = { version: 1, next: 0, pending: 0 };
+  private initializationStage = 'factory';
 
   constructor(
     @Inject(TELEMETRY_CONFIG) private readonly config: TelemetryConfig,
@@ -36,20 +38,50 @@ export class GenericMeasurementHistoryOutbox {
 
   open(): Promise<void> {
     if (this.closed) return Promise.reject(new Error('History outbox is closed'));
-    return this.opening ??= this.initialize().catch(() => {
-      throw new Error('Measurement history outbox could not open; check storage and exclusive ownership');
+    return this.opening ??= this.initialize().catch((cause: unknown) => {
+      const error = cause instanceof Error ? cause : new Error('Unknown outbox initialization error');
+      const causes: Record<string, string | undefined>[] = [];
+      let current: unknown = error;
+      const seen = new Set<unknown>();
+      while (current instanceof Error && causes.length < 5 && !seen.has(current)) {
+        seen.add(current);
+        const item = current as Error & { code?: unknown; cause?: unknown };
+        const safe = (value: string) => value
+          .replace(/(?:\/Users\/[^\s:'"\]]+|\/private\/[^\s:'"\]]+|\/var\/[^\s:'"\]]+|[A-Za-z]:\\[^\s:'"\]]+)/g, '[path]')
+          .replace(/(password|token|secret|credential|authorization)\s*[:=]\s*[^\r\n]*/gi, '$1=[redacted]')
+          .slice(0, 180);
+        causes.push({
+          name: safe(item.name),
+          code: typeof item.code === 'string' ? item.code.replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 80) : undefined,
+          message: safe(item.message || item.name),
+          stack: item.stack?.split('\n').slice(0, 5).map(line => safe(line).slice(0, 240)).join('\n'),
+        });
+        current = item.cause;
+      }
+      this.logger.error(JSON.stringify({
+        event: 'measurement_history_outbox_open_failed',
+        stage: this.initializationStage,
+        causes,
+      }));
+      throw new Error('Measurement history outbox could not open; check storage and exclusive ownership', { cause });
     });
   }
 
   private async initialize() {
+    this.initializationStage = 'factory';
     this.db = this.factory(this.config.historyOutboxDirectory);
+    this.initializationStage = 'open';
     await this.db.open();
+    this.initializationStage = 'read_metadata';
     const value = await this.getMaybe('metadata');
     if (value === undefined) {
+      this.initializationStage = 'check_empty_database';
       if ((await this.db.iterator({ limit: 1 }).all()).length) throw new Error('Outbox metadata missing');
+      this.initializationStage = 'write_initial_metadata';
       await this.db.batch([{ type: 'put', key: 'metadata', value: this.meta }], { sync: true });
       return;
     }
+    this.initializationStage = 'validate_metadata';
     const meta = value as Metadata;
     if (!meta || meta.version !== 1 || ![meta.next, meta.pending].every(n => Number.isSafeInteger(n) && n >= 0) || meta.pending > meta.next) {
       throw new Error('Invalid history outbox metadata');

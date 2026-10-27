@@ -2,6 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ClassicLevel } from 'classic-level';
+import { Logger } from '@nestjs/common';
 import { GenericMeasurementHistoryOutbox } from './generic-measurement-history-outbox';
 
 describe('GenericMeasurementHistoryOutbox', () => {
@@ -44,5 +45,26 @@ describe('GenericMeasurementHistoryOutbox', () => {
     }])).rejects.toThrow('capacity exceeded');
     expect(outbox.status().pending).toBe(2);
     await outbox.close();
+  });
+
+  it('logs the initialization stage and safe underlying storage error details', async () => {
+    const logger = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const storageError = Object.assign(new Error('EACCES opening /Users/private-user/.energrid/measurement-history-outbox authorization: Bearer super-secret-token'), { code: 'EACCES' });
+    const outbox = new GenericMeasurementHistoryOutbox(
+      { historyOutboxDirectory: directory, maxPendingWrites: 2 } as never,
+      () => ({ open: async () => { throw storageError; } } as never),
+    );
+
+    await expect(outbox.open()).rejects.toMatchObject({
+      message: 'Measurement history outbox could not open; check storage and exclusive ownership',
+      cause: storageError,
+    });
+    const diagnostic = String(logger.mock.calls[0]?.[0]);
+    expect(diagnostic).toContain('"stage":"open"');
+    expect(diagnostic).toContain('"code":"EACCES"');
+    expect(diagnostic).toContain('[path]');
+    expect(diagnostic).not.toContain('/Users/private-user');
+    expect(diagnostic).not.toContain('super-secret-token');
+    logger.mockRestore();
   });
 });
