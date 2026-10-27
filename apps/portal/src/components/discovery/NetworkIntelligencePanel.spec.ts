@@ -303,6 +303,7 @@ describe('NetworkIntelligencePanel', () => {
     const key = networkEndpointInvestigationKey('scan-1', 'eero', '192.168.7.20', 'aa:bb:cc:dd:ee:ff');
     const panel = mount(NetworkIntelligencePanel, { props: {
       scopes, snapshots: [snapshot], latest: snapshot, comparison: null,
+      endpointIdentityRefreshes: {}, endpointHttpProbes: {},
       endpointInvestigations: { [key]: { loading: false, result: {
         schemaVersion: 1, scanId: 'scan-1', endpointId: 'aa:bb:cc:dd:ee:ff', createdAt: '2026-10-21T10:00:00Z', provider: 'test', model: 'test',
         summary: 'HTTP headers could help identify the service.', identification: { deviceType: null, manufacturer: null, confidence: null, supportingEvidenceIds: [], uncertainty: 'Unknown.' },
@@ -324,7 +325,11 @@ describe('NetworkIntelligencePanel', () => {
     ]]);
     expect(panel.find('.ni-investigation-evidence summary').text()).toBe('Evidence');
 
-    await panel.setProps({ endpointIdentityRefreshes: { [key]: { loading: false, result: {
+    // Vue Test Utils infers setProps from the initial literal, so cast only this
+    // dynamic update boundary for component props that the test supplies later.
+    const updateEvidenceProps = (props: { endpointIdentityRefreshes?: Record<string, unknown>; endpointHttpProbes?: Record<string, unknown> }) =>
+      panel.setProps(props as never);
+    await updateEvidenceProps({ endpointIdentityRefreshes: { [key]: { loading: false, result: {
       outcome: 'verified', reasonCode: 'historical_mac_matched', refreshId: 'refresh-once', action: 'http_head_root', source: 'direct_arp_reply', method: 'single_target_nmap_arp_ping', scopeId: 'eero',
       ipAddress: '192.168.7.20', historicalMac: 'aa:bb:cc:dd:ee:ff', observedMac: 'aa:bb:cc:dd:ee:ff',
       observedAt: new Date().toISOString(), interfaceName: 'en0',
@@ -342,7 +347,7 @@ describe('NetworkIntelligencePanel', () => {
     expect(panel.emitted('probeEndpoint')).toEqual([[
       { scanId: 'scan-1', scopeId: 'eero', ipAddress: '192.168.7.20', endpointId: 'aa:bb:cc:dd:ee:ff', refreshId: 'refresh-once' },
     ]]);
-    await panel.setProps({ endpointHttpProbes: { [key]: { loading: false, result: {
+    await updateEvidenceProps({ endpointHttpProbes: { [key]: { loading: false, result: {
       outcome: 'completed', reasonCode: 'http_response_received', ipAddress: '192.168.7.20', method: 'HEAD', path: '/', redirects: 'not_followed',
       statusCode: 302, server: 'fixture-device', contentType: 'text/html', observedAt: '2026-10-21T10:01:00Z',
     } } } });
