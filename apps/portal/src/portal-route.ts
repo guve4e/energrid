@@ -1,4 +1,4 @@
-const portalPages = new Set(['assistant', 'devices', 'discovery', 'network-intelligence', 'bus', 'systems', 'energy', 'weather', 'executions', 'logs']);
+const portalPages = new Set(['assistant', 'devices', 'discovery', 'network-intelligence', 'bus', 'systems', 'energy', 'weather', 'expenses', 'executions', 'logs']);
 
 export function pageFromPath(pathname: string): string {
   if (pathname.replace(/\/+$/, '') === '/d/home') return 'home';

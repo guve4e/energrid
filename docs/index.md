@@ -33,6 +33,7 @@ These documents predate the handbook and remain useful for narrower topics. Read
 ### Portal and deployment
 
 - [Portal authentication](portal-authentication.md)
+- [Personal expenses](personal-expenses.md): account-scoped spending, local persistence and legacy JSON import.
 - [Portal Cloudflare / Pi deployment](portal-cloudflare-pi-deploy.md)
 - [Mac LAB persistence](mac-lab-persistence.md)
 - [API docs and OpenAPI](api-docs.md)
