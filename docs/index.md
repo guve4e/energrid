@@ -7,6 +7,7 @@ This handbook describes the repository at the commit from which this branch was 
 - [Architecture overview](architecture-overview.md): applications, libraries, boundaries and data paths.
 - [Collection and ingestion](collection-and-ingestion.md): scheduled HTTP collection, MQTT push, manual discovery, persistence boundaries and roadmap.
 - [Device model and lifecycle](device-model-lifecycle.md): installation scope, physical inventory, logical enrollment, components and identity.
+- [Shelly Pro 2PM onboarding](shelly-pro2pm-switch-onboarding.md): isolated switch-profile verification and onboarding path; not activated.
 - [Observation and identity flows](observation-pipelines.md): MQTT ingestion, HTTP polling, identity verification and failure handling.
 - [Commands, authorization and audit](commands-and-authority.md): current control gates, command acknowledgement and audit limitations.
 - [Persistence map](persistence.md): PostgreSQL schemas, LevelDB ownership and local key families.

@@ -68,6 +68,20 @@ describe('Shelly electrical reading normalization', () => {
       }),
     ]);
   });
+  it('normalizes switch power and cumulative energy Wh to kWh', () => {
+    const result = new ShellyMqttAdapter().handle({
+      topic: 'shellypro2pm-001122334455/events/rpc', payloadText: '{}',
+      payload: { src: 'shellypro2pm-001122334455', method: 'NotifyStatus', params: { ts: 1791676800,
+        'switch:1': { id: 1, output: false, apower: 0, aenergy: { total: 600 } } } },
+    })!;
+    const telemetry = result.effects.find(effect => effect.kind === 'telemetry') as { payload: { values: Record<string, unknown>; readings: Array<Record<string, unknown>> } };
+    expect(telemetry.payload.values).toMatchObject({ on: false, power: 0, energy_import_total: 0.6 });
+    expect(telemetry.payload.readings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ channel: 'switch:1', metric: 'power', value: 0, unit: 'W', timestampBasis: 'device-observed' }),
+      expect.objectContaining({ channel: 'switch:1', metric: 'energy_import_total', value: 0.6, unit: 'kWh', timestampBasis: 'device-observed' }),
+    ]));
+    expect(result.physicalDiscoveries?.[0].components).toEqual([{ key: 'switch:1', capabilities: ['power', 'switch'] }]);
+  });
   it('preserves signed power and distinguishes device time from collector time', () => {
     expect(readings(parse({ act_power: -100 }, 'em1:0'))[0]).toEqual(
       expect.objectContaining({

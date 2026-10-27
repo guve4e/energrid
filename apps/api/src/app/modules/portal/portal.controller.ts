@@ -58,6 +58,10 @@ import { DeviceLanDiscoveryService } from '../devices/device-lan-discovery.servi
 import { lookupMacVendor } from '../devices/mac-vendor-lookup'
 import { compareNetworkSnapshots } from '../devices/network-discovery-snapshot'
 import { projectNetworkRoles } from '../devices/network-role-evidence'
+import { isSafeShellyMqttEventTopic } from '../devices/adapters/inbound/shelly/shelly-mqtt-observation-approval'
+import { configuredSiteLocalObservers, validateSiteLocalShellyEvidence } from '../devices/site-local-shelly-evidence-intake'
+import type { SiteLocalShellyEvidenceInput } from '../devices/site-local-shelly-evidence-intake'
+import type { NetworkDiscoverySnapshot } from '../devices/network-discovery-snapshot'
 import { DeviceMqttIngestService } from '../devices/device-mqtt-ingest.service'
 import { DeviceRegistryService } from '../devices/device-registry.service'
 import { DeviceIntelligenceQueryService } from '../devices/device-intelligence-query.service'
@@ -486,18 +490,21 @@ export class PortalController {
   @Post('devices/:deviceId/shelly-observation-approval')
   async approveShellyObservations(
     @Param('deviceId') deviceId: string,
-    @Body() body: { confirmedDeviceId?: unknown; approvedFields?: unknown },
+    @Body() body: { confirmedDeviceId?: unknown; approvedFields?: unknown; mqttTopic?: unknown },
     @Req() request: DeviceProxyRequest,
   ) {
     assertPortalAdministrator(request)
+    const allowedShellyFields = ['power', 'energy_import_total', 'energy_export_total']
     if (body?.confirmedDeviceId !== deviceId || !Array.isArray(body?.approvedFields) ||
-        body.approvedFields.length !== 1 || body.approvedFields[0] !== 'power') {
-      throw new BadRequestException('Explicitly confirm this Shelly component and its power measurement.')
+        body.approvedFields.length < 1 || body.approvedFields.some(field => !allowedShellyFields.includes(String(field))) ||
+        new Set(body.approvedFields).size !== body.approvedFields.length || !isSafeShellyMqttEventTopic(body.mqttTopic)) {
+      throw new BadRequestException('Explicitly confirm this Shelly component, exact MQTT event topic, and each selected supported measurement.')
     }
     const { tenant, site } = this.deviceRegistry.getSnapshot()
     try {
       const approval = await this.deviceRegistry.approveShellyObservations(
         tenant.id, site.id, deviceId, request.user?.email || 'portal-admin',
+        body.approvedFields as Array<'power' | 'energy_import_total' | 'energy_export_total'>, body.mqttTopic,
       )
       if (!approval) throw new NotFoundException('LAN-verified, enrolled Shelly power component was not found in this site')
       return approval
@@ -692,12 +699,125 @@ export class PortalController {
     const active = this.discoveryOwner()
     const scanOwner = scan.snapshot.ownership
     if (scanOwner && sameDiscoveryOwner(scanOwner, active.ownership)) {
+      const currentSiteDevices = this.deviceRegistry.getDevices(true).filter(device =>
+        device.tenantId === scanOwner.tenantId && device.siteId === scanOwner.siteId,
+      )
       for (const device of scan.devices) {
-        for (const candidate of shellyLanCandidates(device))
-          this.registerOwnedDiscoveryCandidate(candidate, scanOwner, active.siteName)
+        const freshComponents = new Set((device.components || []).map(item => item.component))
+        const historicalComponents = [...new Set(currentSiteDevices.flatMap(existing =>
+          existing.metadata?.physicalId === device.id && typeof existing.metadata?.component === 'string' &&
+          !freshComponents.has(existing.metadata.component) && /^(?:switch|em1|cover):\d+$/.test(existing.metadata.component)
+            ? [existing.metadata.component] : [],
+        ))].sort()
+        for (const candidate of shellyLanCandidates(device)) {
+          const candidateWithConflict = historicalComponents.length
+            ? { ...candidate,
+                reason: `${candidate.reason} Historical component evidence ${historicalComponents.join(', ')} conflicts with the fresh RPC component profile and is preserved for operator reconciliation.`,
+                metadata: { ...candidate.metadata, historicalComponentConflicts: historicalComponents.join(','), requiresProfileReconciliation: true },
+              }
+            : candidate
+          this.registerOwnedDiscoveryCandidate(candidateWithConflict, scanOwner, active.siteName)
+        }
       }
     }
     return scan
+  }
+
+  @Post('network/site-local-shelly-evidence')
+  async importSiteLocalShellyEvidence(
+    @Body() body: unknown,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalAdministrator(request)
+    const { ownership, siteName } = this.discoveryOwner()
+    let observers
+    try { observers = configuredSiteLocalObservers() }
+    catch (error) { throw new ServiceUnavailableException(error instanceof Error ? error.message : 'Site-local observer authorization is invalid.') }
+    if (!observers.length) throw new ServiceUnavailableException('No site-local discovery observers are authorized for Portal evidence intake.')
+    let validated
+    try {
+      validated = validateSiteLocalShellyEvidence(body, {
+        ownership, zones: this.lanDiscovery.getZones(), observers,
+      })
+    } catch (error) {
+      throw new BadRequestException(error instanceof Error ? error.message : 'Site-local Shelly evidence was rejected.')
+    }
+    if (await this.discoveryMemory.getSnapshot(validated.scanId, ownership)) {
+      throw new ConflictException('This immutable site-local evidence report has already been submitted.')
+    }
+    const device = validated.device
+    const completedAt = device.discoveredAt
+    const report = body as SiteLocalShellyEvidenceInput
+    const startedAt = report.startedAt
+    const durationMs = Math.max(0, Date.parse(completedAt) - Date.parse(startedAt))
+    const rawEvidence = [{
+      observedAt: completedAt,
+      source: 'operator_attested_site_local_shelly_rpc_report',
+      scopeId: device.networkZoneId,
+      evidence: {
+        observerId: validated.observer.id,
+        endpointIp: device.ipAddress,
+        deviceId: device.id,
+        identity: {
+          method: report.identity.method, observedAt: report.identity.observedAt,
+          id: report.identity.response.id, mac: report.identity.response.mac,
+          model: report.identity.response.model || '', app: report.identity.response.app || '',
+          generation: report.identity.response.gen, firmware: report.identity.response.ver || report.identity.response.fw_id || '',
+        },
+        components: report.components.map(item => ({ key: item.key, method: item.method, observedAt: item.observedAt,
+          status: projectShellyStatusEvidence(item.response) })),
+      },
+    }]
+    const snapshot: NetworkDiscoverySnapshot = {
+      schemaVersion: 2, scanId: validated.scanId, ownership,
+      startedAt, completedAt,
+      collector: { id: `${validated.observer.id}/${report.observer.interfaceName}`, host: validated.observer.host,
+        interfaces: [report.observer.interfaceName] },
+      scopes: [{ id: device.networkZoneId, name: device.networkZoneName, cidr: validated.observer.cidr,
+        complete: false, gatewayIpsObserved: [],
+        collectionStages: {
+          hostDiscovery: { durationMs: 0, complete: false,
+            targetCount: 0, hostsReported: 0 },
+          serviceEnrichment: { durationMs, complete: report.scan.serviceEnrichmentComplete === true,
+            targetCount: 1, hostsReported: 1 },
+        } }],
+      methods: ['site_local_single_target_read_only_rpc'],
+      successes: 1, failures: [], limitations: ['This report was submitted by an authenticated Portal administrator; observer content is operator-attested and was not cryptographically signed by the observer.'],
+      rawEvidence, rawEvidenceOmitted: 0, endpoints: [device], topology: { relationships: [] },
+    }
+    await this.discoveryMemory.recordScan(completedAt, [device], ownership)
+    await this.discoveryMemory.recordSnapshot(snapshot)
+    if (this.physicalInventory) {
+      await this.physicalInventory.discover({
+        scope: ownership,
+        identity: { namespace: 'mqtt:shelly-protocol-id', value: device.id },
+        vendor: 'Shelly', hardwareModel: device.model,
+        firmwareVersion: device.firmwareVersion,
+        evidenceSource: 'operator_attested_site_local_shelly_rpc_report', observedAt: completedAt,
+        components: shellyLanCandidates(device).flatMap(candidate => {
+          const key = candidate.metadata?.component
+          return typeof key === 'string' ? [{ key, capabilities: candidate.capabilities || [] }] : []
+        }),
+        endpoint: { protocol: 'http', kind: 'rpc', address: `http://${device.ipAddress}` },
+      })
+    }
+    const historicalComponents = [...new Set(this.deviceRegistry.getDevices(true).flatMap(existing =>
+      existing.tenantId === ownership.tenantId && existing.siteId === ownership.siteId &&
+      existing.metadata?.physicalId === device.id && typeof existing.metadata?.component === 'string' &&
+      /^(?:switch|em1|cover):\d+$/.test(existing.metadata.component) &&
+      !device.components?.some(current => current.component === existing.metadata?.component)
+        ? [existing.metadata.component] : [],
+    ))].sort()
+    for (const candidate of shellyLanCandidates(device)) {
+      const projected = historicalComponents.length ? { ...candidate,
+        reason: `${candidate.reason} Historical component evidence ${historicalComponents.join(', ')} conflicts with the fresh RPC profile and remains preserved for operator reconciliation.`,
+        metadata: { ...candidate.metadata, historicalComponentConflicts: historicalComponents.join(','), requiresProfileReconciliation: true },
+      } : candidate
+      this.registerOwnedDiscoveryCandidate(projected, ownership, siteName)
+    }
+    return { status: 'pending_review', scanId: snapshot.scanId, ownership, observerId: validated.observer.id,
+      physicalId: device.id, components: device.components, historicalComponentConflicts: historicalComponents,
+      snapshot }
   }
 
   @Post('network/snapshots/:scanId/scopes/:scopeId/endpoints/:ipAddress/:endpointId/start-onboarding')
@@ -1486,7 +1606,7 @@ export class PortalController {
   @Post('discovery/:deviceId/approve')
   async approveDiscoveredDevice(
     @Param('deviceId') deviceId: string,
-    @Body() body: { zoneId?: unknown },
+    @Body() body: { zoneId?: unknown; profileConflictAcknowledged?: unknown },
     @Req() request: DeviceProxyRequest,
   ) {
     assertPortalAdministrator(request)
@@ -1504,7 +1624,9 @@ export class PortalController {
       if (!zone) throw new BadRequestException('Room is not part of the current site')
       placement = { zoneId: zone.id, zoneName: zone.name }
     }
-    const device = await this.onboarding.approve(deviceId, placement, request.user?.email || 'portal-admin')
+    const device = await this.onboarding.approve(
+      deviceId, placement, request.user?.email || 'portal-admin', body?.profileConflictAcknowledged === true,
+    )
 
     return {
       status: 'approved',
@@ -1701,4 +1823,26 @@ export function assertPortalAdministrator(request: DeviceProxyRequest): void {
 
 function sameDiscoveryOwner(a: DiscoveryOwnership, b: DiscoveryOwnership): boolean {
   return a.tenantId === b.tenantId && a.siteId === b.siteId
+}
+
+function projectShellyStatusEvidence(status: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {}
+  for (const key of ['id', 'output', 'state', 'apower', 'act_power', 'voltage', 'current', 'total_act_energy', 'total_act_ret_energy']) {
+    const value = status[key]
+    if (typeof value === 'string' && value.length <= 64 || typeof value === 'boolean' ||
+        typeof value === 'number' && Number.isFinite(value)) result[key] = value
+  }
+  for (const key of ['aenergy', 'ret_aenergy']) {
+    const value = status[key]
+    if (value && typeof value === 'object' && !Array.isArray(value) &&
+        typeof (value as Record<string, unknown>).total === 'number' && Number.isFinite((value as Record<string, unknown>).total)) {
+      result[key] = { total: (value as Record<string, unknown>).total }
+    }
+  }
+  const temperature = status.temperature
+  if (temperature && typeof temperature === 'object' && !Array.isArray(temperature) &&
+      typeof (temperature as Record<string, unknown>).tC === 'number' && Number.isFinite((temperature as Record<string, unknown>).tC)) {
+    result.temperature = { tC: (temperature as Record<string, unknown>).tC }
+  }
+  return result
 }

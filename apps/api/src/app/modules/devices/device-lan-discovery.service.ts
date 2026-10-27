@@ -1505,7 +1505,7 @@ async function probeShellyComponentEvidence(
   const timeout = setTimeout(() => controller.abort(), 1500)
   try {
     const componentsResponse = await readShellyRpcJson(baseUrl, 'Shelly.GetComponents', controller.signal)
-    const reportedComponents = componentKeysFromComponents(componentsResponse)
+    const reportedComponents = await componentKeysFromComponentsPages(baseUrl, componentsResponse, controller.signal)
     const statusComponents = reportedComponents === null
       ? componentKeysFromStatus(componentsResponse)
       : []
@@ -1519,17 +1519,24 @@ async function probeShellyComponentEvidence(
     for (let offset = 0; offset < components.length && !controller.signal.aborted; offset += shellyComponentProbeConcurrency) {
       const batch = components.slice(offset, offset + shellyComponentProbeConcurrency)
       const results = await Promise.all(batch.map(async item => {
-        const method = item.component.startsWith('switch:') ? 'Switch.GetStatus' : 'EM1.GetStatus'
+        const method = item.component.startsWith('switch:') ? 'Switch.GetStatus'
+          : 'EM1.GetStatus'
         const body = await readShellyRpcJson(baseUrl, `${method}?id=${item.channel}`, controller.signal)
         if (!isConfirmedShellyComponentStatus(item, body)) return null
         const status = body as Record<string, unknown>
-        const power = numberValue(status.apower) ?? numberValue(status.act_power)
+        const measurements = [
+          ...(numberValue(status.apower) !== undefined || numberValue(status.act_power) !== undefined ? ['power'] : []),
+          ...(numberValue(status.aenergy && typeof status.aenergy === 'object' ? (status.aenergy as Record<string, unknown>).total : undefined) !== undefined ? ['energy_import_total'] : []),
+          ...(numberValue(status.ret_aenergy && typeof status.ret_aenergy === 'object' ? (status.ret_aenergy as Record<string, unknown>).total : undefined) !== undefined ? ['energy_export_total'] : []),
+          ...(numberValue(status.total_act_energy) !== undefined ? ['energy_import_total'] : []),
+          ...(numberValue(status.total_act_ret_energy) !== undefined ? ['energy_export_total'] : []),
+        ]
         return {
           component: item.component,
           channel: item.channel,
           observedAt: new Date().toISOString(),
           method: `${method}?id=${item.channel}`,
-          ...(power === undefined ? {} : { power }),
+          measurements: [...new Set(measurements)],
         }
       }))
       for (const result of results) {
@@ -1544,15 +1551,15 @@ async function probeShellyComponentEvidence(
           ...(interfaceName ? { interfaceName } : {}),
           method: result.method,
         })
-        if (result.power !== undefined) confirmed.observations.push({
-          source: 'http_rpc',
-          attribute: 'shelly.measurement_capability',
-          value: `${result.component}:power`,
-          observedAt: result.observedAt,
-          ...(scopeId ? { scopeId } : {}),
-          ...(interfaceName ? { interfaceName } : {}),
-          method: result.method,
-        })
+        for (const metric of result.measurements) confirmed.observations.push({
+            source: 'http_rpc',
+            attribute: 'shelly.measurement_capability',
+            value: `${result.component}:${metric}`,
+            observedAt: result.observedAt,
+            ...(scopeId ? { scopeId } : {}),
+            ...(interfaceName ? { interfaceName } : {}),
+            method: result.method,
+          })
       }
     }
     return confirmed
@@ -1578,15 +1585,35 @@ async function readShellyRpcJson(
   }
 }
 
-function componentKeysFromComponents(value: unknown): Array<{ component: string; channel: number }> | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  const components = (value as { components?: unknown }).components
-  if (!Array.isArray(components)) return null
-  return components.flatMap(item => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return []
-    const key = (item as { key?: unknown }).key
-    return typeof key === 'string' ? parsedShellyComponentKey(key) : []
-  }).slice(0, maxShellyComponents)
+async function componentKeysFromComponentsPages(
+  baseUrl: string,
+  firstPage: unknown,
+  signal: AbortSignal,
+): Promise<Array<{ component: string; channel: number }> | null> {
+  const pageItems = (value: unknown): { keys: Array<{ component: string; channel: number }>; length: number; total?: number } | null => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+    const record = value as { components?: unknown; total?: unknown }
+    if (!Array.isArray(record.components)) return null
+    const keys = record.components.flatMap(item => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+      const key = (item as { key?: unknown }).key
+      return typeof key === 'string' ? parsedShellyComponentKey(key) : []
+    })
+    return { keys, length: record.components.length,
+      ...(typeof record.total === 'number' && Number.isInteger(record.total) && record.total >= 0 ? { total: record.total } : {}) }
+  }
+  const first = pageItems(firstPage)
+  if (!first) return null
+  const keys = [...first.keys]
+  let offset = first.length
+  const total = Math.min(first.total ?? first.length, maxShellyComponents)
+  while (offset < total && offset < maxShellyComponents && !signal.aborted) {
+    const page = pageItems(await readShellyRpcJson(baseUrl, `Shelly.GetComponents?offset=${offset}`, signal))
+    if (!page || page.length === 0) break
+    keys.push(...page.keys)
+    offset += page.length
+  }
+  return keys.slice(0, maxShellyComponents)
 }
 
 function componentKeysFromStatus(value: unknown): Array<{ component: string; channel: number }> {

@@ -20,7 +20,7 @@ import { DeviceIntelligenceObservationIngress, type TrustedObservationInput } fr
 import { GenericMeasurementHistoryWriter } from '../../telemetry/generic-measurements/generic-measurement-history-writer';
 import { ENERGRID_HTTP_OBSERVATION_SOURCE, ENERGRID_HTTP_STATUS_SELECTOR } from '../adapters/inbound/energrid/energrid-http-observation.adapter';
 import { resolveInstallationObservationAuthority } from '../device-observation-installation-authority';
-import { SHELLY_MQTT_OBSERVATION_SOURCE } from '../adapters/inbound/shelly/shelly-mqtt-observation-approval';
+import { isSafeShellyMqttEventTopic, SHELLY_MQTT_OBSERVATION_SOURCE } from '../adapters/inbound/shelly/shelly-mqtt-observation-approval';
 
 /**
  * Runtime owner of explicitly configured MQTT observation profiles.
@@ -179,33 +179,47 @@ export class ApprovedMqttObservationRuntime
     });
     if (!/^shelly[a-z0-9._-]{1,114}$/i.test(input.physicalId) ||
         !/^(?:switch|em1):(?:[0-9]|[12][0-9]|3[01])$/.test(input.componentKey) ||
-        input.topic !== `${input.physicalId}/events/rpc` ||
+        !isSafeShellyMqttEventTopic(input.topic) ||
         !input.evidenceId || input.evidenceId.length > 128 ||
-        typeof input.values.power !== 'number' || !Number.isFinite(input.values.power)) {
+        !Object.keys(input.values).length || Object.entries(input.values).some(([key, value]) =>
+          !['power', 'energy_import_total', 'energy_export_total'].includes(key) ||
+          typeof value !== 'number' || !Number.isFinite(value))) {
       return rejected('shelly_observation_contract_invalid');
     }
     const deviceId = `${input.physicalId}:${input.componentKey}`;
     await this.registry.ensureInstallationsLoaded();
-    const device = this.registry.getDevices(true).find(candidate =>
-      candidate.id === deviceId && candidate.kind === 'physical' &&
+    const device = this.registry.getDevices(true).find(candidate => {
+      const directRpcVerified = candidate.metadata?.identityEvidenceSource === 'verified_shelly_http_rpc' &&
+        candidate.metadata?.componentEvidenceSource === 'verified_shelly_component_status_rpc';
+      const siteLocalRpcVerified = candidate.metadata?.identityEvidenceSource === 'verified_site_local_shelly_rpc' &&
+        candidate.metadata?.componentEvidenceSource === 'verified_site_local_shelly_rpc' &&
+        typeof candidate.metadata?.siteLocalObserverId === 'string' && !!candidate.metadata.siteLocalObserverId;
+      return candidate.id === deviceId && candidate.kind === 'physical' &&
       candidate.trustStatus === 'approved' && candidate.adapter.driver === 'shelly-lan' &&
       candidate.adapter.protocol === 'http' &&
       candidate.metadata?.physicalId === input.physicalId &&
       candidate.metadata?.component === input.componentKey &&
-      candidate.metadata?.identityEvidenceSource === 'verified_shelly_http_rpc' &&
-      candidate.metadata?.componentEvidenceSource === 'verified_shelly_component_status_rpc' &&
+      (directRpcVerified || siteLocalRpcVerified) &&
       candidate.metadata?.shellyMqttObservationApprovalRequired === true &&
-      String(candidate.metadata?.verifiedMeasurementFields || '').split(',').includes('power'),
-    );
+      Object.keys(input.values).every(field => String(candidate.metadata?.verifiedMeasurementFields || '')
+        .split(',').includes(field))
+    });
     if (!device) return rejected('shelly_lan_verified_enrollment_missing');
     const scope = { tenantId: device.tenantId, siteId: device.siteId };
     if (!this.ingress) return rejected('observation_authority_missing');
+    const installation = await this.installations.get(scope.siteId, deviceId);
+    const authorizedFields = installation?.observationAuthority?.bindings.find(binding =>
+      binding.deviceId === deviceId && binding.sourceId === SHELLY_MQTT_OBSERVATION_SOURCE &&
+      binding.selector === input.topic)?.fields || {};
+    const approvedPayload = Object.fromEntries(Object.entries(input.values)
+      .filter(([field]) => Object.hasOwn(authorizedFields, field)));
+    if (!Object.keys(approvedPayload).length) return rejected('observation_authority_missing');
     const result = await this.ingress.ingest({
       scope,
       deviceId,
       sourceId: SHELLY_MQTT_OBSERVATION_SOURCE,
       selector: input.topic,
-      payload: { power: input.values.power },
+      payload: approvedPayload,
       evidenceId: input.evidenceId,
     });
     if (result.outcome === 'processed' && result.accepted && result.state) {

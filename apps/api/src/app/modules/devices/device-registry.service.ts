@@ -624,6 +624,7 @@ export class DeviceRegistryService implements OnModuleInit {
     deviceId: string,
     kind: 'approved' | 'observation_authority_approved' | 'control_configured' | 'installation_details_saved' | 'command' | 'physical_outcome_confirmed',
     evidence: Record<string, string | number | boolean | null>,
+    actor = 'portal-installer',
   ): Promise<void> {
     if (!this.installationStore)
       throw new Error('Local device storage is unavailable.');
@@ -632,7 +633,7 @@ export class DeviceRegistryService implements OnModuleInit {
       deviceId,
       kind,
       occurredAt: new Date().toISOString(),
-      actor: 'portal-installer',
+      actor,
       evidence,
     });
   }
@@ -699,43 +700,80 @@ export class DeviceRegistryService implements OnModuleInit {
     );
     const physicalId = String(device?.metadata?.physicalId || '');
     const component = String(device?.metadata?.component || '');
+    const lanIdentityVerified = device?.metadata?.identityEvidenceSource === 'verified_shelly_http_rpc' &&
+      device?.metadata?.componentEvidenceSource === 'verified_shelly_component_status_rpc';
+    const siteLocalIdentityVerified = device?.metadata?.identityEvidenceSource === 'verified_site_local_shelly_rpc' &&
+      device?.metadata?.componentEvidenceSource === 'verified_site_local_shelly_rpc' &&
+      typeof device?.metadata?.siteLocalObserverId === 'string' && !!device.metadata.siteLocalObserverId;
     if (!device || device.kind !== 'physical' || device.trustStatus !== 'approved' ||
         device.adapter.driver !== 'shelly-lan' || device.adapter.protocol !== 'http' ||
-        device.metadata?.identityEvidenceSource !== 'verified_shelly_http_rpc' ||
-        device.metadata?.componentEvidenceSource !== 'verified_shelly_component_status_rpc' ||
+        !(lanIdentityVerified || siteLocalIdentityVerified) ||
         device.metadata?.shellyMqttObservationApprovalRequired !== true ||
-        !String(device.metadata?.verifiedMeasurementFields || '').split(',').includes('power') ||
+        !String(device.metadata?.verifiedMeasurementFields || '').split(',').some(field =>
+          ['power', 'energy_import_total', 'energy_export_total'].includes(field)) ||
         !/^shelly[a-z0-9._-]{1,114}$/i.test(physicalId) ||
         !/^(?:switch|em1):(?:[0-9]|[12][0-9]|3[01])$/.test(component) ||
         device.id !== `${physicalId}:${component}`) return null;
+    const verifiedFields = String(device.metadata?.verifiedMeasurementFields || '').split(',')
+      .filter((field): field is 'power' | 'energy_import_total' | 'energy_export_total' =>
+        ['power', 'energy_import_total', 'energy_export_total'].includes(field));
     const installation = this.persistedInstallations.get(scopedDeviceKey(deviceId, tenantId, siteId));
     if (!installation || installation.device.tenantId !== tenantId || installation.device.siteId !== siteId) return null;
     if (this.enrollment) {
       const enrollment = await this.enrollment.find({ tenantId, siteId, deviceId });
       if (!enrollment || enrollment.status !== 'enrolled') return null;
     }
-    const expected = shellyMqttObservationApproval(deviceId);
     const approved = isShellyMqttObservationApproval(installation.observationAuthority, deviceId);
+    const mqttBinding = installation.observationAuthority?.bindings.find(binding => binding.deviceId === deviceId &&
+      binding.sourceId === SHELLY_MQTT_OBSERVATION_SOURCE);
+    const approvedFields = mqttBinding?.fields || {};
+    const approvedFieldNames = Object.keys(approvedFields).sort();
+    const fullyApproved = approved && verifiedFields.every(field => approvedFieldNames.includes(field));
     return {
-      approved,
-      approvalStatus: approved ? 'approved' : installation.observationAuthority ? 'different_authority' : 'missing',
+      approved: fullyApproved,
+      approvalStatus: fullyApproved ? 'approved' : approved ? 'partially_approved' : installation.observationAuthority ? 'different_authority' : 'missing',
       sourceId: SHELLY_MQTT_OBSERVATION_SOURCE,
-      selector: expected.bindings[0].selector,
-      fields: [{ metric: 'power', rawKey: 'power', unit: 'W', displayUnit: 'W' }],
+      // Do not guess a device-ID topic for devices configured with a custom prefix.
+      // The operator must review and bind the exact topic before approving a field.
+      selector: approved ? mqttBinding?.selector || '' : '',
+      approvedFields: approvedFieldNames,
+      fields: verifiedFields.map(metric => ({ metric, rawKey: metric,
+        unit: metric === 'power' ? 'W' : 'kWh', displayUnit: metric === 'power' ? 'W' : 'kWh' })),
     };
   }
 
-  async approveShellyObservations(tenantId: string, siteId: string, deviceId: string, actor: string) {
+  async approveShellyObservations(
+    tenantId: string,
+    siteId: string,
+    deviceId: string,
+    actor: string,
+    requestedFields: Array<'power' | 'energy_import_total' | 'energy_export_total'>,
+    mqttTopic: string,
+  ) {
     const status = await this.getShellyObservationApproval(tenantId, siteId, deviceId);
     if (!status) return null;
     const key = scopedDeviceKey(deviceId, tenantId, siteId);
     const installation = this.persistedInstallations.get(key)!;
-    if (status.approved) return status;
-    if (installation.observationAuthority) {
+    const existingFields = installation.observationAuthority?.bindings.find(binding => binding.deviceId === deviceId &&
+      binding.sourceId === SHELLY_MQTT_OBSERVATION_SOURCE)?.fields || {};
+    const mergedFields = [...new Set([...Object.keys(existingFields), ...requestedFields])]
+      .filter((field): field is 'power' | 'energy_import_total' | 'energy_export_total' =>
+        ['power', 'energy_import_total', 'energy_export_total'].includes(field));
+    const expectedAvailable = status.fields.map(field => field.metric);
+    if (!requestedFields.length || requestedFields.some(field => !expectedAvailable.includes(field))) {
+      throw new Error('Requested Shelly measurement was not confirmed by fresh LAN evidence.');
+    }
+    if (installation.observationAuthority && !isShellyMqttObservationApproval(installation.observationAuthority, deviceId)) {
       throw new Error('A different observation authority already exists; it must be reviewed before replacement.');
     }
+    const existingShellyBinding = installation.observationAuthority?.bindings.find(binding =>
+      binding.deviceId === deviceId && binding.sourceId === SHELLY_MQTT_OBSERVATION_SOURCE);
+    if (existingShellyBinding && existingShellyBinding.selector !== mqttTopic) {
+      throw new Error('The reviewed Shelly MQTT source topic cannot be changed through measurement approval; review the binding separately first.');
+    }
+    if (status.approved) return status;
     if (!this.installationStore) throw new Error('Local device storage is unavailable.');
-    const authority = shellyMqttObservationApproval(deviceId);
+    const authority = shellyMqttObservationApproval(deviceId, mergedFields, mqttTopic);
     const updated = { ...installation, observationAuthority: authority, updatedAt: new Date().toISOString() };
     await this.installationStore.save(updated);
     this.persistedInstallations.set(key, updated);
@@ -745,9 +783,9 @@ export class DeviceRegistryService implements OnModuleInit {
       kind: 'observation_authority_approved',
       occurredAt: new Date().toISOString(),
       actor: actor || 'portal-admin',
-      evidence: { sourceId: status.sourceId, selector: status.selector, fields: 'power' },
+      evidence: { sourceId: status.sourceId, selector: mqttTopic, fields: requestedFields.join(',') },
     });
-    return { ...status, approved: true, approvalStatus: 'approved' as const };
+    return this.getShellyObservationApproval(tenantId, siteId, deviceId);
   }
 
   async confirmPhysicalOutcome(deviceId: string): Promise<RegisteredDevice> {

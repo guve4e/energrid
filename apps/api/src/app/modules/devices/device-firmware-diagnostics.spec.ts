@@ -254,6 +254,9 @@ describe('firmware diagnostics', () => {
   });
 
   it('preserves daily evidence and independent incidents across raw/hourly expiry and process restart', async () => {
+    // Keep the fixed Oct 26 samples inside this test's one-day raw window regardless
+    // of the wall clock when the suite is run. Retention behavior stays unchanged.
+    const now = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-26T12:00:00.000Z'));
     const directory = await mkdtemp(join(tmpdir(), 'energrid-health-retention-'));
     const options = { rawSampleDays: 1, hourlySummaryDays: 2, dailySummaryDays: 30,
       significantEventDays: 3650, communicationFailureDays: 5, expectedIntervalMs: 60_000,
@@ -290,6 +293,7 @@ describe('firmware diagnostics', () => {
     } finally {
       await recovered.onModuleDestroy();
       await rm(directory, { recursive: true, force: true });
+      now.mockRestore();
     }
   });
 

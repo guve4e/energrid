@@ -131,6 +131,25 @@ describe('LAN discovery evidence persistence', () => {
     jest.restoreAllMocks()
   })
 
+  it('confirms Shelly switch channels with read-only RPC and preserves actual power and energy evidence', async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ components: [
+        { key: 'switch:0' }, { key: 'switch:1' },
+      ], total: 2 }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 0, output: false, apower: 1150, voltage: 234.8, current: 4.9, aenergy: { total: 600 } }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 1, output: true, apower: 320, voltage: 234.8, current: 1.4, aenergy: { total: 120 } }) }) as unknown as typeof fetch
+    const result = await probeShellyComponentsWithEvidence('192.168.1.166', 'home-lan', 'eth0')
+    expect(result.components).toEqual([{ component: 'switch:0', channel: 0 }, { component: 'switch:1', channel: 1 }])
+    expect(result.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'http_rpc', attribute: 'shelly.component_status', value: 'switch:0', method: 'Switch.GetStatus?id=0' }),
+      expect.objectContaining({ source: 'http_rpc', attribute: 'shelly.measurement_capability', value: 'switch:0:power' }),
+      expect.objectContaining({ source: 'http_rpc', attribute: 'shelly.measurement_capability', value: 'switch:0:energy_import_total' }),
+      expect.objectContaining({ source: 'http_rpc', attribute: 'shelly.measurement_capability', value: 'switch:1:power' }),
+    ]))
+    expect(global.fetch).toHaveBeenCalledTimes(3)
+    expect(global.fetch).toHaveBeenNthCalledWith(2, 'http://192.168.1.166/rpc/Switch.GetStatus?id=0', expect.objectContaining({ method: 'GET', redirect: 'error' }))
+  })
+
   it('requires explicit confirmation before a configured subnet scan and writes nothing before confirmation', async () => {
     const service = new DeviceLanDiscoveryService(memory, TEST_REGISTRY, new DeviceLanNetworkEvidenceCollector())
 

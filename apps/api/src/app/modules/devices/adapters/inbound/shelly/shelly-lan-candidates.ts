@@ -29,9 +29,10 @@ export function shellyLanCandidates(
     )
       continue;
     const relay = component.startsWith('switch:');
+    const statusMethod = relay ? 'Switch' : 'EM1';
     const id = `${device.id}:${component}`;
     const componentObservation = device.observations?.find(observation =>
-      observation.source === 'http_rpc' &&
+      ['http_rpc', 'site_local_http_rpc'].includes(observation.source) &&
       observation.attribute === 'shelly.component_status' &&
       observation.value === component &&
       typeof observation.method === 'string' &&
@@ -42,12 +43,18 @@ export function shellyLanCandidates(
     if (!componentObservation) continue;
     const componentVerificationMethod = componentObservation.method;
     const componentVerifiedAt = componentObservation.observedAt;
+    const siteLocalObserverId = device.observations?.find(observation =>
+      observation.source === 'site_local_http_rpc' && observation.attribute === 'observer.identity',
+    )?.value;
+    const siteLocal = componentObservation.source === 'site_local_http_rpc' && typeof siteLocalObserverId === 'string';
     if (typeof componentVerificationMethod !== 'string' || typeof componentVerifiedAt !== 'string') continue;
-    const verifiedPower = device.observations?.some(observation =>
-      observation.source === 'http_rpc' &&
-      observation.attribute === 'shelly.measurement_capability' &&
-      observation.value === `${component}:power`,
-    ) === true;
+    const verifiedMeasurementFields = ['power', 'energy_import_total', 'energy_export_total']
+      .filter(metric => device.observations?.some(observation =>
+        ['http_rpc', 'site_local_http_rpc'].includes(observation.source) &&
+        observation.attribute === 'shelly.measurement_capability' &&
+        observation.value === `${component}:${metric}`,
+      ));
+    const verifiedPower = verifiedMeasurementFields.length > 0;
     candidates.set(id, {
       id,
       displayName: `${device.id} ${component}`,
@@ -55,8 +62,8 @@ export function shellyLanCandidates(
       transport: 'http',
       driver: 'shelly-lan',
       source: 'http',
-      target: `${baseUrl}/rpc/${relay ? 'Switch' : 'EM1'}.GetStatus?id=${channel}`,
-      capabilities: [...(relay ? ['switch' as const] : []), ...(verifiedPower || !relay ? ['power' as const] : [])],
+      target: `${baseUrl}/rpc/${statusMethod}.GetStatus?id=${channel}`,
+      capabilities: [...(relay ? ['switch' as const] : []), ...(verifiedPower ? ['power' as const] : [])],
       confidence: 0.9,
       reason: 'Shelly identity and channel reported by the local HTTP API.',
       metadata: {
@@ -65,15 +72,16 @@ export function shellyLanCandidates(
         channel,
         httpBaseUrl: baseUrl,
         ipAddress: device.ipAddress,
-        identityEvidenceSource: 'verified_shelly_http_rpc',
+        identityEvidenceSource: siteLocal ? 'verified_site_local_shelly_rpc' : 'verified_shelly_http_rpc',
         identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo',
         identityVerifiedAt: device.discoveredAt,
-        componentEvidenceSource: 'verified_shelly_component_status_rpc',
+        componentEvidenceSource: siteLocal ? 'verified_site_local_shelly_rpc' : 'verified_shelly_component_status_rpc',
         componentVerificationMethod,
         componentVerifiedAt,
+        ...(siteLocal ? { siteLocalObserverId } : {}),
         requiresEnrollmentPlacement: true,
         shellyMqttObservationApprovalRequired: verifiedPower,
-        ...(verifiedPower ? { verifiedMeasurementFields: 'power' } : {}),
+        ...(verifiedPower ? { verifiedMeasurementFields: verifiedMeasurementFields.join(',') } : {}),
         ...(device.macAddress ? { macAddress: device.macAddress } : {}),
         ...(device.deviceReportedMacAddress ? { deviceReportedMacAddress: device.deviceReportedMacAddress } : {}),
         ...(device.hostname ? { hostname: device.hostname } : {}),

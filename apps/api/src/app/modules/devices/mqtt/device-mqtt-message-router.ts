@@ -109,10 +109,11 @@ export class DeviceMqttMessageRouter {
           const physicalId = payload.target?.identity?.value || '';
           const componentKey = payload.target?.componentKey || '';
           const deviceId = physicalId && componentKey ? `${physicalId}:${componentKey}` : undefined;
-          const observedPower = (payload.readings || []).find(reading => reading.metric === 'power');
-          const identityMaterial = observedPower?.timestampBasis === 'device-observed' &&
-              typeof observedPower.observedAt === 'string'
-            ? [message.topic, physicalId, componentKey, observedPower.observedAt,
+          const observedReading = (payload.readings || []).find(reading =>
+            ['power', 'energy_import_total', 'energy_export_total'].includes(String(reading.metric)));
+          const identityMaterial = observedReading?.timestampBasis === 'device-observed' &&
+              typeof observedReading.observedAt === 'string'
+            ? [message.topic, physicalId, componentKey, observedReading.observedAt,
               ...Object.entries(payload.values || {}).sort(([a], [b]) => a.localeCompare(b))
                 .map(([key, value]) => `${key}=${String(value)}`)]
                 .join('\0')
@@ -143,7 +144,10 @@ export class DeviceMqttMessageRouter {
           // Keep the existing electrical history projection, but only after
           // shared Core ingress accepted the specifically approved power field.
           const powerReadings = (payload.readings || []).filter(reading =>
-            reading.metric === 'power' && reading.timestampBasis === 'device-observed',
+            ['power', 'energy_import_total', 'energy_export_total'].includes(String(reading.metric)) &&
+            reading.timestampBasis === 'device-observed' &&
+            ingested?.outcome === 'processed' && Array.isArray(ingested.updatedKeys) &&
+            ingested.updatedKeys.includes(String(reading.metric)),
           );
           if (powerReadings.length && this.telemetry) {
             persistence.push(this.telemetry.capture({

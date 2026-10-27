@@ -2358,6 +2358,10 @@ async function applyDiscoveryDecision(
   zoneId?: string,
 ) {
   if (discoveryDecisionBusy.value[device.id]) return;
+  const profileConflictAcknowledged = action === 'approve' && device.metadata?.requiresProfileReconciliation === true;
+  if (profileConflictAcknowledged && !window.confirm(
+    `Fresh Shelly RPC confirms ${String(device.metadata?.component || 'the current component profile')}. Historical MQTT component evidence (${String(device.metadata?.historicalComponentConflicts || 'unknown')}) will be preserved and is not being deleted or reclassified. Continue to enrollment review?`,
+  )) return;
 
   discoveryDecisionBusy.value = {
     ...discoveryDecisionBusy.value,
@@ -2372,9 +2376,11 @@ async function applyDiscoveryDecision(
         method: 'POST',
         headers: {
           Authorization: `Bearer ${accessToken.value}`,
-          ...(zoneId ? { 'Content-Type': 'application/json' } : {}),
+          ...(zoneId || profileConflictAcknowledged ? { 'Content-Type': 'application/json' } : {}),
         },
-        ...(zoneId ? { body: JSON.stringify({ zoneId }) } : {}),
+        ...(zoneId || profileConflictAcknowledged ? { body: JSON.stringify({
+          ...(zoneId ? { zoneId } : {}), ...(profileConflictAcknowledged ? { profileConflictAcknowledged: true } : {}),
+        }) } : {}),
       },
     );
     const result = await response.json().catch(() => null);
@@ -4871,6 +4877,9 @@ onBeforeUnmount(() => {
             <div class="device-setup-actions">
               <div v-if="selectedDevice.trustStatus !== 'approved'" class="device-approval-actions">
                 <strong>Approval required</strong>
+                <p v-if="selectedDevice.metadata?.requiresProfileReconciliation === true" role="alert">
+                  Historical component conflict: {{ selectedDevice.metadata?.historicalComponentConflicts }}. Fresh RPC confirms {{ selectedDevice.metadata?.component }}. Earlier evidence is preserved; review it before enrollment.
+                </p>
                 <button type="button" class="primary" :disabled="!!discoveryDecisionBusy[selectedDevice.id]" @click="applyDiscoveryDecision(selectedDevice, 'approve')">{{ discoveryDecisionBusy[selectedDevice.id] ? 'Approving...' : 'Approve device' }}</button>
                 <p v-if="stateError" role="alert">{{ stateError }}</p>
               </div>

@@ -243,7 +243,7 @@ export interface NetworkDeviceEndpoint {
 }
 
 export interface NetworkObservation {
-  source: 'icmp' | 'dns' | 'tcp' | 'http_rpc' | 'http_identity' | 'nmap';
+  source: 'icmp' | 'dns' | 'tcp' | 'http_rpc' | 'http_identity' | 'site_local_http_rpc' | 'nmap';
   attribute: string;
   value: string | number | boolean;
   observedAt: string;

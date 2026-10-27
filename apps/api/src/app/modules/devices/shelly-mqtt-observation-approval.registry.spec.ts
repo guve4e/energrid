@@ -1,4 +1,5 @@
 import { DeviceRegistryService } from './device-registry.service';
+import { isShellyMqttObservationApproval, shellyMqttObservationApproval } from './adapters/inbound/shelly/shelly-mqtt-observation-approval';
 
 const physicalId = 'shellypro2pm-aabbccddeeff';
 const deviceId = `${physicalId}:switch:0`;
@@ -27,10 +28,15 @@ const device = {
   },
 };
 
-function setup(options: { siteId?: string; hasPowerEvidence?: boolean; authority?: unknown } = {}) {
+function setup(options: { siteId?: string; hasPowerEvidence?: boolean; authority?: unknown; siteLocal?: boolean } = {}) {
   const siteId = options.siteId || 'site-device-lab';
   const storedDevice = { ...device, siteId, metadata: {
     ...device.metadata,
+    ...(options.siteLocal ? {
+      identityEvidenceSource: 'verified_site_local_shelly_rpc',
+      componentEvidenceSource: 'verified_site_local_shelly_rpc',
+      siteLocalObserverId: 'pi-housenet-observer',
+    } : {}),
     ...(options.hasPowerEvidence === false ? { verifiedMeasurementFields: '' } : {}),
   } };
   const installation = {
@@ -62,23 +68,37 @@ function setup(options: { siteId?: string; hasPowerEvidence?: boolean; authority
 }
 
 describe('site-scoped Shelly observation approval', () => {
+  it('supports separately approved switch power and cumulative energy fields without control authority', () => {
+    const switchId = 'shellypro2pm-ec6260888084:switch:1';
+    const authority = shellyMqttObservationApproval(switchId, ['power', 'energy_import_total']);
+    expect(authority.bindings[0]).toMatchObject({
+      deviceId: switchId, selector: 'shellypro2pm-ec6260888084/events/rpc',
+      fields: { power: { rawKey: 'power', type: 'number' }, energy_import_total: { rawKey: 'energy_import_total', type: 'number' } },
+    });
+    expect(authority.bindings[0].fields).not.toHaveProperty('output');
+    expect(authority.bindings[0].fields).not.toHaveProperty('command');
+    expect(isShellyMqttObservationApproval(authority, switchId)).toBe(true);
+    expect(() => shellyMqttObservationApproval(switchId, ['switch' as never])).toThrow();
+  });
   it('persists the operator-approved exact power binding into the installation authority', async () => {
     const h = setup();
     try {
       await h.registry.ensureInstallationsLoaded();
       const proposal = await h.registry.getShellyObservationApproval('tenant-demo', 'site-device-lab', deviceId);
-      expect(proposal).toMatchObject({ approved: false, approvalStatus: 'missing', sourceId: 'shelly-mqtt', selector: `${physicalId}/events/rpc` });
-      const saved = await h.registry.approveShellyObservations('tenant-demo', 'site-device-lab', deviceId, 'operator@example.test');
+      expect(proposal).toMatchObject({ approved: false, approvalStatus: 'missing', sourceId: 'shelly-mqtt', selector: '' });
+      const mqttTopic = 'shelly/washer@other/events/rpc';
+      const saved = await h.registry.approveShellyObservations('tenant-demo', 'site-device-lab', deviceId,
+        'operator@example.test', ['power'], mqttTopic);
       expect(saved).toMatchObject({ approved: true, approvalStatus: 'approved', fields: [{ metric: 'power', unit: 'W' }] });
       expect(h.installationStore.save).toHaveBeenCalledWith(expect.objectContaining({
         observationAuthority: {
-          bindings: [{ deviceId, sourceId: 'shelly-mqtt', selector: `${physicalId}/events/rpc`, fields: { power: { rawKey: 'power', type: 'number' } } }],
+          bindings: [{ deviceId, sourceId: 'shelly-mqtt', selector: mqttTopic, fields: { power: { rawKey: 'power', type: 'number' } } }],
           policy: { deviceId, allowedSourcesByField: { power: ['shelly-mqtt'] } },
         },
       }));
       expect(h.installationStore.append).toHaveBeenCalledWith(expect.objectContaining({
         deviceId, kind: 'observation_authority_approved', actor: 'operator@example.test',
-        evidence: { sourceId: 'shelly-mqtt', selector: `${physicalId}/events/rpc`, fields: 'power' },
+        evidence: { sourceId: 'shelly-mqtt', selector: mqttTopic, fields: 'power' },
       }));
     } finally { h.restore(); }
   });
@@ -97,11 +117,20 @@ describe('site-scoped Shelly observation approval', () => {
     } finally { noPower.restore(); }
   });
 
+  it('allows separate measurement approval for site-local RPC evidence after enrollment', async () => {
+    const h = setup({ siteLocal: true });
+    try {
+      await h.registry.ensureInstallationsLoaded();
+      await expect(h.registry.getShellyObservationApproval('tenant-demo', 'site-device-lab', deviceId))
+        .resolves.toMatchObject({ approved: false, fields: [{ metric: 'power' }] });
+    } finally { h.restore(); }
+  });
+
   it('does not replace an existing installation observation authority', async () => {
     const h = setup({ authority: { bindings: [], policy: { deviceId } } });
     try {
       await h.registry.ensureInstallationsLoaded();
-      await expect(h.registry.approveShellyObservations('tenant-demo', 'site-device-lab', deviceId, 'operator'))
+      await expect(h.registry.approveShellyObservations('tenant-demo', 'site-device-lab', deviceId, 'operator', ['power'], `${physicalId}/events/rpc`))
         .rejects.toThrow('A different observation authority already exists');
       expect(h.installationStore.save).not.toHaveBeenCalled();
     } finally { h.restore(); }

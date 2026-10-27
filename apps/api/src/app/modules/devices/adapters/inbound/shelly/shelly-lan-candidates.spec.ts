@@ -20,6 +20,7 @@ const device: NetworkDiscoveredDevice = {
     { source: 'http_rpc', attribute: 'shelly.component_status', value: 'switch:1', observedAt: '2026-10-13T08:00:00Z', method: 'Switch.GetStatus?id=1' },
     { source: 'http_rpc', attribute: 'shelly.component_status', value: 'em1:0', observedAt: '2026-10-13T08:00:00Z', method: 'EM1.GetStatus?id=0' },
     { source: 'http_rpc', attribute: 'shelly.measurement_capability', value: 'switch:0:power', observedAt: '2026-10-13T08:00:00Z', method: 'Switch.GetStatus?id=0' },
+    { source: 'http_rpc', attribute: 'shelly.measurement_capability', value: 'em1:0:power', observedAt: '2026-10-13T08:00:00Z', method: 'EM1.GetStatus?id=0' },
   ],
   components: [
     { component: 'switch:0', channel: 0 },
@@ -65,6 +66,29 @@ describe('Shelly LAN onboarding candidates', () => {
       ...device,
       observations: device.observations?.filter(item => item.value !== 'switch:1'),
     }).map(item => item.id)).not.toContain(`${device.id}:switch:1`);
+  });
+  it('accepts a site-local switch component only with fresh component-status evidence', () => {
+    const siteLocal: NetworkDiscoveredDevice = {
+      ...device,
+      id: 'shellypro2pm-ec6260888084',
+      components: [{ component: 'switch:1', channel: 1 }],
+      observations: [{
+        source: 'site_local_http_rpc', attribute: 'observer.identity', value: 'pi-housenet-observer',
+        observedAt: '2026-10-27T06:37:41.000Z', method: 'authorized-site-local-observer-report',
+      }, {
+        source: 'site_local_http_rpc', attribute: 'shelly.component_status', value: 'switch:1',
+        observedAt: '2026-10-27T06:37:41.000Z', method: 'Switch.GetStatus?id=1',
+      }, {
+        source: 'site_local_http_rpc', attribute: 'shelly.measurement_capability', value: 'switch:1:power',
+        observedAt: '2026-10-27T06:37:41.000Z', method: 'Switch.GetStatus?id=1',
+      }],
+    };
+    expect(shellyLanCandidates(siteLocal)).toMatchObject([{
+      id: 'shellypro2pm-ec6260888084:switch:1',
+      target: 'http://192.168.7.21/rpc/Switch.GetStatus?id=1',
+      capabilities: ['switch', 'power'],
+      metadata: { identityEvidenceSource: 'verified_site_local_shelly_rpc', siteLocalObserverId: 'pi-housenet-observer' },
+    }]);
   });
   it('deduplicates channels and rejects invalid component/channel assignments', () => {
     expect(
@@ -205,6 +229,7 @@ describe('read-only Shelly component probing', () => {
       .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 0, output: false }) })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 1, output: true }) })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 0, act_power: 100 }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 0, state: false }) })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 3, output: true }) })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 4, output: 'on' }) })
       .mockResolvedValueOnce({ ok: true, json: async () => [] });

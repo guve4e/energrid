@@ -161,6 +161,7 @@ describe('DeviceMqttMessageRouter', () => {
     const approvedObservationRuntime = {
       ingestShellyMqttObservation: jest.fn().mockResolvedValue({
         outcome: 'processed', accepted: true, deviceId,
+        updatedKeys: ['power'],
         scope: { tenantId: 'tenant-a', siteId: 'site-a' },
       }),
     };

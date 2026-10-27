@@ -208,6 +208,10 @@ function parseShellyComponentTelemetry(
   const totalEnergy = finiteNumber(component.total_act_energy);
 
   const returnedEnergy = finiteNumber(component.total_act_ret_energy);
+  const imported = component.aenergy as Record<string, unknown> | undefined;
+  const exported = component.ret_aenergy as Record<string, unknown> | undefined;
+  const importTotal = finiteNumber(component.total_act_energy) ?? finiteNumber(imported?.total);
+  const exportTotal = finiteNumber(component.total_act_ret_energy) ?? finiteNumber(exported?.total);
 
   if (power != null) {
     values.power = power;
@@ -228,6 +232,8 @@ function parseShellyComponentTelemetry(
   if (returnedEnergy != null) {
     values.returnedEnergy = returnedEnergy;
   }
+  if (importTotal != null && importTotal >= 0) values.energy_import_total = importTotal / 1000;
+  if (exportTotal != null && exportTotal >= 0) values.energy_export_total = exportTotal / 1000;
 
   const clock = shellyObservedAt(raw, params);
   const observedAt = clock.observedAt;
@@ -255,8 +261,6 @@ function parseShellyComponentTelemetry(
     });
   };
   add('power', 'apower' in component ? component.apower : component.act_power);
-  const imported = component.aenergy as Record<string, unknown> | undefined;
-  const exported = component.ret_aenergy as Record<string, unknown> | undefined;
   // Shelly cumulative energy fields are Wh; canonical totals are kWh.
   add(
     'energy_import_total',
@@ -306,7 +310,8 @@ function physicalDiscovery(
 ): Omit<PhysicalDeviceDiscovery, 'scope'> {
   const componentKey = telemetry.component.replace('em1data:', 'em1:');
   const capabilities = [
-    ...(telemetry.values.power !== undefined || telemetry.values.energy !== undefined ? ['power' as const] : []),
+    ...(telemetry.values.power !== undefined || telemetry.values.energy !== undefined ||
+        telemetry.values.energy_import_total !== undefined || telemetry.values.energy_export_total !== undefined ? ['power' as const] : []),
     ...(telemetry.values.on !== undefined ? ['switch' as const] : []),
   ];
   return {
@@ -324,7 +329,8 @@ function discoveredShellyComponent(
   componentKey: string,
 ) {
   const capabilities = [
-    ...(telemetry.values.power !== undefined || telemetry.values.energy !== undefined ? ['power' as const] : []),
+    ...(telemetry.values.power !== undefined || telemetry.values.energy !== undefined ||
+        telemetry.values.energy_import_total !== undefined || telemetry.values.energy_export_total !== undefined ? ['power' as const] : []),
     ...(telemetry.values.on !== undefined ? ['switch' as const] : []),
   ];
   return {

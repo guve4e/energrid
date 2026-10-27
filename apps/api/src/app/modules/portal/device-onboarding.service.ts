@@ -37,6 +37,7 @@ export class DeviceOnboardingService {
     deviceId: string,
     placement?: { zoneId: string; zoneName: string },
     actor = 'portal-admin',
+    profileConflictAcknowledged = false,
   ): Promise<RegisteredDevice> {
     const { tenant, site } = this.registry.getSnapshot();
 
@@ -55,6 +56,9 @@ export class DeviceOnboardingService {
       throw new ConflictException(
         'Fresh Shelly LAN identity and component RPC verification is required before enrollment; MQTT identity claims alone are not sufficient',
       );
+    }
+    if (candidate.trustStatus === 'discovered' && candidate.metadata?.requiresProfileReconciliation === true && !profileConflictAcknowledged) {
+      throw new ConflictException('Historical Shelly component conflicts must be reviewed and explicitly acknowledged before enrollment.');
     }
 
     if (candidate.tenantId !== tenant.id || candidate.siteId !== site.id ||
@@ -132,6 +136,13 @@ export class DeviceOnboardingService {
       );
     }
     this.registry.setEnrollmentStatus(candidate.id, 'enrolled');
+    if (candidate.metadata?.requiresProfileReconciliation === true && profileConflictAcknowledged) {
+      await this.registry.persistInstallationEvent(candidate.id, 'approved', {
+        profileConflictAcknowledged: true,
+        historicalComponents: String(candidate.metadata?.historicalComponentConflicts || ''),
+        currentComponents: String(candidate.metadata?.component || ''),
+      }, actor);
+    }
 
     const physicalId = approved.metadata?.physicalId;
     const componentKey = approved.metadata?.component;
@@ -249,10 +260,15 @@ function hasFreshVerifiedShellyLanEvidence(device: RegisteredDevice, now = Date.
     : '';
   const identityAt = Date.parse(String(device.metadata?.identityVerifiedAt || ''));
   const componentAt = Date.parse(String(device.metadata?.componentVerifiedAt || ''));
+  const direct = device.metadata?.identityEvidenceSource === 'verified_shelly_http_rpc' &&
+    device.metadata?.componentEvidenceSource === 'verified_shelly_component_status_rpc';
+  const siteLocal = device.metadata?.identityEvidenceSource === 'verified_site_local_shelly_rpc' &&
+    device.metadata?.componentEvidenceSource === 'verified_site_local_shelly_rpc' &&
+    typeof device.metadata?.siteLocalObserverId === 'string' &&
+    String(device.metadata.siteLocalObserverId).length > 0;
   return device.adapter.driver === 'shelly-lan' &&
-    device.metadata?.identityEvidenceSource === 'verified_shelly_http_rpc' &&
+    (direct || siteLocal) &&
     device.metadata?.identityVerificationMethod === 'GET /rpc/Shelly.GetDeviceInfo' &&
-    device.metadata?.componentEvidenceSource === 'verified_shelly_component_status_rpc' &&
     device.metadata?.componentVerificationMethod === expectedMethod &&
     Number.isFinite(identityAt) && Number.isFinite(componentAt) &&
     identityAt <= now && componentAt <= now &&
