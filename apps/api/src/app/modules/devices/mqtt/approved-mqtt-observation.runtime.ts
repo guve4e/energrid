@@ -177,14 +177,18 @@ export class ApprovedMqttObservationRuntime
       reasonCode,
       deviceId: `${input.physicalId}:${input.componentKey}`,
     });
+    const supportedFields = ['power', 'energy_import_total', 'energy_export_total'];
     if (!/^shelly[a-z0-9._-]{1,114}$/i.test(input.physicalId) ||
         !/^(?:switch|em1):(?:[0-9]|[12][0-9]|3[01])$/.test(input.componentKey) ||
         !isSafeShellyMqttEventTopic(input.topic) ||
         !input.evidenceId || input.evidenceId.length > 128 ||
-        !Object.keys(input.values).length || Object.entries(input.values).some(([key, value]) =>
-          !['power', 'energy_import_total', 'energy_export_total'].includes(key) ||
-          typeof value !== 'number' || !Number.isFinite(value))) {
+        !input.values || typeof input.values !== 'object' || Array.isArray(input.values) ||
+        !Object.keys(input.values).length || Object.keys(input.values).some(key => !supportedFields.includes(key))) {
       return rejected('shelly_observation_contract_invalid');
+    }
+    if (Object.entries(input.values).some(([key, value]) => typeof value !== 'number' ||
+        !Number.isFinite(value) || (key !== 'power' && value < 0))) {
+      return rejected('shelly_observation_measurement_invalid');
     }
     const deviceId = `${input.physicalId}:${input.componentKey}`;
     await this.registry.ensureInstallationsLoaded();

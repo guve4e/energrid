@@ -67,6 +67,26 @@ describe('approved Shelly MQTT observation ingress', () => {
     expect(h.installations.get).toHaveBeenCalledWith(h.siteId, h.deviceId);
   });
 
+  it('rejects malformed supported measurements explicitly without converting them to zero', async () => {
+    const h = await setup({ approved: true, approvedFields: ['power'] });
+    const result = await runtime!.ingestShellyMqttObservation({
+      topic: `${h.physicalId}/events/rpc`, physicalId: h.physicalId, componentKey: h.componentKey,
+      values: { power: null }, evidenceId: 'malformed-power',
+    });
+    expect(result).toMatchObject({ outcome: 'rejected', reasonCode: 'shelly_observation_measurement_invalid' });
+    expect(h.registry.projectApprovedObservation).not.toHaveBeenCalled();
+  });
+
+  it('keeps unknown raw/status fields outside the canonical measurement contract', async () => {
+    const h = await setup({ approved: true });
+    const result = await runtime!.ingestShellyMqttObservation({
+      topic: `${h.physicalId}/events/rpc`, physicalId: h.physicalId, componentKey: h.componentKey,
+      values: { power: 0, on: false, current: 0 }, evidenceId: 'unsupported-status-fields',
+    });
+    expect(result).toMatchObject({ outcome: 'rejected', reasonCode: 'shelly_observation_contract_invalid' });
+    expect(h.registry.projectApprovedObservation).not.toHaveBeenCalled();
+  });
+
   it('accepts an approved exact component/topic and deduplicates repeated evidence', async () => {
     const h = await setup({ approved: true });
     const input = {
@@ -79,6 +99,16 @@ describe('approved Shelly MQTT observation ingress', () => {
     expect(duplicate).toMatchObject({ outcome: 'processed', accepted: false, reason: 'duplicate_evidence' });
     expect(h.registry.projectApprovedObservation).toHaveBeenCalledTimes(1);
     expect(h.installations.get).toHaveBeenCalledWith(h.siteId, h.deviceId);
+  });
+
+  it('rejects a supported but unapproved field for lack of authority', async () => {
+    const h = await setup({ verifiedFields: 'power,energy_import_total', approved: true, approvedFields: ['power'] });
+    const result = await runtime!.ingestShellyMqttObservation({
+      topic: `${h.physicalId}/events/rpc`, physicalId: h.physicalId, componentKey: h.componentKey,
+      values: { energy_import_total: 0.6 }, evidenceId: 'unapproved-energy-field',
+    });
+    expect(result).toMatchObject({ outcome: 'rejected', reasonCode: 'observation_authority_missing' });
+    expect(h.registry.projectApprovedObservation).not.toHaveBeenCalled();
   });
 
   it('accepts only an explicitly reviewed custom MQTT source topic for the RPC-verified device', async () => {

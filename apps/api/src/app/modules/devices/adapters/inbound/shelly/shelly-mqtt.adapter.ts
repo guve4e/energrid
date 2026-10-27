@@ -11,6 +11,7 @@ interface ShellyComponentTelemetry {
   component: string;
   channel: number | null;
   values: Record<string, number | boolean | string | null>;
+  measurements: Record<'power' | 'energy_import_total' | 'energy_export_total', number | null>;
   observedAt: string;
   readings: Array<
     Pick<
@@ -93,6 +94,7 @@ export class ShellyMqttAdapter implements DeviceMqttMessageAdapter {
               channel: telemetry.channel,
             },
             values: telemetry.values,
+            measurements: telemetry.measurements,
             ...(telemetry.readings.length
               ? { readings: telemetry.readings }
               : {}),
@@ -278,11 +280,19 @@ function parseShellyComponentTelemetry(
   );
   if (Object.keys(values).length === 0 && !readings.length) return null;
 
+  // Keep the complete status values above for Bus/evidence consumers, and
+  // expose a narrow canonical projection for the separately authorized
+  // measurement-ingress path. Invalid readings remain null so they cannot be
+  // mistaken for a missing field or a measured zero.
+  const measurements = Object.fromEntries(readings.map(reading => [reading.metric, reading.value])) as
+    ShellyComponentTelemetry['measurements'];
+
   return {
     physicalId,
     component: componentName,
     channel,
     values,
+    measurements,
     observedAt,
     readings,
   };

@@ -104,6 +104,7 @@ export class DeviceMqttMessageRouter {
           const payload = effect.payload as {
             target?: { identity?: { value?: string }; componentKey?: string };
             values?: Record<string, unknown>;
+            measurements?: Record<string, unknown>;
             readings?: Array<Record<string, unknown>>;
           };
           const physicalId = payload.target?.identity?.value || '';
@@ -119,11 +120,17 @@ export class DeviceMqttMessageRouter {
                 .join('\0')
             : [message.topic, message.payloadText].join('\0');
           const evidenceId = createHash('sha256').update(identityMaterial).digest('hex');
+          // Shelly NotifyStatus also carries state and electrical metadata
+          // (for example output, current and voltage). Those remain available
+          // to the raw Bus/evidence path, but only canonical approved
+          // measurements may enter deterministic observation ingress. Keep
+          // invalid supported readings as null so they are rejected explicitly
+          // instead of silently disappearing or becoming zero.
           const ingested = await this.approvedObservationRuntime?.ingestShellyMqttObservation({
             topic: message.topic,
             physicalId,
             componentKey,
-            values: payload.values || {},
+            values: payload.measurements || {},
             evidenceId,
           });
           const accepted = ingested?.outcome === 'processed' && ingested.accepted === true;
