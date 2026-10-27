@@ -3312,7 +3312,10 @@ async function loadEnrollmentMembership() {
         typeof item.deviceId !== 'string' ||
         !['enrolled', 'suspended', 'retired'].includes(item.status) ||
         ('physicalIdentityValues' in item && (!Array.isArray(item.physicalIdentityValues) || !item.physicalIdentityValues.every((value: unknown) => typeof value === 'string'))) ||
-        ('ambiguousPhysicalIdentityValues' in item && (!Array.isArray(item.ambiguousPhysicalIdentityValues) || !item.ambiguousPhysicalIdentityValues.every((value: unknown) => typeof value === 'string')))
+        ('ambiguousPhysicalIdentityValues' in item && (!Array.isArray(item.ambiguousPhysicalIdentityValues) || !item.ambiguousPhysicalIdentityValues.every((value: unknown) => typeof value === 'string'))) ||
+        ('physicalAssignments' in item && (!Array.isArray(item.physicalAssignments) || !item.physicalAssignments.every((assignment: unknown) =>
+          !!assignment && typeof assignment === 'object' && typeof (assignment as Record<string, unknown>).physicalDeviceId === 'string' &&
+          (!('componentKey' in assignment) || typeof (assignment as Record<string, unknown>).componentKey === 'string'))))
       ) {
         throw new Error('Invalid enrollment record');
       }
@@ -3332,6 +3335,7 @@ async function loadEnrollmentMembership() {
           siteId: item.siteId,
           identityValues: Array.isArray(item.physicalIdentityValues) ? item.physicalIdentityValues as string[] : [],
           ambiguousIdentityValues: Array.isArray(item.ambiguousPhysicalIdentityValues) ? item.ambiguousPhysicalIdentityValues as string[] : [],
+          physicalAssignments: Array.isArray(item.physicalAssignments) ? item.physicalAssignments as LifecycleDeviceRecord['physicalAssignments'] : [],
         });
       } else {
         statuses.set(JSON.stringify([item.tenantId, item.siteId, item.deviceId]), item.status);
