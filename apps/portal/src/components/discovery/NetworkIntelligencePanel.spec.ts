@@ -91,6 +91,20 @@ describe('NetworkIntelligencePanel', () => {
     panel.unmount();
   });
 
+  it('displays structured reconciliation rejection codes without hiding the safe explanation', () => {
+    const panel = mount(NetworkIntelligencePanel, { props: {
+      scopes, snapshots: [], latest: null, comparison: null,
+      siteLocalEvidenceImport: { status: 'pending_review', scanId: 'site-observer-report', observerId: 'pi-housenet',
+        physicalId: 'shellypro2pm-ec6260888084', reconciliationProposals: [], historicalComponentConflicts: [],
+        reconciliationConflicts: [{ deviceId: 'shellypro2pm-ec6260888084:switch:0', component: 'switch:0',
+          reasonCode: 'installation_missing', reason: 'The scoped logical device record has no durable installation record; no metadata was changed.' }] },
+    } });
+    expect(panel.text()).toContain('[installation_missing]');
+    expect(panel.text()).toContain('no durable installation record');
+    expect(panel.text()).toContain('No exact enrolled component matched');
+    panel.unmount();
+  });
+
   it('lets an administrator reopen reconciliation review from a saved site-local RPC snapshot', async () => {
     const scanId = 'site-observer-2aec6d8b2d4d25f397a572203264edd0a388de00';
     const endpointId = 'shellypro2pm-ec6260888084';

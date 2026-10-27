@@ -1,4 +1,7 @@
 import { DeviceRegistryService } from './device-registry.service';
+import { findExactShellyInventoryAssignment } from '../portal/site-local-shelly-inventory-match';
+import { PortalController } from '../portal/portal.controller';
+import type { PhysicalDeviceInventoryRecord } from './enrollment/physical-device-inventory.repository';
 
 const physicalId = 'shellypro2pm-ec6260888084';
 const component = 'switch:0';
@@ -13,7 +16,10 @@ function setup(siteId = 'site-home') {
     capabilities: [{ kind: 'switch', actions: ['read'] }], supportedCapabilities: [{ kind: 'switch', actions: ['read'] }],
     state: { values: { output: false }, observedAt, source: 'mqtt', status: 'online' },
     responseProfile: { confidence: 0.8, learningEnabled: false }, policy: { requiresApproval: true, confirmationRequiredFor: [] },
-    metadata: { physicalId, component, physicalInventoryId: '8e15ec60-a22b-4f8c-ab09-5e61d44030f9', mqttEvidenceCandidate: true },
+    // Mirrors the existing Home MQTT-enrolled records: the authoritative
+    // physical inventory link lives in PhysicalDeviceInventory assignments,
+    // not as a duplicated physicalInventoryId on the logical device metadata.
+    metadata: { physicalId, component, mqttEvidenceCandidate: true },
   };
   const record = { schemaVersion: 1, device, observationAuthority: undefined,
     physicalOutcome: { status: 'not_confirmed', confirmedAt: null, confirmedBy: null }, updatedAt: observedAt };
@@ -27,7 +33,7 @@ function setup(siteId = 'site-home') {
     list: jest.fn().mockResolvedValue([{ deviceId, status: 'enrolled' }]),
     find: jest.fn().mockResolvedValue({ deviceId, status: 'enrolled' }),
   };
-  return { registry: new DeviceRegistryService(undefined, store as any, enrollment as any), store, record, device };
+  return { registry: new DeviceRegistryService(undefined, store as any, enrollment as any), store, record, device, enrollment };
 }
 
 const evidence = (siteId = 'site-home') => ({
@@ -45,7 +51,7 @@ describe('site-scoped Shelly enrollment reconciliation', () => {
     const before = h.registry.getDevices(true).find(item => item.id === deviceId)!;
     const updated = await h.registry.reconcileShellyIdentityEvidence(evidence());
     expect(updated).toMatchObject({ id: deviceId, displayName: before.displayName, zoneName: before.zoneName,
-      adapter: before.adapter, metadata: { physicalId, component, physicalInventoryId: '8e15ec60-a22b-4f8c-ab09-5e61d44030f9',
+      adapter: before.adapter, metadata: { physicalId, component,
         identityEvidenceSource: 'verified_site_local_shelly_rpc', componentEvidenceSource: 'verified_site_local_shelly_rpc',
         verifiedMeasurementFields: 'power,energy_import_total' } });
     expect(h.store.save).toHaveBeenCalledTimes(1);
@@ -89,11 +95,162 @@ describe('site-scoped Shelly enrollment reconciliation', () => {
     expect(h.store.save).toHaveBeenCalledWith(expect.objectContaining({ observationAuthority: existingAuthority }));
   });
 
-  it('requires the exact existing physical inventory assignment', async () => {
+  it('accepts the caller-validated exact assignment when legacy metadata omits the duplicate inventory ID', async () => {
     const h = setup();
     await h.registry.onModuleInit();
-    await expect(h.registry.reconcileShellyIdentityEvidence({ ...evidence(), physicalInventoryId: 'other-inventory' })).resolves.toBeNull();
+    // A legacy logical record without a copied inventory ID is eligible only
+    // after the caller supplies the exact server-validated assignment.
+    const result = await h.registry.reconcileShellyIdentityEvidence(evidence());
+    expect(result?.id).toBe(deviceId);
+    const conflict = setup();
+    conflict.device.metadata = { ...conflict.device.metadata, physicalInventoryId: 'different-inventory' };
+    await conflict.registry.onModuleInit();
+    await expect(conflict.registry.reconcileShellyIdentityEvidence(evidence())).resolves.toBeNull();
+    expect(conflict.store.save).not.toHaveBeenCalled();
+  });
+
+  it('reports the first safe matching rejection code and accepts the legacy Home record via the validated inventory assignment', async () => {
+    const h = setup();
+    await h.registry.onModuleInit();
+    await expect(h.registry.getShellyReconciliationTargetDecision(
+      'tenant-demo', 'site-home', deviceId, physicalId, component, evidence().physicalInventoryId,
+    )).resolves.toMatchObject({ matched: true, device: { id: deviceId, adapter: { driver: 'shelly-discovered' } } });
+
+    const mismatch = await h.registry.getShellyReconciliationTargetDecision(
+      'tenant-demo', 'site-home', deviceId, 'shellyplus1-other', component, evidence().physicalInventoryId,
+    );
+    expect(mismatch).toEqual({ matched: false, reasonCode: 'physical_identity_mismatch' });
+    const outside = await h.registry.getShellyReconciliationTargetDecision(
+      'tenant-demo', 'site-device-lab', deviceId, physicalId, component, evidence().physicalInventoryId,
+    );
+    expect(outside).toEqual({ matched: false, reasonCode: 'logical_record_outside_site' });
+    const unlinked = setup();
+    unlinked.enrollment.find.mockResolvedValue({ deviceId, status: 'suspended' });
+    await unlinked.registry.onModuleInit();
+    await expect(unlinked.registry.getShellyReconciliationTargetDecision(
+      'tenant-demo', 'site-home', deviceId, physicalId, component, evidence().physicalInventoryId,
+    )).resolves.toEqual({ matched: false, reasonCode: 'not_enrolled' });
+
+    const inventoryConflict = setup();
+    inventoryConflict.device.metadata = { ...inventoryConflict.device.metadata, physicalInventoryId: 'different-inventory' };
+    await inventoryConflict.registry.onModuleInit();
+    await expect(inventoryConflict.registry.getShellyReconciliationTargetDecision(
+      'tenant-demo', 'site-home', deviceId, physicalId, component, evidence().physicalInventoryId,
+    )).resolves.toEqual({ matched: false, reasonCode: 'physical_inventory_conflict' });
+  });
+
+  it('replays accepted Home RPC identity against both persisted component assignments without changing Home records', async () => {
+    const secondId = `${physicalId}:switch:1`;
+    const h = setup();
+    const secondDevice = { ...h.device, id: secondId, displayName: `${physicalId} switch:1`, zoneId: 'unknown', zoneName: 'Unknown',
+      metadata: { physicalId, component: 'switch:1', mqttEvidenceCandidate: true } };
+    const records = [h.record, { ...h.record, device: secondDevice }];
+    const store = { listAll: jest.fn().mockResolvedValue(records), save: jest.fn().mockResolvedValue(undefined), append: jest.fn().mockResolvedValue(undefined) };
+    const enrollment = {
+      list: jest.fn().mockResolvedValue([{ deviceId, status: 'enrolled' }, { deviceId: secondId, status: 'enrolled' }]),
+      find: jest.fn(async ({ deviceId: id }: { deviceId: string }) => ({ deviceId: id, status: 'enrolled' })),
+    };
+    const registry = new DeviceRegistryService(undefined, store as any, enrollment as any);
+    await registry.onModuleInit();
+    const inventory: PhysicalDeviceInventoryRecord = {
+      physicalDeviceId: '8e15ec60-a22b-4f8c-ab09-5e61d44030f9',
+      scope: { tenantId: 'tenant-demo', siteId: 'site-home' },
+      identity: { namespace: 'mqtt:shelly-protocol-id', value: physicalId },
+      verificationStatus: 'protocol_observed', firstSeenAt: observedAt, lastSeenAt: observedAt,
+      components: ['switch:0', 'switch:1'].map(key => ({ key, capabilities: ['switch', 'power'], firstSeenAt: observedAt, lastSeenAt: observedAt })),
+      endpoints: [], networkObservations: [],
+      assignments: [
+        { deviceId, physicalDeviceId: '8e15ec60-a22b-4f8c-ab09-5e61d44030f9', componentKey: 'switch:0', assignedAt: observedAt, assignedBy: 'operator' },
+        { deviceId: secondId, physicalDeviceId: '8e15ec60-a22b-4f8c-ab09-5e61d44030f9', componentKey: 'switch:1', assignedAt: observedAt, assignedBy: 'operator' },
+      ],
+    };
+    for (const key of ['switch:0', 'switch:1']) {
+      const id = `${physicalId}:${key}`;
+      const matchedInventory = findExactShellyInventoryAssignment(
+        [inventory], { tenantId: 'tenant-demo', siteId: 'site-home' }, id, physicalId, key,
+      );
+      expect(matchedInventory?.physicalDeviceId).toBe(inventory.physicalDeviceId);
+      await expect(registry.getShellyReconciliationTargetDecision(
+        'tenant-demo', 'site-home', id, physicalId, key, matchedInventory!.physicalDeviceId,
+      )).resolves.toMatchObject({ matched: true, device: { id } });
+    }
+    expect(store.save).not.toHaveBeenCalled();
+  });
+
+  it('builds a historical review proposal from the accepted Home snapshot and existing MQTT records', async () => {
+    const secondId = `${physicalId}:switch:1`;
+    const h = setup();
+    const secondDevice = { ...h.device, id: secondId, displayName: `${physicalId} switch:1`, zoneId: 'unknown', zoneName: 'Unknown',
+      metadata: { physicalId, component: 'switch:1', mqttEvidenceCandidate: true } };
+    const records = [h.record, { ...h.record, device: secondDevice }];
+    const store = { listAll: jest.fn().mockResolvedValue(records), save: jest.fn().mockResolvedValue(undefined), append: jest.fn().mockResolvedValue(undefined) };
+    const enrollment = {
+      list: jest.fn().mockResolvedValue([{ deviceId, status: 'enrolled' }, { deviceId: secondId, status: 'enrolled' }]),
+      find: jest.fn(async ({ deviceId: id }: { deviceId: string }) => ({ deviceId: id, status: 'enrolled' })),
+    };
+    const registry = new DeviceRegistryService(undefined, store as any, enrollment as any);
+    await registry.onModuleInit();
+    const inventoryId = '8e15ec60-a22b-4f8c-ab09-5e61d44030f9';
+    const inventory: PhysicalDeviceInventoryRecord = {
+      physicalDeviceId: inventoryId, scope: { tenantId: 'tenant-demo', siteId: 'site-home' },
+      identity: { namespace: 'mqtt:shelly-protocol-id', value: physicalId },
+      verificationStatus: 'protocol_observed', firstSeenAt: observedAt, lastSeenAt: observedAt,
+      components: ['switch:0', 'switch:1'].map(key => ({ key, capabilities: ['switch', 'power'], firstSeenAt: observedAt, lastSeenAt: observedAt })),
+      endpoints: [], networkObservations: [],
+      assignments: [
+        { deviceId, physicalDeviceId: inventoryId, componentKey: 'switch:0', assignedAt: observedAt, assignedBy: 'operator' },
+        { deviceId: secondId, physicalDeviceId: inventoryId, componentKey: 'switch:1', assignedAt: observedAt, assignedBy: 'operator' },
+      ],
+    };
+    const endpoint = {
+      id: physicalId, ipAddress: '192.168.1.166', vendor: 'Shelly', model: 'SPSW-202PE16EU', generation: 2,
+      firmwareVersion: '2.0.0', status: 'online', discoveredAt: '2026-10-27T09:39:36.000Z',
+      networkZoneId: 'upstream-lan', networkZoneName: 'Upstream LAN', gatewayId: 'upstream-lan',
+      components: [{ component: 'switch:0', channel: 0 }, { component: 'switch:1', channel: 1 }],
+      observations: [
+        { source: 'http_identity', attribute: 'identity.device_id', value: physicalId, observedAt: '2026-10-27T09:39:00.000Z' },
+        { source: 'site_local_http_rpc', attribute: 'observer.identity', value: 'pi-housenet', observedAt: '2026-10-27T09:39:00.000Z' },
+        ...['switch:0', 'switch:1'].flatMap((key, index) => [
+          { source: 'site_local_http_rpc', attribute: 'shelly.component_status', value: key, method: `Switch.GetStatus?id=${index}`, observedAt: `2026-10-27T09:39:${10 + index * 10}.000Z` },
+          { source: 'site_local_http_rpc', attribute: 'shelly.measurement_capability', value: `${key}:power`, observedAt: `2026-10-27T09:39:${10 + index * 10}.000Z` },
+          { source: 'site_local_http_rpc', attribute: 'shelly.measurement_capability', value: `${key}:energy_import_total`, observedAt: `2026-10-27T09:39:${10 + index * 10}.000Z` },
+        ]),
+      ],
+    };
+    const snapshot = {
+      scanId: 'site-observer-2aec6d8b2d4d25f397a572203264edd0a388de00',
+      completedAt: '2026-10-27T09:39:36.000Z', ownership: { tenantId: 'tenant-demo', siteId: 'site-home' },
+      collector: { host: 'pi' }, scopes: [{ id: 'upstream-lan', cidr: '192.168.1.0/24' }], endpoints: [endpoint],
+    } as any;
+    const controller = new PortalController(
+      {} as any, {} as any, {} as any, {} as any, {} as any, registry,
+      {} as any, {} as any, {} as any, {} as any, {} as any,
+      undefined, undefined, { list: jest.fn().mockResolvedValue([inventory]) } as any,
+    );
+    const review = await (controller as any).buildSiteLocalShellyReview(
+      snapshot, snapshot.ownership, 'pi-housenet', endpoint, 'Home', false,
+    );
+    expect(review.reconciliationProposals).toHaveLength(2);
+    expect(review.reconciliationProposals).toEqual(expect.arrayContaining([
+      expect.objectContaining({ deviceId, physicalInventoryId: inventoryId, component: 'switch:0', evidenceFresh: false, currentIdentitySource: 'unverified' }),
+      expect.objectContaining({ deviceId: secondId, physicalInventoryId: inventoryId, component: 'switch:1', evidenceFresh: false, currentIdentitySource: 'unverified' }),
+    ]));
+    expect(review.reconciliationConflicts).toEqual([]);
+    expect(store.save).not.toHaveBeenCalled();
+    expect(records.map(item => ({ id: item.device.id, room: item.device.zoneName }))).toEqual([
+      { id: deviceId, room: 'Bathroom' }, { id: secondId, room: 'Unknown' },
+    ]);
+  });
+
+  it('does not write authority when saved physical identity evidence is only proposed', async () => {
+    const h = setup();
+    await h.registry.onModuleInit();
+    expect(await h.registry.getShellyReconciliationTargetDecision(
+      'tenant-demo', 'site-home', deviceId, physicalId, component, evidence().physicalInventoryId,
+    )).toMatchObject({ matched: true });
     expect(h.store.save).not.toHaveBeenCalled();
+    expect(h.record.observationAuthority).toBeUndefined();
+    expect(h.device.control).toBeUndefined();
   });
 
   it('rejects identity/component mismatches and evidence outside the authorized site', async () => {

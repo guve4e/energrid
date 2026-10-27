@@ -75,7 +75,7 @@ type ShellyReconciliationProposal = {
 type SiteLocalEvidenceImport = {
   status: string; scanId: string; observerId: string; physicalId: string;
   reconciliationProposals: ShellyReconciliationProposal[];
-  reconciliationConflicts: Array<{ deviceId: string; component: string; reason: string }>;
+  reconciliationConflicts: Array<{ deviceId: string; component: string; reason: string; reasonCode?: string }>;
   historicalComponentConflicts: string[];
 };
 
@@ -531,7 +531,7 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
           <button v-if="!proposal.reconciled" type="button" class="ni-button ni-button-primary" @click="emit('reconcileSiteLocalEvidence', { scanId: proposal.evidenceScanId, deviceId: proposal.deviceId, component: proposal.component })">{{ proposal.evidenceFresh ? 'Record verified identity for this existing component' : 'Record historical identity evidence for this existing component' }}</button>
           <span v-else class="ni-status-pill is-complete" role="status">Identity evidence recorded · no enrollment or authority granted</span>
         </article>
-        <p v-if="siteLocalEvidenceImport.reconciliationConflicts.length" class="ni-review-note">Conflicts suppressed without changing records: {{ siteLocalEvidenceImport.reconciliationConflicts.map(item => `${item.component}: ${item.reason}`).join(' · ') }}</p>
+        <p v-if="siteLocalEvidenceImport.reconciliationConflicts.length" class="ni-review-note">Conflicts suppressed without changing records: {{ siteLocalEvidenceImport.reconciliationConflicts.map(item => `${item.component}${item.reasonCode ? ` [${item.reasonCode}]` : ''}: ${item.reason}`).join(' · ') }}</p>
         <p v-if="siteLocalEvidenceImport.historicalComponentConflicts.length" class="ni-review-note">Historical component evidence preserved: {{ siteLocalEvidenceImport.historicalComponentConflicts.join(', ') }}</p>
         <p v-if="!siteLocalEvidenceImport.reconciliationProposals.length" role="status">No exact enrolled component matched this report. No existing record was changed.</p>
       </template>

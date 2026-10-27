@@ -57,7 +57,7 @@ type ShellyReconciliationProposal = {
 type SiteLocalEvidenceImport = {
   status: string; scanId: string; observerId: string; physicalId: string;
   reconciliationProposals: ShellyReconciliationProposal[];
-  reconciliationConflicts: Array<{ deviceId: string; component: string; reason: string }>;
+  reconciliationConflicts: Array<{ deviceId: string; component: string; reason: string; reasonCode?: string }>;
   historicalComponentConflicts: string[];
 };
 

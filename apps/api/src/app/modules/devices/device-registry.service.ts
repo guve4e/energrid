@@ -58,6 +58,23 @@ export interface DiscoveredDeviceConfig {
   metadata?: Record<string, string | number | boolean>;
 }
 
+export type ShellyReconciliationRejectionCode =
+  | 'logical_record_missing'
+  | 'logical_record_outside_site'
+  | 'installation_missing'
+  | 'installation_scope_mismatch'
+  | 'device_not_physical'
+  | 'device_not_approved'
+  | 'physical_identity_mismatch'
+  | 'component_mismatch'
+  | 'logical_device_id_mismatch'
+  | 'physical_inventory_conflict'
+  | 'not_enrolled';
+
+export type ShellyReconciliationTargetDecision =
+  | { matched: true; device: RegisteredDevice }
+  | { matched: false; reasonCode: ShellyReconciliationRejectionCode };
+
 interface ApprovedDeviceConfig {
   id?: string;
   deviceId?: string;
@@ -779,13 +796,11 @@ export class DeviceRegistryService implements OnModuleInit {
       throw new Error('Accepted, exact site-local Shelly identity evidence is required.');
     }
     const key = scopedDeviceKey(deviceId, tenantId, siteId);
-    const device = this.getDevices(true).find(item => item.id === deviceId && item.tenantId === tenantId && item.siteId === siteId);
-    const record = this.persistedInstallations.get(key);
-    if (!device || device.kind !== 'physical' || device.trustStatus !== 'approved' ||
-        device.metadata?.physicalId !== physicalId || device.metadata?.component !== component ||
-        device.metadata?.physicalInventoryId !== input.physicalInventoryId ||
-        !record || record.device.tenantId !== tenantId || record.device.siteId !== siteId ||
-        (this.enrollment && (await this.enrollment.find({ tenantId, siteId, deviceId }))?.status !== 'enrolled')) return null;
+    const decision = await this.getShellyReconciliationTargetDecision(
+      tenantId, siteId, deviceId, physicalId, component, input.physicalInventoryId,
+    );
+    if (!decision.matched) return null;
+    const device = decision.device;
 
     const config = this.liveApprovedDeviceConfigs.get(key);
     if (!config) return null;
@@ -831,17 +846,45 @@ export class DeviceRegistryService implements OnModuleInit {
   }
 
   async getShellyReconciliationTarget(tenantId: string, siteId: string, deviceId: string, physicalId: string, component: string, physicalInventoryId: string): Promise<RegisteredDevice | null> {
+    const decision = await this.getShellyReconciliationTargetDecision(
+      tenantId, siteId, deviceId, physicalId, component, physicalInventoryId,
+    );
+    return decision.matched ? decision.device : null;
+  }
+
+  /**
+   * Evaluates an existing Shelly component against a server-validated
+   * same-site physical inventory assignment. The inventory link is stored in
+   * the physical inventory repository, not copied into legacy MQTT device
+   * metadata, so absence of metadata.physicalInventoryId is not a mismatch.
+   */
+  async getShellyReconciliationTargetDecision(
+    tenantId: string, siteId: string, deviceId: string, physicalId: string,
+    component: string, physicalInventoryId: string,
+  ): Promise<ShellyReconciliationTargetDecision> {
     await this.ensureInstallationsLoaded();
     const key = scopedDeviceKey(deviceId, tenantId, siteId);
-    const device = this.getDevices(true).find(item => item.id === deviceId && item.tenantId === tenantId && item.siteId === siteId);
+    const sameIdRecords = this.getDevices(true).filter(item => item.id === deviceId);
+    const device = sameIdRecords.find(item => item.tenantId === tenantId && item.siteId === siteId);
+    if (!device) return { matched: false, reasonCode: sameIdRecords.length ? 'logical_record_outside_site' : 'logical_record_missing' };
     const record = this.persistedInstallations.get(key);
-    if (!device || !record || record.device.tenantId !== tenantId || record.device.siteId !== siteId ||
-        device.kind !== 'physical' || device.trustStatus !== 'approved' ||
-        device.metadata?.physicalId !== physicalId || device.metadata?.component !== component ||
-        device.metadata?.physicalInventoryId !== physicalInventoryId ||
-        device.id !== `${physicalId}:${component}` ||
-        (this.enrollment && (await this.enrollment.find({ tenantId, siteId, deviceId }))?.status !== 'enrolled')) return null;
-    return device;
+    if (!record) return { matched: false, reasonCode: 'installation_missing' };
+    if (record.device.tenantId !== tenantId || record.device.siteId !== siteId)
+      return { matched: false, reasonCode: 'installation_scope_mismatch' };
+    if (device.kind !== 'physical') return { matched: false, reasonCode: 'device_not_physical' };
+    if (device.trustStatus !== 'approved') return { matched: false, reasonCode: 'device_not_approved' };
+    if (device.metadata?.physicalId !== physicalId) return { matched: false, reasonCode: 'physical_identity_mismatch' };
+    if (device.metadata?.component !== component) return { matched: false, reasonCode: 'component_mismatch' };
+    if (device.id !== `${physicalId}:${component}`) return { matched: false, reasonCode: 'logical_device_id_mismatch' };
+    // A present metadata link must agree. Legacy MQTT records commonly have no
+    // copy because their authoritative component assignment is persisted in
+    // PhysicalDeviceInventory and was validated by the caller before this gate.
+    if (device.metadata?.physicalInventoryId !== undefined &&
+        device.metadata.physicalInventoryId !== physicalInventoryId)
+      return { matched: false, reasonCode: 'physical_inventory_conflict' };
+    if (this.enrollment && (await this.enrollment.find({ tenantId, siteId, deviceId }))?.status !== 'enrolled')
+      return { matched: false, reasonCode: 'not_enrolled' };
+    return { matched: true, device };
   }
 
   async approveShellyObservations(

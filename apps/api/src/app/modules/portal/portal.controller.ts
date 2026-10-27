@@ -857,13 +857,15 @@ export class PortalController {
       const inventory = findExactShellyInventoryAssignment(siteInventories, ownership, String(candidate.id), device.id, component)
       if (!inventory) {
         reconciliationConflicts.push({ deviceId: candidate.id, component,
+          reasonCode: 'physical_inventory_assignment_unmatched',
           reason: 'No unique same-site physical inventory assignment matches this exact Shelly identity and component; no existing record was changed.' })
         continue
       }
-      const current = await this.deviceRegistry.getShellyReconciliationTarget(
+      const match = await this.deviceRegistry.getShellyReconciliationTargetDecision(
         ownership.tenantId, ownership.siteId, String(candidate.id), device.id, component, inventory.physicalDeviceId,
       )
-      if (current) {
+      if (match.matched) {
+        const current = match.device
         const identityVerifiedAt = String(device.observations?.find(item => item.source === 'http_identity' &&
           item.attribute === 'identity.device_id' && item.value === device.id)?.observedAt || '')
         const componentVerifiedAt = String(device.observations?.find(item => item.source === 'site_local_http_rpc' &&
@@ -885,10 +887,22 @@ export class PortalController {
       }
       const sameId = this.deviceRegistry.getDevices(true).find(existing => existing.id === candidate.id)
       if (sameId) {
+        const rejectionMessages: Record<string, string> = {
+          logical_record_outside_site: 'A logical device with this identity exists outside the authorized site; cross-site reconciliation and duplicate candidate creation were suppressed.',
+          installation_missing: 'The scoped logical device record has no durable installation record; no metadata was changed.',
+          installation_scope_mismatch: 'The durable installation record does not belong to the authorized tenant and site; no metadata was changed.',
+          device_not_physical: 'The existing logical record is not classified as a physical device; no metadata was changed.',
+          device_not_approved: 'The existing physical device is not in an approved state; no metadata was changed.',
+          physical_identity_mismatch: 'The existing record has a different protocol identity; no metadata was changed.',
+          component_mismatch: 'The existing record has a different component key; no metadata was changed.',
+          logical_device_id_mismatch: 'The existing logical ID does not match this physical identity and component; no metadata was changed.',
+          physical_inventory_conflict: 'The logical record has a physical inventory link that conflicts with the server-validated assignment; no metadata was changed.',
+          not_enrolled: 'The existing logical record is not currently enrolled; no metadata was changed.',
+          logical_record_missing: 'The exact logical record was not found; no duplicate candidate was created.',
+        }
         reconciliationConflicts.push({ deviceId: candidate.id, component,
-          reason: sameId.tenantId !== ownership.tenantId || sameId.siteId !== ownership.siteId
-            ? 'A logical device with this identity exists outside the authorized site; cross-site reconciliation and duplicate candidate creation were suppressed.'
-            : 'An existing record has different identity or enrollment state; no metadata was changed and no duplicate candidate was created.' })
+          reasonCode: match.reasonCode,
+          reason: rejectionMessages[match.reasonCode] || 'The existing record did not pass a reconciliation check; no metadata was changed.' })
         continue
       }
       if (registerUnmatched) {
