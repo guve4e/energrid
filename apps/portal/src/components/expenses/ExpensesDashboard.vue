@@ -17,19 +17,29 @@ type Expense = {
   legacyRecordId?: string;
   legacyReadOnly?: boolean;
 };
+type SpendingSummaryView = {
+  total: string;
+  dailyAverage: string | null;
+  transactionCount: number;
+  excludedUnconvertedCount: number;
+  legacyCoverage: string;
+  byCategory: Array<{ category: string; total: string; count: number }>;
+  byMonth: Array<{ month: string; total: string; count: number }>;
+};
 type FinanceCategory = { id: string; name: string; description: string | null; parentId: string | null; status: 'active' | 'archived' };
 const props = defineProps<{ apiBase: string; accessToken: string }>();
 const expenses = ref<Expense[]>([]);
-const summary = ref({ total: '0', dailyAverage: null as string | null, transactionCount: 0, excludedUnconvertedCount: 0, legacyCoverage: 'leveldb-available', byCategory: [] as Array<{ category: string; total: string; count: number }> });
-const yearSummary = ref({ total: '0' });
-const allHistorySummary = ref({ total: '0', transactionCount: 0, byCategory: [] as Array<{ category: string; total: string; count: number }>, byMonth: [] as Array<{ month: string; total: string; count: number }> });
+const emptySummary = (): SpendingSummaryView => ({ total: '0', dailyAverage: null, transactionCount: 0, excludedUnconvertedCount: 0, legacyCoverage: 'leveldb-available', byCategory: [], byMonth: [] });
+const summary = ref<SpendingSummaryView>(emptySummary());
+const yearSummary = ref<SpendingSummaryView>(emptySummary());
+const allHistorySummary = ref<SpendingSummaryView>(emptySummary());
 const loading = ref(true);
 const error = ref('');
 const busy = ref(false);
 const addOpen = ref(false);
 const editingId = ref<string | null>(null);
 const month = ref(localMonth());
-const transactionScope = ref<'month' | 'all'>('month');
+const transactionScope = ref<'month' | 'year' | 'all'>('all');
 const search = ref('');
 const categoryFilter = ref('');
 const transactionPage = ref(1);
@@ -54,19 +64,40 @@ const form = reactive({
 });
 
 const categoryOptions = computed(() => [...new Set([...categories.value.map((item) => item.name), ...summary.value.byCategory.map((item) => item.category), ...allHistorySummary.value.byCategory.map((item) => item.category)])].sort((a, b) => a.localeCompare(b)));
-const unconvertedCount = computed(() => summary.value.excludedUnconvertedCount);
-const monthTotal = computed(() => Number(summary.value.total));
+const displaySummary = computed(() => transactionScope.value === 'all'
+  ? allHistorySummary.value
+  : transactionScope.value === 'year'
+    ? yearSummary.value
+    : summary.value);
+const displayScopeLabel = computed(() => transactionScope.value === 'all'
+  ? 'All history'
+  : transactionScope.value === 'year'
+    ? month.value.slice(0, 4)
+    : selectedMonthLabel.value);
+const displaySummaryTitle = computed(() => transactionScope.value === 'all'
+  ? 'All history'
+  : transactionScope.value === 'year'
+    ? `${month.value.slice(0, 4)} total`
+    : 'This month');
+const dailyPaceLabel = computed(() => transactionScope.value === 'month'
+  ? 'Average per day this month'
+  : transactionScope.value === 'year'
+    ? `Average per day in ${month.value.slice(0, 4)}`
+    : 'Average per day over all history');
+const unconvertedCount = computed(() => displaySummary.value.excludedUnconvertedCount);
 const yearTotal = computed(() => Number(yearSummary.value.total));
 const allHistoryTotal = computed(() => Number(allHistorySummary.value.total));
 const transactionPageCount = computed(() => Math.max(1, Math.ceil(expenses.value.length / transactionPageSize)));
 const selectedMonthLabel = computed(() => new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${month.value}-15T00:00:00Z`)));
 const selectedDateRangeLabel = computed(() => {
+  if (transactionScope.value === 'all') return 'All recorded dates';
+  if (transactionScope.value === 'year') return `${month.value.slice(0, 4)} calendar year`;
   const range = monthRange(month.value);
   return `${humanDate(range.fromDate)} – ${humanDate(range.toDate)}`;
 });
-const dailyAverage = computed(() => summary.value.dailyAverage);
+const dailyAverage = computed(() => displaySummary.value.dailyAverage);
 const categoryTotals = computed(() => {
-  return summary.value.byCategory.map((item) => ({ name: item.category, total: Number(item.total) }));
+  return displaySummary.value.byCategory.map((item) => ({ name: item.category, total: Number(item.total) }));
 });
 const maxCategoryTotal = computed(() =>
   Math.max(1, ...categoryTotals.value.map((item) => item.total)),
@@ -120,13 +151,12 @@ const humanDate = (value: string) =>
 const euroPercent = (value: number) =>
   `${Math.max(3, Math.round((value / maxCategoryTotal.value) * 100))}%`;
 
-watch(month, () => {
+watch([month, transactionScope], () => {
   transactionPage.value = 1;
-  if (transactionScope.value === 'month') void load();
-  else void refreshSummaries().catch(setRequestError);
+  void load();
 });
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
-watch([transactionScope, search, categoryFilter], () => { transactionPage.value = 1; clearTimeout(searchTimer); searchTimer = setTimeout(loadExpenses, 250); });
+watch([search, categoryFilter], () => { transactionPage.value = 1; clearTimeout(searchTimer); searchTimer = setTimeout(loadExpenses, 250); });
 
 function setRequestError(cause: unknown) {
   error.value = cause instanceof Error ? cause.message : 'Your expenses could not be loaded.';
@@ -175,6 +205,10 @@ async function loadExpenses() {
       const range = monthRange(month.value);
       query.set('fromDate', range.fromDate);
       query.set('toDate', range.toDate);
+    } else if (transactionScope.value === 'year') {
+      const year = month.value.slice(0, 4);
+      query.set('fromDate', `${year}-01-01`);
+      query.set('toDate', `${year}-12-31`);
     }
     if (search.value.trim()) query.set('text', search.value.trim());
     if (categoryFilter.value) query.set('category', categoryFilter.value);
@@ -193,6 +227,7 @@ async function load() {
 }
 
 function selectChartMonth(value: string) {
+  transactionScope.value = 'month';
   month.value = value;
 }
 
@@ -405,19 +440,19 @@ onMounted(load);
       >
     </div>
 
-    <div v-if="summary.legacyCoverage === 'leveldb-unavailable'" class="expense-legacy-warning" role="status">
+    <div v-if="displaySummary.legacyCoverage === 'leveldb-unavailable'" class="expense-legacy-warning" role="status">
       Older LevelDB expenses could not be loaded. These totals may be incomplete; PostgreSQL records remain available.
     </div>
 
     <div class="expense-metrics">
       <article class="expense-metric expense-metric--featured">
-        <span>This month</span><strong>{{ formatEur(monthTotal) }}</strong
-        ><small>{{ summary.transactionCount }} recorded expenses</small>
+        <span>{{ displaySummaryTitle }}</span><strong>{{ formatEur(displaySummary.total) }}</strong
+        ><small>{{ displaySummary.transactionCount }} recorded expenses</small>
         <div class="expense-metric-glow" aria-hidden="true"></div>
       </article>
       <article class="expense-metric">
         <span>Daily pace</span><strong>{{ dailyAverage === null || dailyAverage === undefined ? '—' : formatEur(dailyAverage) }}</strong
-        ><small>Average per day this month</small>
+        ><small>{{ dailyPaceLabel }}</small>
       </article>
       <article class="expense-metric">
         <span>{{ month.slice(0, 4) === String(new Date().getFullYear()) ? 'Year to date' : 'Year total' }}</span><strong>{{ formatEur(yearTotal) }}</strong
@@ -434,8 +469,8 @@ onMounted(load);
         }}</strong
         ><small>{{
           categoryTotals[0]
-            ? formatEur(categoryTotals[0].total) + ' this month'
-            : 'No expenses this month'
+            ? `${formatEur(categoryTotals[0].total)} · ${displayScopeLabel}`
+            : `No expenses · ${displayScopeLabel}`
         }}</small>
       </article>
     </div>
@@ -464,8 +499,8 @@ onMounted(load);
             :key="item.key"
             type="button"
             class="expense-chart-column"
-            :class="{ selected: item.key === month }"
-            :aria-pressed="item.key === month"
+            :class="{ selected: transactionScope === 'month' && item.key === month }"
+            :aria-pressed="transactionScope === 'month' && item.key === month"
             :aria-label="chartMonthTitle(item)"
             :title="chartMonthTitle(item)"
             @click="selectChartMonth(item.key)"
@@ -476,6 +511,7 @@ onMounted(load);
                 class="expense-chart-bar"
                 :style="{
                   height: `${Math.max(2, (item.total / maxMonthTotal) * 100)}%`,
+                  width: '100%',
                 }"
               ></div>
             </div>
@@ -492,7 +528,7 @@ onMounted(load);
         <div class="expense-card-heading">
           <div>
             <h2>Where it goes</h2>
-            <p>Category totals · {{ selectedMonthLabel }} · EUR</p>
+            <p>Category totals · {{ displayScopeLabel }} · EUR</p>
           </div>
         </div>
         <div v-if="categoryTotals.length" class="expense-category-list">
@@ -512,8 +548,8 @@ onMounted(load);
         </div>
         <div v-else class="expense-empty-small">
           <span class="expense-empty-icon">↗</span
-          ><strong>A fresh month starts here</strong>
-          <p>Choose a different month or add your first expense.</p>
+          ><strong>No expenses for this period</strong>
+          <p>Choose another reporting period or add an expense.</p>
         </div>
       </article>
     </div>
@@ -522,12 +558,13 @@ onMounted(load);
       <div class="expense-card-heading expense-transactions-heading">
         <div>
           <h2>Transactions</h2>
-          <p>{{ transactionScope === 'month' ? `${selectedDateRangeLabel} · ${selectedMonthLabel}` : 'All recorded dates' }} · {{ expenses.length }} matching</p>
+          <p>{{ selectedDateRangeLabel }}<template v-if="transactionScope === 'month'"> · {{ selectedMonthLabel }}</template> · {{ expenses.length }} matching</p>
         </div>
         <label class="expense-scope-filter">
           <span class="sr-only">Transaction date range</span>
           <select v-model="transactionScope" aria-label="Transaction date range">
             <option value="month">Selected month</option>
+            <option value="year">Selected year</option>
             <option value="all">All history</option>
           </select>
         </label>
@@ -1012,6 +1049,7 @@ onMounted(load);
   border-radius: 7px 7px 0 0;
   min-height: 2px;
   transition: height 0.25s;
+  width: 100%;
 }
 .expense-chart-column.selected .expense-chart-track {
   background: var(--eg-blue-soft);

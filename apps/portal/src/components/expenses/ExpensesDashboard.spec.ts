@@ -47,17 +47,19 @@ describe('Personal Finance V2 Portal cutover', () => {
   it('loads backend summaries and searches through V2 routes', async () => {
     const { calls } = setup();
     await flushPromises();
-    expect(calls.some(({ url }) => url.startsWith('/personal-finance/expenses?limit=1000&fromDate='))).toBe(true);
+    expect(calls.some(({ url }) => url.startsWith('/personal-finance/expenses?limit=1000') && !url.includes('fromDate='))).toBe(true);
     expect(calls.some(({ url }) => url.startsWith('/personal-finance/summary?'))).toBe(true);
     expect(calls.some(({ url }) => url === '/personal-finance/summary')).toBe(true);
     expect(wrapper!.text()).toContain('407');
     expect(wrapper!.text()).toContain('Daily pace');
-    expect(wrapper!.text()).toContain('€13.15');
     expect(wrapper!.text()).toContain('All history');
+    expect(wrapper!.get('select[aria-label="Transaction date range"]').element).toHaveProperty('value', 'all');
     expect(wrapper!.get('select[aria-label="Filter expenses by category"]').text()).toContain('Historical');
     expect(wrapper!.text()).toContain('Groceries');
     await wrapper!.get('input[type="month"]').setValue('2025-01');
+    await wrapper!.get('select[aria-label="Transaction date range"]').setValue('month');
     await flushPromises();
+    expect(wrapper!.text()).toContain('€13.15');
     expect(wrapper!.text()).toContain('Year total');
     const monthQueries = calls.filter(({ url }) => url.includes('/personal-finance/summary?fromDate='));
     expect(monthQueries.some(({ url }) => url.includes('fromDate=2025-01-01'))).toBe(true);
@@ -110,14 +112,34 @@ describe('Personal Finance V2 Portal cutover', () => {
     expect(wrapper!.text()).toContain('Add expense');
   });
 
-  it('uses the selected month for list filters and allows an explicit all-history scope', async () => {
+  it('uses month, calendar-year, and all-history scopes for transactions and summaries', async () => {
     const { calls } = setup();
     await flushPromises();
     const scope = wrapper!.get('select[aria-label="Transaction date range"]');
+    expect(scope.text()).toContain('Selected year');
+    expect(scope.element).toHaveProperty('value', 'all');
+    expect(wrapper!.text()).toContain('Category totals · All history · EUR');
+
+    await scope.setValue('month');
+    await new Promise((resolve) => setTimeout(resolve, 280));
+    await flushPromises();
+    expect(wrapper!.text()).toContain('Category totals · October 2026 · EUR');
+    expect(calls.some(({ url }) => url.includes('/personal-finance/expenses?') && url.includes('fromDate=2026-10-01') && url.includes('toDate=2026-10-31'))).toBe(true);
+
+    await scope.setValue('year');
+    await new Promise((resolve) => setTimeout(resolve, 280));
+    await flushPromises();
+    expect(calls.some(({ url }) => url.includes('/personal-finance/expenses?') && url.includes('fromDate=2026-01-01') && url.includes('toDate=2026-12-31'))).toBe(true);
+    expect(calls.some(({ url }) => url.includes('/personal-finance/summary?') && url.includes('fromDate=2026-01-01') && url.includes('toDate=2026-12-31'))).toBe(true);
+    expect(wrapper!.text()).toContain('Category totals · 2026 · EUR');
+    expect(wrapper!.text()).toContain('2026 calendar year');
+
     await scope.setValue('all');
     await new Promise((resolve) => setTimeout(resolve, 280));
     await flushPromises();
     expect(calls.some(({ url }) => url.includes('/personal-finance/expenses?limit=1000') && !url.includes('fromDate=') && !url.includes('toDate='))).toBe(true);
+    expect(wrapper!.text()).toContain('Category totals · All history · EUR');
+    expect(wrapper!.text()).toContain('All recorded dates');
     await wrapper!.get('input[aria-label="Search expenses"]').setValue('lidl');
     await wrapper!.get('select[aria-label="Filter expenses by category"]').setValue('Fuel');
     await new Promise((resolve) => setTimeout(resolve, 280));
@@ -135,9 +157,12 @@ describe('Personal Finance V2 Portal cutover', () => {
     expect(chart.text()).toContain('Oct ’25');
     expect(wrapper!.get('.expense-chart-total').text()).toContain('October 2025');
     expect(wrapper!.get('.expense-chart-total').text()).toContain('€26.00');
+    expect(chart.findAll('.expense-chart-column.selected')).toHaveLength(0);
+    expect(chart.findAll('.expense-chart-line')).toHaveLength(0);
     for (const button of chart.findAll('button')) {
       const bar = button.get('.expense-chart-bar');
       expect(bar.attributes('style')).toContain('height:');
+      expect(bar.attributes('style')).toContain('width: 100%');
       expect(Number.parseFloat(bar.element.getAttribute('style')!.match(/height:\s*([\d.]+)%/)?.[1] ?? '0')).toBeGreaterThan(0);
     }
     const monthButton = chart.findAll('button').find((button) => button.attributes('aria-label')?.includes('April 2025'))!;
@@ -146,6 +171,9 @@ describe('Personal Finance V2 Portal cutover', () => {
     await monthButton.trigger('click');
     await flushPromises();
     expect(wrapper!.get('input[type="month"]').element).toHaveProperty('value', '2025-04');
+    expect(wrapper!.get('select[aria-label="Transaction date range"]').element).toHaveProperty('value', 'month');
+    expect(chart.findAll('.expense-chart-column.selected')).toHaveLength(1);
+    expect(wrapper!.text()).toContain('Category totals · April 2025 · EUR');
     expect(wrapper!.get('.expense-chart-total').text()).toContain('April 2025');
     expect(wrapper!.get('.expense-chart-total').text()).toContain('€18.00');
   });
