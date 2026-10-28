@@ -938,7 +938,19 @@ export class PortalController {
     const evidence = raw?.evidence as Record<string, any> | undefined
     const observerId = typeof evidence?.observerId === 'string' ? evidence.observerId : ''
     const observer = observers.find(item => item.id === observerId && item.tenantId === ownership.tenantId && item.siteId === ownership.siteId);
-    const selectedEndpoint = snapshot.endpoints.find(item => item.id === body.deviceId)
+    // The Portal submits the enrolled logical component ID (physical ID + component),
+    // while Discovery Memory stores the physical endpoint under its Shelly ID.
+    // Resolve only that exact supported suffix; the checks below still validate the
+    // server-authorized physical identity, site, observer, scope, inventory and RPC evidence.
+    const componentSuffix = `:${body.component}`
+    const physicalId = /^(?:switch|em1):(?:[0-9]|[12][0-9]|3[01])$/.test(body.component) &&
+      body.deviceId.endsWith(componentSuffix)
+      ? body.deviceId.slice(0, -componentSuffix.length)
+      : ''
+    if (!/^shelly[a-z0-9._-]{1,114}$/i.test(physicalId)) {
+      throw new BadRequestException('The selected logical component does not map to the verified physical identity.')
+    }
+    const selectedEndpoint = snapshot.endpoints.find(item => item.id === physicalId)
     if (!observer || !selectedEndpoint || observer.scopeId !== selectedEndpoint.networkZoneId ||
         observer.host !== snapshot.collector.host || observer.cidr !== snapshot.scopes.find(item => item.id === observer.scopeId)?.cidr) {
       throw new BadRequestException('Evidence observer, site, and authorized network scope no longer match.')
@@ -948,7 +960,7 @@ export class PortalController {
     if (!Number.isFinite(completedAt) || completedAt > now + 30_000) {
       throw new BadRequestException('The accepted report has an invalid completion timestamp.')
     }
-    const endpoint = snapshot.endpoints.find(item => item.id === body.deviceId && item.networkZoneId === observer.scopeId)
+    const endpoint = snapshot.endpoints.find(item => item.id === physicalId && item.networkZoneId === observer.scopeId)
     if (!endpoint || endpoint.vendor !== 'Shelly' || !observer.expectedDeviceIds.some(id => id.toLowerCase() === endpoint.id.toLowerCase())) {
       throw new BadRequestException('Evidence does not match the observer allowlist and selected physical identity.')
     }
