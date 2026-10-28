@@ -53,7 +53,7 @@ describe('Personal Finance historical import normalization', () => {
       findImportedLegacyIds: jest.fn().mockResolvedValue([]),
     } as unknown as PersonalFinanceApplication;
     const legacy = { list: jest.fn().mockResolvedValue([old]) } as unknown as PersonalExpenseStore;
-    const controller = new PersonalFinanceController(finance, legacy);
+    const controller = new PersonalFinanceController(finance, legacy, {} as any);
     const request = { user: { userId: 'account-a' } } as any;
 
     expect((await controller.query({ limit: '100' }, request)).expenses).toMatchObject([
@@ -68,7 +68,7 @@ describe('Personal Finance historical import normalization', () => {
       findImportedLegacyIds: jest.fn().mockResolvedValue(['pg-duplicate']),
     } as unknown as PersonalFinanceApplication;
     const legacy = { list: jest.fn().mockResolvedValue([{ legacyRecordId: 'leveldb-duplicate' }]) } as unknown as PersonalExpenseStore;
-    const controller = new PersonalFinanceController(finance, legacy);
+    const controller = new PersonalFinanceController(finance, legacy, {} as any);
     const request = { user: { userId: 'account-a' } } as any;
     const raw = (id: string) => ({ _id: id, date: '2025-01-03', amount: '2.50', currency: 'EUR', category: 'Food', description: 'Groceries' });
     const preview = await controller.previewImport({ records: [raw('leveldb-duplicate'), raw('pg-duplicate'), raw('new-source')] }, request);
@@ -82,7 +82,7 @@ describe('Personal Finance historical import normalization', () => {
       importExpenses: jest.fn().mockResolvedValue({ imported: 1, duplicates: 0 }),
     } as unknown as PersonalFinanceApplication;
     const legacy = { list: jest.fn().mockResolvedValue([{ legacyRecordId: 'leveldb-duplicate' }]) } as unknown as PersonalExpenseStore;
-    const controller = new PersonalFinanceController(finance, legacy);
+    const controller = new PersonalFinanceController(finance, legacy, {} as any);
     const request = { user: { userId: 'account-a' } } as any;
     const raw = (id: string) => ({ _id: id, date: '2025-01-03', amount: '2.50', currency: 'EUR', category: 'Food', description: 'Groceries' });
     const result = await controller.import({ records: [raw('leveldb-duplicate'), raw('pg-duplicate'), raw('new-source')] }, request);
@@ -97,7 +97,7 @@ describe('Personal Finance historical import normalization', () => {
       findImportedLegacyIds: jest.fn().mockResolvedValue([]),
     } as unknown as PersonalFinanceApplication;
     const legacy = { list: jest.fn().mockRejectedValue(new Error('Database is not open')) } as unknown as PersonalExpenseStore;
-    const controller = new PersonalFinanceController(finance, legacy);
+    const controller = new PersonalFinanceController(finance, legacy, {} as any);
 
     await expect(controller.query({}, { user: { userId: 'account-a' } } as any)).resolves.toMatchObject({
       expenses: [postgresExpense],
@@ -113,7 +113,7 @@ describe('Personal Finance historical import normalization', () => {
       findImportedLegacyIds: jest.fn().mockResolvedValue([]),
     } as unknown as PersonalFinanceApplication;
     const legacy = { list: jest.fn().mockRejectedValue(new Error('Database is not open')) } as unknown as PersonalExpenseStore;
-    const controller = new PersonalFinanceController(finance, legacy);
+    const controller = new PersonalFinanceController(finance, legacy, {} as any);
 
     await expect(controller.summary({}, { user: { userId: 'account-a' } } as any)).resolves.toMatchObject({
       total: '12.00', transactionCount: 1, legacyCoverage: 'leveldb-unavailable',
@@ -135,7 +135,7 @@ describe('Personal Finance historical import normalization', () => {
     const legacy = { list: jest.fn().mockResolvedValue([
       { legacyRecordId: 'legacy-1', date: '2025-01-03', amountEur: '15', category: 'Fuel' },
     ]) } as unknown as PersonalExpenseStore;
-    const controller = new PersonalFinanceController(finance, legacy);
+    const controller = new PersonalFinanceController(finance, legacy, {} as any);
 
     await expect(controller.summary({ fromDate: '2025-01-01', toDate: '2025-01-31' }, { user: { userId: 'account-a' } } as any)).resolves.toMatchObject({
       total: '30', dailyAverage: '0.97',
@@ -153,7 +153,7 @@ describe('Personal Finance historical import normalization', () => {
       importExpenses: jest.fn(),
     } as unknown as PersonalFinanceApplication;
     const legacy = { list: jest.fn().mockRejectedValue(new Error('Database is not open')) } as unknown as PersonalExpenseStore;
-    const controller = new PersonalFinanceController(finance, legacy);
+    const controller = new PersonalFinanceController(finance, legacy, {} as any);
     const request = { user: { userId: 'account-a' } } as any;
     const records = [{ _id: 'source-1', date: '2025-01-03', amount: '2.50', currency: 'EUR', category: 'Food', description: 'Groceries' }];
 

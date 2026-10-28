@@ -4,7 +4,7 @@
 
 Personal Expenses is an account-scoped feature in the Energrid Portal. It stores personal transactions separately from device, site, energy-telemetry and household-inventory records. Every API request requires an Energrid access token; the server scopes reads, writes, imports and deletion to the authenticated account ID.
 
-The existing `/personal-expenses` API and Portal retain their LevelDB behavior for compatibility. Foundation V2 adds the separate `/personal-finance` account-scoped API backed by PostgreSQL. Its text proposal parser is local and provider-independent; proposals remain drafts until an authenticated user confirms them. Receipt OCR, payment integrations, and Assistant tool registration are not part of this milestone.
+The existing `/personal-expenses` API and Portal retain their LevelDB behavior for compatibility. Foundation V2 adds the separate `/personal-finance` account-scoped API backed by PostgreSQL. Its text proposal parser is local and provider-independent; proposals remain drafts until an authenticated user confirms them. Receipt Intelligence can extract a JPEG or PNG after the signed-in user explicitly opts in to cloud processing. Extraction creates a review-required draft; it does not create an expense until the user reviews and confirms it. Payment integrations and Assistant tool registration remain out of scope.
 
 ## Record and currency behavior
 
@@ -24,9 +24,9 @@ The existing LevelDB importer accepts up to 5 MB of JSON. The V2 PostgreSQL impo
 
 ## Storage and privacy
 
-The legacy API stores records in `~/.energrid/personal-expenses` by default, configurable with `ENERGRID_PERSONAL_EXPENSES_DIRECTORY`. V2 adds PostgreSQL tables for merchants, expense drafts, expenses, line items, receipt metadata and immutable provenance. Receipt storage is represented by a storage key and metadata; this milestone does not implement image upload or OCR. The migration is additive and its down migration intentionally preserves the financial tables.
+The legacy API stores records in `~/.energrid/personal-expenses` by default, configurable with `ENERGRID_PERSONAL_EXPENSES_DIRECTORY`. V2 adds PostgreSQL tables for merchants, expense drafts, expenses, line items, receipt metadata and immutable provenance. Receipt image files are stored separately under `~/.energrid/private-receipts` by default, configurable with `PERSONAL_FINANCE_RECEIPTS_DIR`; account directories use mode `0700`, files use mode `0600`, and API responses omit private storage keys. The receipt migration is additive and its down migration intentionally preserves financial records.
 
-V2 stores receipt metadata and a storage key, but does not upload or retain receipt files. Banking credentials and external financial APIs remain out of scope. Those integrations require a separate design for provider access, consent, retention, corrections and reconciliation. The legacy `/personal-expenses` capture endpoint continues to use Energrid's existing LLM configuration; the V2 proposal endpoint uses a local parser.
+Receipt extraction sends an image to the configured OpenAI document-understanding adapter only when the request includes explicit consent and `ENERGRID_LLM_MODE=cloud-enabled`, the configured provider is OpenAI, and an API key is available. The adapter limits request time and retries, requests a strict typed schema, and treats text found in the image as untrusted data. The returned values remain untrusted suggestions: the user must review the draft, itemization or total-only choice, and then confirm it before an expense is written. Duplicate image content is detected by an account-scoped SHA-256 hash. Possible existing expense matches are suggestions only. Receipt content can be viewed only through the authenticated, account-scoped API; image deletion marks the document deleted and removes its local file while preserving receipt metadata. Banking credentials and external financial APIs remain out of scope. The legacy `/personal-expenses` capture endpoint continues to use Energrid's existing LLM configuration; the V2 text proposal endpoint uses a local parser.
 
 ## API surface
 
@@ -35,6 +35,9 @@ V2 stores receipt metadata and a storage key, but does not upload or retain rece
 - `POST /personal-expenses/import/preview` validates and previews a legacy export; `POST /personal-expenses/import` commits the previewed records.
 - `GET /personal-expenses/ai/status` reports configured draft availability; `POST /personal-expenses/parse` extracts a reviewable draft from a text description and does not persist it.
 - `POST /personal-finance/drafts/propose` creates a locally extracted, unconfirmed draft; `GET /personal-finance/drafts/:id` reads it; `POST .../:id/confirm` confirms it transactionally; `POST .../:id/reject` rejects it.
+- `POST /personal-finance/receipts/extract` accepts one JPEG/PNG file up to 10 MiB plus `cloudDataConsent=true`; it returns a review-required draft and account-scoped possible matches, without confirming an expense.
+- `PATCH /personal-finance/drafts/:id` saves explicit receipt review choices, including reviewed itemization or total-only treatment and adjustments. The existing draft confirmation endpoint remains the separate action that records the expense.
+- `GET /personal-finance/receipts/:id/content` streams the account-owned image with private/no-store headers; `DELETE .../content` deletes the file but keeps its metadata; `POST .../attach` associates receipt metadata with an existing expense in the same account.
 - `GET /personal-finance/expenses` queries merged V2 and unmigrated legacy records; `GET /personal-finance/summary` returns exact EUR totals with unconverted counts.
 - `GET /personal-finance/categories` lists active categories; `POST /personal-finance/categories` creates one; `PATCH /personal-finance/categories/:id` renames or reparents one; `POST /personal-finance/categories/:id/archive` archives it without deleting history.
 - `POST /personal-finance/expenses/import` accepts legacy records with stable `_id`, `legacyRecordId`, or `id` keys and stores each submitted batch transactionally.

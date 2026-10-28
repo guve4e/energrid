@@ -43,6 +43,11 @@ export interface ExpenseItem {
   lineTotal: string;
   currency: CurrencyCode;
   sourceReceiptId?: string | null;
+  normalizedDescription?: string | null;
+  packaging?: string | null;
+  taxIncluded?: boolean;
+  categoryId?: string | null;
+  extractionProvenance?: Record<string, unknown> | null;
 }
 
 export interface ReceiptMetadata {
@@ -64,6 +69,11 @@ export interface ReceiptMetadata {
   } | null;
   parserProvider: string | null;
   parserModel: string | null;
+  extraction?: import('./receipt-extraction.types').ReceiptExtractionV1 | null;
+  userReviewedAt?: string | null;
+  reviewedAsTotalOnly?: boolean;
+  documentDeletedAt?: string | null;
+  reviewedAdjustments?: import('./receipt-extraction.types').ReceiptExtractionV1['adjustments'] | null;
   createdAt: string;
 }
 

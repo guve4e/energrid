@@ -31,6 +31,20 @@ export interface ExpenseImportRow extends ExpenseWrite {
   legacyRecordId: string | null;
 }
 
+export interface ExpenseDraftReviewWrite {
+  date: string | null;
+  amount: string | null;
+  currency: string | null;
+  merchantName: string | null;
+  category: string | null;
+  categoryId: string | null;
+  description: string | null;
+  items: ExpenseRecord['items'];
+  itemizationReviewed: boolean;
+  totalOnly: boolean;
+  adjustments: NonNullable<ReceiptMetadata['reviewedAdjustments']>;
+}
+
 export interface PersonalFinanceRepository {
   listCategories(accountId: string, includeArchived?: boolean): Promise<FinanceCategory[]>;
   createCategory(accountId: string, actorId: string, input: CategoryWrite): Promise<FinanceCategory>;
@@ -45,9 +59,16 @@ export interface PersonalFinanceRepository {
   importExpenses(accountId: string, actorId: string, rows: readonly ExpenseImportRow[]): Promise<{ imported: number; duplicates: number }>;
   createDraft(accountId: string, actorId: string, proposal: ExpenseDraftProposal): Promise<ExpenseDraft>;
   getDraft(accountId: string, draftId: string): Promise<ExpenseDraft | null>;
+  reopenRejectedReceiptDraft(accountId: string, actorId: string, receiptId: string): Promise<ExpenseDraft | null>;
   rejectDraft(accountId: string, draftId: string, actorId: string): Promise<ExpenseDraft | null>;
   confirmDraft(accountId: string, draftId: string, actorId: string): Promise<ExpenseRecord | null>;
   addReceiptMetadata(accountId: string, draftId: string, receipt: Omit<ReceiptMetadata, 'id' | 'accountId' | 'draftId' | 'expenseId' | 'createdAt'>): Promise<ReceiptMetadata>;
+  findReceiptByHash(accountId: string, contentHash: string): Promise<ReceiptMetadata | null>;
+  findPossibleReceiptMatches(accountId: string, date: string, amount: string, currency: string, merchantName: string | null): Promise<ExpenseRecord[]>;
+  getReceipt(accountId: string, receiptId: string): Promise<ReceiptMetadata | null>;
+  markReceiptDocumentDeleted(accountId: string, actorId: string, receiptId: string): Promise<ReceiptMetadata | null>;
+  updateDraft(accountId: string, actorId: string, draftId: string, input: ExpenseDraftReviewWrite): Promise<ExpenseDraft | null>;
+  attachReceiptToExpense(accountId: string, actorId: string, receiptId: string, expenseId: string): Promise<ReceiptMetadata | null>;
   summarize(accountId: string, query: Pick<ExpenseQuery, 'fromDate' | 'toDate'>): Promise<SpendingSummary>;
 }
 

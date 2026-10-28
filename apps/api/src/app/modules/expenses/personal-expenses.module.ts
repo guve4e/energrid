@@ -5,10 +5,15 @@ import { PersonalFinanceController } from './personal-finance.controller';
 import { PersonalExpenseStore } from './personal-expense.store';
 import { PersonalExpenseCaptureService } from './personal-expense-capture.service';
 import { PersonalFinanceApplication } from './application/personal-finance.application';
+import { ReceiptIntelligenceApplication } from './application/receipt-intelligence.application';
 import { PERSONAL_FINANCE_REPOSITORY, type PersonalFinanceRepository } from './application/ports/personal-finance.repository';
 import { EXPENSE_TEXT_EXTRACTION, type ExpenseTextExtractionPort } from './application/ports/expense-extraction.port';
+import { DOCUMENT_UNDERSTANDING, type DocumentUnderstandingPort } from './application/ports/document-understanding.port';
+import { PRIVATE_RECEIPT_STORAGE, type PrivateReceiptStoragePort } from './application/ports/private-receipt-storage.port';
 import { PostgresPersonalFinanceRepository, PERSONAL_FINANCE_POOL } from './infrastructure/postgres/postgres-personal-finance.repository';
 import { LocalExpenseTextExtractor } from './infrastructure/local-expense-text-extractor';
+import { OpenAiDocumentUnderstandingAdapter } from './infrastructure/openai-document-understanding.adapter';
+import { LocalPrivateReceiptStorageAdapter } from './infrastructure/local-private-receipt-storage.adapter';
 import {
   LlmGatewayService,
   OpenAiDeviceLlmProvider,
@@ -40,10 +45,17 @@ function createPersonalFinancePool(): Pool {
     { provide: PERSONAL_FINANCE_POOL, useFactory: createPersonalFinancePool },
     { provide: PERSONAL_FINANCE_REPOSITORY, inject: [PERSONAL_FINANCE_POOL], useFactory: (pool: Pool) => new PostgresPersonalFinanceRepository(pool) },
     { provide: EXPENSE_TEXT_EXTRACTION, useFactory: () => new LocalExpenseTextExtractor() },
+    { provide: DOCUMENT_UNDERSTANDING, useFactory: () => new OpenAiDocumentUnderstandingAdapter() },
+    { provide: PRIVATE_RECEIPT_STORAGE, useFactory: () => new LocalPrivateReceiptStorageAdapter() },
     {
       provide: PersonalFinanceApplication,
       inject: [PERSONAL_FINANCE_REPOSITORY, EXPENSE_TEXT_EXTRACTION],
       useFactory: (repository: PersonalFinanceRepository, extraction: ExpenseTextExtractionPort) => new PersonalFinanceApplication(repository, extraction),
+    },
+    {
+      provide: ReceiptIntelligenceApplication,
+      inject: [PERSONAL_FINANCE_REPOSITORY, DOCUMENT_UNDERSTANDING, PRIVATE_RECEIPT_STORAGE],
+      useFactory: (repository: PersonalFinanceRepository, understanding: DocumentUnderstandingPort, storage: PrivateReceiptStoragePort) => new ReceiptIntelligenceApplication(repository, understanding, storage),
     },
     PersonalExpenseStore,
     PersonalExpenseCaptureService,

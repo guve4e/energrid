@@ -118,6 +118,7 @@ export function validateExpenseItem<T extends Omit<ExpenseItem, 'id'>>(item: T):
     tax,
     lineTotal,
     currency,
+    taxIncluded: item.taxIncluded ?? false,
   };
   const expected = expectedItemLineTotal(normalized, currency);
   if (compareDecimal(lineTotal, expected) !== 0) throw new Error(`Expense item line total must equal ${expected} ${currency}`);
@@ -139,9 +140,9 @@ export function reconcileItemsAgainstTotal(
   return { matched: compareDecimal(calculatedTotal, normalizedReceiptTotal) === 0, calculatedTotal, receiptTotal: normalizedReceiptTotal, difference };
 }
 
-export function expectedItemLineTotal(item: Pick<ExpenseItem, 'quantity' | 'unitPrice' | 'discount' | 'tax'>, currency: string): string {
+export function expectedItemLineTotal(item: Pick<ExpenseItem, 'quantity' | 'unitPrice' | 'discount' | 'tax'> & { taxIncluded?: boolean }, currency: string): string {
   const preTax = addDecimal(multiplyDecimal(item.quantity, item.unitPrice), `-${item.discount}`);
-  const withTax = addDecimal(preTax, item.tax);
+  const withTax = item.taxIncluded ? preTax : addDecimal(preTax, item.tax);
   if (compareDecimal(withTax, '0') < 0) throw new Error('Item total cannot be negative');
   return roundDecimal(withTax, currencyMinorUnits(currency));
 }

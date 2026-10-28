@@ -1,17 +1,69 @@
-import { BadRequestException, Body, Controller, Delete, Get, NotFoundException, Param, Patch, Post, Query, Req, ServiceUnavailableException, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Header, HttpException, NotFoundException, Param, Patch, Post, Query, Req, ServiceUnavailableException, StreamableFile, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { AccessJwtGuard, requirePrincipal } from '../auth/auth.guard';
 import type { AuthenticatedRequest } from '../auth/auth.types';
 import { PersonalFinanceApplication } from './application/personal-finance.application';
+import { ReceiptIntelligenceApplication } from './application/receipt-intelligence.application';
 import { PersonalExpenseStore } from './personal-expense.store';
 import { addDecimal, compareDecimal, decimalString, divideDecimalByInteger, financeDecimal } from './domain/decimal';
 import { euroValue, normalizeCurrency } from './domain/expense-rules';
-import type { ExpenseQuery, ExpenseRecord, ExpenseSourceKind } from './domain/personal-finance.types';
-import type { ExpenseImportRow, ExpenseWrite } from './application/ports/personal-finance.repository';
+import type { ExpenseItem, ExpenseQuery, ExpenseRecord, ExpenseSourceKind } from './domain/personal-finance.types';
+import type { ExpenseDraftReviewWrite, ExpenseImportRow, ExpenseWrite } from './application/ports/personal-finance.repository';
 
 @Controller('personal-finance')
 @UseGuards(AccessJwtGuard)
 export class PersonalFinanceController {
-  constructor(private readonly finance: PersonalFinanceApplication, private readonly legacy: PersonalExpenseStore) {}
+  constructor(private readonly finance: PersonalFinanceApplication, private readonly legacy: PersonalExpenseStore, private readonly receipts: ReceiptIntelligenceApplication) {}
+
+  @Post('receipts/extract')
+  @UseInterceptors(FileInterceptor('receipt', { limits: { files: 1, fileSize: 10 * 1024 * 1024 } }))
+  async extractReceipt(@UploadedFile() file: { buffer: Buffer; mimetype: string } | undefined, @Body('cloudDataConsent') consent: unknown, @Req() request: AuthenticatedRequest) {
+    const accountId = requirePrincipal(request).userId;
+    if (consent !== 'true') throw new BadRequestException('Explicitly consent to cloud receipt processing before uploading.');
+    if (!file?.buffer?.length) throw new BadRequestException('Choose a JPEG or PNG receipt image.');
+    try {
+      const result = await this.receipts.extract({ accountId, actorId: accountId }, file.buffer, file.mimetype, true);
+      return { ...result, draft: result.draft ? publicDraft(result.draft) : null, receipt: result.receipt ? publicReceipt(result.receipt) : undefined };
+    }
+    catch (error) { if (error instanceof HttpException) throw error; throw new BadRequestException(message(error)); }
+  }
+
+  @Patch('drafts/:id')
+  async reviewReceiptDraft(@Param('id') id: string, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
+    const accountId = requirePrincipal(request).userId;
+    try {
+      const result = await this.receipts.reviewDraft({ accountId, actorId: accountId }, id, normalizeDraftReview(body));
+      if (!result) throw new NotFoundException('Reviewable expense draft not found');
+      return { draft: publicDraft(result) };
+    } catch (error) { if (error instanceof HttpException) throw error; throw new BadRequestException(message(error)); }
+  }
+
+  @Get('receipts/:id/content')
+  @Header('Cache-Control', 'private, no-store')
+  @Header('X-Content-Type-Options', 'nosniff')
+  async receiptContent(@Param('id') id: string, @Req() request: AuthenticatedRequest) {
+    const accountId = requirePrincipal(request).userId;
+    const result = await this.receipts.getImage({ accountId, actorId: accountId }, id);
+    if (!result) throw new NotFoundException('Receipt not found');
+    return new StreamableFile(Buffer.from(result.bytes), { type: result.receipt.mediaType, length: result.receipt.byteLength });
+  }
+
+  @Delete('receipts/:id/content')
+  async deleteReceiptContent(@Param('id') id: string, @Req() request: AuthenticatedRequest) {
+    const accountId = requirePrincipal(request).userId;
+    const receipt = await this.receipts.deleteImage({ accountId, actorId: accountId }, id);
+    if (!receipt) throw new NotFoundException('Receipt not found');
+    return { deleted: true };
+  }
+
+  @Post('receipts/:id/attach')
+  async attachReceipt(@Param('id') id: string, @Body() body: { expenseId?: unknown }, @Req() request: AuthenticatedRequest) {
+    const accountId = requirePrincipal(request).userId;
+    if (typeof body?.expenseId !== 'string' || !body.expenseId.trim()) throw new BadRequestException('expenseId is required');
+    const receipt = await this.receipts.attachToExpense({ accountId, actorId: accountId }, id, body.expenseId.trim());
+    if (!receipt) throw new NotFoundException('Receipt or expense not found');
+    return { receipt: publicReceipt(receipt) };
+  }
 
   @Get('categories')
   async listCategories(@Query('includeArchived') includeArchived: string, @Req() request: AuthenticatedRequest) {
@@ -79,7 +131,7 @@ export class PersonalFinanceController {
   async getDraft(@Param('id') id: string, @Req() request: AuthenticatedRequest) {
     const draft = await this.finance.getExpenseDraft(requirePrincipal(request).userId, id);
     if (!draft) throw new NotFoundException('Expense draft not found');
-    return { draft };
+    return { draft: publicDraft(draft) };
   }
 
   @Post('drafts/:id/confirm')
@@ -298,6 +350,70 @@ function legacyRecord(accountId: string, value: Awaited<ReturnType<PersonalExpen
 }
 
 function message(error: unknown): string { return error instanceof Error ? error.message : 'Personal finance request failed'; }
+
+function publicReceipt<T extends { storageKey: string }>(receipt: T) {
+  const { storageKey: _privateStorageKey, ...safe } = receipt;
+  return safe;
+}
+
+function publicDraft<T extends { receipts: Array<{ storageKey: string }> }>(draft: T) {
+  return { ...draft, receipts: draft.receipts.map(publicReceipt) };
+}
+
+function normalizeDraftReview(raw: unknown): ExpenseDraftReviewWrite {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Draft review must be an object');
+  const body = raw as Record<string, unknown>;
+  const nullableText = (key: string, max: number) => {
+    const value = body[key];
+    if (value === null || value === undefined || value === '') return null;
+    if (typeof value !== 'string' || value.length > max) throw new Error(`${key} must be text or null`);
+    return value;
+  };
+  if (!Array.isArray(body.items) || body.items.length > 1000) throw new Error('items must be an array of at most 1000 receipt lines');
+  if (!Array.isArray(body.adjustments) || body.adjustments.length > 100) throw new Error('adjustments must be an array of at most 100 receipt adjustments');
+  const adjustments = body.adjustments.map((value, index) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Receipt adjustment ${index + 1} is invalid`);
+    const adjustment = value as Record<string, unknown>;
+    if (typeof adjustment.label !== 'string' || adjustment.label.length > 160 || !['tax', 'discount', 'deposit', 'return', 'rounding', 'other'].includes(String(adjustment.kind))) throw new Error(`Receipt adjustment ${index + 1} is invalid`);
+    if (adjustment.amount !== null && typeof adjustment.amount !== 'string') throw new Error(`Receipt adjustment ${index + 1} amount must be text or null`);
+    if (adjustment.includedInTotal !== null && typeof adjustment.includedInTotal !== 'boolean') throw new Error(`Receipt adjustment ${index + 1} inclusion must be true, false, or null`);
+    return { label: adjustment.label, kind: adjustment.kind as 'tax' | 'discount' | 'deposit' | 'return' | 'rounding' | 'other', amount: adjustment.amount as string | null, includedInTotal: adjustment.includedInTotal as boolean | null };
+  });
+  const items = body.items.map((value, index) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Receipt line ${index + 1} is invalid`);
+    const item = value as Record<string, unknown>;
+    const text = (key: string, max: number) => {
+      if (typeof item[key] !== 'string' || (item[key] as string).length > max) throw new Error(`Receipt line ${index + 1}: ${key} is required`);
+      return item[key] as string;
+    };
+    const decimal = (key: string) => {
+      if (typeof item[key] !== 'string' || !(item[key] as string).trim()) throw new Error(`Receipt line ${index + 1}: ${key} is required`);
+      return item[key] as string;
+    };
+    const optional = (key: string, max: number) => item[key] == null || item[key] === '' ? null : typeof item[key] === 'string' ? (item[key] as string).slice(0, max) : null;
+    if (typeof item.taxIncluded !== 'boolean') throw new Error(`Receipt line ${index + 1}: taxIncluded must be explicit`);
+    return {
+      description: text('description', 240), productCode: optional('productCode', 100),
+      quantity: decimal('quantity'), unit: text('unit', 40), unitPrice: decimal('unitPrice'),
+      discount: decimal('discount'), tax: decimal('tax'), lineTotal: decimal('lineTotal'),
+      currency: text('currency', 3), sourceReceiptId: optional('sourceReceiptId', 80),
+      normalizedDescription: optional('normalizedDescription', 240), packaging: optional('packaging', 160),
+      taxIncluded: item.taxIncluded, categoryId: optional('categoryId', 80),
+      extractionProvenance: item.extractionProvenance && typeof item.extractionProvenance === 'object' ? item.extractionProvenance as Record<string, unknown> : null,
+    } satisfies ExpenseItem;
+  });
+  if (typeof body.itemizationReviewed !== 'boolean') throw new Error('itemizationReviewed must be explicitly selected');
+  if (typeof body.totalOnly !== 'boolean') throw new Error('totalOnly must be explicitly selected');
+  const date = nullableText('date', 10);
+  const amount = nullableText('amount', 64);
+  const currency = nullableText('currency', 3);
+  const categoryId = nullableText('categoryId', 80);
+  return {
+    date, amount, currency, merchantName: nullableText('merchantName', 180),
+    category: nullableText('category', 80), categoryId, description: nullableText('description', 500),
+    items, itemizationReviewed: body.itemizationReviewed, totalOnly: body.totalOnly, adjustments,
+  };
+}
 
 function categorySummaryKey(categoryId: string | null, category: string): string {
   return categoryId ? `id:${categoryId}` : `text:${category}`;

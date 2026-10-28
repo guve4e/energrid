@@ -176,6 +176,74 @@ describePostgres('Postgres Personal Finance repository integration', () => {
     expect(await repository.queryExpenses(owner, { limit: 10 })).toHaveLength(1);
   });
 
+  it('persists an account-private receipt extraction through review, item confirmation, duplicate retry, attachment and document deletion audit', async () => {
+    const owner = await account();
+    const other = await account();
+    const category = await repository.createCategory(owner, owner, { name: 'Groceries', description: null, parentId: null });
+    const contentHash = randomUUID().replaceAll('-', '').padEnd(64, 'a').slice(0, 64);
+    const extraction = {
+      schemaVersion: 'receipt-extraction-v1' as const,
+      documentType: { value: 'receipt', confidence: 0.99, uncertainty: null, sourceText: 'Receipt' },
+      merchant: { value: 'Store', confidence: 0.9, uncertainty: null, sourceText: 'Store' },
+      date: { value: '2025-03-01', confidence: 0.9, uncertainty: null, sourceText: '01.03.2025' },
+      time: { value: null, confidence: null, uncertainty: null, sourceText: null },
+      currency: { value: 'EUR', confidence: 0.99, uncertainty: null, sourceText: 'EUR' },
+      subtotal: { value: '12.34', confidence: 0.9, uncertainty: null, sourceText: '12,34' },
+      taxTotal: { value: null, confidence: null, uncertainty: null, sourceText: null },
+      discountTotal: { value: null, confidence: null, uncertainty: null, sourceText: null },
+      depositTotal: { value: null, confidence: null, uncertainty: null, sourceText: null },
+      total: { value: '12.34', confidence: 0.99, uncertainty: null, sourceText: '12,34' },
+      adjustments: [], sourceText: 'Bread 12,34 EUR', warnings: [],
+      items: [{ originalDescription: { value: 'Bread', confidence: 0.9, uncertainty: null, sourceText: 'Bread' }, normalizedDescription: { value: null, confidence: null, uncertainty: null, sourceText: null }, quantity: { value: '1', confidence: 0.9, uncertainty: null, sourceText: '1' }, unit: { value: 'each', confidence: 0.9, uncertainty: null, sourceText: '1' }, packaging: { value: null, confidence: null, uncertainty: null, sourceText: null }, unitPrice: { value: '12.34', confidence: 0.9, uncertainty: null, sourceText: '12,34' }, lineTotal: { value: '12.34', confidence: 0.9, uncertainty: null, sourceText: '12,34' }, discount: { value: '0', confidence: 0.9, uncertainty: null, sourceText: null }, tax: { value: '0', confidence: 0.9, uncertainty: null, sourceText: null }, taxIncluded: { value: false, confidence: 0.9, uncertainty: null, sourceText: null }, suggestedCategory: { value: 'Groceries', confidence: 0.8, uncertainty: null, sourceText: null } }],
+    };
+    const draft = await repository.createDraft(owner, owner, {
+      date: '2025-03-01', amount: '12.34', currency: 'EUR', merchantName: 'Store', category: 'Groceries', description: 'Store', tags: [], items: [],
+      receipts: [{ contentHash, mediaType: 'image/jpeg', byteLength: 4, storageKey: `${owner}/receipt.jpg`, status: 'review_required', extractedTotals: { subtotal: '12.34', tax: null, discount: null, total: '12.34', currency: 'EUR' }, parserProvider: 'test', parserModel: 'vision', extraction }],
+      sourceKind: 'receipt', sourceId: `receipt:sha256:${contentHash}`, extractionProvider: 'test', extractionModel: 'vision',
+    });
+    const receipt = draft.receipts[0];
+    expect(await repository.getReceipt(other, receipt.id)).toBeNull();
+    await expect(repository.confirmDraft(owner, draft.id, owner)).rejects.toThrow(/review the receipt/i);
+    const item = { description: 'Bread', productCode: null, quantity: '1', unit: 'each', unitPrice: '12.34', discount: '0', tax: '0', lineTotal: '12.34', currency: 'EUR', sourceReceiptId: receipt.id, categoryId: category.id, normalizedDescription: null, packaging: null, taxIncluded: false, extractionProvenance: { provider: 'test' } };
+    await repository.updateDraft(owner, owner, draft.id, { date: '2025-03-01', amount: '12.34', currency: 'EUR', merchantName: 'Store', category: 'Groceries', categoryId: category.id, description: 'Store', items: [item], itemizationReviewed: true, totalOnly: false, adjustments: [] });
+    await pool.query('DROP TRIGGER IF EXISTS personal_finance_test_fail_confirm ON personal_finance.provenance_events');
+    await pool.query('DROP FUNCTION IF EXISTS public.personal_finance_test_fail_confirm()');
+    await pool.query(`CREATE FUNCTION public.personal_finance_test_fail_confirm() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.event_type='expense.confirmed' THEN RAISE EXCEPTION 'forced confirmation rollback'; END IF; RETURN NEW; END $$`);
+    await pool.query('CREATE TRIGGER personal_finance_test_fail_confirm BEFORE INSERT ON personal_finance.provenance_events FOR EACH ROW EXECUTE FUNCTION public.personal_finance_test_fail_confirm()');
+    try {
+      await expect(repository.confirmDraft(owner, draft.id, owner)).rejects.toThrow(/forced confirmation rollback/);
+    } finally {
+      await pool.query('DROP TRIGGER IF EXISTS personal_finance_test_fail_confirm ON personal_finance.provenance_events');
+      await pool.query('DROP FUNCTION IF EXISTS public.personal_finance_test_fail_confirm()');
+    }
+    expect((await pool.query('SELECT count(*)::int AS count FROM personal_finance.expenses WHERE account_id=$1', [owner])).rows[0].count).toBe(0);
+    expect((await repository.getDraft(owner, draft.id))?.status).toBe('needs_review');
+    expect((await pool.query('SELECT 1 FROM personal_finance.receipts WHERE account_id=$1 AND id=$2 AND draft_id=$3 AND expense_id IS NULL', [owner, receipt.id, draft.id])).rowCount).toBe(1);
+    const confirmed = await repository.confirmDraft(owner, draft.id, owner);
+    const retry = await repository.confirmDraft(owner, draft.id, owner);
+    expect(confirmed?.items).toMatchObject([{ description: 'Bread', quantity: '1', lineTotal: '12.34', categoryId: category.id }]);
+    expect(retry?.id).toBe(confirmed?.id);
+    expect((await pool.query('SELECT 1 FROM personal_finance.receipts WHERE account_id=$1 AND id=$2 AND draft_id IS NULL AND expense_id=$3', [owner, receipt.id, confirmed!.id])).rowCount).toBe(1);
+    const confirmationEvents = await pool.query<{ event_type: string }>('SELECT event_type FROM personal_finance.provenance_events WHERE account_id=$1 AND draft_id=$2 ORDER BY occurred_at,id', [owner, draft.id]);
+    expect(confirmationEvents.rows.map((event) => event.event_type)).toEqual(expect.arrayContaining(['draft.proposed', 'draft.reviewed', 'draft.confirmed', 'expense.confirmed']));
+    const secondHash = randomUUID().replaceAll('-', '').padEnd(64, 'b').slice(0, 64);
+    const pendingAttachment = await repository.createDraft(owner, owner, {
+      date: '2025-03-01', amount: '12.34', currency: 'EUR', merchantName: 'Store', category: 'Groceries', description: 'Store', tags: [], items: [], receipts: [{
+        contentHash: secondHash, mediaType: 'image/jpeg', byteLength: 4, storageKey: `${owner}/receipt-copy.jpg`, status: 'review_required',
+        extractedTotals: { subtotal: '12.34', tax: null, discount: null, total: '12.34', currency: 'EUR' }, parserProvider: 'test', parserModel: 'vision', extraction,
+      }], sourceKind: 'receipt', sourceId: `receipt:sha256:${secondHash}`, extractionProvider: 'test', extractionModel: 'vision',
+    });
+    const attachmentReceiptId = pendingAttachment.receipts[0].id;
+    const attached = await repository.attachReceiptToExpense(owner, owner, attachmentReceiptId, confirmed!.id);
+    expect(attached?.expenseId).toBe(confirmed?.id);
+    expect((await pool.query('SELECT count(*)::int AS count FROM personal_finance.expenses WHERE account_id=$1 AND deleted_at IS NULL', [owner])).rows[0].count).toBe(1);
+    const deleted = await repository.markReceiptDocumentDeleted(owner, owner, attachmentReceiptId);
+    expect(deleted?.documentDeletedAt).toBeTruthy();
+    const events = await pool.query<{ event_type: string }>('SELECT event_type FROM personal_finance.provenance_events WHERE account_id=$1 AND receipt_id=$2 ORDER BY occurred_at,id', [owner, attachmentReceiptId]);
+    expect(events.rows.map((event) => event.event_type)).toEqual(expect.arrayContaining(['receipt.attached_to_expense', 'receipt.document_deleted']));
+  });
+
   it('audits edits and soft deletion, and keeps deleted expenses out of reports', async () => {
     const owner = await account();
     const sourceId = randomUUID();

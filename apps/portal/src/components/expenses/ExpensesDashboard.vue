@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { authFetch } from '../../auth/auth-client';
 
 type Expense = {
@@ -40,12 +40,34 @@ const addOpen = ref(false);
 const editingId = ref<string | null>(null);
 const month = ref(localMonth());
 const transactionScope = ref<'month' | 'year' | 'all'>('all');
+const chartEndMonth = ref(month.value);
 const search = ref('');
 const categoryFilter = ref('');
 const transactionPage = ref(1);
 const transactionPageSize = 50;
 const categories = ref<FinanceCategory[]>([]);
 const categoriesOpen = ref(false);
+const receiptOpen = ref(false);
+const receiptConsent = ref(false);
+const receiptInput = ref<HTMLInputElement | null>(null);
+const receiptBusy = ref(false);
+const receiptImageUrl = ref('');
+const receiptDraftId = ref('');
+const receiptId = ref('');
+const receiptDuplicate = ref(false);
+const receiptPossibleMatches = ref<Expense[]>([]);
+const receiptWarnings = ref<string[]>([]);
+const receiptFieldWarnings = ref<Partial<Record<'merchant' | 'date' | 'currency' | 'total', string>>>({});
+const receiptReviewDirty = ref(false);
+const receiptSaveError = ref('');
+const receiptReconciliation = ref<{ matched: boolean | null; itemTotal: string | null; total: string | null; difference: string | null; warnings: string[] } | null>(null);
+const receiptTotalOnly = ref(false);
+const receiptForm = reactive({ date: '', amount: '', currency: 'EUR', merchantName: '', category: '', description: '' });
+type ReviewItem = { description: string; normalizedDescription: string; suggestedCategory: string; confidence: number | null; uncertainty: string | null; quantity: string; unit: string; packaging: string; unitPrice: string; discount: string; tax: string; taxIncluded: '' | 'true' | 'false'; lineTotal: string; currency: string; categoryId: string | null; sourceReceiptId: string | null; extractionProvenance: Record<string, unknown> | null };
+type ReviewAdjustment = { label: string; kind: 'tax' | 'discount' | 'deposit' | 'return' | 'rounding' | 'other'; amount: string; includedInTotal: '' | 'true' | 'false' };
+const receiptItems = ref<ReviewItem[]>([]);
+const receiptAdjustments = ref<ReviewAdjustment[]>([]);
+const receiptSourceText = ref('');
 const categoryName = ref('');
 const categoryDescription = ref('');
 const categoryEditId = ref<string | null>(null);
@@ -97,6 +119,7 @@ const yearTotal = computed(() => Number(yearSummary.value.total));
 const allHistoryTotal = computed(() => Number(allHistorySummary.value.total));
 const transactionPageCount = computed(() => Math.max(1, Math.ceil(expenses.value.length / transactionPageSize)));
 const selectedMonthLabel = computed(() => new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${month.value}-15T00:00:00Z`)));
+const chartEndMonthLabel = computed(() => new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${chartEndMonth.value}-15T00:00:00Z`)));
 const selectedDateRangeLabel = computed(() => {
   if (transactionScope.value === 'all') return 'All recorded dates';
   if (transactionScope.value === 'year') return `${month.value.slice(0, 4)} calendar year`;
@@ -111,8 +134,9 @@ const maxCategoryTotal = computed(() =>
   Math.max(1, ...categoryTotals.value.map((item) => item.total)),
 );
 const chartMonths = computed(() => {
-  return allHistorySummary.value.byMonth
-    .filter((item) => item.count > 0)
+  const byMonth = Array.isArray(allHistorySummary.value.byMonth) ? allHistorySummary.value.byMonth : [];
+  return byMonth
+    .filter((item) => item.count > 0 && item.month <= chartEndMonth.value)
     .slice(-8)
     .map((summary) => {
       const [year, monthNumber] = summary.month.split('-').map(Number);
@@ -121,10 +145,7 @@ const chartMonths = computed(() => {
         key: summary.month,
         summary: { total: summary.total, transactionCount: summary.count },
         total: Number(summary.total),
-        monthLabel: new Intl.DateTimeFormat(undefined, {
-          month: 'short',
-          timeZone: 'UTC',
-        }).format(date),
+        monthLabel: new Intl.DateTimeFormat(undefined, { month: 'short', timeZone: 'UTC' }).format(date),
         yearLabel: String(date.getUTCFullYear()).slice(-2),
         fullLabel: new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(date),
       };
@@ -174,13 +195,13 @@ function setRequestError(cause: unknown) {
 }
 
 async function api(path: string, init?: RequestInit) {
+  const isFormData = typeof FormData !== 'undefined' && init?.body instanceof FormData;
+  const headers = new Headers(init?.headers || {});
+  headers.set('Authorization', `Bearer ${props.accessToken}`);
+  if (!isFormData && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
   const response = await authFetch(`${props.apiBase}${path}`, {
     ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${props.accessToken}`,
-      ...(init?.headers || {}),
-    },
+    headers,
   });
   const text = await response.text();
   let body: any = null;
@@ -189,6 +210,164 @@ async function api(path: string, init?: RequestInit) {
   if (!text) return null;
   if (body === null) throw new Error(`The server returned an unreadable response (${response.status}). Please retry.`);
   return body;
+}
+
+function openReceiptCapture() {
+  closeReceiptReview();
+  receiptConsent.value = false;
+  receiptDuplicate.value = false;
+  receiptPossibleMatches.value = [];
+  receiptWarnings.value = [];
+  receiptFieldWarnings.value = {};
+  receiptSaveError.value = '';
+  receiptReconciliation.value = null;
+  receiptOpen.value = true;
+}
+
+function handleReceiptInput(event: Event) {
+  void uploadReceipt((event.target as HTMLInputElement).files?.[0]);
+}
+
+async function uploadReceipt(file?: File) {
+  if (!file) return;
+  if (!receiptConsent.value) { error.value = 'Please consent to cloud processing before selecting a receipt image.'; return; }
+  if (!['image/jpeg', 'image/png'].includes(file.type) || file.size > 10 * 1024 * 1024) { error.value = 'Choose a JPEG or PNG image no larger than 10 MB.'; return; }
+  receiptBusy.value = true;
+  error.value = '';
+  try {
+    const data = new FormData();
+    data.append('receipt', file);
+    data.append('cloudDataConsent', 'true');
+    const result = await api('/personal-finance/receipts/extract', { method: 'POST', body: data });
+    receiptDuplicate.value = result.duplicate === true;
+    receiptPossibleMatches.value = result.possibleMatches || [];
+    receiptReconciliation.value = result.reconciliation ?? null;
+    if (!result.draft) {
+      error.value = 'This receipt was already uploaded. Its existing transaction remains unchanged.';
+      return;
+    }
+    const draft = result.draft;
+    receiptDraftId.value = draft.id;
+    const receipt = draft.receipts?.[0];
+    receiptId.value = receipt?.id ?? result.receipt?.id ?? '';
+    const extraction = receipt?.extraction;
+    Object.assign(receiptForm, {
+      date: draft.date ?? extraction?.date?.value ?? '', amount: draft.amount ?? extraction?.total?.value ?? '',
+      currency: draft.currency ?? extraction?.currency?.value ?? 'EUR', merchantName: draft.merchantName ?? extraction?.merchant?.value ?? '',
+      category: draft.category ?? '', description: draft.description ?? extraction?.merchant?.value ?? '',
+    });
+    receiptSourceText.value = extraction?.sourceText ?? '';
+    receiptAdjustments.value = (receipt?.reviewedAdjustments ?? extraction?.adjustments ?? []).map((adjustment: any) => ({
+      label: adjustment.label ?? '', kind: adjustment.kind ?? 'other', amount: adjustment.amount ?? '',
+      includedInTotal: typeof adjustment.includedInTotal === 'boolean' ? String(adjustment.includedInTotal) as 'true' | 'false' : '',
+    }));
+    receiptWarnings.value = [...(result.reconciliation?.warnings ?? []), ...(extraction?.warnings ?? [])];
+    receiptFieldWarnings.value = {};
+    for (const [label, field] of Object.entries({ merchant: extraction?.merchant, date: extraction?.date, currency: extraction?.currency, total: extraction?.total })) {
+      if (field?.uncertainty) receiptFieldWarnings.value[label as keyof typeof receiptFieldWarnings.value] = field.uncertainty;
+      else if (field?.confidence !== null && field?.confidence !== undefined && field.confidence < 0.7) receiptFieldWarnings.value[label as keyof typeof receiptFieldWarnings.value] = `Please check this value (${Math.round(field.confidence * 100)}% confidence).`;
+    }
+    const fieldValue = (value: any) => value && typeof value === 'object' && 'value' in value ? value.value : value;
+    const itemsForReview = receipt?.userReviewedAt ? draft.items ?? [] : extraction?.items ?? draft.items ?? [];
+    receiptItems.value = itemsForReview.map((item: any) => ({
+      description: fieldValue(item.description ?? item.originalDescription) ?? '',
+      normalizedDescription: fieldValue(item.normalizedDescription) ?? '',
+      quantity: fieldValue(item.quantity) ?? '', unit: fieldValue(item.unit) ?? '',
+      packaging: fieldValue(item.packaging) ?? '', unitPrice: fieldValue(item.unitPrice) ?? '',
+      discount: fieldValue(item.discount) ?? '', tax: fieldValue(item.tax) ?? '',
+      taxIncluded: typeof fieldValue(item.taxIncluded) === 'boolean' ? String(fieldValue(item.taxIncluded)) as 'true' | 'false' : '',
+      lineTotal: fieldValue(item.lineTotal) ?? '', currency: receiptForm.currency,
+      suggestedCategory: fieldValue(item.suggestedCategory) ?? '',
+      confidence: item.originalDescription?.confidence ?? null, uncertainty: item.originalDescription?.uncertainty ?? null,
+      categoryId: item.categoryId ?? categories.value.find((category) => category.name.toLocaleLowerCase() === String(fieldValue(item.suggestedCategory) ?? '').toLocaleLowerCase())?.id ?? null,
+      sourceReceiptId: receipt?.id ?? item.sourceReceiptId ?? null,
+      extractionProvenance: item.extractionProvenance ?? { provider: receipt?.parserProvider, schemaVersion: extraction?.schemaVersion, sourceContentHash: receipt?.contentHash },
+    }));
+    receiptTotalOnly.value = false;
+    receiptReviewDirty.value = false;
+    receiptSaveError.value = '';
+    if (receiptId.value) {
+      const imageResponse = await authFetch(`${props.apiBase}/personal-finance/receipts/${encodeURIComponent(receiptId.value)}/content`, { headers: { Authorization: `Bearer ${props.accessToken}` } });
+      if (imageResponse.ok) {
+        if (receiptImageUrl.value) URL.revokeObjectURL(receiptImageUrl.value);
+        receiptImageUrl.value = URL.createObjectURL(await imageResponse.blob());
+      }
+    }
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Receipt extraction failed.'; }
+  finally { receiptBusy.value = false; if (receiptInput.value) receiptInput.value.value = ''; }
+}
+
+function receiptReviewPayload() {
+  return {
+    ...receiptForm,
+    description: receiptForm.description.trim() || receiptForm.merchantName.trim(),
+    categoryId: categories.value.find((category) => category.name === receiptForm.category)?.id ?? null,
+    itemizationReviewed: true,
+    totalOnly: receiptTotalOnly.value,
+    items: receiptTotalOnly.value ? [] : receiptItems.value.map((item) => ({
+      description: item.description, productCode: null, quantity: item.quantity, unit: item.unit, unitPrice: item.unitPrice,
+      discount: item.discount, tax: item.tax, lineTotal: item.lineTotal, currency: item.currency,
+      sourceReceiptId: item.sourceReceiptId, normalizedDescription: item.normalizedDescription || null,
+      packaging: item.packaging || null, taxIncluded: item.taxIncluded === 'true', categoryId: item.categoryId,
+      extractionProvenance: item.extractionProvenance,
+    })),
+    adjustments: receiptAdjustments.value.map((adjustment) => ({ label: adjustment.label, kind: adjustment.kind, amount: adjustment.amount || null, includedInTotal: adjustment.includedInTotal === '' ? null : adjustment.includedInTotal === 'true' })),
+  };
+}
+
+async function confirmReceiptDraft() {
+  receiptSaveError.value = '';
+  if (!receiptDraftId.value || !receiptForm.category || !receiptForm.date || !receiptForm.amount || !(receiptForm.description.trim() || receiptForm.merchantName.trim())) { receiptSaveError.value = 'Add a date, total, category, and merchant before saving.'; return; }
+  if (receiptReconciliation.value?.matched === false && !receiptReviewDirty.value && !receiptTotalOnly.value) { receiptSaveError.value = 'The item totals do not match the receipt. Review the items or total before saving.'; return; }
+  if (!receiptTotalOnly.value && receiptItems.value.some((item) => !item.description || !item.quantity || !item.unit || !item.unitPrice || item.discount === '' || item.tax === '' || !item.lineTotal || item.taxIncluded === '')) { receiptSaveError.value = 'Complete the item details, or choose “Save without item details.”'; return; }
+  receiptBusy.value = true;
+  try {
+    await api(`/personal-finance/drafts/${encodeURIComponent(receiptDraftId.value)}`, { method: 'PATCH', body: JSON.stringify(receiptReviewPayload()) });
+    await api(`/personal-finance/drafts/${encodeURIComponent(receiptDraftId.value)}/confirm`, { method: 'POST' });
+    closeReceiptReview();
+    await load();
+  } catch (cause) { receiptSaveError.value = cause instanceof Error ? cause.message : 'The receipt expense could not be saved. Review the total and item amounts.'; }
+  finally { receiptBusy.value = false; }
+}
+
+function markReceiptReviewDirty(affectsTotals = false, field?: keyof typeof receiptFieldWarnings.value) {
+  if (affectsTotals) receiptReviewDirty.value = true;
+  if (field) receiptFieldWarnings.value = { ...receiptFieldWarnings.value, [field]: undefined };
+  receiptSaveError.value = '';
+}
+
+function formatReceiptMoney(value: string | null | undefined) {
+  if (value === null || value === undefined || value === '') return '—';
+  return new Intl.NumberFormat(undefined, { style: 'currency', currency: receiptForm.currency, maximumFractionDigits: 2 }).format(Number(value));
+}
+
+async function attachReceiptMatch(expense: Expense) {
+  if (!receiptId.value) return;
+  receiptBusy.value = true;
+  try {
+    await api(`/personal-finance/receipts/${encodeURIComponent(receiptId.value)}/attach`, { method: 'POST', body: JSON.stringify({ expenseId: expense.id }) });
+    closeReceiptReview();
+    await load();
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : 'The receipt could not be attached.'; }
+  finally { receiptBusy.value = false; }
+}
+
+async function rejectReceiptDraft() {
+  if (receiptDraftId.value) await api(`/personal-finance/drafts/${encodeURIComponent(receiptDraftId.value)}/reject`, { method: 'POST' }).catch(() => undefined);
+  closeReceiptReview();
+}
+
+function closeReceiptReview() {
+  receiptOpen.value = false;
+  if (receiptImageUrl.value) URL.revokeObjectURL(receiptImageUrl.value);
+  receiptImageUrl.value = '';
+  receiptDraftId.value = '';
+  receiptId.value = '';
+  receiptItems.value = [];
+  receiptAdjustments.value = [];
+  receiptFieldWarnings.value = {};
+  receiptReviewDirty.value = false;
+  receiptSaveError.value = '';
 }
 
 function monthRange(value: string) { const [y, m] = value.split('-').map(Number); return { fromDate: `${value}-01`, toDate: new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10) }; }
@@ -240,6 +419,15 @@ async function load() {
 function selectChartMonth(value: string) {
   transactionScope.value = 'month';
   month.value = value;
+}
+
+function handleReportingMonthChange(event: Event) {
+  const value = (event.target as HTMLInputElement).value;
+  if (!value) return;
+  const monthChanged = month.value !== value;
+  chartEndMonth.value = value;
+  if (monthChanged) month.value = value;
+  else void refreshSummaries().catch(setRequestError);
 }
 
 function chartMonthTitle(item: (typeof chartMonths.value)[number]) {
@@ -397,6 +585,10 @@ function localMonth() {
 }
 
 onMounted(load);
+onBeforeUnmount(() => {
+  if (searchTimer) clearTimeout(searchTimer);
+  if (receiptImageUrl.value) URL.revokeObjectURL(receiptImageUrl.value);
+});
 </script>
 
 <template>
@@ -411,6 +603,7 @@ onMounted(load);
       </div>
       <div class="expenses-actions">
         <button class="expense-button expense-button--quiet" type="button" @click="categoriesOpen = true">Manage categories</button>
+        <button class="expense-button expense-button--quiet" type="button" @click="openReceiptCapture">Scan receipt</button>
         <button
           class="expense-button expense-button--primary"
           type="button"
@@ -436,7 +629,8 @@ onMounted(load);
         ><label class="sr-only" for="expense-month">Choose month</label
         ><input
           id="expense-month"
-          v-model="month"
+          :value="month"
+          @change="handleReportingMonthChange"
           class="expense-month-picker"
           type="month"
         />
@@ -489,11 +683,11 @@ onMounted(load);
         <div class="expense-card-heading">
           <div>
             <h2>Monthly spending</h2>
-            <p>Recent months with recorded expenses · EUR</p>
+            <p>Recent months with recorded spending · EUR</p>
           </div>
           <span class="expense-chart-total">
             <small v-if="chartFocusMonth">{{ chartFocusMonth.fullLabel }}</small>
-            {{ formatEur(chartFocusMonth?.summary.total ?? '0') }}
+            {{ formatEur(chartFocusMonth?.summary?.total ?? '0') }}
           </span>
         </div>
         <div
@@ -680,6 +874,118 @@ onMounted(load);
       </div>
     </article>
 
+    <div v-if="receiptOpen" class="expense-modal-backdrop" @click.self="closeReceiptReview">
+      <section class="expense-modal receipt-modal" role="dialog" aria-modal="true" aria-labelledby="receipt-title">
+        <div class="expense-modal-heading">
+          <div><p class="eyebrow">Receipt intelligence</p><h2 id="receipt-title">{{ receiptDraftId ? 'Review receipt' : 'Scan receipt' }}</h2></div>
+          <button class="expense-modal-close" type="button" aria-label="Close receipt review" @click="closeReceiptReview">×</button>
+        </div>
+        <div class="receipt-modal-content">
+          <div v-if="!receiptDraftId" class="receipt-consent">
+            <p>Receipt images contain personal information. With your permission, this image will be sent to the configured cloud vision provider for extraction and stored privately in your account.</p>
+            <label><input v-model="receiptConsent" type="checkbox" /> I consent to cloud processing of this receipt image.</label>
+            <input ref="receiptInput" class="sr-only" type="file" accept="image/jpeg,image/png" capture="environment" :disabled="!receiptConsent || receiptBusy" @change="handleReceiptInput" />
+            <button class="expense-button expense-button--primary" type="button" :disabled="!receiptConsent || receiptBusy" @click="receiptInput?.click()">{{ receiptBusy ? 'Reading receipt…' : 'Choose or photograph receipt' }}</button>
+            <p class="expense-optional">JPEG or PNG · up to 10 MB.</p>
+            <p v-if="error" class="receipt-error" role="alert">{{ error }}</p>
+          </div>
+          <div v-else class="receipt-review">
+            <p v-if="receiptDuplicate" class="receipt-notice" role="status">This receipt was already uploaded. Its existing draft is shown; it will not create another receipt.</p>
+            <div class="receipt-review-fields">
+              <label class="receipt-primary-field">Merchant<input v-model="receiptForm.merchantName" maxlength="180" placeholder="Enter merchant" @input="markReceiptReviewDirty(false, 'merchant')" /><small v-if="receiptFieldWarnings.merchant" class="receipt-field-warning">{{ receiptFieldWarnings.merchant }}</small></label>
+              <label>Date<input v-model="receiptForm.date" type="date" @input="markReceiptReviewDirty(false, 'date')" /><small v-if="receiptFieldWarnings.date" class="receipt-field-warning">{{ receiptFieldWarnings.date }}</small></label>
+              <label>Total<div class="receipt-total-field"><input v-model="receiptForm.amount" inputmode="decimal" placeholder="Enter total" @input="markReceiptReviewDirty(true, 'total')" /><select v-model="receiptForm.currency" aria-label="Receipt currency" @change="markReceiptReviewDirty(true, 'currency')"><option>EUR</option><option>USD</option></select></div><small v-if="receiptFieldWarnings.total || receiptFieldWarnings.currency" class="receipt-field-warning">{{ receiptFieldWarnings.total || receiptFieldWarnings.currency }}</small></label>
+              <label>Category<select v-model="receiptForm.category" @change="markReceiptReviewDirty()"><option value="">Choose category</option><option v-for="category in categories" :key="category.id" :value="category.name">{{ category.name }}</option></select></label>
+            </div>
+
+            <div v-if="receiptReconciliation" class="receipt-reconciliation" :class="{ matched: !receiptReviewDirty && receiptReconciliation.matched === true, mismatch: !receiptReviewDirty && receiptReconciliation.matched === false, pending: receiptReviewDirty || receiptReconciliation.matched === null }" role="status" aria-live="polite">
+              <strong v-if="receiptReviewDirty">Changes need a fresh check</strong>
+              <strong v-else-if="receiptReconciliation.matched === true">Items match the receipt total</strong>
+              <strong v-else-if="receiptReconciliation.matched === false">The totals do not match yet</strong>
+              <strong v-else>Receipt totals need review</strong>
+              <span v-if="receiptReviewDirty">We’ll check the exact amounts when you save. Nothing will be adjusted automatically.</span>
+              <span v-else-if="receiptReconciliation.matched === false">Items {{ formatReceiptMoney(receiptReconciliation.itemTotal) }} · receipt {{ formatReceiptMoney(receiptReconciliation.total) }}. Edit the amounts or choose to save without item details.</span>
+              <span v-else-if="receiptReconciliation.matched === true">Items {{ formatReceiptMoney(receiptReconciliation.itemTotal) }} · receipt {{ formatReceiptMoney(receiptReconciliation.total) }}</span>
+              <span v-else>Check the missing amounts, or choose to save without item details.</span>
+            </div>
+            <div v-else class="receipt-reconciliation pending" role="status"><strong>Check receipt totals</strong><span>Compare the receipt total with the purchased items before saving.</span></div>
+            <p v-if="receiptSaveError" class="receipt-error" role="alert">{{ receiptSaveError }}</p>
+            <p v-else-if="error" class="receipt-error" role="alert">{{ error }}</p>
+
+            <details v-if="receiptImageUrl" class="receipt-optional-panel">
+              <summary>Preview receipt</summary>
+              <div class="receipt-image-frame"><img :src="receiptImageUrl" alt="Private receipt image for review" /></div>
+            </details>
+
+            <section class="receipt-items" aria-label="Receipt items">
+              <div class="receipt-items-heading"><h3>Purchased items <span>({{ receiptTotalOnly ? 0 : receiptItems.length }})</span></h3><button class="receipt-text-button" type="button" :disabled="receiptTotalOnly" @click="markReceiptReviewDirty(true); receiptItems.push({ description: '', normalizedDescription: '', suggestedCategory: '', confidence: null, uncertainty: null, quantity: '', unit: '', packaging: '', unitPrice: '', discount: '', tax: '', taxIncluded: '', lineTotal: '', currency: receiptForm.currency, categoryId: null, sourceReceiptId: receiptId || null, extractionProvenance: null })">Add item</button></div>
+              <div v-if="receiptTotalOnly" class="receipt-empty-items">This expense will keep its total without claiming item details.</div>
+              <div v-else-if="receiptItems.length" class="receipt-item-list">
+                <details v-for="(item, index) in receiptItems" :key="index" class="receipt-item">
+                  <summary>
+                    <span class="receipt-item-main"><strong>{{ item.description || `Item ${index + 1}` }}</strong><small>{{ item.quantity || '—' }} {{ item.unit }}</small></span>
+                    <span class="receipt-item-trailing"><strong>{{ formatReceiptMoney(item.lineTotal) }}</strong><small v-if="item.uncertainty" class="receipt-field-warning">Check item</small></span>
+                  </summary>
+                  <div class="receipt-item-editor">
+                    <label>Description<input v-model="item.description" maxlength="240" @input="markReceiptReviewDirty()" /></label>
+                    <label>Quantity<input v-model="item.quantity" inputmode="decimal" @input="markReceiptReviewDirty(true)" /></label>
+                    <label>Final price<input v-model="item.lineTotal" inputmode="decimal" @input="markReceiptReviewDirty(true)" /></label>
+                    <small class="receipt-item-help">The final price must agree with the quantity, unit price, tax and discount in item details.</small>
+                    <small v-if="item.uncertainty" class="receipt-item-uncertainty">{{ item.uncertainty }}</small>
+                    <details class="receipt-advanced">
+                      <summary>More item details</summary>
+                      <label>Unit<input v-model="item.unit" maxlength="40" placeholder="each, kg…" @input="markReceiptReviewDirty(true)" /></label>
+                      <label>Unit price<input v-model="item.unitPrice" inputmode="decimal" @input="markReceiptReviewDirty(true)" /></label>
+                      <label>Discount<input v-model="item.discount" inputmode="decimal" @input="markReceiptReviewDirty(true)" /></label>
+                      <label>Tax<input v-model="item.tax" inputmode="decimal" @input="markReceiptReviewDirty(true)" /></label>
+                      <label>Tax included?<select v-model="item.taxIncluded" @change="markReceiptReviewDirty(true)"><option value="">Choose</option><option value="true">Yes</option><option value="false">No</option></select></label>
+                      <label>Packaging<input v-model="item.packaging" maxlength="160" @input="markReceiptReviewDirty()" /></label>
+                      <label>Normalized description<input v-model="item.normalizedDescription" maxlength="240" @input="markReceiptReviewDirty()" /></label>
+                      <label>Item category<select v-model="item.categoryId" @change="markReceiptReviewDirty()"><option :value="null">No category</option><option v-for="category in categories" :key="category.id" :value="category.id">{{ category.name }}</option></select></label>
+                      <small v-if="item.suggestedCategory">Suggested category: {{ item.suggestedCategory }}</small>
+                      <small v-if="item.confidence !== null">Extraction confidence: {{ Math.round(item.confidence * 100) }}%</small>
+                      <button class="receipt-text-button receipt-remove-item" type="button" @click="markReceiptReviewDirty(true); receiptItems.splice(index, 1)">Remove item</button>
+                    </details>
+                  </div>
+                </details>
+              </div>
+              <div v-else class="receipt-empty-items">No items were extracted. Add items, or choose to save without item details.</div>
+              <label class="receipt-total-only"><input v-model="receiptTotalOnly" type="checkbox" @change="markReceiptReviewDirty(true)" /> Save without item details</label>
+            </section>
+
+            <details v-if="receiptAdjustments.length || receiptSourceText || receiptWarnings.length || receiptForm.description" class="receipt-optional-panel">
+              <summary>More receipt details</summary>
+              <div class="receipt-advanced-content">
+                <label>Description<input v-model="receiptForm.description" maxlength="500" placeholder="Optional expense note" @input="markReceiptReviewDirty()" /></label>
+                <section v-if="receiptAdjustments.length" class="receipt-adjustments" aria-label="Receipt adjustments">
+                  <h3>Taxes and adjustments</h3><p>Keep these values as printed. Mark whether each is already included in the item lines.</p>
+                  <div v-for="(adjustment, index) in receiptAdjustments" :key="index" class="receipt-adjustment-row">
+                    <label>Label<input v-model="adjustment.label" maxlength="160" @input="markReceiptReviewDirty()" /></label>
+                    <label>Type<select v-model="adjustment.kind" @change="markReceiptReviewDirty(true)"><option value="tax">Tax / VAT</option><option value="discount">Discount</option><option value="deposit">Deposit</option><option value="return">Return</option><option value="rounding">Rounding</option><option value="other">Other</option></select></label>
+                    <label>Amount<input v-model="adjustment.amount" inputmode="decimal" placeholder="Unknown" @input="markReceiptReviewDirty(true)" /></label>
+                    <label>Included in total?<select v-model="adjustment.includedInTotal" @change="markReceiptReviewDirty(true)"><option value="">Choose</option><option value="true">Yes</option><option value="false">No</option></select></label>
+                  </div>
+                </section>
+                <ul v-if="receiptWarnings.length" class="receipt-warning-list"><li v-for="warning in receiptWarnings" :key="warning">{{ warning }}</li></ul>
+                <details v-if="receiptSourceText" class="receipt-source-text"><summary>Text read from receipt</summary><pre>{{ receiptSourceText }}</pre></details>
+              </div>
+            </details>
+
+            <details v-if="receiptPossibleMatches.length" class="receipt-optional-panel receipt-matches">
+              <summary>Possible matching expenses ({{ receiptPossibleMatches.length }})</summary>
+              <p>If this receipt is for an expense you already recorded, attach it instead of saving a duplicate.</p>
+              <button v-for="match in receiptPossibleMatches" :key="match.id" class="expense-button expense-button--quiet" type="button" :disabled="receiptBusy" @click="attachReceiptMatch(match)">{{ humanDate(match.date) }} · {{ formatNative(match) }} · {{ match.description }}</button>
+            </details>
+
+            <div class="receipt-action-bar">
+              <button class="expense-button expense-button--quiet" type="button" :disabled="receiptBusy" @click="rejectReceiptDraft">Discard draft</button>
+              <button class="expense-button expense-button--primary" type="button" :disabled="receiptBusy || (receiptReconciliation?.matched === false && !receiptReviewDirty && !receiptTotalOnly)" @click="confirmReceiptDraft">{{ receiptBusy ? 'Saving…' : 'Save expense' }}</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
     <div
       v-if="addOpen"
       class="expense-modal-backdrop"
@@ -857,6 +1163,91 @@ onMounted(load);
   color: var(--muted);
   font-size: 13px;
 }
+.receipt-modal {
+  display: flex;
+  flex-direction: column;
+  max-height: min(88dvh, 820px);
+  max-width: 720px;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+  width: min(720px, calc(100vw - 32px));
+}
+:global(html:has(.receipt-modal)), :global(body:has(.receipt-modal)) { overflow: hidden; }
+.receipt-modal .expense-modal-heading { flex: 0 0 auto; margin: 0; padding: 20px 22px 12px; }
+.receipt-modal-content { min-height: 0; min-width: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding: 0 22px 18px; }
+.receipt-consent { display: grid; gap: 16px; }
+.receipt-consent > p { color: var(--muted); font-size: 13px; line-height: 1.55; margin: 0; }
+.receipt-consent label, .receipt-total-only { align-items: center; display: flex; gap: 10px; font-size: 13px; }
+.receipt-review { display: grid; gap: 14px; min-width: 0; }
+.receipt-notice, .receipt-error { border: 1px solid var(--line); border-radius: 10px; font-size: 12px; line-height: 1.45; margin: 0; padding: 10px 12px; }
+.receipt-notice { background: color-mix(in srgb, var(--eg-blue-soft) 18%, transparent); }
+.receipt-error { background: #fff0ef; border-color: #d88a84; color: #8d2e2b; }
+.receipt-review-fields { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); min-width: 0; }
+.receipt-review-fields > label, .receipt-item-editor > label, .receipt-advanced-content > label { color: var(--ink); display: grid; font-size: 12px; font-weight: 700; gap: 6px; min-width: 0; }
+.receipt-review-fields input, .receipt-review-fields select, .receipt-item-editor input, .receipt-item-editor select, .receipt-advanced-content input, .receipt-adjustment-row input, .receipt-adjustment-row select {
+  background: var(--surface, #fff);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  box-sizing: border-box;
+  color: var(--ink);
+  font: inherit;
+  min-height: 42px;
+  min-width: 0;
+  padding: 8px 10px;
+  width: 100%;
+}
+.receipt-review-fields .receipt-primary-field { grid-column: 1 / -1; }
+.receipt-total-field { display: grid; gap: 7px; grid-template-columns: minmax(0, 1fr) 86px; min-width: 0; }
+.receipt-field-warning { color: #a05e16; font-size: 11px; font-weight: 600; line-height: 1.35; }
+.receipt-reconciliation { border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 4px; padding: 11px 12px; font-size: 12px; }
+.receipt-reconciliation span { color: var(--muted); line-height: 1.4; }
+.receipt-reconciliation.matched { border-color: #39855c; }
+.receipt-reconciliation.mismatch { background: #fff6f4; border-color: #c76565; color: #8d2e2b; }
+.receipt-reconciliation.pending { border-color: #bf8a35; }
+.receipt-optional-panel, .receipt-item { border: 1px solid var(--line); border-radius: 10px; min-width: 0; }
+.receipt-optional-panel > summary { cursor: pointer; font-size: 12px; font-weight: 700; list-style-position: inside; padding: 11px 12px; }
+.receipt-image-frame { align-items: center; background: #101923; border-top: 1px solid var(--line); display: flex; justify-content: center; max-height: 48vh; min-height: 120px; overflow: hidden; padding: 10px; }
+.receipt-image-frame img { display: block; max-height: 44vh; max-width: 100%; object-fit: contain; }
+.receipt-items { border-top: 1px solid var(--line); display: grid; gap: 10px; min-width: 0; padding-top: 13px; }
+.receipt-items-heading { align-items: center; display: flex; gap: 12px; justify-content: space-between; }
+.receipt-items-heading h3, .receipt-adjustments h3 { font-size: 14px; margin: 0; }
+.receipt-items-heading h3 span { color: var(--muted); font-size: 12px; font-weight: 500; }
+.receipt-text-button { background: transparent; border: 0; color: var(--eg-blue); cursor: pointer; font-size: 12px; font-weight: 700; padding: 6px 2px; }
+.receipt-text-button:disabled { cursor: not-allowed; opacity: .5; }
+.receipt-item-list { display: grid; gap: 7px; min-width: 0; }
+.receipt-item { overflow: hidden; }
+.receipt-item > summary { align-items: center; cursor: pointer; display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr) auto; list-style-position: inside; min-width: 0; padding: 11px 12px; }
+.receipt-item-main, .receipt-item-trailing { display: grid; gap: 3px; min-width: 0; }
+.receipt-item-main strong { overflow-wrap: anywhere; }
+.receipt-item-main small, .receipt-item-trailing small { color: var(--muted); font-size: 11px; }
+.receipt-item-trailing { justify-items: end; text-align: right; }
+.receipt-item-editor { border-top: 1px solid var(--line); display: grid; gap: 10px; grid-template-columns: repeat(3, minmax(0, 1fr)); min-width: 0; padding: 12px; }
+.receipt-item-uncertainty { color: #a05e16; font-size: 11px; grid-column: 1 / -1; line-height: 1.4; }
+.receipt-item-help { color: var(--muted); font-size: 10px; grid-column: 1 / -1; line-height: 1.35; }
+.receipt-advanced { align-self: start; grid-column: 1 / -1; min-width: 0; }
+.receipt-advanced > summary { cursor: pointer; font-size: 11px; font-weight: 700; padding: 6px 0; }
+.receipt-advanced > label { display: grid; font-size: 11px; font-weight: 700; gap: 5px; margin-top: 8px; }
+.receipt-advanced > small { color: var(--muted); display: block; font-size: 11px; margin-top: 7px; }
+.receipt-remove-item { color: #a33c38; }
+.receipt-empty-items { background: color-mix(in srgb, var(--surface) 86%, var(--line)); border-radius: 9px; color: var(--muted); font-size: 12px; line-height: 1.4; padding: 12px; }
+.receipt-total-only { color: var(--muted); font-size: 12px; margin-top: 3px; }
+.receipt-total-only input { accent-color: var(--eg-blue); min-height: auto; width: auto; }
+.receipt-advanced-content { display: grid; gap: 12px; padding: 0 12px 12px; }
+.receipt-adjustments { border-top: 1px solid var(--line); display: grid; gap: 10px; padding-top: 12px; }
+.receipt-adjustments h3 { font-size: 13px; }
+.receipt-adjustments > p, .receipt-matches > p { color: var(--muted); font-size: 11px; line-height: 1.4; margin: 0; }
+.receipt-adjustment-row { display: grid; gap: 8px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.receipt-adjustment-row label { display: grid; font-size: 11px; font-weight: 700; gap: 5px; min-width: 0; }
+.receipt-warning-list { color: var(--muted); font-size: 11px; line-height: 1.4; margin: 0; padding-left: 18px; }
+.receipt-source-text { border-top: 1px solid var(--line); padding-top: 10px; }
+.receipt-source-text > summary { cursor: pointer; font-size: 11px; font-weight: 700; }
+.receipt-source-text pre { overflow-wrap: anywhere; white-space: pre-wrap; }
+.receipt-matches { border: 1px solid var(--line); }
+.receipt-matches > p { padding: 0 12px 10px; }
+.receipt-matches button { justify-self: start; margin: 0 12px 8px; max-width: calc(100% - 24px); overflow-wrap: anywhere; white-space: normal; }
+.receipt-action-bar { align-items: center; background: var(--surface, #fff); border-top: 1px solid var(--line); bottom: 0; display: flex; gap: 10px; justify-content: space-between; margin: 0 -22px -18px; padding: 12px 22px max(12px, env(safe-area-inset-bottom)); position: sticky; z-index: 2; }
+.receipt-action-bar .expense-button--primary { min-width: 150px; }
 .expenses-page .eyebrow {
   color: var(--eg-blue);
   font-size: 11px;
@@ -1000,6 +1391,12 @@ onMounted(load);
   font-size: 15px;
   font-weight: 800;
   text-align: right;
+}
+.expense-chart-total small {
+  color: var(--muted);
+  display: block;
+  font-size: 9px;
+  font-weight: 600;
 }
 .expense-chart-total small {
   color: var(--muted);
@@ -1585,6 +1982,7 @@ onMounted(load);
   width: 1px;
 }
 @media (max-width: 900px) {
+  .receipt-modal { max-height: min(92dvh, 820px); }
   .expense-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1597,6 +1995,17 @@ onMounted(load);
   }
 }
 @media (max-width: 640px) {
+  .expense-modal-backdrop:has(.receipt-modal) { align-items: stretch; padding: 0; }
+  .receipt-modal { border-radius: 0; height: 100dvh; max-height: 100dvh; max-width: none; width: 100vw; }
+  .receipt-modal .expense-modal-heading { padding: 15px 16px 11px; }
+  .receipt-modal-content { padding: 0 16px 14px; }
+  .receipt-review-fields { grid-template-columns: minmax(0, 1fr); }
+  .receipt-review-fields .receipt-primary-field { grid-column: auto; }
+  .receipt-item-editor { grid-template-columns: minmax(0, 1fr); }
+  .receipt-item-uncertainty, .receipt-advanced { grid-column: auto; }
+  .receipt-adjustment-row { grid-template-columns: minmax(0, 1fr); }
+  .receipt-action-bar { margin: 0 -16px -14px; padding: 12px 16px max(12px, env(safe-area-inset-bottom)); }
+  .receipt-action-bar .expense-button--primary { flex: 1; min-width: 0; }
   .expenses-page {
     gap: 15px;
   }

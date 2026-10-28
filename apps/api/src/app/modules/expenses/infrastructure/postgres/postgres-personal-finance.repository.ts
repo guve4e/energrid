@@ -1,9 +1,9 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient, QueryResultRow } from 'pg';
-import { addDecimal, compareDecimal, decimalString, financeDecimal } from '../../domain/decimal';
-import { euroValue, normalizeMerchantName, reconcileItemsAgainstTotal } from '../../domain/expense-rules';
+import { addDecimal, compareDecimal, decimalString, financeDecimal, roundDecimal } from '../../domain/decimal';
+import { currencyMinorUnits, euroValue, normalizeMerchantName, reconcileItemsAgainstTotal } from '../../domain/expense-rules';
 import type { ExpenseDraft, ExpenseDraftProposal, ExpenseItem, ExpenseQuery, ExpenseRecord, ExpenseSource, ExpenseSourceKind, FinanceCategory, ReceiptMetadata, SpendingSummary } from '../../domain/personal-finance.types';
-import type { CategoryWrite, ExpenseImportRow, ExpenseWrite, PersonalFinanceRepository } from '../../application/ports/personal-finance.repository';
+import type { CategoryWrite, ExpenseDraftReviewWrite, ExpenseImportRow, ExpenseWrite, PersonalFinanceRepository } from '../../application/ports/personal-finance.repository';
 
 export const PERSONAL_FINANCE_POOL = Symbol('PERSONAL_FINANCE_POOL');
 
@@ -25,12 +25,15 @@ type DraftRow = QueryResultRow & {
 };
 type ItemRow = QueryResultRow & {
   id: string; expense_id?: string; description: string; product_code: string | null; quantity: string; unit: string; unit_price: string; discount: string;
-  tax: string; line_total: string; currency: string; source_receipt_id: string | null;
+  tax: string; line_total: string; currency: string; source_receipt_id: string | null; normalized_description: string | null; packaging: string | null;
+  tax_included: boolean; category_id: string | null; extraction_provenance: Record<string, unknown>;
 };
 type ReceiptRow = QueryResultRow & {
   id: string; account_id: string; draft_id: string | null; expense_id: string | null; content_hash: string; media_type: string;
   byte_length: string | number; storage_key: string; status: ReceiptMetadata['status']; extracted_totals: ReceiptMetadata['extractedTotals'];
-  parser_provider: string | null; parser_model: string | null; created_at: Date | string;
+  parser_provider: string | null; parser_model: string | null; created_at: Date | string; extraction_result: ReceiptMetadata['extraction'];
+  user_reviewed_at: Date | string | null; reviewed_as_total_only: boolean; document_deleted_at: Date | string | null;
+  reviewed_adjustments: ReceiptMetadata['reviewedAdjustments'];
 };
 
 export class PostgresPersonalFinanceRepository implements PersonalFinanceRepository {
@@ -262,9 +265,9 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
       const inserted = await client.query(
         `INSERT INTO personal_finance.expense_drafts
           (id,account_id,status,expense_date,amount,currency,merchant_name,merchant_id,category,description,tags,source_kind,source_id,extraction_provider,extraction_model,source_content_hash)
-         VALUES ($1,$2,'proposed',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
          ON CONFLICT (account_id,source_kind,source_id) WHERE source_id IS NOT NULL DO NOTHING RETURNING id`,
-        [id, accountId, proposal.date, proposal.amount, proposal.currency, proposal.merchantName, null, proposal.category, proposal.description, proposal.tags, proposal.sourceKind, proposal.sourceId, proposal.extractionProvider, proposal.extractionModel, null],
+        [id, accountId, proposal.sourceKind === 'receipt' ? 'needs_review' : 'proposed', proposal.date, proposal.amount, proposal.currency, proposal.merchantName, null, proposal.category, proposal.description, proposal.tags, proposal.sourceKind, proposal.sourceId, proposal.extractionProvider, proposal.extractionModel, null],
       );
       if (!inserted.rows[0] && proposal.sourceId) {
         const existing = await client.query<DraftRow>(
@@ -275,8 +278,14 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
       }
       const merchantId = await this.resolveMerchant(client, accountId, proposal.merchantName);
       if (merchantId) await client.query('UPDATE personal_finance.expense_drafts SET merchant_id=$3 WHERE account_id=$1 AND id=$2', [accountId, id, merchantId]);
-      await this.insertDraftItems(client, accountId, id, proposal.items);
-      for (const receipt of proposal.receipts) await this.insertReceipt(client, accountId, id, receipt);
+      const receipts: ReceiptMetadata[] = [];
+      for (const receipt of proposal.receipts) {
+        const created = await this.insertReceipt(client, accountId, id, receipt);
+        receipts.push(created);
+        await this.insertEvent(client, accountId, { kind: 'receipt', id: created.id, contentHash: receipt.contentHash, provider: receipt.parserProvider, model: receipt.parserModel }, 'receipt.extracted', { draftId: id, receiptId: created.id, mediaType: receipt.mediaType, byteLength: receipt.byteLength });
+      }
+      const receiptItems = proposal.items.map((item) => ({ ...item, sourceReceiptId: item.sourceReceiptId ?? (receipts.length === 1 ? receipts[0].id : null) }));
+      await this.insertDraftItems(client, accountId, id, receiptItems);
       await this.insertEvent(client, accountId, source, 'draft.proposed', { draftId: id, actorId });
       const row = await this.getDraftRow(client, accountId, id);
       return row ? this.loadDraftWithClient(client, accountId, row) : this.missingDraft();
@@ -286,6 +295,19 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
   async getDraft(accountId: string, draftId: string): Promise<ExpenseDraft | null> {
     const row = await this.getDraftRow(this.pool, accountId, draftId);
     return row ? this.loadDraftWithClient(this.pool, accountId, row) : null;
+  }
+
+  async reopenRejectedReceiptDraft(accountId: string, actorId: string, receiptId: string): Promise<ExpenseDraft | null> {
+    return this.transaction(async (client) => {
+      const receipt = await client.query<ReceiptRow>('SELECT * FROM personal_finance.receipts WHERE account_id=$1 AND id=$2 FOR UPDATE', [accountId, receiptId]);
+      const draftId = receipt.rows[0]?.draft_id;
+      if (!draftId || receipt.rows[0].expense_id) return null;
+      const updated = await client.query<DraftRow>(`UPDATE personal_finance.expense_drafts SET status='needs_review',updated_at=now()
+        WHERE account_id=$1 AND id=$2 AND status='rejected' RETURNING *`, [accountId, draftId]);
+      if (!updated.rows[0]) return null;
+      await this.insertEvent(client, accountId, { kind: 'receipt', id: receiptId, contentHash: receipt.rows[0].content_hash, provider: receipt.rows[0].parser_provider, model: receipt.rows[0].parser_model }, 'draft.reopened', { draftId, receiptId, actorId });
+      return this.loadDraftWithClient(client, accountId, updated.rows[0]);
+    });
   }
 
   async rejectDraft(accountId: string, draftId: string, actorId: string): Promise<ExpenseDraft | null> {
@@ -353,6 +375,85 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
     });
   }
 
+  async findReceiptByHash(accountId: string, contentHash: string): Promise<ReceiptMetadata | null> {
+    const result = await this.pool.query<ReceiptRow>('SELECT * FROM personal_finance.receipts WHERE account_id=$1 AND content_hash=$2', [accountId, contentHash.toLowerCase()]);
+    return result.rows[0] ? mapReceipt(result.rows[0]) : null;
+  }
+
+  async findPossibleReceiptMatches(accountId: string, date: string, amount: string, currency: string, merchantName: string | null): Promise<ExpenseRecord[]> {
+    const result = await this.pool.query<ExpenseRow>(
+      `SELECT e.*,COALESCE(c.name,e.category) AS category FROM personal_finance.expenses e
+       LEFT JOIN personal_finance.categories c ON c.account_id=e.account_id AND c.id=e.category_id
+       WHERE e.account_id=$1 AND e.deleted_at IS NULL AND e.expense_date=$2 AND e.amount=$3::numeric AND upper(trim(e.currency))=upper($4)
+       AND ($5::text IS NULL OR lower(trim(COALESCE(e.merchant_name,'')))=lower(trim($5))) ORDER BY e.created_at DESC LIMIT 50`,
+      [accountId, date, financeDecimal(amount), currency, merchantName],
+    );
+    return this.attachExpenseItems(accountId, result.rows);
+  }
+
+  async getReceipt(accountId: string, receiptId: string): Promise<ReceiptMetadata | null> {
+    const result = await this.pool.query<ReceiptRow>('SELECT * FROM personal_finance.receipts WHERE account_id=$1 AND id=$2', [accountId, receiptId]);
+    return result.rows[0] ? mapReceipt(result.rows[0]) : null;
+  }
+
+  async markReceiptDocumentDeleted(accountId: string, actorId: string, receiptId: string): Promise<ReceiptMetadata | null> {
+    return this.transaction(async (client) => {
+      const before = await client.query<ReceiptRow>('SELECT * FROM personal_finance.receipts WHERE account_id=$1 AND id=$2 FOR UPDATE', [accountId, receiptId]);
+      if (!before.rows[0]) return null;
+      if (!before.rows[0].document_deleted_at) {
+        const result = await client.query<ReceiptRow>('UPDATE personal_finance.receipts SET document_deleted_at=now() WHERE account_id=$1 AND id=$2 RETURNING *', [accountId, receiptId]);
+        await this.insertEvent(client, accountId, { kind: 'receipt', id: receiptId, contentHash: before.rows[0].content_hash, provider: before.rows[0].parser_provider, model: before.rows[0].parser_model }, 'receipt.document_deleted', { receiptId, actorId });
+        return mapReceipt(result.rows[0]);
+      }
+      return mapReceipt(before.rows[0]);
+    });
+  }
+
+  async updateDraft(accountId: string, actorId: string, draftId: string, input: ExpenseDraftReviewWrite): Promise<ExpenseDraft | null> {
+    return this.transaction(async (client) => {
+      const row = await client.query<DraftRow>('SELECT * FROM personal_finance.expense_drafts WHERE account_id=$1 AND id=$2 FOR UPDATE', [accountId, draftId]);
+      if (!row.rows[0] || !['proposed', 'needs_review'].includes(row.rows[0].status)) return null;
+      const receiptsForReview = await this.listReceipts(client, accountId, draftId);
+      const items = input.items.map((item) => ({ ...item, sourceReceiptId: item.sourceReceiptId ?? null }));
+      await client.query(
+        `UPDATE personal_finance.expense_drafts SET expense_date=$3,amount=$4,currency=$5,merchant_name=$6,category=$7,description=$8,status='needs_review',updated_at=now()
+         WHERE account_id=$1 AND id=$2`,
+        [accountId, draftId, input.date, input.amount, input.currency, input.merchantName, input.category, input.description],
+      );
+      await client.query('DELETE FROM personal_finance.expense_draft_items WHERE account_id=$1 AND draft_id=$2', [accountId, draftId]);
+      await this.insertDraftItems(client, accountId, draftId, items);
+      if (receiptsForReview.length) {
+        await client.query(
+          `UPDATE personal_finance.receipts SET user_reviewed_at=now(),reviewed_as_total_only=$3,status='review_required',reviewed_adjustments=$4
+           WHERE account_id=$1 AND draft_id=$2`,
+          [accountId, draftId, input.totalOnly, JSON.stringify(input.adjustments)],
+        );
+      }
+      if (input.categoryId) {
+        const selected = await client.query('SELECT 1 FROM personal_finance.categories WHERE account_id=$1 AND id=$2 AND archived_at IS NULL', [accountId, input.categoryId]);
+        if (!selected.rows[0]) throw new Error('Selected category is unavailable for this account');
+      }
+      const reviewRevisionHash = createHash('sha256').update(JSON.stringify({ date: input.date, amount: input.amount, currency: input.currency, merchantName: input.merchantName, category: input.category, categoryId: input.categoryId, description: input.description, items, adjustments: input.adjustments, totalOnly: input.totalOnly })).digest('hex');
+      await this.insertEvent(client, accountId, { kind: 'receipt', id: draftId }, 'draft.reviewed', { draftId, receiptId: receiptsForReview[0]?.id ?? null, actorId, itemCount: items.length, itemizationReviewed: input.itemizationReviewed, totalOnly: input.totalOnly, adjustmentCount: input.adjustments.length, reviewRevisionHash });
+      const refreshed = await this.getDraftRow(client, accountId, draftId);
+      return refreshed ? this.loadDraftWithClient(client, accountId, refreshed) : null;
+    });
+  }
+
+  async attachReceiptToExpense(accountId: string, actorId: string, receiptId: string, expenseId: string): Promise<ReceiptMetadata | null> {
+    return this.transaction(async (client) => {
+      const receipt = await client.query<ReceiptRow>('SELECT * FROM personal_finance.receipts WHERE account_id=$1 AND id=$2 FOR UPDATE', [accountId, receiptId]);
+      const expense = await client.query('SELECT 1 FROM personal_finance.expenses WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL FOR KEY SHARE', [accountId, expenseId]);
+      if (!receipt.rows[0] || !expense.rows[0] || receipt.rows[0].expense_id) return null;
+      const draftId = receipt.rows[0].draft_id;
+      await client.query('UPDATE personal_finance.receipts SET draft_id=NULL,expense_id=$3,status=\'attached\' WHERE account_id=$1 AND id=$2', [accountId, receiptId, expenseId]);
+      if (draftId) await client.query("UPDATE personal_finance.expense_drafts SET status='rejected',updated_at=now() WHERE account_id=$1 AND id=$2 AND status IN ('proposed','needs_review')", [accountId, draftId]);
+      await this.insertEvent(client, accountId, { kind: 'receipt', id: receiptId, contentHash: receipt.rows[0].content_hash, provider: receipt.rows[0].parser_provider, model: receipt.rows[0].parser_model }, 'receipt.attached_to_expense', { receiptId, expenseId, draftId, actorId });
+      const updated = await client.query<ReceiptRow>('SELECT * FROM personal_finance.receipts WHERE account_id=$1 AND id=$2', [accountId, receiptId]);
+      return updated.rows[0] ? mapReceipt(updated.rows[0]) : null;
+    });
+  }
+
   async summarize(accountId: string, query: Pick<ExpenseQuery, 'fromDate' | 'toDate'>): Promise<SpendingSummary> {
     const values: unknown[] = [accountId];
     const where = ['account_id=$1', 'deleted_at IS NULL'];
@@ -402,9 +503,9 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
     for (const item of items) {
       await client.query(
         `INSERT INTO personal_finance.expense_items
-          (id,account_id,expense_id,description,product_code,quantity,unit,unit_price,discount,tax,line_total,currency,source_receipt_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-        [item.id ?? randomUUID(), accountId, expenseId, item.description, item.productCode, financeDecimal(item.quantity), item.unit, financeDecimal(item.unitPrice), financeDecimal(item.discount), financeDecimal(item.tax), financeDecimal(item.lineTotal), item.currency, item.sourceReceiptId ?? null],
+          (id,account_id,expense_id,description,product_code,quantity,unit,unit_price,discount,tax,line_total,currency,source_receipt_id,normalized_description,packaging,tax_included,category_id,extraction_provenance)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+        [item.id ?? randomUUID(), accountId, expenseId, item.description, item.productCode, financeDecimal(item.quantity), item.unit, financeDecimal(item.unitPrice), financeDecimal(item.discount), financeDecimal(item.tax), financeDecimal(item.lineTotal), item.currency, item.sourceReceiptId ?? null, item.normalizedDescription ?? null, item.packaging ?? null, item.taxIncluded ?? false, item.categoryId ?? null, item.extractionProvenance ?? {}],
       );
     }
   }
@@ -413,9 +514,9 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
     for (const item of items) {
       await client.query(
         `INSERT INTO personal_finance.expense_draft_items
-          (id,account_id,draft_id,description,product_code,quantity,unit,unit_price,discount,tax,line_total,currency,source_receipt_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-        [randomUUID(), accountId, draftId, item.description, item.productCode, financeDecimal(item.quantity), item.unit, financeDecimal(item.unitPrice), financeDecimal(item.discount), financeDecimal(item.tax), financeDecimal(item.lineTotal), item.currency, item.sourceReceiptId ?? null],
+          (id,account_id,draft_id,description,product_code,quantity,unit,unit_price,discount,tax,line_total,currency,source_receipt_id,normalized_description,packaging,tax_included,category_id,extraction_provenance)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+        [randomUUID(), accountId, draftId, item.description, item.productCode, financeDecimal(item.quantity), item.unit, financeDecimal(item.unitPrice), financeDecimal(item.discount), financeDecimal(item.tax), financeDecimal(item.lineTotal), item.currency, item.sourceReceiptId ?? null, item.normalizedDescription ?? null, item.packaging ?? null, item.taxIncluded ?? false, item.categoryId ?? null, item.extractionProvenance ?? {}],
       );
     }
   }
@@ -424,9 +525,9 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
     const id = randomUUID();
     const result = await client.query<ReceiptRow>(
       `INSERT INTO personal_finance.receipts
-       (id,account_id,draft_id,content_hash,media_type,byte_length,storage_key,status,extracted_totals,parser_provider,parser_model)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [id, accountId, draftId, receipt.contentHash.toLowerCase(), receipt.mediaType, receipt.byteLength, receipt.storageKey, receipt.status, receipt.extractedTotals, receipt.parserProvider, receipt.parserModel],
+       (id,account_id,draft_id,content_hash,media_type,byte_length,storage_key,status,extracted_totals,parser_provider,parser_model,extraction_schema_version,document_type,source_text,extraction_result,extraction_warnings)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+      [id, accountId, draftId, receipt.contentHash.toLowerCase(), receipt.mediaType, receipt.byteLength, receipt.storageKey, receipt.status, receipt.extractedTotals, receipt.parserProvider, receipt.parserModel, receipt.extraction?.schemaVersion ?? null, receipt.extraction?.documentType.value ?? null, receipt.extraction?.sourceText ?? null, receipt.extraction ?? null, JSON.stringify(receipt.extraction?.warnings ?? [])],
     );
     return mapReceipt(result.rows[0]);
   }
@@ -496,7 +597,7 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
 
   private async loadDraftWithClient(client: Pick<Pool, 'query'> | PoolClient, accountId: string, row: DraftRow): Promise<ExpenseDraft> {
     const [items, receipts] = await Promise.all([
-      client.query<ItemRow>('SELECT id,description,product_code,quantity,unit,unit_price,discount,tax,line_total,currency,source_receipt_id FROM personal_finance.expense_draft_items WHERE account_id=$1 AND draft_id=$2 ORDER BY id', [accountId, row.id]),
+      client.query<ItemRow>('SELECT * FROM personal_finance.expense_draft_items WHERE account_id=$1 AND draft_id=$2 ORDER BY id', [accountId, row.id]),
       client.query<ReceiptRow>('SELECT * FROM personal_finance.receipts WHERE account_id=$1 AND draft_id=$2 ORDER BY created_at', [accountId, row.id]),
     ]);
     return {
@@ -522,13 +623,26 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
 
   private assertReceiptsReconcile(items: ExpenseItem[], receipts: ReceiptMetadata[], expenseAmount: string, expenseCurrency: string) {
     for (const receipt of receipts) {
+      if (!receipt.userReviewedAt) throw new Error('Review the receipt details and confirm its itemization before saving');
       const total = receipt.extractedTotals?.total;
       const currency = receipt.extractedTotals?.currency;
-      if (!total || !currency || receipt.status === 'failed') continue;
+      if (receipt.status === 'failed') throw new Error('A failed receipt cannot be confirmed');
       const attachedItems = items.filter((item) => item.sourceReceiptId === receipt.id);
-      if (attachedItems.length) {
-        const result = reconcileItemsAgainstTotal(attachedItems, total, currency);
-        if (!result.matched) throw new Error(`Receipt items total ${result.calculatedTotal} ${currency} does not match receipt total ${result.receiptTotal} ${currency}`);
+      if (!total || !currency) {
+        if (receipt.reviewedAsTotalOnly) continue;
+        if (!attachedItems.length) throw new Error('Add receipt items or explicitly choose to save the receipt as total-only');
+        if (attachedItems.some((item) => item.currency.toUpperCase() !== expenseCurrency.toUpperCase())) throw new Error('Receipt item currency does not match the expense currency');
+        const calculated = receipt.extraction ? itemTotalWithIncludedAdjustments(attachedItems, receipt.reviewedAdjustments ?? receipt.extraction.adjustments) : attachedItems.reduce((sum, item) => addDecimal(sum, item.lineTotal), '0');
+        const scale = currencyMinorUnits(expenseCurrency);
+        if (compareDecimal(roundDecimal(calculated, scale), roundDecimal(expenseAmount, scale)) !== 0) throw new Error('Receipt items do not reconcile to the entered expense total');
+        continue;
+      }
+      if (!receipt.reviewedAsTotalOnly) {
+        if (!attachedItems.length) throw new Error('Add the receipt items or explicitly choose to save the receipt as total-only');
+        const calculated = receipt.extraction ? itemTotalWithIncludedAdjustments(attachedItems, receipt.reviewedAdjustments ?? receipt.extraction.adjustments) : attachedItems.reduce((sum, item) => addDecimal(sum, item.lineTotal), '0');
+        const calculatedRounded = roundDecimal(calculated, currencyMinorUnits(currency));
+        const receiptRounded = roundDecimal(total, currencyMinorUnits(currency));
+        if (compareDecimal(calculatedRounded, receiptRounded) !== 0) throw new Error(`Receipt items total ${calculatedRounded} ${currency} does not match receipt total ${receiptRounded} ${currency}`);
       }
       const receiptAmount = reconcileItemsAgainstTotal([], total, currency).receiptTotal;
       if (currency.toUpperCase() !== expenseCurrency.toUpperCase())
@@ -581,11 +695,25 @@ function mapCategory(row: CategoryRow): FinanceCategory {
 }
 
 function mapItem(row: ItemRow): ExpenseItem {
-  return { id: row.id, description: row.description, productCode: row.product_code, quantity: decimalString(row.quantity), unit: row.unit, unitPrice: decimalString(row.unit_price), discount: decimalString(row.discount), tax: decimalString(row.tax), lineTotal: decimalString(row.line_total), currency: row.currency.trim(), sourceReceiptId: row.source_receipt_id };
+  return { id: row.id, description: row.description, productCode: row.product_code, quantity: decimalString(row.quantity), unit: row.unit, unitPrice: decimalString(row.unit_price), discount: decimalString(row.discount), tax: decimalString(row.tax), lineTotal: decimalString(row.line_total), currency: row.currency.trim(), sourceReceiptId: row.source_receipt_id, normalizedDescription: row.normalized_description, packaging: row.packaging, taxIncluded: row.tax_included, categoryId: row.category_id, extractionProvenance: row.extraction_provenance ?? {} };
 }
 
 function mapReceipt(row: ReceiptRow): ReceiptMetadata {
-  return { id: row.id, accountId: row.account_id, draftId: row.draft_id, expenseId: row.expense_id, contentHash: row.content_hash, mediaType: row.media_type, byteLength: Number(row.byte_length), storageKey: row.storage_key, status: row.status, extractedTotals: row.extracted_totals, parserProvider: row.parser_provider, parserModel: row.parser_model, createdAt: isoTimestamp(row.created_at) };
+  return { id: row.id, accountId: row.account_id, draftId: row.draft_id, expenseId: row.expense_id, contentHash: row.content_hash.trim(), mediaType: row.media_type, byteLength: Number(row.byte_length), storageKey: row.storage_key, status: row.status, extractedTotals: row.extracted_totals, parserProvider: row.parser_provider, parserModel: row.parser_model, extraction: row.extraction_result ?? null, userReviewedAt: row.user_reviewed_at ? isoTimestamp(row.user_reviewed_at) : null, reviewedAsTotalOnly: row.reviewed_as_total_only ?? false, documentDeletedAt: row.document_deleted_at ? isoTimestamp(row.document_deleted_at) : null, reviewedAdjustments: row.reviewed_adjustments ?? null, createdAt: isoTimestamp(row.created_at) };
+}
+
+function itemTotalWithIncludedAdjustments(items: ExpenseItem[], adjustments: NonNullable<ReceiptMetadata['reviewedAdjustments']>) {
+  return adjustments.reduce((sum, adjustment) => {
+    if (adjustment.includedInTotal === null) throw new Error(`Receipt adjustment “${adjustment.label}” needs review`);
+    if (adjustment.includedInTotal !== true) return sum;
+    if (adjustment.amount === null) throw new Error(`Receipt adjustment “${adjustment.label}” needs an amount`);
+    const amount = financeDecimal(adjustment.amount);
+    const signed = adjustment.kind === 'discount' || adjustment.kind === 'return'
+      ? `-${amount}`
+      : adjustment.kind === 'other' ? null : amount;
+    if (signed === null) throw new Error('A receipt has an unresolved adjustment that requires review');
+    return addDecimal(sum, signed);
+  }, items.reduce((sum, item) => addDecimal(sum, item.lineTotal), '0'));
 }
 
 export function isoDate(value: Date | string): string {
