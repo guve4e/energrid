@@ -5,12 +5,20 @@ import type { DiscoveredDeviceConfig } from '../../../device-registry.service';
 export function shellyLanCandidates(
   device: NetworkDiscoveredDevice,
 ): DiscoveredDeviceConfig[] {
+  const identityVerified = device.observations?.some(observation =>
+    ((observation.source === 'http_rpc' && observation.attribute === 'shelly.device_id') ||
+      (observation.source === 'http_identity' && observation.attribute === 'identity.device_id')) &&
+    observation.value === device.id &&
+    Number.isFinite(Date.parse(observation.observedAt)),
+  );
   if (
     device.vendor !== 'Shelly' ||
     device.status !== 'online' ||
     !device.generation ||
     device.generation < 2 ||
-    !/^shelly[a-z0-9._-]{1,114}$/i.test(device.id)
+    !/^shelly[a-z0-9._-]{1,114}$/i.test(device.id) ||
+    !identityVerified ||
+    device.identityConflict
   )
     return [];
   let baseUrl: string;

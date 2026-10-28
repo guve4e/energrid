@@ -80,3 +80,9 @@ Implementation anchors: [enrollment migration](../apps/core/migrations/179239146
 ## Status and authority are separate
 
 Discovery status, physical identity verification, logical enrollment, trust/approval, observation admission, connectivity and health are distinct concepts. For example, a device can be discoverable but unenrolled; a device can be enrolled while currently unreachable; a recent sample can be fresh without proving command capability. See [observation pipelines](observation-pipelines.md) and [commands and authority](commands-and-authority.md).
+
+## Restoring LAN-verified Add Devices candidates
+
+The authenticated Portal state projection rebuilds pending Shelly candidates from the current tenant/site's persisted Discovery Memory records. A record is eligible only when it contains a timestamped Shelly RPC device ID that exactly matches the record's physical ID, plus a separate read-only status response for each component. Conflicted identities and unsupported components are excluded. The existing registry suppresses candidates whose logical identity is already approved. The candidate retains its source and observation timestamps; this restoration does not enroll it or grant measurement or control authority.
+
+The Shelly ID is protocol evidence, not independent hardware authentication. Fresh identity and component evidence is still required for onboarding actions that require it. The projection uses [Shelly LAN candidate mapping](../apps/api/src/app/modules/devices/adapters/inbound/shelly/shelly-lan-candidates.ts), [Discovery Memory](../apps/api/src/app/modules/devices/device-discovery-memory.store.ts), and the authenticated [Portal state projection](../apps/api/src/app/modules/portal/portal.controller.ts).

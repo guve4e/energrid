@@ -319,11 +319,14 @@ export class PortalController {
     const { tenant, site } = initialRegistry
     const ownership = { tenantId: tenant.id, siteId: site.id }
     const networkHistory = await this.discoveryMemory.listIdentityEvidence(ownership).catch(() => [])
-    // Discovery memory is durable across API restarts; repopulate only the
-    // existing pending-candidate registry port from verified Energrid evidence.
+    // Discovery memory is durable across API restarts; rebuild eligible
+    // pending candidates from exact, site-owned physical identity evidence.
     for (const record of networkHistory) {
-      const candidate = energridDiscoveryCandidate(record.device)
-      if (candidate) this.registerOwnedDiscoveryCandidate(candidate, ownership, site.name)
+      const energridCandidate = energridDiscoveryCandidate(record.device)
+      if (energridCandidate) this.registerOwnedDiscoveryCandidate(energridCandidate, ownership, site.name)
+      for (const shellyCandidate of shellyLanCandidates(record.device)) {
+        this.registerOwnedDiscoveryCandidate(shellyCandidate, ownership, site.name)
+      }
     }
     const currentDevices = this.deviceRegistry.getSnapshot().devices ?? state.devices ?? []
     const visibleCandidates = currentDevices.filter(device =>

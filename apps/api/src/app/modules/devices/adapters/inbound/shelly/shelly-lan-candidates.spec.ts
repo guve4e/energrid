@@ -16,6 +16,7 @@ const device: NetworkDiscoveredDevice = {
   discoveredAt: '2026-10-13T08:00:00Z',
   reason: 'Shelly HTTP response',
   observations: [
+    { source: 'http_rpc', attribute: 'shelly.device_id', value: 'shellyplus2pm-aabbccddeeff', observedAt: '2026-10-13T08:00:00Z', method: 'Shelly.GetDeviceInfo' },
     { source: 'http_rpc', attribute: 'shelly.component_status', value: 'switch:0', observedAt: '2026-10-13T08:00:00Z', method: 'Switch.GetStatus?id=0' },
     { source: 'http_rpc', attribute: 'shelly.component_status', value: 'switch:1', observedAt: '2026-10-13T08:00:00Z', method: 'Switch.GetStatus?id=1' },
     { source: 'http_rpc', attribute: 'shelly.component_status', value: 'em1:0', observedAt: '2026-10-13T08:00:00Z', method: 'EM1.GetStatus?id=0' },
@@ -67,12 +68,26 @@ describe('Shelly LAN onboarding candidates', () => {
       observations: device.observations?.filter(item => item.value !== 'switch:1'),
     }).map(item => item.id)).not.toContain(`${device.id}:switch:1`);
   });
+  it('requires an exact, timestamped RPC identity and rejects identity conflicts', () => {
+    expect(shellyLanCandidates({
+      ...device,
+      observations: device.observations?.filter(item => item.attribute !== 'shelly.device_id'),
+    })).toEqual([]);
+    expect(shellyLanCandidates({
+      ...device,
+      observations: device.observations?.map(item => item.attribute === 'shelly.device_id'
+        ? { ...item, value: 'shellyplus2pm-other' }
+        : item),
+    })).toEqual([]);
+    expect(shellyLanCandidates({ ...device, identityConflict: { reason: 'multiple_macs_for_endpoint', macAddresses: ['aa', 'bb'] } })).toEqual([]);
+  });
   it('accepts a site-local switch component only with fresh component-status evidence', () => {
     const siteLocal: NetworkDiscoveredDevice = {
       ...device,
       id: 'shellypro2pm-ec6260888084',
       components: [{ component: 'switch:1', channel: 1 }],
-      observations: [{
+      observations: [{ source: 'http_identity', attribute: 'identity.device_id', value: 'shellypro2pm-ec6260888084',
+        observedAt: '2026-10-27T06:37:41.000Z', method: 'GET /rpc/Shelly.GetDeviceInfo' }, {
         source: 'site_local_http_rpc', attribute: 'observer.identity', value: 'pi-housenet-observer',
         observedAt: '2026-10-27T06:37:41.000Z', method: 'authorized-site-local-observer-report',
       }, {
@@ -157,6 +172,9 @@ describe('Shelly LAN onboarding candidates', () => {
         app: 'Plus1',
         macAddress: '88:13:bf:cd:c8:bc',
         components: [{ component: 'switch:0', channel: 0 }],
+        observations: device.observations?.map(item => item.attribute === 'shelly.device_id'
+          ? { ...item, value: 'shellyplus1-8813bfcdc8bc' }
+          : item),
       };
       registry.registerDiscoveredShellyDevice(plusOne.id, 'switch:0', 0, 'shellyplus1-8813bfcdc8bc/rpc');
       const lanCandidate = shellyLanCandidates(plusOne)[0];

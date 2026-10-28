@@ -170,7 +170,7 @@ describe('portal control configuration authorization', () => {
         })),
       };
       const controller = new PortalController(
-        { getState: () => ({ devices: [] }) } as never, {} as never, {} as never, {} as never, {} as never,
+        { getState: () => ({ devices: [] }) } as never, { getLastScan: () => [] } as never, {} as never, {} as never, {} as never,
         registry as never, {} as never, {} as never, {} as never, {} as never,
         { listIdentityEvidence: jest.fn(async (owner: { tenantId: string; siteId: string }) =>
           owner.tenantId === record.ownership.tenantId && owner.siteId === record.ownership.siteId ? [record] : [],
@@ -198,6 +198,76 @@ describe('portal control configuration authorization', () => {
     const labState = await lab.controller.getState({ method: 'GET', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 } });
     expect(lab.registry.registerDiscoveredDevice).not.toHaveBeenCalled();
     expect(labState.devices).toEqual([]);
+  });
+
+  it('restores one site-owned Shelly physical candidate and its status-verified components after API restart', async () => {
+    const observedAt = new Date().toISOString();
+    const physicalId = 'shellyproem50-8c4f00dbd258';
+    const components = [
+      { component: 'em1:0', channel: 0 },
+      { component: 'em1:1', channel: 1 },
+      { component: 'switch:0', channel: 0 },
+    ];
+    const device = {
+      id: physicalId, ipAddress: '192.168.7.54', vendor: 'Shelly', generation: 2,
+      status: 'online', protocol: 'http', networkZoneId: 'eero-lan', networkZoneName: 'Eero LAN',
+      confidence: 0.9, discoveredAt: observedAt, reason: 'Shelly HTTP API responded on the local network.',
+      components,
+      observations: [
+        { source: 'http_rpc', attribute: 'shelly.device_id', value: physicalId, observedAt, method: 'Shelly.GetDeviceInfo' },
+        ...components.map(item => ({ source: 'http_rpc', attribute: 'shelly.component_status', value: item.component, observedAt, method: `${item.component.startsWith('em1:') ? 'EM1' : 'Switch'}.GetStatus?id=${item.channel}` })),
+        { source: 'http_rpc', attribute: 'shelly.measurement_capability', value: 'em1:0:power', observedAt, method: 'EM1.GetStatus?id=0' },
+      ],
+    };
+    const record = {
+      schemaVersion: 2, ownership: { tenantId: 'tenant-demo', siteId: 'site-home' },
+      identity: `device:eero-lan:${physicalId}`, firstSeenAt: observedAt,
+      lastSeenAt: observedAt, lastScanId: 'scan-shelly', device,
+    };
+    const createController = (siteId: string) => {
+      const candidateConfigs = new Map<string, any>();
+      const registerDiscoveredDevice = jest.fn(config => { candidateConfigs.set(config.id, config); return true; });
+      const listIdentityEvidence = jest.fn(async (owner: { tenantId: string; siteId: string }) =>
+        owner.tenantId === record.ownership.tenantId && owner.siteId === record.ownership.siteId ? [record] : [],
+      );
+      const registry = {
+        registerDiscoveredDevice,
+        getSnapshot: () => ({
+          tenant: { id: 'tenant-demo' }, site: { id: siteId, name: siteId },
+          devices: [...candidateConfigs.values()].map(config => ({
+            ...config, tenantId: 'tenant-demo', siteId, siteName: siteId, zoneId: 'home', zoneName: 'Home',
+            trustStatus: 'discovered', kind: 'physical',
+            capabilities: config.capabilities.map((kind: string) => ({ kind, actions: ['read'] })),
+            adapter: { protocol: config.protocol, target: config.target, driver: config.driver },
+            state: { values: {}, observedAt: null, source: 'registry', status: 'unknown' },
+          })),
+        }),
+      };
+      const controller = new PortalController(
+        { getState: () => ({ devices: [] }) } as never, { getLastScan: () => [] } as never, {} as never, {} as never, {} as never,
+        registry as never, {} as never, {} as never, {} as never, {} as never,
+        { listIdentityEvidence } as never,
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        { list: jest.fn().mockResolvedValue([]) } as never,
+      );
+      return { controller, registerDiscoveredDevice, listIdentityEvidence };
+    };
+    const admin = { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin' as const, sessionId: 'test-session', sessionVersion: 0 };
+
+    const home = createController('site-home');
+    const state = await home.controller.getState({ method: 'GET', url: '/', headers: {}, user: admin });
+    expect(home.listIdentityEvidence).toHaveBeenCalledWith({ tenantId: 'tenant-demo', siteId: 'site-home' });
+    expect(home.registerDiscoveredDevice).toHaveBeenCalledTimes(3);
+    const restored = state.devices.filter((item: any) => item.metadata?.physicalId === physicalId);
+    expect(restored.map((item: any) => item.id).sort()).toEqual(components.map(item => `${physicalId}:${item.component}`).sort());
+    expect(new Set(restored.map((item: any) => item.metadata?.physicalId))).toEqual(new Set([physicalId]));
+    expect(restored.every((item: any) => item.trustStatus === 'discovered' && !item.control && item.metadata?.componentVerifiedAt === observedAt)).toBe(true);
+
+    const otherSite = createController('site-device-lab');
+    const otherState = await otherSite.controller.getState({ method: 'GET', url: '/', headers: {}, user: admin });
+    expect(otherSite.listIdentityEvidence).toHaveBeenCalledWith({ tenantId: 'tenant-demo', siteId: 'site-device-lab' });
+    expect(otherSite.registerDiscoveredDevice).not.toHaveBeenCalled();
+    expect(otherState.devices).toEqual([]);
   });
 
   it('projects a pending Shelly candidate from scoped inventory plus an exact current LAN protocol match', async () => {
@@ -396,6 +466,8 @@ describe('portal control configuration authorization', () => {
           discoveredAt: '2026-10-22T12:00:00.000Z',
           components: [{ component: 'switch:0', channel: 0 }],
           observations: [
+            { source: 'http_rpc', attribute: 'shelly.device_id', value: 'shellyplus1-8813bfcdc8bc',
+              method: 'Shelly.GetDeviceInfo', observedAt: '2026-10-22T12:00:00.000Z', scopeId: 'home-lan' },
             { source: 'http_rpc', attribute: 'shelly.component_status', value: 'switch:0',
               method: 'Switch.GetStatus?id=0', observedAt: '2026-10-22T12:00:00.000Z', scopeId: 'home-lan' },
             { source: 'http_rpc', attribute: 'shelly.measurement_capability', value: 'switch:0:power',
