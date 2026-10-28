@@ -134,6 +134,40 @@ describe('Personal Finance V2 Portal cutover', () => {
     expect(reviewed.items[0]).toMatchObject({ description: 'Oat milk', normalizedDescription: 'Milk', quantity: '1', unit: 'each', unitPrice: '3.00', discount: '0', tax: '0', lineTotal: '3.00', packaging: '1 L carton', extractionProvenance: { provider: 'openai', confidence: 0.99 } });
   });
 
+  it('shows a receipt discrepancy without silently changing amounts or enabling Save', async () => {
+    setAuthenticatedSession({ accessToken: 'finance-token', expiresIn: 900, user: { id: 'account-1', email: 'user@example.test', name: 'User', role: 'viewer' } });
+    const field = (value: unknown) => ({ value, confidence: 0.99, uncertainty: null, sourceText: null });
+    const extraction = { schemaVersion: 'v1', sourceText: '', warnings: [], adjustments: [], merchant: field('Lidl'), date: field('2026-10-28'), currency: field('EUR'), total: field('3.00'), items: [{ originalDescription: field('Milk'), normalizedDescription: field('Milk'), quantity: field('1'), unit: field('each'), packaging: field(null), unitPrice: field('2.80'), lineTotal: field('2.80'), discount: field('0'), tax: field('0'), taxIncluded: field(true), suggestedCategory: field('Groceries') }] };
+    const draft = { id: 'draft-2', status: 'proposed', date: '2026-10-28', amount: '3.00', currency: 'EUR', merchantName: 'Lidl', category: 'Groceries', description: 'Lidl', items: [], receipts: [{ id: 'receipt-2', contentHash: 'def', parserProvider: 'openai', extraction }], tags: [] };
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      if (url.endsWith('/receipts/extract')) return jsonResponse({ duplicate: false, draft, possibleMatches: [], reconciliation: { matched: false, itemTotal: '2.80', total: '3.00', difference: '-0.20', warnings: [] } });
+      if (url.endsWith('/receipts/receipt-2/content')) return { ok: true, status: 200, blob: async () => new Blob(['image']) };
+      if (url.endsWith('/personal-finance/categories')) return jsonResponse({ categories: [{ id: 'groceries-id', name: 'Groceries', status: 'active' }] });
+      if (url.includes('/personal-finance/expenses')) return jsonResponse({ expenses: [] });
+      if (url.includes('/personal-finance/summary')) return jsonResponse({ total: '0.00', transactionCount: 0, excludedUnconvertedCount: 0, byCategory: [] });
+      return jsonResponse({});
+    }));
+    wrapper = mount(ExpensesDashboard, { props: { apiBase: '', accessToken: 'finance-token' } });
+    await flushPromises();
+    await wrapper!.findAll('button').find((button) => button.text().includes('Scan receipt'))!.trigger('click');
+    await wrapper!.findAll('label').find((label) => label.text().includes('I consent to cloud processing'))!.get('input').setValue(true);
+    const fileInput = wrapper!.get('input[accept="image/jpeg,image/png"]');
+    const file = new File([new Uint8Array([0xff, 0xd8, 0xff])], 'receipt.jpg', { type: 'image/jpeg' });
+    Object.defineProperty(fileInput.element, 'files', { configurable: true, value: { 0: file, length: 1, item: (index: number) => index === 0 ? file : null } });
+    await fileInput.trigger('change');
+    await flushPromises();
+    expect(wrapper!.text()).toContain('The totals do not match yet');
+    expect(wrapper!.text()).toContain('Edit the amounts or choose to save without item details.');
+    expect(wrapper!.text()).toContain('€2.80');
+    expect(wrapper!.find('input[placeholder="Enter total"]').element).toHaveProperty('value', '3.00');
+    const saveButton = wrapper!.findAll('button').find((button) => button.text().includes('Save expense'))!;
+    expect(saveButton.exists()).toBe(true);
+    expect((saveButton.element as HTMLButtonElement).disabled).toBe(true);
+    expect(calls.some(({ url }) => url.endsWith('/drafts/draft-2/confirm'))).toBe(false);
+  });
+
   it('loads backend summaries and searches through V2 routes', async () => {
     const { calls } = setup();
     await flushPromises();

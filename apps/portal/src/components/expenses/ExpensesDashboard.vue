@@ -1182,7 +1182,7 @@ onBeforeUnmount(() => {
 .receipt-review { display: grid; gap: 14px; min-width: 0; }
 .receipt-notice, .receipt-error { border: 1px solid var(--line); border-radius: 10px; font-size: 12px; line-height: 1.45; margin: 0; padding: 10px 12px; }
 .receipt-notice { background: color-mix(in srgb, var(--eg-blue-soft) 18%, transparent); }
-.receipt-error { background: #fff0ef; border-color: #d88a84; color: #8d2e2b; }
+.receipt-error { background: var(--eg-danger-soft); border-color: var(--eg-danger); color: var(--eg-danger); }
 .receipt-review-fields { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); min-width: 0; }
 .receipt-review-fields > label, .receipt-item-editor > label, .receipt-advanced-content > label { color: var(--ink); display: grid; font-size: 12px; font-weight: 700; gap: 6px; min-width: 0; }
 .receipt-review-fields input, .receipt-review-fields select, .receipt-item-editor input, .receipt-item-editor select, .receipt-advanced-content input, .receipt-adjustment-row input, .receipt-adjustment-row select {
@@ -1199,12 +1199,12 @@ onBeforeUnmount(() => {
 }
 .receipt-review-fields .receipt-primary-field { grid-column: 1 / -1; }
 .receipt-total-field { display: grid; gap: 7px; grid-template-columns: minmax(0, 1fr) 86px; min-width: 0; }
-.receipt-field-warning { color: #a05e16; font-size: 11px; font-weight: 600; line-height: 1.35; }
+.receipt-field-warning { color: var(--eg-warning); font-size: 11px; font-weight: 600; line-height: 1.35; }
 .receipt-reconciliation { border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 4px; padding: 11px 12px; font-size: 12px; }
 .receipt-reconciliation span { color: var(--muted); line-height: 1.4; }
-.receipt-reconciliation.matched { border-color: #39855c; }
-.receipt-reconciliation.mismatch { background: #fff6f4; border-color: #c76565; color: #8d2e2b; }
-.receipt-reconciliation.pending { border-color: #bf8a35; }
+.receipt-reconciliation.matched { background: var(--eg-success-soft); border-color: var(--eg-success); }
+.receipt-reconciliation.mismatch { background: var(--eg-danger-soft); border-color: var(--eg-danger); color: var(--eg-danger); }
+.receipt-reconciliation.pending { background: var(--eg-warning-soft); border-color: var(--eg-warning); }
 .receipt-optional-panel, .receipt-item { border: 1px solid var(--line); border-radius: 10px; min-width: 0; }
 .receipt-optional-panel > summary { cursor: pointer; font-size: 12px; font-weight: 700; list-style-position: inside; padding: 11px 12px; }
 .receipt-image-frame { align-items: center; background: #101923; border-top: 1px solid var(--line); display: flex; justify-content: center; max-height: 48vh; min-height: 120px; overflow: hidden; padding: 10px; }
@@ -1223,13 +1223,13 @@ onBeforeUnmount(() => {
 .receipt-item-main small, .receipt-item-trailing small { color: var(--muted); font-size: 11px; }
 .receipt-item-trailing { justify-items: end; text-align: right; }
 .receipt-item-editor { border-top: 1px solid var(--line); display: grid; gap: 10px; grid-template-columns: repeat(3, minmax(0, 1fr)); min-width: 0; padding: 12px; }
-.receipt-item-uncertainty { color: #a05e16; font-size: 11px; grid-column: 1 / -1; line-height: 1.4; }
+.receipt-item-uncertainty { color: var(--eg-warning); font-size: 11px; grid-column: 1 / -1; line-height: 1.4; }
 .receipt-item-help { color: var(--muted); font-size: 10px; grid-column: 1 / -1; line-height: 1.35; }
 .receipt-advanced { align-self: start; grid-column: 1 / -1; min-width: 0; }
 .receipt-advanced > summary { cursor: pointer; font-size: 11px; font-weight: 700; padding: 6px 0; }
 .receipt-advanced > label { display: grid; font-size: 11px; font-weight: 700; gap: 5px; margin-top: 8px; }
 .receipt-advanced > small { color: var(--muted); display: block; font-size: 11px; margin-top: 7px; }
-.receipt-remove-item { color: #a33c38; }
+.receipt-remove-item { color: var(--eg-danger); }
 .receipt-empty-items { background: color-mix(in srgb, var(--surface) 86%, var(--line)); border-radius: 9px; color: var(--muted); font-size: 12px; line-height: 1.4; padding: 12px; }
 .receipt-total-only { color: var(--muted); font-size: 12px; margin-top: 3px; }
 .receipt-total-only input { accent-color: var(--eg-blue); min-height: auto; width: auto; }
