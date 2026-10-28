@@ -42,7 +42,7 @@ export class VoiceGateway implements OnGatewayConnection {
           accessToken = message.token
           authenticated = true
           clearTimeout(authTimeout)
-          await this.voiceSessionService.openSession(client)
+          await this.voiceSessionService.openSession(client, principal)
           client.send(JSON.stringify({ type: 'authenticated' }))
         } catch {
           client.close(1008, 'Invalid authentication message')

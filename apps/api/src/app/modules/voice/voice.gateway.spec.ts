@@ -56,7 +56,9 @@ let sessions: {
     )
     await new Promise((resolve) => setImmediate(resolve))
 
-    expect(sessions.openSession).toHaveBeenCalledWith(socket)
+    expect(sessions.openSession).toHaveBeenCalledWith(socket, {
+      userId: 'u', email: 'a@b.test', name: 'A', role: 'admin', sessionId: 's', sessionVersion: 1,
+    })
     expect(socket.send).toHaveBeenCalledWith(JSON.stringify({ type: 'authenticated' }))
   })
 

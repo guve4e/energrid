@@ -2,11 +2,14 @@ import { Module } from '@nestjs/common';
 import { HOUSE_AGENT } from './house-agent.port';
 import { LettaHouseAgentAdapter } from './letta-house-agent.adapter';
 import { DevicesModule } from '../devices/devices.module';
+import { PersonalExpensesModule } from '../expenses/personal-expenses.module';
+import { FinanceAssistantTools } from './finance-assistant-tools';
 
 @Module({
-  imports: [DevicesModule],
+  imports: [DevicesModule, PersonalExpensesModule],
   providers: [
     LettaHouseAgentAdapter,
+    FinanceAssistantTools,
     { provide: HOUSE_AGENT, useExisting: LettaHouseAgentAdapter },
   ],
   exports: [HOUSE_AGENT],

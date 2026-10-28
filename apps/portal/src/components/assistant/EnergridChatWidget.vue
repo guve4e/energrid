@@ -43,7 +43,10 @@ async function send() {
         Authorization: `Bearer ${props.accessToken}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify({
+        message: text,
+        ...(conversationId.value ? { conversationId: conversationId.value } : {}),
+      }),
     });
 
     if (!response.ok) {

@@ -13,6 +13,7 @@ import { FileInteractionTraceStore } from '../observability/file-interaction-tra
 import { runWithInteractionTrace } from '../observability/interaction-trace-context'
 import { WebSocket } from 'ws'
 import { randomUUID } from 'crypto'
+import type { AuthPrincipal } from '../auth/auth.types'
 import {
   classifyHomeIntent,
   planHomeIntent,
@@ -55,8 +56,8 @@ export class VoiceSessionService {
     private readonly homeAutomation: HomeAutomationService,
   ) {}
 
-  async openSession(client: WebSocket): Promise<void> {
-    const session = await this.createSession(client)
+  async openSession(client: WebSocket, principal?: AuthPrincipal): Promise<void> {
+    const session = await this.createSession(client, principal)
     this.sessions.set(client, session)
 
     this.trace.logSessionStart(session)
@@ -135,7 +136,7 @@ export class VoiceSessionService {
     this.emitter.emitActionConfirmationResult(session, 'cancelled')
   }
 
-  private async createSession(client: WebSocket): Promise<ActiveVoiceSession> {
+  private async createSession(client: WebSocket, principal?: AuthPrincipal): Promise<ActiveVoiceSession> {
     const id = randomUUID()
     const conversationId = randomUUID()
 
@@ -155,6 +156,7 @@ export class VoiceSessionService {
       id,
       conversationId,
       client,
+      principal,
       sttSession,
       streamingStt: this.sttService.isStreamingMode(),
       sttStreamingStarted: false,
@@ -801,6 +803,8 @@ export class VoiceSessionService {
     const scope = {
       tenantId: tenant.id,
       siteId: site.id,
+      principal: session.principal,
+      conversationId: session.conversationId,
     }
 
     const interaction = new InteractionTraceSession(
@@ -824,6 +828,9 @@ export class VoiceSessionService {
             session.finalTranscript,
           ),
         )
+        // Carry the server-issued HouseAgent handle into later voice turns so
+        // pending finance drafts remain bound to this authenticated session.
+        session.conversationId = answer.conversationId
 
         session.timings.llmCompletedAt = Date.now()
         session.timings.llmFirstDeltaAt =

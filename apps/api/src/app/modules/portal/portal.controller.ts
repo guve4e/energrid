@@ -241,7 +241,7 @@ export class PortalController {
 
   @Post('assistant/chat')
   async chatWithEnergrid(
-    @Body() body: { message?: unknown },
+    @Body() body: { message?: unknown; conversationId?: unknown },
     @Req() request: DeviceProxyRequest,
   ) {
     assertPortalAdministrator(request);
@@ -257,8 +257,17 @@ export class PortalController {
     }
 
     const message = body.message.trim();
+    if (body.conversationId !== undefined &&
+        (typeof body.conversationId !== 'string' || body.conversationId.length > 128)) {
+      throw new HouseChatBadRequestException('Conversation ID is invalid');
+    }
     const { tenant, site } = this.deviceRegistry.getSnapshot();
-    const scope = { tenantId: tenant.id, siteId: site.id };
+    const scope = {
+      tenantId: tenant.id,
+      siteId: site.id,
+      principal: request.user!,
+      ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
+    };
     const weatherReply = await this.weatherAssistant?.answer(scope, message);
     if (weatherReply) return { reply: weatherReply, conversationId: `weather:${site.id}` };
 

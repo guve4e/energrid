@@ -11,7 +11,7 @@ const backendLabel =
 
 export default defineConfig({
   root: __dirname,
-  cacheDir: '../../node_modules/.vite/apps/portal',
+  cacheDir: process.env.VITE_CACHE_DIR || '../../node_modules/.vite/apps/portal',
   plugins: [vue()],
   resolve: {
     alias: {
@@ -26,6 +26,7 @@ export default defineConfig({
     host: process.env.VITE_DEV_HOST || 'localhost',
     proxy: {
       '/auth': apiProxyTarget,
+      '/personal-finance': apiProxyTarget,
       '/portal': {
         target: apiProxyTarget,
         ws: true,

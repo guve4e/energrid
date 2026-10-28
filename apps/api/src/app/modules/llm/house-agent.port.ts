@@ -1,6 +1,12 @@
+import type { AuthPrincipal } from '../auth/auth.types';
+
 export interface HouseAgentScope {
   tenantId: string;
   siteId: string;
+  /** Supplied only by authenticated server entry points; never from model arguments. */
+  principal?: AuthPrincipal;
+  /** Opaque conversation handle issued by HouseAgentPort. */
+  conversationId?: string;
 }
 
 export interface HouseAgentReply {

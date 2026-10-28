@@ -19,7 +19,7 @@ describe('Voice → scoped Letta handoff', () => {
 
     const talk = jest.fn().mockResolvedValue({
       text: 'Готово, светнах лампата.',
-      conversationId: 'letta-house-agent',
+        conversationId: 'voice-conversation',
     });
 
     const streamStaticReply = jest.fn().mockResolvedValue(
@@ -93,6 +93,7 @@ describe('Voice → scoped Letta handoff', () => {
     const session = {
       id: 'voice-test',
       conversationId: 'voice-conversation',
+      principal: { userId: 'account-voice', email: 'voice@example.test', name: 'Voice', role: 'admin', sessionId: 'session-voice', sessionVersion: 1 },
       finalTranscript: 'Светни лампата в кухнята.',
       assistantReply: '',
       timings: {},
@@ -102,7 +103,11 @@ describe('Voice → scoped Letta handoff', () => {
 
     expect(talk).toHaveBeenCalledTimes(1);
     expect(talk).toHaveBeenCalledWith(
-      { tenantId: 'tenant-demo', siteId: 'site-home' },
+      {
+        tenantId: 'tenant-demo', siteId: 'site-home',
+        principal: session.principal,
+        conversationId: session.conversationId,
+      },
       'Светни лампата в кухнята.',
     );
 

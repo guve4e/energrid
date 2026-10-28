@@ -15,6 +15,7 @@ The checked-in migrations are under `apps/core/migrations`; they create multiple
 | `device_inventory.mqtt_publisher_evidence` | Broker publisher metadata, digest and verification state; links to physical inventory where correlated. Migration adds time-history indexes and retention support. |
 | `telemetry.measurements` | Generic accepted historical measurements keyed by tenant/site/device/component/channel/metric/sample ID; references enrollment and physical assignment. Numeric validity, quality and timestamp constraints are checked in PostgreSQL. |
 | `telemetry.readings`, `dirty_hours`, `hourly` | Electrical telemetry history and dirty rollup work, created by the electrical telemetry migration. |
+| `personal_finance.merchants`, `expense_drafts`, `expenses`, `expense_items`, `expense_draft_items`, `receipts`, `provenance_events` | Account-scoped personal finance history, draft confirmation, receipt metadata and append-only provenance. Money uses `numeric(38,18)` and source/import keys are unique within the account. |
 | Forecast, weather, pricing, estimator and installation tables | Core application persistence created in the earlier migrations. Consult migration files for exact table names and constraints before changing them. |
 
 ```mermaid
@@ -86,6 +87,7 @@ There are additional short-lived in-memory structures, including the basic obser
 - Observation LevelDB writes batch state, decision, evidence deduplication and bounded decision retention. An uncertain LevelDB write poisons the store instance until reopened rather than continuing from ambiguous state.
 - Generic measurement outbox entries remain queued through PostgreSQL outages and replay after startup/on interval. Full or unavailable local durable admission returns an error to the source.
 - Firmware-health retention and migration happen as writes occur; startup does not destructively rewrite existing local records.
+- Personal finance V2 confirms a draft, its line items, receipt links and provenance in one transaction; imports also use one transaction per submitted batch. The legacy LevelDB expense store remains available to V2 reads during migration.
 
 ## Schema source of truth
 

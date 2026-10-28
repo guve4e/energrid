@@ -5,11 +5,13 @@ import type {
   HomeIntentPlan,
 } from '@energrid/domain-automation'
 import type { HomeActionExecutionResult } from './home-automation.service'
+import type { AuthPrincipal } from '../auth/auth.types'
 
 export interface ActiveVoiceSession {
   id: string
   conversationId: string
   client: WebSocket
+  principal?: AuthPrincipal
   sttSession: StreamingSttSession
   streamingStt: boolean
   sttStreamingStarted: boolean

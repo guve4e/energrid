@@ -5265,3 +5265,141 @@ pre {
   .home-assistant-conversation { grid-template-columns: 1fr; }
   .home-assistant-header { align-items: flex-start; }
 }
+
+
+/* Keep Personal Finance consistent with the Portal dark theme. */
+.theme-dark .expenses-page {
+  --ink: #f7fbfb;
+  --muted: #94a3b8;
+  --line: #243143;
+  --surface: #050917;
+  --eg-blue: #79a8ff;
+  --eg-blue-soft: #172b4d;
+  --eg-danger-soft: #3a1f21;
+  --eg-warning-soft: #392c17;
+  color: #edf4f2;
+}
+.theme-dark .expenses-page .expenses-subtitle,
+.theme-dark .expenses-page .expense-card-heading p,
+.theme-dark .expenses-page .expense-muted,
+.theme-dark .expenses-page .expense-period-label,
+.theme-dark .expenses-page .expense-chart-foot,
+.theme-dark .expenses-page .expense-table-footnote,
+.theme-dark .expenses-page .expense-description small,
+.theme-dark .expenses-page .amount-cell small,
+.theme-dark .expenses-page .expense-empty-state,
+.theme-dark .expenses-page .expense-modal-lead,
+.theme-dark .expenses-page .expense-import-status {
+  color: #94a3b8;
+}
+.theme-dark .expenses-page .expense-ai-capture,
+.theme-dark .expenses-page .expense-capture-note,
+.theme-dark .expenses-page .expense-card,
+.theme-dark .expenses-page .expense-metric:not(.expense-metric--featured) {
+  background: #050917;
+  border-color: #243143;
+}
+.theme-dark .expenses-page .expense-ai-mark,
+.theme-dark .expenses-page .expense-capture-icon,
+.theme-dark .expenses-page .expense-empty-icon,
+.theme-dark .expenses-page .expense-preview-stats div,
+.theme-dark .expenses-page .expense-preview-examples {
+  background: #172b4d;
+  color: #a9c4ff;
+}
+.theme-dark .expenses-page .expense-ai-copy h2,
+.theme-dark .expenses-page .expense-capture-note strong,
+.theme-dark .expenses-page .expense-card-heading h2,
+.theme-dark .expenses-page .expense-empty-state strong,
+.theme-dark .expenses-page .expense-category-copy strong,
+.theme-dark .expenses-page .expense-modal-heading h2,
+.theme-dark .expenses-page .expense-preview-stats strong,
+.theme-dark .expenses-page .expense-preview-examples strong {
+  color: #f7fbfb;
+}
+.theme-dark .expenses-page .expense-ai-controls textarea,
+.theme-dark .expenses-page .expense-search,
+.theme-dark .expenses-page .expense-category-filter select,
+.theme-dark .expenses-page .expense-modal,
+.theme-dark .expenses-page .expense-modal form input,
+.theme-dark .expenses-page .expense-modal form select,
+.theme-dark .expenses-page .expense-amount-input {
+  background: #0d141b;
+  border-color: #243143;
+  color: #edf4f2;
+}
+.theme-dark .expenses-page .expense-ai-privacy,
+.theme-dark .expenses-page .expense-ai-review,
+.theme-dark .expenses-page .expense-tags span {
+  background: #0d1727;
+  border-color: #243143;
+  color: #aab8cc;
+}
+.theme-dark .expenses-page .expense-chart-track,
+.theme-dark .expenses-page .expense-category-rail {
+  background: #172033;
+}
+.theme-dark .expenses-page .expense-chart-column.selected .expense-chart-track {
+  background: #172b4d;
+}
+.theme-dark .expenses-page .expense-chart-label,
+.theme-dark .expenses-page .expense-chart-value,
+.theme-dark .expenses-page .expense-category-copy span,
+.theme-dark .expenses-page .expense-preview-stats span {
+  color: #94a3b8;
+}
+.theme-dark .expenses-page .expense-table th {
+  color: #94a3b8;
+}
+.theme-dark .expenses-page .expense-table td {
+  border-color: #243143;
+  color: #cbd5e1;
+}
+.theme-dark .expenses-page .expense-table tbody tr:hover {
+  background: #0d1730;
+}
+.theme-dark .expenses-page .expense-category-pill {
+  background: #172b4d;
+  color: #a9c4ff;
+}
+.theme-dark .expenses-page .expense-modal-close {
+  background: #1f2937;
+  color: #cbd5e1;
+}
+.theme-dark .expenses-page .expense-button--quiet,
+.theme-dark .expenses-page .expense-month-picker {
+  background: #1f2937;
+  border-color: #243143;
+  color: #edf4f2;
+}
+.theme-dark .expenses-page .expense-button--quiet:hover {
+  background: #263449;
+}
+.theme-dark .expenses-page .expense-dropzone {
+  border-color: #35517c;
+  color: #c7d7e5;
+}
+.theme-dark .expenses-page .expense-dropzone:hover {
+  background: #0d1727;
+  border-color: #79a8ff;
+}
+.theme-dark .expenses-page .expense-upload-symbol {
+  background: #172b4d;
+  color: #a9c4ff;
+}
+.theme-dark .expenses-page .expense-alert {
+  background: #3a1f21;
+  color: #fda29b;
+}
+.theme-dark .expenses-page .expense-success {
+  background: #153628;
+  color: #78e4a9;
+}
+.theme-dark .expenses-page .expense-conversion-note,
+.theme-dark .expenses-page .expense-import-errors {
+  background: #392c17;
+  color: #f7c66a;
+}
+.theme-dark .expenses-page .expense-modal-backdrop {
+  background: #020617bb;
+}

@@ -5,109 +5,69 @@ import { authFetch } from '../../auth/auth-client';
 type Expense = {
   id: string;
   date: string;
-  amount: number;
+  amount: string;
   currency: string;
-  amountEur: number | null;
-  fxRate?: number;
+  amountEur: string | null;
+  fx?: { rate: string } | null;
   category: string;
+  categoryId?: string | null;
   description: string;
   tags: string[];
-  liters?: number;
+  liters?: string | null;
   legacyRecordId?: string;
+  legacyReadOnly?: boolean;
 };
-type ImportPreview = {
-  records: Omit<Expense, 'id'>[];
-  total: number;
-  valid: number;
-  duplicates: number;
-  errors: string[];
-};
+type FinanceCategory = { id: string; name: string; description: string | null; parentId: string | null; status: 'active' | 'archived' };
 const props = defineProps<{ apiBase: string; accessToken: string }>();
 const expenses = ref<Expense[]>([]);
-const aiStatus = ref<{ available: boolean; provider: string | null } | null>(
-  null,
-);
+const summary = ref({ total: '0', dailyAverage: null as string | null, transactionCount: 0, excludedUnconvertedCount: 0, legacyCoverage: 'leveldb-available', byCategory: [] as Array<{ category: string; total: string; count: number }> });
+const yearSummary = ref({ total: '0' });
+const allHistorySummary = ref({ total: '0', transactionCount: 0, byCategory: [] as Array<{ category: string; total: string; count: number }> });
+const monthlySummaries = ref<Record<string, { total: string; transactionCount: number } | null>>({});
 const loading = ref(true);
 const error = ref('');
 const busy = ref(false);
 const addOpen = ref(false);
 const editingId = ref<string | null>(null);
-const importOpen = ref(false);
-const importPreview = ref<ImportPreview | null>(null);
-const importName = ref('');
-const importMessage = ref('');
-const aiText = ref('');
-const aiConsent = ref(false);
-const aiError = ref('');
-const aiDraft = ref(false);
 const month = ref(localMonth());
+const transactionScope = ref<'month' | 'all'>('month');
 const search = ref('');
+const categoryFilter = ref('');
+const transactionPage = ref(1);
+const transactionPageSize = 50;
+const categories = ref<FinanceCategory[]>([]);
+const categoriesOpen = ref(false);
+const categoryName = ref('');
+const categoryDescription = ref('');
+const categoryEditId = ref<string | null>(null);
+const categoryEditName = ref('');
+const originalCategory = ref<string | null>(null);
 const form = reactive({
   date: localDate(),
   amount: '',
   currency: 'EUR',
   fxRate: '',
   category: 'Groceries',
+  categoryId: null as string | null,
   description: '',
   tags: '',
   liters: '',
 });
 
-const categories = [
-  'Groceries',
-  'Restaurants',
-  'Fuel',
-  'Auto',
-  'Home',
-  'Utilities',
-  'Health',
-  'Personal',
-  'Pets',
-  'Entertainment',
-  'Internet',
-  'Mobile',
-  'Cloud Services',
-  'Streaming',
-  'Software',
-];
-const monthExpenses = computed(() =>
-  expenses.value.filter((item) => item.date.startsWith(month.value)),
-);
-const unconvertedCount = computed(
-  () => monthExpenses.value.filter((item) => item.amountEur === null).length,
-);
-const monthTotal = computed(() =>
-  monthExpenses.value.reduce((sum, item) => sum + euroAmount(item), 0),
-);
-const yearTotal = computed(() =>
-  expenses.value
-    .filter((item) => item.date.startsWith(month.value.slice(0, 4)))
-    .reduce((sum, item) => sum + euroAmount(item), 0),
-);
-const dayCount = computed(() =>
-  Math.max(
-    1,
-    Number(month.value.slice(5, 7)) === new Date().getMonth() + 1 &&
-      Number(month.value.slice(0, 4)) === new Date().getFullYear()
-      ? new Date().getDate()
-      : new Date(
-          Number(month.value.slice(0, 4)),
-          Number(month.value.slice(5, 7)),
-          0,
-        ).getDate(),
-  ),
-);
-const dailyAverage = computed(() => monthTotal.value / dayCount.value);
+const categoryOptions = computed(() => [...new Set([...categories.value.map((item) => item.name), ...summary.value.byCategory.map((item) => item.category), ...allHistorySummary.value.byCategory.map((item) => item.category)])].sort((a, b) => a.localeCompare(b)));
+const unconvertedCount = computed(() => summary.value.excludedUnconvertedCount);
+const monthTotal = computed(() => Number(summary.value.total));
+const yearTotal = computed(() => Number(yearSummary.value.total));
+const allHistoryTotal = computed(() => Number(allHistorySummary.value.total));
+const transactionPageCount = computed(() => Math.max(1, Math.ceil(expenses.value.length / transactionPageSize)));
+const selectedMonthLabel = computed(() => new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(new Date(`${month.value}-15T00:00:00Z`)));
+const selectedDateRangeLabel = computed(() => {
+  const range = monthRange(month.value);
+  return `${humanDate(range.fromDate)} – ${humanDate(range.toDate)}`;
+});
+const dailyAverage = computed(() => summary.value.dailyAverage);
 const categoryTotals = computed(() => {
-  const totals = new Map<string, number>();
-  for (const item of monthExpenses.value)
-    totals.set(
-      item.category,
-      (totals.get(item.category) || 0) + euroAmount(item),
-    );
-  return [...totals.entries()]
-    .map(([name, total]) => ({ name, total }))
-    .sort((a, b) => b.total - a.total);
+  return summary.value.byCategory.map((item) => ({ name: item.category, total: Number(item.total) }));
 });
 const maxCategoryTotal = computed(() =>
   Math.max(1, ...categoryTotals.value.map((item) => item.total)),
@@ -115,52 +75,38 @@ const maxCategoryTotal = computed(() =>
 const chartMonths = computed(() => {
   const [year, monthNumber] = month.value.split('-').map(Number);
   return Array.from({ length: 8 }, (_, index) => {
-    const date = new Date(Date.UTC(year, monthNumber - 1 - 7 + index, 1));
+    const date = new Date(Date.UTC(year, monthNumber - 8 + index, 1));
     const key = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
-    const total = expenses.value
-      .filter((item) => item.date.startsWith(key))
-      .reduce((sum, item) => sum + euroAmount(item), 0);
+    const summary = monthlySummaries.value[key];
     return {
       key,
-      label: new Intl.DateTimeFormat(undefined, {
+      summary,
+      total: summary ? Number(summary.total) : 0,
+      monthLabel: new Intl.DateTimeFormat(undefined, {
         month: 'short',
         timeZone: 'UTC',
       }).format(date),
-      total,
+      yearLabel: String(date.getUTCFullYear()).slice(-2),
+      fullLabel: new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(date),
     };
   });
 });
 const maxMonthTotal = computed(() =>
   Math.max(1, ...chartMonths.value.map((item) => item.total)),
 );
-const filteredExpenses = computed(() => {
-  const query = search.value.trim().toLowerCase();
-  return [...expenses.value]
-    .filter(
-      (item) =>
-        !query ||
-        [item.category, item.description, item.tags.join(' ')]
-          .join(' ')
-          .toLowerCase()
-          .includes(query),
-    )
-    .sort((a, b) => b.date.localeCompare(a.date))
-    .slice(0, 100);
-});
-const formatEur = (value: number) =>
+const filteredExpenses = computed(() => expenses.value.slice((transactionPage.value - 1) * transactionPageSize, transactionPage.value * transactionPageSize));
+const formatEur = (value: number | string) =>
   new Intl.NumberFormat(undefined, {
     style: 'currency',
     currency: 'EUR',
     maximumFractionDigits: 2,
-  }).format(value);
+  }).format(Number(value));
 const formatNative = (item: Expense) =>
   new Intl.NumberFormat(undefined, {
     style: 'currency',
     currency: item.currency,
     maximumFractionDigits: 2,
-  }).format(item.amount);
-const euroAmount = (item: Expense) =>
-  item.amountEur ?? (item.currency === 'EUR' ? item.amount : 0);
+  }).format(Number(item.amount));
 const humanDate = (value: string) =>
   new Intl.DateTimeFormat(undefined, {
     day: 'numeric',
@@ -171,10 +117,17 @@ const humanDate = (value: string) =>
 const euroPercent = (value: number) =>
   `${Math.max(3, Math.round((value / maxCategoryTotal.value) * 100))}%`;
 
-watch(aiText, () => {
-  aiConsent.value = false;
-  aiError.value = '';
+watch(month, () => {
+  transactionPage.value = 1;
+  if (transactionScope.value === 'month') void load();
+  else void refreshSummaries().catch(setRequestError);
 });
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
+watch([transactionScope, search, categoryFilter], () => { transactionPage.value = 1; clearTimeout(searchTimer); searchTimer = setTimeout(loadExpenses, 250); });
+
+function setRequestError(cause: unknown) {
+  error.value = cause instanceof Error ? cause.message : 'Your expenses could not be loaded.';
+}
 
 async function api(path: string, init?: RequestInit) {
   const response = await authFetch(`${props.apiBase}${path}`, {
@@ -185,38 +138,82 @@ async function api(path: string, init?: RequestInit) {
       ...(init?.headers || {}),
     },
   });
-  if (!response.ok) {
-    let message = 'Your expenses could not be loaded. Please try again.';
-    try {
-      const body = await response.json();
-      if (typeof body.message === 'string') message = body.message;
-    } catch {
-      /* Use the friendly fallback. */
-    }
-    throw new Error(message);
-  }
-  return response.json();
+  const text = await response.text();
+  let body: any = null;
+  if (text) { try { body = JSON.parse(text); } catch { /* handled below */ } }
+  if (!response.ok) throw new Error(typeof body?.message === 'string' ? body.message : `The request failed (${response.status}). Please try again.`);
+  if (!text) return null;
+  if (body === null) throw new Error(`The server returned an unreadable response (${response.status}). Please retry.`);
+  return body;
 }
 
-async function load() {
+function monthRange(value: string) { const [y, m] = value.split('-').map(Number); return { fromDate: `${value}-01`, toDate: new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10) }; }
+async function refreshSummaries() {
+  const keys = chartMonths.value.map((item) => item.key);
+  const monthRangeValue = monthRange(month.value);
+  const year = month.value.slice(0, 4);
+  monthlySummaries.value = {};
+  try {
+    const [monthData, yearData, allHistoryData] = await Promise.all([
+      api(`/personal-finance/summary?fromDate=${monthRangeValue.fromDate}&toDate=${monthRangeValue.toDate}`),
+      api(`/personal-finance/summary?fromDate=${year}-01-01&toDate=${year}-12-31`),
+      api('/personal-finance/summary'),
+    ]);
+    const chartResults = await Promise.allSettled(keys.map((key) => {
+      const range = monthRange(key);
+      return api(`/personal-finance/summary?fromDate=${range.fromDate}&toDate=${range.toDate}`);
+    }));
+    summary.value = monthData;
+    yearSummary.value = yearData;
+    allHistorySummary.value = allHistoryData;
+    monthlySummaries.value = Object.fromEntries(keys.map((key, index) => {
+      const result = chartResults[index];
+      return [key, result?.status === 'fulfilled'
+        ? { total: String(result.value.total ?? '0'), transactionCount: Number(result.value.transactionCount ?? 0) }
+        : null];
+    }));
+  } catch (cause) {
+    monthlySummaries.value = Object.fromEntries(keys.map((key) => [key, null]));
+    throw cause;
+  }
+}
+
+async function loadExpenses() {
   loading.value = true;
   error.value = '';
   try {
-    const result = await api('/personal-expenses');
+    const categoryResult = await api('/personal-finance/categories');
+    categories.value = categoryResult.categories || [];
+    const query = new URLSearchParams({ limit: '1000' });
+    if (transactionScope.value === 'month') {
+      const range = monthRange(month.value);
+      query.set('fromDate', range.fromDate);
+      query.set('toDate', range.toDate);
+    }
+    if (search.value.trim()) query.set('text', search.value.trim());
+    if (categoryFilter.value) query.set('category', categoryFilter.value);
+    const result = await api(`/personal-finance/expenses?${query.toString()}`);
     expenses.value = result.expenses || [];
+    transactionPage.value = Math.min(transactionPage.value, transactionPageCount.value);
   } catch (cause) {
-    error.value =
-      cause instanceof Error
-        ? cause.message
-        : 'Your expenses could not be loaded.';
+    setRequestError(cause);
   } finally {
     loading.value = false;
   }
-  try {
-    aiStatus.value = await api('/personal-expenses/ai/status');
-  } catch {
-    aiStatus.value = { available: false, provider: null };
-  }
+}
+
+async function load() {
+  await Promise.all([loadExpenses(), refreshSummaries().catch(setRequestError)]);
+}
+
+function selectChartMonth(value: string) {
+  month.value = value;
+}
+
+function chartMonthTitle(item: (typeof chartMonths.value)[number]) {
+  if (item.summary === undefined) return `${item.fullLabel}: loading monthly data`;
+  if (item.summary === null) return `${item.fullLabel}: monthly data unavailable`;
+  return `${item.fullLabel}: ${formatEur(item.summary.total)} · ${item.summary.transactionCount} expenses`;
 }
 
 async function saveExpense() {
@@ -233,34 +230,31 @@ async function saveExpense() {
   try {
     const result = await api(
       editingId.value
-        ? `/personal-expenses/${encodeURIComponent(editingId.value)}`
-        : '/personal-expenses',
+          ? `/personal-finance/expenses/${encodeURIComponent(editingId.value)}`
+        : '/personal-finance/expenses',
       {
         method: editingId.value ? 'PATCH' : 'POST',
         body: JSON.stringify({
           date: form.date,
-          amount,
+          amount: form.amount,
           currency: form.currency,
           ...(form.currency !== 'EUR' && form.fxRate
-            ? { fxRate: Number(form.fxRate) }
+            ? { fxRate: form.fxRate }
             : {}),
           category: form.category.trim(),
+          categoryId: resolvedCategoryId(),
           description: form.description.trim(),
           tags: form.tags
             .split(',')
             .map((tag) => tag.trim())
             .filter(Boolean),
           ...(form.category === 'Fuel' && form.liters
-            ? { liters: Number(form.liters) }
+            ? { liters: form.liters }
             : {}),
         }),
       },
     );
-    expenses.value = editingId.value
-      ? expenses.value.map((item) =>
-          item.id === result.expense.id ? result.expense : item,
-        )
-      : [result.expense, ...expenses.value];
+    await load();
     addOpen.value = false;
     resetForm();
   } catch (cause) {
@@ -273,21 +267,61 @@ async function saveExpense() {
   }
 }
 
+function resolvedCategoryId(): string | null {
+  const selected = categories.value.find((item) => item.name.toLocaleLowerCase() === form.category.trim().toLocaleLowerCase());
+  if (!editingId.value) return selected?.id ?? null;
+  if (form.category === originalCategory.value) return form.categoryId;
+  return selected?.id ?? null;
+}
+
+async function createCategory() {
+  if (!categoryName.value.trim()) return;
+  busy.value = true;
+  try {
+    await api('/personal-finance/categories', { method: 'POST', body: JSON.stringify({ name: categoryName.value, description: categoryDescription.value || null }) });
+    categoryName.value = '';
+    categoryDescription.value = '';
+    await load();
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Category could not be created.'; }
+  finally { busy.value = false; }
+}
+
+async function renameCategory(category: FinanceCategory) {
+  const name = categoryEditName.value.trim();
+  if (!name) return;
+  busy.value = true;
+  try {
+    await api(`/personal-finance/categories/${encodeURIComponent(category.id)}`, { method: 'PATCH', body: JSON.stringify({ name, description: category.description, parentId: category.parentId }) });
+    categoryEditId.value = null;
+    await load();
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Category could not be renamed.'; }
+  finally { busy.value = false; }
+}
+
+async function archiveCategory(category: FinanceCategory) {
+  busy.value = true;
+  try {
+    await api(`/personal-finance/categories/${encodeURIComponent(category.id)}/archive`, { method: 'POST' });
+    await load();
+  } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Category could not be archived.'; }
+  finally { busy.value = false; }
+}
+
 function openAdd() {
   resetForm();
-  aiDraft.value = false;
   addOpen.value = true;
 }
 
 function openEdit(item: Expense) {
-  aiDraft.value = false;
   editingId.value = item.id;
+  originalCategory.value = item.category;
   Object.assign(form, {
     date: item.date,
     amount: String(item.amount),
     currency: item.currency,
-    fxRate: item.fxRate == null ? '' : String(item.fxRate),
+    fxRate: item.fx?.rate == null ? '' : String(item.fx.rate),
     category: item.category,
+    categoryId: item.categoryId ?? null,
     description: item.description,
     tags: item.tags.join(', '),
     liters: item.liters == null ? '' : String(item.liters),
@@ -295,57 +329,14 @@ function openEdit(item: Expense) {
   addOpen.value = true;
 }
 
-async function draftFromDescription() {
-  aiError.value = '';
-  if (!aiText.value.trim()) {
-    aiError.value = 'Describe one expense first.';
-    return;
-  }
-  if (!aiConsent.value) {
-    aiError.value =
-      'Confirm AI processing before asking Energrid to read this description.';
-    return;
-  }
-  busy.value = true;
-  try {
-    const result = await api('/personal-expenses/parse', {
-      method: 'POST',
-      body: JSON.stringify({
-        text: aiText.value.trim(),
-        cloudDataConsent: true,
-      }),
-    });
-    const draft = result.draft;
-    aiConsent.value = false;
-    resetForm();
-    Object.assign(form, {
-      date: draft.date || localDate(),
-      amount: draft.amount == null ? '' : String(draft.amount),
-      currency: draft.currency || 'EUR',
-      category: draft.category || 'Groceries',
-      description: draft.description || '',
-      tags: Array.isArray(draft.tags) ? draft.tags.join(', ') : '',
-      liters: draft.liters == null ? '' : String(draft.liters),
-    });
-    aiDraft.value = true;
-    addOpen.value = true;
-  } catch (cause) {
-    aiError.value =
-      cause instanceof Error
-        ? cause.message
-        : 'Energrid could not prepare that expense.';
-  } finally {
-    busy.value = false;
-  }
-}
-
 async function deleteExpense(item: Expense) {
   if (!window.confirm(`Delete “${item.description}”?`)) return;
   try {
-    await api(`/personal-expenses/${encodeURIComponent(item.id)}`, {
+    if (item.legacyReadOnly) { error.value = 'Import this legacy entry before editing or deleting it.'; return; }
+    await api(`/personal-finance/expenses/${encodeURIComponent(item.id)}`, {
       method: 'DELETE',
     });
-    expenses.value = expenses.value.filter((expense) => expense.id !== item.id);
+    await load();
   } catch (cause) {
     error.value =
       cause instanceof Error
@@ -354,81 +345,16 @@ async function deleteExpense(item: Expense) {
   }
 }
 
-async function inspectImport(event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0];
-  importPreview.value = null;
-  importMessage.value = '';
-  error.value = '';
-  if (!file) return;
-  if (file.size > 5 * 1024 * 1024) {
-    error.value =
-      'That file is over 5 MB. Split the export into smaller files and import them one at a time.';
-    return;
-  }
-  importName.value = file.name;
-  busy.value = true;
-  try {
-    const text = await file.text();
-    let records: unknown;
-    try {
-      records = JSON.parse(text);
-    } catch {
-      records = text
-        .split(/\r?\n/)
-        .filter((line) => line.trim())
-        .map((line) => JSON.parse(line));
-    }
-    importPreview.value = await api('/personal-expenses/import/preview', {
-      method: 'POST',
-      body: JSON.stringify({ records }),
-    });
-  } catch (cause) {
-    error.value =
-      cause instanceof Error
-        ? cause.message
-        : 'This file could not be read. Use a JSON or JSON Lines export.';
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function confirmImport() {
-  if (!importPreview.value?.records.length) return;
-  busy.value = true;
-  importMessage.value = '';
-  error.value = '';
-  try {
-    const result = await api('/personal-expenses/import', {
-      method: 'POST',
-      body: JSON.stringify({ records: importPreview.value.records }),
-    });
-    importMessage.value = `Imported ${result.imported} expenses${result.skippedDuplicates ? ` · skipped ${result.skippedDuplicates} duplicates` : ''}${result.rejected ? ` · ${result.rejected} needs attention` : ''}.`;
-    importPreview.value = null;
-    await load();
-  } catch (cause) {
-    error.value =
-      cause instanceof Error
-        ? cause.message
-        : 'The import did not finish. Your original file is unchanged.';
-  } finally {
-    busy.value = false;
-  }
-}
-
-function openImport() {
-  importOpen.value = true;
-  importPreview.value = null;
-  importMessage.value = '';
-  importName.value = '';
-}
 function resetForm() {
   editingId.value = null;
+  originalCategory.value = null;
   Object.assign(form, {
     date: localDate(),
     amount: '',
     currency: 'EUR',
     fxRate: '',
     category: 'Groceries',
+    categoryId: null,
     description: '',
     tags: '',
     liters: '',
@@ -446,8 +372,8 @@ onMounted(load);
 </script>
 
 <template>
-  <section class="expenses-page" aria-labelledby="expenses-title">
-    <header class="expenses-heading">
+  <section class="panel workspace-panel expenses-page" aria-labelledby="expenses-title">
+    <header class="expenses-heading page-heading">
       <div>
         <p class="eyebrow">Personal finance</p>
         <h1 id="expenses-title">Your spending, in one place.</h1>
@@ -456,13 +382,7 @@ onMounted(load);
         </p>
       </div>
       <div class="expenses-actions">
-        <button
-          class="expense-button expense-button--quiet"
-          type="button"
-          @click="openImport"
-        >
-          Import old data
-        </button>
+        <button class="expense-button expense-button--quiet" type="button" @click="categoriesOpen = true">Manage categories</button>
         <button
           class="expense-button expense-button--primary"
           type="button"
@@ -474,9 +394,6 @@ onMounted(load);
     </header>
 
     <p v-if="error" class="expense-alert" role="alert">{{ error }}</p>
-    <p v-if="importMessage" class="expense-success" role="status">
-      {{ importMessage }}
-    </p>
     <p v-if="unconvertedCount" class="expense-conversion-note" role="status">
       {{ unconvertedCount }}
       {{ unconvertedCount === 1 ? 'transaction is' : 'transactions are' }} in a
@@ -504,68 +421,27 @@ onMounted(load);
       >
     </div>
 
-    <article class="expense-ai-capture">
-      <div class="expense-ai-mark" aria-hidden="true">✦</div>
-      <div class="expense-ai-copy">
-        <p class="eyebrow">Low-effort capture</p>
-        <h2>Tell Energrid what you spent.</h2>
-        <p>
-          Type or dictate a sentence. Energrid will draft the date, amount and
-          category for you to review.
-        </p>
-      </div>
-      <div class="expense-ai-controls">
-        <label class="sr-only" for="expense-natural-input"
-          >Describe an expense</label
-        >
-        <textarea
-          id="expense-natural-input"
-          v-model="aiText"
-          rows="2"
-          maxlength="1200"
-          placeholder="For example: €28.57 at Lidl for groceries today"
-        ></textarea>
-        <label class="expense-ai-consent"
-          ><input v-model="aiConsent" type="checkbox" /><span
-            >I agree to send this description to Energrid’s configured AI
-            provider. It will not be saved until I review and confirm the
-            draft.</span
-          ></label
-        >
-        <div class="expense-ai-actions">
-          <span v-if="!aiStatus?.available" class="expense-ai-unavailable"
-            >AI capture is not configured for this Energrid environment
-            yet.</span
-          ><span v-else class="expense-ai-provider"
-            >Configured provider: {{ aiStatus.provider }}</span
-          ><button
-            class="expense-button expense-button--primary"
-            type="button"
-            :disabled="busy || !aiStatus?.available"
-            @click="draftFromDescription"
-          >
-            {{ busy ? 'Preparing…' : 'Draft expense' }}
-          </button>
-        </div>
-        <p v-if="aiError" class="expense-ai-error" role="alert">
-          {{ aiError }}
-        </p>
-      </div>
-    </article>
+    <div v-if="summary.legacyCoverage === 'leveldb-unavailable'" class="expense-legacy-warning" role="status">
+      Older LevelDB expenses could not be loaded. These totals may be incomplete; PostgreSQL records remain available.
+    </div>
 
     <div class="expense-metrics">
       <article class="expense-metric expense-metric--featured">
         <span>This month</span><strong>{{ formatEur(monthTotal) }}</strong
-        ><small>{{ monthExpenses.length }} recorded expenses</small>
+        ><small>{{ summary.transactionCount }} recorded expenses</small>
         <div class="expense-metric-glow" aria-hidden="true"></div>
       </article>
       <article class="expense-metric">
-        <span>Daily pace</span><strong>{{ formatEur(dailyAverage) }}</strong
+        <span>Daily pace</span><strong>{{ dailyAverage === null || dailyAverage === undefined ? '—' : formatEur(dailyAverage) }}</strong
         ><small>Average per day this month</small>
       </article>
       <article class="expense-metric">
-        <span>Year to date</span><strong>{{ formatEur(yearTotal) }}</strong
+        <span>{{ month.slice(0, 4) === String(new Date().getFullYear()) ? 'Year to date' : 'Year total' }}</span><strong>{{ formatEur(yearTotal) }}</strong
         ><small>{{ month.slice(0, 4) }} · all categories</small>
+      </article>
+      <article class="expense-metric">
+        <span>All history</span><strong>{{ formatEur(allHistoryTotal) }}</strong
+        ><small>{{ allHistorySummary.transactionCount }} recorded expenses</small>
       </article>
       <article class="expense-metric">
         <span>Top category</span
@@ -585,40 +461,41 @@ onMounted(load);
         <div class="expense-card-heading">
           <div>
             <h2>Monthly spending</h2>
-            <p>Last eight months · converted to EUR</p>
+            <p>Eight months through {{ selectedMonthLabel }} · EUR</p>
           </div>
           <span class="expense-chart-total">{{ formatEur(monthTotal) }}</span>
         </div>
         <div
           class="expense-chart"
-          role="img"
-          :aria-label="`Monthly expenses for the last eight months. Selected month total ${formatEur(monthTotal)}.`"
+          role="group"
+          :aria-label="`Monthly spending for eight months through ${selectedMonthLabel}`"
         >
-          <div
+          <button
             v-for="item in chartMonths"
             :key="item.key"
+            type="button"
             class="expense-chart-column"
-            :class="{ selected: item.key === month }"
+            :class="{ selected: item.key === month, unavailable: item.summary === null, zero: item.summary && item.total === 0 }"
+            :aria-pressed="item.key === month"
+            :aria-label="chartMonthTitle(item)"
+            :title="chartMonthTitle(item)"
+            @click="selectChartMonth(item.key)"
           >
-            <span class="expense-chart-value">{{
-              item.total >= 1000
-                ? `${(item.total / 1000).toFixed(1)}k`
-                : Math.round(item.total)
-            }}</span>
+            <span class="expense-chart-value">{{ item.summary === undefined ? 'Loading' : item.summary === null ? 'Unavailable' : formatEur(item.summary.total) }}</span>
             <div class="expense-chart-track">
               <div
                 class="expense-chart-bar"
                 :style="{
-                  height: `${Math.max(3, (item.total / maxMonthTotal) * 100)}%`,
+                  height: `${item.summary && item.total > 0 ? Math.max(2, (item.total / maxMonthTotal) * 100) : 0}%`,
                 }"
               ></div>
             </div>
-            <span class="expense-chart-label">{{ item.label }}</span>
-          </div>
+            <span class="expense-chart-label">{{ item.monthLabel }} ’{{ item.yearLabel }}</span>
+          </button>
         </div>
         <div class="expense-chart-foot">
-          <span><i></i> Total expenses</span
-          ><span>{{ month.slice(0, 4) }}</span>
+          <span><i></i> Monthly total · keyboard or click to select</span>
+          <span>{{ chartMonths[0]?.fullLabel }} – {{ selectedMonthLabel }}</span>
         </div>
       </article>
 
@@ -626,20 +503,12 @@ onMounted(load);
         <div class="expense-card-heading">
           <div>
             <h2>Where it goes</h2>
-            <p>
-              Category totals for
-              {{
-                new Intl.DateTimeFormat(undefined, {
-                  month: 'long',
-                  timeZone: 'UTC',
-                }).format(new Date(`${month}-15T00:00:00Z`))
-              }}
-            </p>
+            <p>Category totals · {{ selectedMonthLabel }} · EUR</p>
           </div>
         </div>
         <div v-if="categoryTotals.length" class="expense-category-list">
           <div
-            v-for="item in categoryTotals.slice(0, 7)"
+            v-for="item in categoryTotals"
             :key="item.name"
             class="expense-category-row"
           >
@@ -664,8 +533,15 @@ onMounted(load);
       <div class="expense-card-heading expense-transactions-heading">
         <div>
           <h2>Transactions</h2>
-          <p>Recent activity across your history</p>
+          <p>{{ transactionScope === 'month' ? `${selectedDateRangeLabel} · ${selectedMonthLabel}` : 'All recorded dates' }} · {{ expenses.length }} matching</p>
         </div>
+        <label class="expense-scope-filter">
+          <span class="sr-only">Transaction date range</span>
+          <select v-model="transactionScope" aria-label="Transaction date range">
+            <option value="month">Selected month</option>
+            <option value="all">All history</option>
+          </select>
+        </label>
         <label class="expense-search"
           ><span aria-hidden="true">⌕</span
           ><input
@@ -674,6 +550,13 @@ onMounted(load);
             placeholder="Search merchant, category or tag"
             aria-label="Search expenses"
         /></label>
+        <label class="expense-category-filter">
+          <span class="sr-only">Filter expenses by category</span>
+          <select v-model="categoryFilter" aria-label="Filter expenses by category">
+            <option value="">All categories</option>
+            <option v-for="category in categoryOptions" :key="category" :value="category">{{ category }}</option>
+          </select>
+        </label>
       </div>
       <div v-if="loading" class="expense-empty-state">
         Loading transaction history…
@@ -681,20 +564,14 @@ onMounted(load);
       <div v-else-if="!filteredExpenses.length" class="expense-empty-state">
         <span class="expense-empty-icon">＋</span
         ><strong>No transactions match this view</strong>
-        <p>Add an expense or import your previous history to get started.</p>
+        <p>Choose another month, expand to all history, or adjust the filters.</p>
         <div class="expense-empty-actions">
           <button
             class="expense-button expense-button--primary"
             type="button"
             @click="openAdd"
           >
-            Add an expense</button
-          ><button
-            class="expense-button expense-button--quiet"
-            type="button"
-            @click="openImport"
-          >
-            Import history
+            Add an expense
           </button>
         </div>
       </div>
@@ -739,6 +616,7 @@ onMounted(load);
                   class="expense-edit"
                   type="button"
                   :aria-label="`Edit ${item.description}`"
+                  :disabled="item.legacyReadOnly"
                   @click="openEdit(item)"
                 >
                   ↗
@@ -747,6 +625,7 @@ onMounted(load);
                   class="expense-delete"
                   type="button"
                   :aria-label="`Delete ${item.description}`"
+                  :disabled="item.legacyReadOnly"
                   @click="deleteExpense(item)"
                 >
                   ×
@@ -755,33 +634,16 @@ onMounted(load);
             </tr>
           </tbody>
         </table>
-        <p
-          v-if="filteredExpenses.length === 100"
-          class="expense-table-footnote"
-        >
-          Showing the latest 100 matching transactions.
-        </p>
+        <div v-if="expenses.length > transactionPageSize" class="expense-table-pagination" aria-label="Transaction pages">
+          <span>Showing {{ (transactionPage - 1) * transactionPageSize + 1 }}–{{ Math.min(transactionPage * transactionPageSize, expenses.length) }} of {{ expenses.length }}</span>
+          <div>
+            <button type="button" class="expense-button expense-button--quiet" :disabled="transactionPage === 1" @click="transactionPage--">Previous</button>
+            <span>Page {{ transactionPage }} of {{ transactionPageCount }}</span>
+            <button type="button" class="expense-button expense-button--quiet" :disabled="transactionPage === transactionPageCount" @click="transactionPage++">Next</button>
+          </div>
+        </div>
       </div>
     </article>
-
-    <section class="expense-capture-note">
-      <div class="expense-capture-icon">✦</div>
-      <div>
-        <strong>Capture should take seconds</strong>
-        <p>
-          History import and quick entry are ready. Receipt scanning, voice
-          capture, and bank connections can follow as separate, reviewable
-          sources.
-        </p>
-      </div>
-      <button
-        class="expense-button expense-button--quiet"
-        type="button"
-        @click="openImport"
-      >
-        Bring in your history
-      </button>
-    </section>
 
     <div
       v-if="addOpen"
@@ -810,10 +672,6 @@ onMounted(load);
             ×
           </button>
         </div>
-        <p v-if="aiDraft" class="expense-ai-review">
-          AI prepared this draft. Check the date, amount, currency and category
-          before saving.
-        </p>
         <form @submit.prevent="saveExpense">
           <div class="expense-form-grid">
             <label>Date<input v-model="form.date" required type="date" /></label
@@ -835,8 +693,8 @@ onMounted(load);
             <label
               >Currency<select v-model="form.currency">
                 <option>EUR</option>
-                <option>BGN</option>
                 <option>USD</option>
+                <option v-if="editingId && form.currency === 'BGN'">BGN</option>
               </select></label
             ><label
               >Category<input
@@ -846,8 +704,8 @@ onMounted(load);
                 maxlength="80" /><datalist id="expense-category-options">
                 <option
                   v-for="category in categories"
-                  :key="category"
-                  :value="category"
+                  :key="category.id"
+                  :value="category.name"
                 ></option></datalist
             ></label>
           </div>
@@ -872,8 +730,8 @@ onMounted(load);
             <span class="expense-optional">optional · comma separated</span
             ><input v-model="form.tags" placeholder="e.g. weekly shop, Lidl"
           /></label>
-          <label v-if="form.category === 'Fuel'"
-            >Fuel volume <span class="expense-optional">liters</span
+          <label
+            >Fuel volume <span class="expense-optional">optional · liters</span
             ><input
               v-model="form.liters"
               min="0.01"
@@ -897,105 +755,32 @@ onMounted(load);
       </section>
     </div>
 
-    <div
-      v-if="importOpen"
-      class="expense-modal-backdrop"
-      @click.self="importOpen = false"
-    >
-      <section
-        class="expense-modal expense-import-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="import-expense-title"
-      >
+    <div v-if="categoriesOpen" class="expense-modal-backdrop" @click.self="categoriesOpen = false">
+      <section class="expense-modal" role="dialog" aria-modal="true" aria-labelledby="expense-categories-title">
         <div class="expense-modal-heading">
-          <div>
-            <p class="eyebrow">Move your history</p>
-            <h2 id="import-expense-title">Import old expenses</h2>
-            <p class="expense-modal-lead">
-              Choose a JSON or JSON Lines export from your old app. The preview
-              checks each record before anything is saved.
-            </p>
-          </div>
-          <button
-            class="expense-modal-close"
-            type="button"
-            aria-label="Close"
-            @click="importOpen = false"
-          >
-            ×
-          </button>
+          <div><h2 id="expense-categories-title">Spending categories</h2><p class="expense-modal-lead">Rename or archive categories without changing historical free-text records.</p></div>
+          <button class="expense-modal-close" type="button" aria-label="Close categories" @click="categoriesOpen = false">×</button>
         </div>
-        <label class="expense-dropzone"
-          ><input
-            type="file"
-            accept=".json,.jsonl,.ndjson,application/json"
-            @change="inspectImport"
-          /><span class="expense-upload-symbol">↑</span
-          ><strong>{{ importName || 'Choose your export file' }}</strong
-          ><small
-            >MongoDB JSON, JSON array, or JSON Lines · up to 5 MB</small
-          ></label
-        >
-        <p v-if="busy" class="expense-import-status" role="status">
-          Reading and checking records…
-        </p>
-        <div v-if="importPreview" class="expense-preview">
-          <div class="expense-preview-stats">
-            <div>
-              <strong>{{ importPreview.valid }}</strong
-              ><span>ready to import</span>
-            </div>
-            <div>
-              <strong>{{ importPreview.duplicates }}</strong
-              ><span>already imported</span>
-            </div>
-            <div>
-              <strong>{{ importPreview.total }}</strong
-              ><span>records found</span>
-            </div>
-          </div>
-          <div v-if="importPreview.errors.length" class="expense-import-errors">
-            <strong
-              >{{
-                importPreview.total -
-                importPreview.valid -
-                importPreview.duplicates
-              }}
-              records need attention</strong
-            >
-            <ul>
-              <li v-for="problem in importPreview.errors" :key="problem">
-                {{ problem }}
-              </li>
-            </ul>
-          </div>
-          <div class="expense-preview-examples">
-            <strong>Data kept from your old entries</strong>
-            <p>
-              Date, amount and original currency, EUR conversion and rate,
-              category, description, tags, fuel liters, and source ID where
-              present.
-            </p>
-          </div>
-        </div>
-        <div class="expense-modal-footer">
-          <span
-            >The import can be repeated safely; source IDs prevent
-            duplicates.</span
-          ><button
-            class="expense-button expense-button--primary"
-            type="button"
-            :disabled="busy || !importPreview?.valid"
-            @click="confirmImport"
-          >
-            {{
-              busy
-                ? 'Importing…'
-                : `Import ${importPreview?.valid || 0} expenses`
-            }}
-          </button>
-        </div>
+        <form class="expense-category-create" @submit.prevent="createCategory">
+          <label>New category<input v-model="categoryName" required maxlength="80" placeholder="e.g. Education" /></label>
+          <label>Description <span class="expense-optional">optional</span><input v-model="categoryDescription" maxlength="500" placeholder="What belongs here?" /></label>
+          <button class="expense-button expense-button--primary" type="submit" :disabled="busy">Add category</button>
+        </form>
+        <ul class="expense-category-manage-list">
+          <li v-for="category in categories" :key="category.id">
+            <template v-if="categoryEditId === category.id">
+              <input v-model="categoryEditName" aria-label="Category name" maxlength="80" />
+              <button class="expense-button expense-button--quiet" type="button" :disabled="busy" @click="renameCategory(category)">Save name</button>
+              <button class="expense-button expense-button--quiet" type="button" @click="categoryEditId = null">Cancel</button>
+            </template>
+            <template v-else>
+              <span>{{ category.name }}</span>
+              <button class="expense-button expense-button--quiet" type="button" @click="categoryEditId = category.id; categoryEditName = category.name">Rename</button>
+              <button class="expense-button expense-button--quiet" type="button" :disabled="busy" @click="archiveCategory(category)">Archive</button>
+            </template>
+          </li>
+          <li v-if="!categories.length" class="expense-empty-row">No active categories yet.</li>
+        </ul>
       </section>
     </div>
   </section>
@@ -1003,16 +788,16 @@ onMounted(load);
 
 <style scoped>
 .expenses-page {
-  --ink: #102326;
-  --muted: #718184;
-  --line: #e3e9e5;
-  --surface: #fff;
-  --mint: #d8f36c;
-  --deep: #17393b;
+  --ink: var(--eg-text);
+  --muted: var(--eg-muted);
+  --line: var(--eg-border);
+  --surface: var(--eg-surface);
+  --mint: var(--eg-blue-soft);
+  --deep: var(--eg-blue);
   color: var(--ink);
   display: grid;
   gap: 22px;
-  padding: 4px 0 34px;
+  padding: 18px;
 }
 .expenses-heading,
 .expenses-actions,
@@ -1026,20 +811,20 @@ onMounted(load);
   gap: 16px;
 }
 .expenses-heading h1 {
-  font-size: clamp(27px, 3vw, 38px);
-  letter-spacing: -0.045em;
-  line-height: 1.12;
-  margin: 7px 0;
+  color: var(--ink);
+  font-size: 28px;
+  letter-spacing: -0.035em;
+  line-height: 1.2;
+  margin: 0 0 6px;
 }
 .expenses-subtitle,
 .expense-card-heading p,
-.expense-capture-note p,
 .expense-modal-lead {
   color: var(--muted);
   font-size: 13px;
 }
 .expenses-page .eyebrow {
-  color: #618d36;
+  color: var(--eg-blue);
   font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.12em;
@@ -1065,97 +850,13 @@ onMounted(load);
   color: var(--deep);
 }
 .expense-button--primary {
-  background: var(--deep);
+  background: var(--eg-blue);
   color: #fff;
-  box-shadow: 0 9px 20px #17393b1c;
+  box-shadow: 0 9px 20px #2863e61c;
 }
 .expense-period-row {
   border-top: 1px solid var(--line);
   padding-top: 16px;
-}
-.expense-ai-capture {
-  align-items: flex-start;
-  background: linear-gradient(115deg, #f5f8f0, #fbfcf8);
-  border: 1px solid #e2eadb;
-  border-radius: 15px;
-  display: grid;
-  gap: 15px;
-  grid-template-columns: 38px minmax(180px, 0.7fr) minmax(300px, 1.3fr);
-  padding: 17px;
-}
-.expense-ai-mark {
-  align-items: center;
-  background: #e6efdc;
-  border-radius: 11px;
-  color: #67884a;
-  display: grid;
-  font-size: 18px;
-  height: 38px;
-  justify-items: center;
-}
-.expense-ai-copy h2 {
-  color: var(--deep);
-  font-size: 15px;
-  letter-spacing: -0.025em;
-  margin: 5px 0;
-}
-.expense-ai-copy > p:last-child {
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 1.45;
-}
-.expense-ai-controls {
-  display: grid;
-  gap: 8px;
-}
-.expense-ai-controls textarea {
-  background: #fff;
-  border: 1px solid #e1e8dd;
-  border-radius: 9px;
-  color: var(--ink);
-  font-size: 11px;
-  min-height: 58px;
-  padding: 10px;
-  resize: vertical;
-  width: 100%;
-}
-.expense-ai-consent {
-  align-items: flex-start;
-  color: #7d8b82;
-  display: flex;
-  font-size: 9px;
-  gap: 7px;
-  line-height: 1.4;
-  margin: 0;
-}
-.expense-ai-consent input {
-  accent-color: #547c43;
-  flex: none;
-  margin: 1px 0 0;
-}
-.expense-ai-actions {
-  align-items: center;
-  display: flex;
-  gap: 10px;
-  justify-content: space-between;
-}
-.expense-ai-provider,
-.expense-ai-unavailable {
-  color: #87948b;
-  font-size: 9px;
-}
-.expense-ai-error {
-  color: #a63f35;
-  font-size: 10px;
-}
-.expense-ai-review {
-  background: #f2f7e9;
-  border-radius: 8px;
-  color: #668148;
-  font-size: 10px;
-  line-height: 1.45;
-  margin: -6px 0 16px;
-  padding: 9px 11px;
 }
 .expense-period-label {
   color: var(--muted);
@@ -1175,10 +876,20 @@ onMounted(load);
   color: #8b9998;
   font-size: 11px;
 }
+.expense-legacy-warning {
+  background: #fff5e6;
+  border: 1px solid #ead3a8;
+  border-radius: 9px;
+  color: #75531c;
+  font-size: 12px;
+  line-height: 1.45;
+  margin-bottom: 12px;
+  padding: 10px 13px;
+}
 .expense-metrics {
   display: grid;
   gap: 12px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 .expense-metric {
   background: #fff;
@@ -1206,7 +917,7 @@ onMounted(load);
   font-size: 11px;
 }
 .expense-metric--featured {
-  background: linear-gradient(135deg, #193c3d, #28524a);
+  background: linear-gradient(135deg, #1b4fb8, #2863e6);
   border: 0;
   color: #fff;
 }
@@ -1215,7 +926,7 @@ onMounted(load);
   color: #d4e4d6;
 }
 .expense-metric-glow {
-  background: radial-gradient(ellipse, #d8f36c49, transparent 68%);
+  background: radial-gradient(ellipse, #b7d2ff49, transparent 68%);
   height: 140px;
   position: absolute;
   right: -30px;
@@ -1261,24 +972,40 @@ onMounted(load);
   display: grid;
   gap: 12px;
   grid-template-columns: repeat(8, minmax(0, 1fr));
-  height: 170px;
-  padding-top: 18px;
+  height: 205px;
+  padding-top: 12px;
 }
 .expense-chart-column {
   align-items: center;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
   display: grid;
-  grid-template-rows: 18px 1fr 20px;
+  gap: 3px;
+  grid-template-rows: 34px 1fr 22px;
   height: 100%;
   justify-items: center;
   min-width: 0;
+  padding: 0 2px;
+  width: 100%;
+}
+.expense-chart-column:focus-visible {
+  border-radius: 8px;
+  outline: 2px solid var(--eg-blue);
+  outline-offset: 2px;
 }
 .expense-chart-value {
-  color: #a2aeaa;
+  color: var(--muted);
   font-size: 9px;
+  line-height: 1.15;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: center;
 }
 .expense-chart-track {
   align-items: end;
-  background: #f1f5f1;
+  background: var(--line);
   border-radius: 7px 7px 2px 2px;
   display: flex;
   height: 100%;
@@ -1286,24 +1013,35 @@ onMounted(load);
   width: min(28px, 80%);
 }
 .expense-chart-bar {
-  background: linear-gradient(180deg, #96be59, #547b49);
+  background: linear-gradient(180deg, #79a8ff, #2863e6);
   border-radius: 7px 7px 0 0;
   min-height: 2px;
   transition: height 0.25s;
 }
 .expense-chart-column.selected .expense-chart-track {
-  background: #e8f3d5;
+  background: var(--eg-blue-soft);
 }
 .expense-chart-column.selected .expense-chart-bar {
-  background: linear-gradient(180deg, #d8f36c, #739f49);
+  background: linear-gradient(180deg, #a9c4ff, #2863e6);
 }
 .expense-chart-column.selected .expense-chart-label {
   color: var(--deep);
   font-weight: 800;
 }
+.expense-chart-column.unavailable .expense-chart-track {
+  background: repeating-linear-gradient(135deg, transparent 0 4px, var(--line) 4px 6px);
+  border: 1px dashed var(--muted);
+  box-sizing: border-box;
+}
+.expense-chart-column.zero .expense-chart-track {
+  background: transparent;
+  border: 1px solid var(--line);
+  box-sizing: border-box;
+}
 .expense-chart-label {
-  color: #98a4a1;
-  font-size: 10px;
+  color: var(--muted);
+  font-size: 9px;
+  white-space: nowrap;
 }
 .expense-chart-foot {
   color: #899693;
@@ -1318,7 +1056,7 @@ onMounted(load);
   gap: 7px;
 }
 .expense-chart-foot i {
-  background: #88ae50;
+  background: var(--eg-blue);
   border-radius: 50%;
   height: 7px;
   width: 7px;
@@ -1336,6 +1074,8 @@ onMounted(load);
 }
 .expense-category-copy span {
   color: #526260;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .expense-category-copy strong {
   color: var(--deep);
@@ -1348,10 +1088,19 @@ onMounted(load);
   overflow: hidden;
 }
 .expense-category-rail span {
-  background: #89ad58;
+  background: var(--eg-blue);
   border-radius: 20px;
   display: block;
   height: 100%;
+}
+.expense-scope-filter select {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--ink);
+  font-size: 11px;
+  min-height: 38px;
+  padding: 0 10px;
 }
 .expense-empty-small {
   align-items: center;
@@ -1404,6 +1153,15 @@ onMounted(load);
   padding: 0 10px;
   width: 100%;
 }
+.expense-category-filter select {
+  background: #f6f8f5;
+  border: 1px solid #edf0ec;
+  border-radius: 9px;
+  color: var(--ink);
+  font-size: 11px;
+  min-height: 38px;
+  padding: 0 10px;
+}
 .expense-search span {
   font-size: 19px;
 }
@@ -1452,14 +1210,20 @@ onMounted(load);
   white-space: nowrap;
 }
 .expense-category-pill {
-  background: #eff5e8;
+  background: var(--eg-blue-soft);
   border-radius: 30px;
-  color: #63834b;
+  color: var(--eg-blue);
   display: inline-block;
   font-size: 10px;
   padding: 5px 9px;
   white-space: nowrap;
 }
+.expense-category-create { display: grid; gap: 12px; margin: 18px 0; }
+.expense-category-manage-list { list-style: none; margin: 0; padding: 0; max-height: 42vh; overflow: auto; }
+.expense-category-manage-list li { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--border-subtle, #333); padding: 9px 0; }
+.expense-category-manage-list li > span { flex: 1; }
+.expense-category-manage-list input { flex: 1; min-width: 100px; }
+.expense-category-manage-list .expense-button { padding: 7px 10px; }
 .expense-description {
   color: var(--ink) !important;
   font-weight: 700;
@@ -1538,37 +1302,19 @@ onMounted(load);
   font-size: 10px;
   padding: 0 18px 15px;
 }
-.expense-capture-note {
+.expense-table-pagination {
   align-items: center;
-  background: #f4f7f0;
-  border: 1px solid #e4ebda;
-  border-radius: 13px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
   display: flex;
-  gap: 13px;
-  padding: 15px 18px;
+  font-size: 11px;
+  justify-content: space-between;
+  padding: 12px 16px;
 }
-.expense-capture-icon {
+.expense-table-pagination > div {
   align-items: center;
-  background: #e4efcf;
-  border-radius: 10px;
-  color: #648143;
-  display: grid;
-  flex: none;
-  height: 36px;
-  place-items: center;
-  width: 36px;
-}
-.expense-capture-note strong {
-  color: #334e3b;
-  font-size: 12px;
-}
-.expense-capture-note p {
-  font-size: 10px;
-  margin-top: 3px;
-}
-.expense-capture-note .expense-button {
-  margin-left: auto;
-  white-space: nowrap;
+  display: flex;
+  gap: 10px;
 }
 .expense-alert,
 .expense-success {
@@ -1805,12 +1551,6 @@ onMounted(load);
   width: 1px;
 }
 @media (max-width: 900px) {
-  .expense-ai-capture {
-    grid-template-columns: 38px minmax(0, 1fr);
-  }
-  .expense-ai-controls {
-    grid-column: 2;
-  }
   .expense-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1820,13 +1560,6 @@ onMounted(load);
   .expense-category-list {
     grid-template-columns: 1fr 1fr;
     column-gap: 18px;
-  }
-  .expense-capture-note {
-    align-items: flex-start;
-    flex-wrap: wrap;
-  }
-  .expense-capture-note .expense-button {
-    margin-left: 49px;
   }
 }
 @media (max-width: 640px) {
@@ -1856,23 +1589,13 @@ onMounted(load);
   .expense-metric > small {
     font-size: 9px;
   }
-  .expense-dashboard-grid {
-    gap: 10px;
-  }
-  .expense-ai-capture {
-    grid-template-columns: 32px minmax(0, 1fr);
-    padding: 13px;
-  }
-  .expense-ai-mark {
-    height: 32px;
-    width: 32px;
-  }
-  .expense-ai-actions {
+  .expense-table-pagination {
     align-items: flex-start;
     flex-direction: column;
+    gap: 8px;
   }
-  .expense-ai-actions .expense-button {
-    width: 100%;
+  .expense-dashboard-grid {
+    gap: 10px;
   }
   .expense-card {
     padding: 15px;
@@ -1886,6 +1609,10 @@ onMounted(load);
   }
   .expense-search {
     max-width: none;
+  }
+  .expense-category-filter,
+  .expense-category-filter select {
+    width: 100%;
   }
   .expense-chart {
     gap: 5px;
@@ -1906,15 +1633,6 @@ onMounted(load);
   .expense-table th,
   .expense-table td {
     padding: 11px 12px;
-  }
-  .expense-capture-note {
-    padding: 12px;
-  }
-  .expense-capture-note p {
-    line-height: 1.5;
-  }
-  .expense-capture-note .expense-button {
-    margin-left: 49px;
   }
   .expense-modal {
     padding: 18px;
@@ -1939,4 +1657,5 @@ onMounted(load);
     font-size: 17px;
   }
 }
+
 </style>

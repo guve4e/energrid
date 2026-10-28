@@ -1,15 +1,50 @@
-import { Module } from '@nestjs/common';
+import { Inject, Module, OnModuleDestroy } from '@nestjs/common';
+import { Pool } from 'pg';
 import { PersonalExpensesController } from './personal-expenses.controller';
+import { PersonalFinanceController } from './personal-finance.controller';
 import { PersonalExpenseStore } from './personal-expense.store';
 import { PersonalExpenseCaptureService } from './personal-expense-capture.service';
+import { PersonalFinanceApplication } from './application/personal-finance.application';
+import { PERSONAL_FINANCE_REPOSITORY, type PersonalFinanceRepository } from './application/ports/personal-finance.repository';
+import { EXPENSE_TEXT_EXTRACTION, type ExpenseTextExtractionPort } from './application/ports/expense-extraction.port';
+import { PostgresPersonalFinanceRepository, PERSONAL_FINANCE_POOL } from './infrastructure/postgres/postgres-personal-finance.repository';
+import { LocalExpenseTextExtractor } from './infrastructure/local-expense-text-extractor';
 import {
   LlmGatewayService,
   OpenAiDeviceLlmProvider,
 } from '../llm/llm-gateway.service';
 
+function createPersonalFinancePool(): Pool {
+  const connectionString = process.env.AUTH_DATABASE_URL?.trim();
+  if (connectionString) {
+    if (process.env.NODE_ENV === 'production') throw new Error('AUTH_DATABASE_URL is for isolated local development only; use configured PostgreSQL settings in production');
+    let parsed: URL;
+    try { parsed = new URL(connectionString); } catch { throw new Error('AUTH_DATABASE_URL must be a PostgreSQL connection URL'); }
+    if (!['postgres:', 'postgresql:'].includes(parsed.protocol) || !['127.0.0.1', 'localhost', '::1'].includes(parsed.hostname)) throw new Error('AUTH_DATABASE_URL is only supported for loopback development');
+    const pool = new Pool({ connectionString, max: 3, connectionTimeoutMillis: 5000, query_timeout: 15000, statement_timeout: 10000, application_name: 'energrid-personal-finance' });
+    pool.on('error', () => undefined);
+    return pool;
+  }
+  const { PGHOST: host, PGPORT: port, PGDATABASE: database, PGUSER: user, PGPASSWORD: password, PGSSL } = process.env;
+  if (!host || !port || !database || !user || !password) throw new Error('Personal finance requires PostgreSQL configuration (PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD)');
+  const portNumber = Number(port);
+  if (!Number.isInteger(portNumber) || portNumber < 1 || portNumber > 65535) throw new Error('Invalid PostgreSQL port');
+  const pool = new Pool({ host, port: portNumber, database, user, password, ssl: PGSSL?.toLowerCase() === 'true', max: 3, connectionTimeoutMillis: 5000, query_timeout: 15000, statement_timeout: 10000, application_name: 'energrid-personal-finance' });
+  pool.on('error', () => undefined);
+  return pool;
+}
+
 @Module({
-  controllers: [PersonalExpensesController],
+  controllers: [PersonalExpensesController, PersonalFinanceController],
   providers: [
+    { provide: PERSONAL_FINANCE_POOL, useFactory: createPersonalFinancePool },
+    { provide: PERSONAL_FINANCE_REPOSITORY, inject: [PERSONAL_FINANCE_POOL], useFactory: (pool: Pool) => new PostgresPersonalFinanceRepository(pool) },
+    { provide: EXPENSE_TEXT_EXTRACTION, useFactory: () => new LocalExpenseTextExtractor() },
+    {
+      provide: PersonalFinanceApplication,
+      inject: [PERSONAL_FINANCE_REPOSITORY, EXPENSE_TEXT_EXTRACTION],
+      useFactory: (repository: PersonalFinanceRepository, extraction: ExpenseTextExtractionPort) => new PersonalFinanceApplication(repository, extraction),
+    },
     PersonalExpenseStore,
     PersonalExpenseCaptureService,
     OpenAiDeviceLlmProvider,
@@ -23,5 +58,9 @@ import {
       },
     },
   ],
+  exports: [PersonalFinanceApplication],
 })
-export class PersonalExpensesModule {}
+export class PersonalExpensesModule implements OnModuleDestroy {
+  constructor(@Inject(PERSONAL_FINANCE_POOL) private readonly pool: Pool) {}
+  async onModuleDestroy(): Promise<void> { await this.pool.end(); }
+}
