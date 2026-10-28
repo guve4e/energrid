@@ -11,7 +11,14 @@ const proposal = {
   broker: 'devicebroker.ddns.net:1883',
   selector: '',
   approvedFields: [],
-  fields: [{ metric: 'power' as const, rawKey: 'power' as const, unit: 'W' as const, displayUnit: 'W' as const }],
+  evidenceFresh: true,
+  evidence: { provenance: 'operator_attested_site_local_shelly_rpc_report', observerId: 'pi-housenet', snapshotId: 'site-observer-12345678',
+    endpoint: '192.168.1.166', networkScope: 'upstream-lan:192.168.1.0/24', identityVerifiedAt: '2026-10-27T10:00:00.000Z', componentVerifiedAt: '2026-10-27T10:00:00.000Z' },
+  fields: [
+    { metric: 'power' as const, rawKey: 'power' as const, unit: 'W' as const, displayUnit: 'W' as const },
+    { metric: 'energy_import_total' as const, rawKey: 'energy_import_total' as const, unit: 'kWh' as const, displayUnit: 'kWh' as const },
+    { metric: 'energy_export_total' as const, rawKey: 'energy_export_total' as const, unit: 'kWh' as const, displayUnit: 'kWh' as const },
+  ],
 };
 let wrapper: ReturnType<typeof mount> | undefined;
 
@@ -59,6 +66,7 @@ describe('DeviceShellyObservationApproval', () => {
     const multi = { ...proposal, fields: [
       { metric: 'power' as const, rawKey: 'power', unit: 'W' as const, displayUnit: 'W' as const },
       { metric: 'energy_import_total' as const, rawKey: 'energy_import_total', unit: 'kWh' as const, displayUnit: 'kWh' as const },
+      { metric: 'energy_export_total' as const, rawKey: 'energy_export_total', unit: 'kWh' as const, displayUnit: 'kWh' as const },
     ] };
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => ({
       ok: true, status: 200,
@@ -81,5 +89,18 @@ describe('DeviceShellyObservationApproval', () => {
     await wrapper.get('button').trigger('click');
     expect(wrapper.text()).toContain('energy_import_total');
     expect(wrapper.text()).toContain('does not grant device control');
+  });
+
+  it('displays historical evidence and its fields but disables new measurement approvals', async () => {
+    const historical = { ...proposal, evidenceFresh: false };
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => historical })));
+    setAuthenticatedSession({ accessToken: 'portal-token', expiresIn: 900, user: { id: 'admin', email: 'admin@test', name: 'Admin', role: 'admin' } });
+    wrapper = mount(DeviceShellyObservationApproval, { props: { deviceId, enabled: true, apiBase: '', accessToken: 'portal-token' } });
+    await flushPromises();
+    await wrapper.get('button').trigger('click');
+    expect(wrapper.text()).toContain('This accepted RPC evidence is historical');
+    expect(wrapper.text()).toContain('site-observer-12345678');
+    expect(wrapper.text()).toContain('energy_import_total');
+    expect(wrapper.findAll('button').find(button => button.text().includes('Approve Power'))!.attributes('disabled')).toBeDefined();
   });
 });

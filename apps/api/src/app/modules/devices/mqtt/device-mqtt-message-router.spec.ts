@@ -3,6 +3,11 @@ import { DeviceRegistryService } from '../device-registry.service';
 import { DeviceObservationService } from '../device-observation.service';
 import { DeviceHealthService } from '../device-health.service';
 import { TelemetryIngestService } from '../../telemetry/telemetry-ingest.service';
+import { shellyPro2PmNotifyStatusFixture } from '../adapters/inbound/shelly/__fixtures__/shelly-pro2pm-notifystatus.fixture';
+import { ApprovedMqttObservationRuntime } from './approved-mqtt-observation.runtime';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const enrolled = { find: async () => ({ status: 'enrolled' }) } as any;
 
@@ -174,7 +179,7 @@ describe('DeviceMqttMessageRouter', () => {
     const result = await router.route(shellyMessage(payload));
     await result?.persisted;
     expect(approvedObservationRuntime.ingestShellyMqttObservation).toHaveBeenCalledWith(expect.objectContaining({
-      topic: `${shellyId}/events/rpc`, physicalId: shellyId, componentKey: 'switch:0', values: { on: false, power: 42 },
+      topic: `${shellyId}/events/rpc`, physicalId: shellyId, componentKey: 'switch:0', values: { power: 42 },
       evidenceId: expect.any(String),
     }));
     expect(result?.observationAdmission).toEqual({ outcome: 'admitted' });
@@ -186,6 +191,123 @@ describe('DeviceMqttMessageRouter', () => {
       readings: [expect.objectContaining({ metric: 'power', value: 42 })],
     }), device, 'shelly-mqtt');
     expect(observation.getDevice(deviceId)).toBeNull();
+  });
+
+  it('projects only canonical measurements from real-shaped NotifyStatus and processes each switch separately', async () => {
+    const topic = 'shelly/washer@other/events/rpc';
+    const runtimeCalls: Array<{ componentKey: string; values: Record<string, unknown> }> = [];
+    const registry = { getDevices: jest.fn().mockReturnValue([]) };
+    const approvedObservationRuntime = {
+      ingestShellyMqttObservation: jest.fn().mockImplementation(async (input) => {
+        runtimeCalls.push({ componentKey: input.componentKey, values: input.values });
+        return { outcome: 'processed', accepted: true, deviceId: `${shellyId}:${input.componentKey}`,
+          updatedKeys: Object.keys(input.values), scope: { tenantId: 'tenant-a', siteId: 'site-a' } };
+      }),
+    };
+    const router = new DeviceMqttMessageRouter(
+      registry as any, new DeviceObservationService(), undefined, undefined, undefined, undefined,
+      approvedObservationRuntime as any,
+    );
+    const payload = {
+      ...shellyPro2PmNotifyStatusFixture,
+      params: {
+        ...shellyPro2PmNotifyStatusFixture.params,
+        // These status/control and alternate-schema values are retained in
+        // the incoming Bus message, but only canonical readings cross the
+        // approved observation boundary.
+        'switch:0': { ...shellyPro2PmNotifyStatusFixture.params['switch:0'], current: 0, voltage: 230, total_act_energy: 0, total_act_ret_energy: 0 },
+        'switch:1': { ...shellyPro2PmNotifyStatusFixture.params['switch:1'], current: 0, voltage: 230, total_act_energy: 0, total_act_ret_energy: 0 },
+      },
+    };
+    const result = await router.route({ topic, payload, payloadText: JSON.stringify(payload) });
+
+    expect(runtimeCalls).toEqual([
+      { componentKey: 'switch:0', values: { power: 0, energy_import_total: 0, energy_export_total: 0 } },
+      { componentKey: 'switch:1', values: { power: 0, energy_import_total: 0, energy_export_total: 0 } },
+    ]);
+    expect(result?.observationAdmissions).toHaveLength(2);
+    expect(result?.observationAdmissions?.every(item => item.outcome === 'admitted')).toBe(true);
+  });
+
+  it('preserves malformed supported Shelly values as explicit invalid readings for rejection', async () => {
+    const approvedObservationRuntime = {
+      ingestShellyMqttObservation: jest.fn().mockResolvedValue({
+        outcome: 'rejected', reasonCode: 'shelly_observation_measurement_invalid',
+      }),
+    };
+    const router = new DeviceMqttMessageRouter(
+      { getDevices: jest.fn().mockReturnValue([]) } as any, new DeviceObservationService(),
+      undefined, undefined, undefined, undefined, approvedObservationRuntime as any,
+    );
+    const payload = { src: shellyId, method: 'NotifyStatus', params: { ts: 1791676800,
+      'switch:0': { apower: null, current: 1, voltage: 230 } } };
+    const result = await router.route(shellyMessage(payload));
+    expect(approvedObservationRuntime.ingestShellyMqttObservation).toHaveBeenCalledWith(expect.objectContaining({
+      values: { power: null },
+    }));
+    expect(result?.observationAdmissions).toEqual([expect.objectContaining({
+      outcome: 'rejected', reasonCode: 'shelly_observation_measurement_invalid',
+    })]);
+  });
+
+  it('passes a valid canonical measurement to the authority gate despite extra status fields', async () => {
+    const previousEnv = { ...process.env };
+    const directory = await mkdtemp(join(tmpdir(), 'energrid-shelly-router-'));
+    let runtime: ApprovedMqttObservationRuntime | undefined;
+    try {
+      process.env.HOME_OBSERVATION_STORE_DIRECTORY = directory;
+      process.env.HOME_HTTP_POLL_ENABLED = 'true';
+      delete process.env.HOME_OBSERVATION_BINDINGS_JSON;
+      delete process.env.LAB_MQTT_OBSERVATION_BINDINGS_JSON;
+      const physicalId = 'shellypro2pm-ec6260888084';
+      const deviceId = `${physicalId}:switch:0`;
+      const device = {
+        id: deviceId, tenantId: 'tenant-a', siteId: 'site-a', kind: 'physical', trustStatus: 'approved',
+        metadata: { physicalId, component: 'switch:0',
+          identityEvidenceSource: 'verified_shelly_http_rpc',
+          componentEvidenceSource: 'verified_shelly_component_status_rpc',
+          shellyMqttObservationApprovalRequired: true,
+          verifiedMeasurementFields: 'power,energy_import_total,energy_export_total' },
+      };
+      const registry = { ensureInstallationsLoaded: jest.fn().mockResolvedValue(undefined),
+        getDevices: jest.fn().mockReturnValue([device]), projectApprovedObservation: jest.fn() };
+      const installations = { get: jest.fn().mockResolvedValue({ schemaVersion: 1, device }) };
+      const enrollment = { find: jest.fn().mockResolvedValue({ status: 'enrolled' }) };
+      runtime = new ApprovedMqttObservationRuntime(registry as any, installations as any, enrollment as any);
+      const router = new DeviceMqttMessageRouter(
+        registry as any, new DeviceObservationService(), undefined, undefined, undefined, undefined, runtime,
+      );
+      const payload = { src: physicalId, method: 'NotifyStatus', params: { ts: 1791676800,
+        'switch:0': { output: false, apower: 0, current: 0.1, voltage: 230, total_act_energy: 0, total_act_ret_energy: 0 } } };
+      const result = await router.route({ topic: 'shelly/washer@other/events/rpc', payload, payloadText: JSON.stringify(payload) });
+      expect(result?.observationAdmissions).toEqual([expect.objectContaining({
+        outcome: 'rejected', reasonCode: 'observation_authority_missing',
+      })]);
+      expect(installations.get).toHaveBeenCalledWith('site-a', deviceId);
+      expect(registry.projectApprovedObservation).not.toHaveBeenCalled();
+    } finally {
+      await runtime?.onModuleDestroy();
+      await rm(directory, { recursive: true, force: true });
+      process.env = previousEnv;
+    }
+  });
+
+  it('does not invent zero-valued measurements when a status has no supported measurement fields', async () => {
+    const approvedObservationRuntime = {
+      ingestShellyMqttObservation: jest.fn().mockResolvedValue({
+        outcome: 'rejected', reasonCode: 'shelly_observation_contract_invalid',
+      }),
+    };
+    const router = new DeviceMqttMessageRouter(
+      { getDevices: jest.fn().mockReturnValue([]) } as any, new DeviceObservationService(),
+      undefined, undefined, undefined, undefined, approvedObservationRuntime as any,
+    );
+    const payload = { src: shellyId, method: 'NotifyStatus', params: { ts: 1791676800,
+      'switch:0': { output: false, current: 1, voltage: 230 } } };
+    await router.route(shellyMessage(payload));
+    expect(approvedObservationRuntime.ingestShellyMqttObservation).toHaveBeenCalledWith(expect.objectContaining({
+      values: {},
+    }));
   });
 
   it('does not route MQTT-reported Shelly components without explicit installed bindings', async () => {

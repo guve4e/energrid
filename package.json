@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "license": "MIT",
   "scripts": {
-    "api": "nx serve api",
+    "api": "HOST=127.0.0.1 nx serve api",
     "docs:dev": "vitepress dev .",
     "docs:build": "vitepress build .",
     "docs:preview": "vitepress preview .",
@@ -12,7 +12,7 @@
     "auth:recover-admin": "node apps/api/scripts/auth-admin-account.js recover",
     "auth:cleanup": "node apps/api/scripts/auth-session-cleanup.js",
     "portal": "nx serve portal",
-    "portal:local": "PORTAL_API_PROXY_TARGET=${PORTAL_API_PROXY_TARGET:-http://localhost:3000} VITE_BACKEND_LABEL=local-live nx serve portal",
+    "portal:local": "PORTAL_API_PROXY_TARGET=${PORTAL_API_PROXY_TARGET:-http://localhost:3000} VITE_BACKEND_LABEL=local-live VITE_DEV_HOST=127.0.0.1 nx serve portal",
     "portal:local:lan": "PORTAL_API_PROXY_TARGET=http://127.0.0.1:3000 VITE_BACKEND_LABEL=local-live VITE_DEV_HOST=0.0.0.0 nx serve portal",
     "portal:pi": "PORTAL_API_PROXY_TARGET=http://192.168.1.60:3000 VITE_BACKEND_LABEL=pi5-live nx serve portal",
     "portal:build": "nx build portal",

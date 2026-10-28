@@ -13,6 +13,7 @@ export type LifecycleDeviceRecord = {
   metadata?: Record<string, string | number | boolean>;
   identityValues?: string[];
   ambiguousIdentityValues?: string[];
+  physicalAssignments?: Array<{ physicalDeviceId: string; componentKey?: string }>;
 };
 
 export type LifecyclePendingRecord = {
@@ -95,6 +96,12 @@ export function resolveNetworkEndpointLifecycle(
 
   const enrolledMatches = enrolled.filter(device => devicePhysicalIds(device).some(id => identities.includes(id)));
   if (enrolledMatches.length > 1) {
+    if (isOnePhysicalDeviceWithDistinctComponents(enrolledMatches)) {
+      const target = [...enrolledMatches].sort((left, right) =>
+        componentKeyFor(left).localeCompare(componentKeyFor(right)),
+      )[0];
+      return { endpointKey: key, stage: 'enrolled', recordId: target.id, recordName: target.displayName, relatedRecords: enrolledMatches.length };
+    }
     return { endpointKey: key, stage: 'ambiguous', relatedRecords: enrolledMatches.length };
   }
   if (enrolledMatches.length === 1) {
@@ -122,6 +129,20 @@ export function resolveNetworkEndpointLifecycle(
   }
 
   return { endpointKey: key, stage: 'identified' };
+}
+
+/** Multiple logical enrollments are one physical match only when the durable inventory
+ * assignment proves a shared physical record and each logical record names a distinct component. */
+function isOnePhysicalDeviceWithDistinctComponents(records: readonly LifecycleDeviceRecord[]): boolean {
+  const assignments = records.map(record => record.physicalAssignments || []);
+  if (assignments.some(items => items.length !== 1 || !items[0].physicalDeviceId || !items[0].componentKey)) return false;
+  const physicalIds = new Set(assignments.map(items => items[0].physicalDeviceId));
+  const componentKeys = assignments.map(items => items[0].componentKey!.trim().toLowerCase());
+  return physicalIds.size === 1 && new Set(componentKeys).size === records.length;
+}
+
+function componentKeyFor(record: LifecycleDeviceRecord): string {
+  return record.physicalAssignments?.[0]?.componentKey || record.id;
 }
 
 function verifiedProtocolIdentityValues(endpoint: NetworkEndpointForLifecycle): string[] {

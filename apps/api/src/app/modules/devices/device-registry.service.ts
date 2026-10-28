@@ -58,6 +58,23 @@ export interface DiscoveredDeviceConfig {
   metadata?: Record<string, string | number | boolean>;
 }
 
+export type ShellyReconciliationRejectionCode =
+  | 'logical_record_missing'
+  | 'logical_record_outside_site'
+  | 'installation_missing'
+  | 'installation_scope_mismatch'
+  | 'device_not_physical'
+  | 'device_not_approved'
+  | 'physical_identity_mismatch'
+  | 'component_mismatch'
+  | 'logical_device_id_mismatch'
+  | 'physical_inventory_conflict'
+  | 'not_enrolled';
+
+export type ShellyReconciliationTargetDecision =
+  | { matched: true; device: RegisteredDevice }
+  | { matched: false; reasonCode: ShellyReconciliationRejectionCode };
+
 interface ApprovedDeviceConfig {
   id?: string;
   deviceId?: string;
@@ -728,6 +745,9 @@ export class DeviceRegistryService implements OnModuleInit {
     const approvedFields = mqttBinding?.fields || {};
     const approvedFieldNames = Object.keys(approvedFields).sort();
     const fullyApproved = approved && verifiedFields.every(field => approvedFieldNames.includes(field));
+    const identityVerifiedAt = String(device.metadata?.identityVerifiedAt || '');
+    const componentVerifiedAt = String(device.metadata?.componentVerifiedAt || '');
+    const evidenceFresh = freshSiteEvidenceTime(identityVerifiedAt) && freshSiteEvidenceTime(componentVerifiedAt);
     return {
       approved: fullyApproved,
       approvalStatus: fullyApproved ? 'approved' : approved ? 'partially_approved' : installation.observationAuthority ? 'different_authority' : 'missing',
@@ -737,6 +757,16 @@ export class DeviceRegistryService implements OnModuleInit {
       // The operator must review and bind the exact topic before approving a field.
       selector: approved ? mqttBinding?.selector || '' : '',
       approvedFields: approvedFieldNames,
+      evidenceFresh,
+      evidence: {
+        provenance: siteLocalIdentityVerified ? 'operator_attested_site_local_shelly_rpc_report' : 'direct_shelly_http_rpc',
+        observerId: typeof device.metadata?.siteLocalObserverId === 'string' ? device.metadata.siteLocalObserverId : '',
+        snapshotId: String(device.metadata?.siteLocalEvidenceScanId || ''),
+        endpoint: String(device.metadata?.ipAddress || ''),
+        networkScope: String(device.metadata?.networkScope || ''),
+        identityVerifiedAt,
+        componentVerifiedAt,
+      },
       fields: verifiedFields.map(metric => ({ metric, rawKey: metric,
         unit: metric === 'power' ? 'W' : 'kWh', displayUnit: metric === 'power' ? 'W' : 'kWh' })),
     };
@@ -749,7 +779,8 @@ export class DeviceRegistryService implements OnModuleInit {
    */
   async reconcileShellyIdentityEvidence(input: {
     tenantId: string; siteId: string; deviceId: string; physicalId: string; component: string;
-    evidenceScanId: string; observerId: string; ipAddress: string; networkScope: string;
+    physicalInventoryId: string; evidenceScanId: string; evidenceCompletedAt: string;
+    observerId: string; ipAddress: string; networkScope: string;
     identityVerifiedAt: string; componentVerifiedAt: string; verifiedMeasurementFields: string[];
   }): Promise<RegisteredDevice | null> {
     await this.ensureInstallationsLoaded();
@@ -759,24 +790,32 @@ export class DeviceRegistryService implements OnModuleInit {
         deviceId !== `${physicalId}:${component}` ||
         !input.evidenceScanId.startsWith('site-observer-') || !input.observerId ||
         !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(input.ipAddress) || !input.networkScope ||
-        !freshSiteEvidenceTime(input.identityVerifiedAt) || !freshSiteEvidenceTime(input.componentVerifiedAt) ||
+        !input.physicalInventoryId || !validHistoricalEvidenceTime(input.identityVerifiedAt, input.evidenceCompletedAt) ||
+        !validHistoricalEvidenceTime(input.componentVerifiedAt, input.evidenceCompletedAt) ||
         input.verifiedMeasurementFields.some(field => !['power', 'energy_import_total', 'energy_export_total'].includes(field))) {
-      throw new Error('Fresh, exact site-local Shelly identity evidence is required.');
+      throw new Error('Accepted, exact site-local Shelly identity evidence is required.');
     }
     const key = scopedDeviceKey(deviceId, tenantId, siteId);
-    const device = this.getDevices(true).find(item => item.id === deviceId && item.tenantId === tenantId && item.siteId === siteId);
-    const record = this.persistedInstallations.get(key);
-    if (!device || device.kind !== 'physical' || device.trustStatus !== 'approved' ||
-        device.metadata?.physicalId !== physicalId || device.metadata?.component !== component ||
-        !record || record.device.tenantId !== tenantId || record.device.siteId !== siteId ||
-        (this.enrollment && (await this.enrollment.find({ tenantId, siteId, deviceId }))?.status !== 'enrolled')) return null;
+    const decision = await this.getShellyReconciliationTargetDecision(
+      tenantId, siteId, deviceId, physicalId, component, input.physicalInventoryId,
+    );
+    if (!decision.matched) return null;
+    const device = decision.device;
 
     const config = this.liveApprovedDeviceConfigs.get(key);
     if (!config) return null;
+    const hasVerifiedElectricalMeasurements = input.verifiedMeasurementFields.some(field =>
+      ['power', 'energy_import_total', 'energy_export_total'].includes(field),
+    );
     if (device.metadata?.siteLocalEvidenceScanId === input.evidenceScanId &&
         device.metadata?.identityEvidenceSource === 'verified_site_local_shelly_rpc' &&
-        device.metadata?.componentEvidenceSource === 'verified_site_local_shelly_rpc') return device;
+        device.metadata?.componentEvidenceSource === 'verified_site_local_shelly_rpc' &&
+        (!hasVerifiedElectricalMeasurements || device.supportedCapabilities?.some(capability => capability.kind === 'power'))) return device;
     const previous = config;
+    const supportedCapabilities = [...new Set([
+      ...(config.supportedCapabilities || config.capabilities || []),
+      ...(hasVerifiedElectricalMeasurements ? ['power' as const] : []),
+    ])];
     const metadata = cleanMetadata({
       ...config.metadata,
       identityEvidenceSource: 'verified_site_local_shelly_rpc',
@@ -786,6 +825,8 @@ export class DeviceRegistryService implements OnModuleInit {
       componentVerificationMethod: component.startsWith('switch:')
         ? `Switch.GetStatus?id=${component.split(':')[1]}` : `EM1.GetStatus?id=${component.split(':')[1]}`,
       componentVerifiedAt: input.componentVerifiedAt,
+      siteLocalEvidenceCompletedAt: input.evidenceCompletedAt,
+      siteLocalEvidenceFreshAtReconciliation: freshSiteEvidenceTime(input.identityVerifiedAt) && freshSiteEvidenceTime(input.componentVerifiedAt),
       siteLocalObserverId: input.observerId,
       siteLocalEvidenceScanId: input.evidenceScanId,
       ipAddress: input.ipAddress,
@@ -796,7 +837,11 @@ export class DeviceRegistryService implements OnModuleInit {
         ? { verifiedMeasurementFields: [...new Set(input.verifiedMeasurementFields)].join(',') }
         : {}),
     });
-    this.liveApprovedDeviceConfigs.set(key, { ...config, metadata });
+    this.liveApprovedDeviceConfigs.set(key, {
+      ...config,
+      ...(hasVerifiedElectricalMeasurements ? { supportedCapabilities } : {}),
+      metadata,
+    });
     try {
       const updated = this.getDevices(true).find(item => item.id === deviceId && item.tenantId === tenantId && item.siteId === siteId);
       if (!updated) throw new Error('Enrolled component disappeared during reconciliation.');
@@ -812,17 +857,46 @@ export class DeviceRegistryService implements OnModuleInit {
     }
   }
 
-  async getShellyReconciliationTarget(tenantId: string, siteId: string, deviceId: string, physicalId: string, component: string): Promise<RegisteredDevice | null> {
+  async getShellyReconciliationTarget(tenantId: string, siteId: string, deviceId: string, physicalId: string, component: string, physicalInventoryId: string): Promise<RegisteredDevice | null> {
+    const decision = await this.getShellyReconciliationTargetDecision(
+      tenantId, siteId, deviceId, physicalId, component, physicalInventoryId,
+    );
+    return decision.matched ? decision.device : null;
+  }
+
+  /**
+   * Evaluates an existing Shelly component against a server-validated
+   * same-site physical inventory assignment. The inventory link is stored in
+   * the physical inventory repository, not copied into legacy MQTT device
+   * metadata, so absence of metadata.physicalInventoryId is not a mismatch.
+   */
+  async getShellyReconciliationTargetDecision(
+    tenantId: string, siteId: string, deviceId: string, physicalId: string,
+    component: string, physicalInventoryId: string,
+  ): Promise<ShellyReconciliationTargetDecision> {
     await this.ensureInstallationsLoaded();
     const key = scopedDeviceKey(deviceId, tenantId, siteId);
-    const device = this.getDevices(true).find(item => item.id === deviceId && item.tenantId === tenantId && item.siteId === siteId);
+    const sameIdRecords = this.getDevices(true).filter(item => item.id === deviceId);
+    const device = sameIdRecords.find(item => item.tenantId === tenantId && item.siteId === siteId);
+    if (!device) return { matched: false, reasonCode: sameIdRecords.length ? 'logical_record_outside_site' : 'logical_record_missing' };
     const record = this.persistedInstallations.get(key);
-    if (!device || !record || record.device.tenantId !== tenantId || record.device.siteId !== siteId ||
-        device.kind !== 'physical' || device.trustStatus !== 'approved' ||
-        device.metadata?.physicalId !== physicalId || device.metadata?.component !== component ||
-        device.id !== `${physicalId}:${component}` ||
-        (this.enrollment && (await this.enrollment.find({ tenantId, siteId, deviceId }))?.status !== 'enrolled')) return null;
-    return device;
+    if (!record) return { matched: false, reasonCode: 'installation_missing' };
+    if (record.device.tenantId !== tenantId || record.device.siteId !== siteId)
+      return { matched: false, reasonCode: 'installation_scope_mismatch' };
+    if (device.kind !== 'physical') return { matched: false, reasonCode: 'device_not_physical' };
+    if (device.trustStatus !== 'approved') return { matched: false, reasonCode: 'device_not_approved' };
+    if (device.metadata?.physicalId !== physicalId) return { matched: false, reasonCode: 'physical_identity_mismatch' };
+    if (device.metadata?.component !== component) return { matched: false, reasonCode: 'component_mismatch' };
+    if (device.id !== `${physicalId}:${component}`) return { matched: false, reasonCode: 'logical_device_id_mismatch' };
+    // A present metadata link must agree. Legacy MQTT records commonly have no
+    // copy because their authoritative component assignment is persisted in
+    // PhysicalDeviceInventory and was validated by the caller before this gate.
+    if (device.metadata?.physicalInventoryId !== undefined &&
+        device.metadata.physicalInventoryId !== physicalInventoryId)
+      return { matched: false, reasonCode: 'physical_inventory_conflict' };
+    if (this.enrollment && (await this.enrollment.find({ tenantId, siteId, deviceId }))?.status !== 'enrolled')
+      return { matched: false, reasonCode: 'not_enrolled' };
+    return { matched: true, device };
   }
 
   async approveShellyObservations(
@@ -836,6 +910,10 @@ export class DeviceRegistryService implements OnModuleInit {
   ) {
     const status = await this.getShellyObservationApproval(tenantId, siteId, deviceId);
     if (!status) return null;
+    if (status.approved) return status;
+    if (!status.evidenceFresh) {
+      throw new Error('Fresh site-local Shelly identity and component evidence is required before measurement authority can be recorded.');
+    }
     const key = scopedDeviceKey(deviceId, tenantId, siteId);
     const installation = this.persistedInstallations.get(key)!;
     const existingFields = installation.observationAuthority?.bindings.find(binding => binding.deviceId === deviceId &&
@@ -855,13 +933,34 @@ export class DeviceRegistryService implements OnModuleInit {
     if (existingShellyBinding && existingShellyBinding.selector !== mqttTopic) {
       throw new Error('The reviewed Shelly MQTT source topic cannot be changed through measurement approval; review the binding separately first.');
     }
-    if (status.approved) return status;
     if (!this.installationStore) throw new Error('Local device storage is unavailable.');
     if (mqttBroker !== configuredShellyMqttBroker()) throw new Error('The reviewed MQTT broker differs from the active Shelly subscriber.');
     const authority = shellyMqttObservationApproval(deviceId, mergedFields, mqttTopic, mqttBroker);
-    const updated = { ...installation, observationAuthority: authority, updatedAt: new Date().toISOString() };
+    const withPowerRead = (capabilities: RegisteredDevice['capabilities']) => {
+      const current = capabilities || [];
+      const power = current.find(capability => capability.kind === 'power');
+      if (power?.actions.includes('read')) return current;
+      if (power) return current.map(capability => capability.kind === 'power'
+        ? { ...capability, actions: [...new Set([...capability.actions, 'read' as const])], unit: capability.unit || 'W' }
+        : capability);
+      return [...current, { kind: 'power' as const, actions: ['read' as const], unit: 'W' }];
+    };
+    const updatedDevice = {
+      ...installation.device,
+      capabilities: withPowerRead(installation.device.capabilities),
+      supportedCapabilities: withPowerRead(installation.device.supportedCapabilities || installation.device.capabilities),
+    };
+    const updated = { ...installation, device: updatedDevice, observationAuthority: authority, updatedAt: new Date().toISOString() };
     await this.installationStore.save(updated);
     this.persistedInstallations.set(key, updated);
+    const config = this.liveApprovedDeviceConfigs.get(key);
+    if (config) {
+      this.liveApprovedDeviceConfigs.set(key, {
+        ...config,
+        capabilities: [...new Set([...(config.capabilities || []), 'power' as const])],
+        supportedCapabilities: [...new Set([...(config.supportedCapabilities || config.capabilities || []), 'power' as const])],
+      });
+    }
     await this.installationStore.append({
       id: `${new Date().toISOString()}-${Math.random().toString(36).slice(2, 10)}`,
       deviceId,
@@ -3396,4 +3495,11 @@ function numberFromEnv(name: string, fallback: number): number {
 function freshSiteEvidenceTime(value: string, now = Date.now()): boolean {
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) && timestamp <= now + 30_000 && now - timestamp <= 15 * 60_000;
+}
+
+function validHistoricalEvidenceTime(value: string, completedAt: string, now = Date.now()): boolean {
+  const timestamp = Date.parse(value);
+  const completed = Date.parse(completedAt);
+  return Number.isFinite(timestamp) && Number.isFinite(completed) &&
+    timestamp <= completed + 30_000 && completed <= now + 30_000;
 }

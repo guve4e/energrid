@@ -81,4 +81,39 @@ describe('portal enrollment identity projection', () => {
       physicalDeviceCount: 2,
     })
   })
+
+  it('projects distinct component assignments for two logical records on one physical device', () => {
+    const switch0 = 'shellypro2pm-ec6260888084:switch:0'
+    const switch1 = 'shellypro2pm-ec6260888084:switch:1'
+    const physicalId = '8e15ec60-a22b-4f8c-ab09-5e61d44030f9'
+    const inventory = physical(physicalId, switch0, 'shellypro2pm-ec6260888084')
+    inventory.assignments = [
+      { deviceId: switch0, physicalDeviceId: physicalId, componentKey: 'switch:0', assignedAt: '2026-01-01T00:00:00.000Z', assignedBy: 'operator' },
+      { deviceId: switch1, physicalDeviceId: physicalId, componentKey: 'switch:1', assignedAt: '2026-01-01T00:00:00.000Z', assignedBy: 'operator' },
+    ]
+
+    const result = projectEnrollmentIdentityLinks(scope, [enrollment(switch0), enrollment(switch1)], [inventory])
+
+    expect(result.map(item => item.physicalAssignments)).toEqual([
+      [{ physicalDeviceId: physicalId, componentKey: 'switch:0' }],
+      [{ physicalDeviceId: physicalId, componentKey: 'switch:1' }],
+    ])
+    expect(result.map(item => item.ambiguousPhysicalIdentityValues)).toEqual([[], []])
+  })
+
+  it('keeps separately stored physical records with the same identity flagged as a conflict', () => {
+    const logicalId = 'shellypro2pm-ec6260888084:switch:0'
+    const identity = 'shellypro2pm-ec6260888084'
+
+    const result = projectEnrollmentIdentityLinks(scope, [enrollment(logicalId)], [
+      physical('physical-a', logicalId, identity),
+      physical('physical-b', logicalId, identity),
+    ])
+
+    expect(result[0]).toMatchObject({
+      physicalDeviceCount: 2,
+      ambiguousPhysicalIdentityValues: [identity],
+    })
+    expect(result[0].physicalAssignments.map(assignment => assignment.physicalDeviceId)).toEqual(['physical-a', 'physical-b'])
+  })
 })

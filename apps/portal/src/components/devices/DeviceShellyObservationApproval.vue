@@ -9,6 +9,16 @@ interface ApprovalState {
   broker: string;
   selector: string;
   approvedFields: string[];
+  evidenceFresh: boolean;
+  evidence: {
+    provenance: string;
+    observerId: string;
+    snapshotId: string;
+    endpoint: string;
+    networkScope: string;
+    identityVerifiedAt: string;
+    componentVerifiedAt: string;
+  };
   fields: Array<{ metric: 'power' | 'energy_import_total' | 'energy_export_total'; rawKey: string; unit: 'W' | 'kWh'; displayUnit: 'W' | 'kWh' }>;
 }
 
@@ -40,6 +50,8 @@ async function load() {
     if (!physicalId || result.sourceId !== 'shelly-mqtt' ||
         typeof result.broker !== 'string' || !/^[a-z0-9.-]{1,253}:\d{1,5}$/.test(result.broker) ||
         (result.selector !== '' && !validMqttTopic(result.selector)) ||
+        typeof result.evidenceFresh !== 'boolean' || !result.evidence || typeof result.evidence.provenance !== 'string' ||
+        typeof result.evidence.identityVerifiedAt !== 'string' || typeof result.evidence.componentVerifiedAt !== 'string' ||
         !Array.isArray(result.fields) || !result.fields.length || !Array.isArray(result.approvedFields) ||
         result.fields.some(field => !['power', 'energy_import_total', 'energy_export_total'].includes(field.metric)) ||
         !['approved', 'partially_approved', 'missing', 'different_authority'].includes(result.approvalStatus) ||
@@ -95,12 +107,15 @@ onMounted(() => void load());
         <label class="topic-binding">Exact MQTT event topic
           <input v-model.trim="mqttTopic" :readonly="!!state.selector" autocomplete="off" spellcheck="false" placeholder="shelly/washer@other/events/rpc" aria-label="Exact MQTT event topic" />
         </label>
+        <p>RPC evidence: <code>{{ state.evidence.provenance }}</code> · observer <code>{{ state.evidence.observerId || 'direct LAN observer' }}</code> · {{ state.evidence.endpoint }} · {{ state.evidence.networkScope }}</p>
+        <p>Snapshot <code>{{ state.evidence.snapshotId || 'not recorded' }}</code> · identity verified {{ state.evidence.identityVerifiedAt }} · component verified {{ state.evidence.componentVerifiedAt }}</p>
+        <p v-if="!state.evidenceFresh" class="approval-error" role="alert">This accepted RPC evidence is historical. Capture and reconcile fresh identity and component evidence before recording new measurement authority.</p>
         <p>The topic is a reviewed source selector, not proof of device identity. The device identity and component were verified independently over Shelly RPC.</p>
         <p><b>Broker:</b> <code>{{ state.broker }}</code> · <b>Source:</b> <code>{{ state.sourceId }}</code> · <code>{{ validMqttTopic(mqttTopic) ? mqttTopic : 'enter an exact event topic' }}</code></p>
         <p v-for="field in state.fields" :key="field.metric">
           <code>{{ field.metric }}</code> → {{ fieldLabel(field.metric) }} ({{ field.unit }})
           <span v-if="state.approvedFields.includes(field.metric)" class="approval-approved"> · Approved</span>
-          <button v-else type="button" :disabled="busy || !validMqttTopic(mqttTopic)" @click="approve(field)">{{ busy ? 'Saving…' : `Approve ${fieldLabel(field.metric)}` }}</button>
+          <button v-else type="button" :disabled="busy || !state.evidenceFresh || !validMqttTopic(mqttTopic)" @click="approve(field)">{{ busy ? 'Saving…' : `Approve ${fieldLabel(field.metric)}` }}</button>
         </p>
         <p>Each approval applies to that measurement only. It does not grant device control.</p>
         <button type="button" :disabled="busy" @click="reviewing = false">Cancel</button>

@@ -5,6 +5,7 @@ export type PortalEnrollmentIdentityLink = DeviceEnrollment & {
   physicalIdentityValues: string[]
   ambiguousPhysicalIdentityValues: string[]
   physicalDeviceCount: number
+  physicalAssignments: Array<{ physicalDeviceId: string; componentKey?: string }>
 }
 
 /** Adds only identity claims reached through an exact logical assignment in the same tenant/site. */
@@ -21,6 +22,11 @@ export function projectEnrollmentIdentityLinks(
     const assigned = scopedDevices.filter(device =>
       device.assignments.some(assignment => assignment.deviceId === enrollment.deviceId),
     )
+    const physicalAssignments = assigned.flatMap(device => device.assignments
+      .filter(assignment => assignment.deviceId === enrollment.deviceId)
+      .map(assignment => ({ physicalDeviceId: device.physicalDeviceId,
+        ...(assignment.componentKey ? { componentKey: assignment.componentKey } : {}),
+      })))
     const identityAssignments = new Map<string, number>()
     for (const device of assigned) {
       const value = device.identity?.value
@@ -35,6 +41,7 @@ export function projectEnrollmentIdentityLinks(
         .filter(([, count]) => count > 1)
         .map(([value]) => value),
       physicalDeviceCount: assigned.length,
+      physicalAssignments,
     }
   })
 }

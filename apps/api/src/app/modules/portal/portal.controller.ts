@@ -79,6 +79,7 @@ import type {
 import type { RegisteredDevice } from '../devices/device-registry.types'
 import { projectPendingDeviceIdentity } from './pending-device-identity.projection'
 import { projectEnrollmentIdentityLinks } from './enrollment-identity-projection'
+import { findExactShellyInventoryAssignment } from './site-local-shelly-inventory-match'
 import { isNetworkObservationFresh } from '../devices/network-observation-freshness'
 import { shellyLanCandidates } from '../devices/adapters/inbound/shelly/shelly-lan-candidates'
 import { energridDiscoveryCandidate } from '../devices/adapters/inbound/energrid/energrid-discovery-candidate'
@@ -812,6 +813,44 @@ export class PortalController {
       })
     }
     await this.deviceRegistry.ensureInstallationsLoaded()
+    return this.buildSiteLocalShellyReview(snapshot, ownership, validated.observer.id, device, siteName, true)
+  }
+
+  @Get('network/site-local-shelly-evidence/:scanId/review')
+  async reviewSavedSiteLocalShellyEvidence(
+    @Param('scanId') scanId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalAdministrator(request)
+    const { ownership, siteName } = this.discoveryOwner()
+    const snapshot = await this.discoveryMemory.getSnapshot(scanId, ownership)
+    if (!snapshot || snapshot.schemaVersion < 2 || !snapshot.ownership || !sameDiscoveryOwner(snapshot.ownership, ownership)) {
+      throw new NotFoundException('Site-owned RPC evidence was not found.')
+    }
+    const raw = snapshot.rawEvidence.find(item => item.source === 'operator_attested_site_local_shelly_rpc_report')
+    const evidence = raw?.evidence as Record<string, any> | undefined
+    const observerId = typeof evidence?.observerId === 'string' ? evidence.observerId : ''
+    const observer = configuredSiteLocalObservers().find(item => item.id === observerId &&
+      item.tenantId === ownership.tenantId && item.siteId === ownership.siteId)
+    const endpointId = typeof evidence?.deviceId === 'string' ? evidence.deviceId : ''
+    const endpoint = snapshot.endpoints.find(item => item.id === endpointId)
+    if (!observer || !endpoint || observer.scopeId !== endpoint.networkZoneId ||
+        observer.host !== snapshot.collector.host || observer.cidr !== snapshot.scopes.find(item => item.id === observer.scopeId)?.cidr ||
+        !observer.expectedDeviceIds.some(id => id.toLowerCase() === endpoint.id.toLowerCase())) {
+      throw new ConflictException('Saved evidence no longer matches the authorized site-local observer and network scope.')
+    }
+    await this.deviceRegistry.ensureInstallationsLoaded()
+    return this.buildSiteLocalShellyReview(snapshot, ownership, observer.id, endpoint, siteName, false)
+  }
+
+  private async buildSiteLocalShellyReview(
+    snapshot: NetworkDiscoverySnapshot,
+    ownership: DiscoveryOwnership,
+    observerId: string,
+    device: NetworkDiscoverySnapshot['endpoints'][number],
+    siteName: string,
+    registerUnmatched: boolean,
+  ) {
     const historicalComponents = [...new Set(this.deviceRegistry.getDevices(true).flatMap(existing =>
       existing.tenantId === ownership.tenantId && existing.siteId === ownership.siteId &&
       existing.metadata?.physicalId === device.id && typeof existing.metadata?.component === 'string' &&
@@ -821,49 +860,71 @@ export class PortalController {
     ))].sort()
     const reconciliationProposals: Array<Record<string, unknown>> = []
     const reconciliationConflicts: Array<Record<string, unknown>> = []
+    const siteInventories = await this.physicalInventory?.list(ownership) || []
     for (const candidate of shellyLanCandidates(device)) {
       const component = String(candidate.metadata?.component || '')
-      const current = await this.deviceRegistry.getShellyReconciliationTarget(
-        ownership.tenantId, ownership.siteId, String(candidate.id), device.id, component,
+      const inventory = findExactShellyInventoryAssignment(siteInventories, ownership, String(candidate.id), device.id, component)
+      if (!inventory) {
+        reconciliationConflicts.push({ deviceId: candidate.id, component,
+          reasonCode: 'physical_inventory_assignment_unmatched',
+          reason: 'No unique same-site physical inventory assignment matches this exact Shelly identity and component; no existing record was changed.' })
+        continue
+      }
+      const match = await this.deviceRegistry.getShellyReconciliationTargetDecision(
+        ownership.tenantId, ownership.siteId, String(candidate.id), device.id, component, inventory.physicalDeviceId,
       )
-      if (current) {
+      if (match.matched) {
+        const current = match.device
+        const identityVerifiedAt = String(device.observations?.find(item => item.source === 'http_identity' &&
+          item.attribute === 'identity.device_id' && item.value === device.id)?.observedAt || '')
+        const componentVerifiedAt = String(device.observations?.find(item => item.source === 'site_local_http_rpc' &&
+          item.attribute === 'shelly.component_status' && item.value === component)?.observedAt || '')
         reconciliationProposals.push({
-          deviceId: current.id,
-          displayName: current.displayName,
-          room: current.zoneName,
-          physicalId: device.id,
-          component,
-          evidenceScanId: snapshot.scanId,
-          observerId: validated.observer.id,
-          observedAt: device.discoveredAt,
-          endpoint: device.ipAddress,
-          model: device.model,
-          firmwareVersion: device.firmwareVersion || '',
+          deviceId: current.id, displayName: current.displayName, room: current.zoneName,
+          physicalId: device.id, component, evidenceScanId: snapshot.scanId, observerId,
+          observedAt: device.discoveredAt, endpoint: device.ipAddress, model: device.model,
+          firmwareVersion: device.firmwareVersion || '', physicalInventoryId: inventory.physicalDeviceId,
+          identityVerifiedAt,
+          componentVerifiedAt,
+          evidenceFresh: isFreshSiteEvidence(identityVerifiedAt) && isFreshSiteEvidence(componentVerifiedAt),
           verifiedMeasurementFields: String(candidate.metadata?.verifiedMeasurementFields || '').split(',').filter(Boolean),
           currentIdentitySource: String(current.metadata?.identityEvidenceSource || 'unverified'),
-          currentDriver: current.adapter.driver,
-          mqttTopicRequiresOperatorBinding: true,
+          currentDriver: current.adapter.driver, mqttTopicRequiresOperatorBinding: true,
+          reconciled: current.metadata?.siteLocalEvidenceScanId === snapshot.scanId,
         })
         continue
       }
       const sameId = this.deviceRegistry.getDevices(true).find(existing => existing.id === candidate.id)
       if (sameId) {
+        const rejectionMessages: Record<string, string> = {
+          logical_record_outside_site: 'A logical device with this identity exists outside the authorized site; cross-site reconciliation and duplicate candidate creation were suppressed.',
+          installation_missing: 'The scoped logical device record has no durable installation record; no metadata was changed.',
+          installation_scope_mismatch: 'The durable installation record does not belong to the authorized tenant and site; no metadata was changed.',
+          device_not_physical: 'The existing logical record is not classified as a physical device; no metadata was changed.',
+          device_not_approved: 'The existing physical device is not in an approved state; no metadata was changed.',
+          physical_identity_mismatch: 'The existing record has a different protocol identity; no metadata was changed.',
+          component_mismatch: 'The existing record has a different component key; no metadata was changed.',
+          logical_device_id_mismatch: 'The existing logical ID does not match this physical identity and component; no metadata was changed.',
+          physical_inventory_conflict: 'The logical record has a physical inventory link that conflicts with the server-validated assignment; no metadata was changed.',
+          not_enrolled: 'The existing logical record is not currently enrolled; no metadata was changed.',
+          logical_record_missing: 'The exact logical record was not found; no duplicate candidate was created.',
+        }
         reconciliationConflicts.push({ deviceId: candidate.id, component,
-          reason: sameId.tenantId !== ownership.tenantId || sameId.siteId !== ownership.siteId
-            ? 'A logical device with this identity exists outside the authorized site; cross-site reconciliation and duplicate candidate creation were suppressed.'
-            : 'An existing record has different identity or enrollment state; no metadata was changed and no duplicate candidate was created.' })
+          reasonCode: match.reasonCode,
+          reason: rejectionMessages[match.reasonCode] || 'The existing record did not pass a reconciliation check; no metadata was changed.' })
         continue
       }
-      const projected = historicalComponents.length ? { ...candidate,
-        reason: `${candidate.reason} Historical component evidence ${historicalComponents.join(', ')} conflicts with the fresh RPC profile and remains preserved for operator reconciliation.`,
-        metadata: { ...candidate.metadata, historicalComponentConflicts: historicalComponents.join(','), requiresProfileReconciliation: true },
-      } : candidate
-      this.registerOwnedDiscoveryCandidate(projected, ownership, siteName)
+      if (registerUnmatched) {
+        const projected = historicalComponents.length ? { ...candidate,
+          reason: `${candidate.reason} Historical component evidence ${historicalComponents.join(', ')} conflicts with the accepted RPC profile and remains preserved for operator reconciliation.`,
+          metadata: { ...candidate.metadata, historicalComponentConflicts: historicalComponents.join(','), requiresProfileReconciliation: true },
+        } : candidate
+        this.registerOwnedDiscoveryCandidate(projected, ownership, siteName)
+      }
     }
-    return { status: reconciliationProposals.length ? 'reconciliation_review_required' : 'pending_review', scanId: snapshot.scanId, ownership, observerId: validated.observer.id,
-      physicalId: device.id, components: device.components, historicalComponentConflicts: historicalComponents,
-      reconciliationProposals, reconciliationConflicts,
-      snapshot }
+    return { status: reconciliationProposals.length ? 'reconciliation_review_required' : 'pending_review',
+      scanId: snapshot.scanId, ownership, observerId, physicalId: device.id, components: device.components,
+      historicalComponentConflicts: historicalComponents, reconciliationProposals, reconciliationConflicts, snapshot }
   }
 
   @Post('network/site-local-shelly-evidence/:scanId/reconcile')
@@ -886,15 +947,29 @@ export class PortalController {
     const evidence = raw?.evidence as Record<string, any> | undefined
     const observerId = typeof evidence?.observerId === 'string' ? evidence.observerId : ''
     const observer = observers.find(item => item.id === observerId && item.tenantId === ownership.tenantId && item.siteId === ownership.siteId);
-    const selectedEndpoint = snapshot.endpoints.find(item => item.id === body.deviceId)
+    // The Portal submits the enrolled logical component ID (physical ID + component),
+    // while Discovery Memory stores the physical endpoint under its Shelly ID.
+    // Resolve only that exact supported suffix; the checks below still validate the
+    // server-authorized physical identity, site, observer, scope, inventory and RPC evidence.
+    const componentSuffix = `:${body.component}`
+    const physicalId = /^(?:switch|em1):(?:[0-9]|[12][0-9]|3[01])$/.test(body.component) &&
+      body.deviceId.endsWith(componentSuffix)
+      ? body.deviceId.slice(0, -componentSuffix.length)
+      : ''
+    if (!/^shelly[a-z0-9._-]{1,114}$/i.test(physicalId)) {
+      throw new BadRequestException('The selected logical component does not map to the verified physical identity.')
+    }
+    const selectedEndpoint = snapshot.endpoints.find(item => item.id === physicalId)
     if (!observer || !selectedEndpoint || observer.scopeId !== selectedEndpoint.networkZoneId ||
         observer.host !== snapshot.collector.host || observer.cidr !== snapshot.scopes.find(item => item.id === observer.scopeId)?.cidr) {
       throw new BadRequestException('Evidence observer, site, and authorized network scope no longer match.')
     }
+    const completedAt = Date.parse(snapshot.completedAt)
     const now = Date.now()
-    const fresh = (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value)) && Date.parse(value) <= now + 30_000 && now - Date.parse(value) <= 15 * 60_000
-    if (!fresh(snapshot.completedAt)) throw new ConflictException('Site-local identity evidence expired; capture it again before reconciliation.')
-    const endpoint = snapshot.endpoints.find(item => item.id === body.deviceId && item.networkZoneId === observer.scopeId)
+    if (!Number.isFinite(completedAt) || completedAt > now + 30_000) {
+      throw new BadRequestException('The accepted report has an invalid completion timestamp.')
+    }
+    const endpoint = snapshot.endpoints.find(item => item.id === physicalId && item.networkZoneId === observer.scopeId)
     if (!endpoint || endpoint.vendor !== 'Shelly' || !observer.expectedDeviceIds.some(id => id.toLowerCase() === endpoint.id.toLowerCase())) {
       throw new BadRequestException('Evidence does not match the observer allowlist and selected physical identity.')
     }
@@ -905,20 +980,29 @@ export class PortalController {
     }
     const identityObserved = endpoint.observations?.find(item => item.source === 'http_identity' && item.attribute === 'identity.device_id' && item.value === endpoint.id)
     const componentObserved = endpoint.observations?.find(item => item.source === 'site_local_http_rpc' && item.attribute === 'shelly.component_status' && item.value === body.component)
-    if (!identityObserved || !componentObserved || !fresh(identityObserved.observedAt) || !fresh(componentObserved.observedAt)) {
-      throw new ConflictException('Identity or component evidence expired; capture it again before reconciliation.')
+    if (!identityObserved || !componentObserved ||
+        !validEvidenceTimestamp(identityObserved.observedAt, completedAt) ||
+        !validEvidenceTimestamp(componentObserved.observedAt, completedAt)) {
+      throw new BadRequestException('Accepted report timestamps do not support this exact identity and component.')
+    }
+    const inventories = await this.physicalInventory?.list(ownership) || []
+    const inventory = findExactShellyInventoryAssignment(inventories, ownership, String(body.deviceId), endpoint.id, String(body.component))
+    if (!inventory) {
+      throw new ConflictException('The exact logical component is not assigned to a matching physical inventory record in this site.')
     }
     const fields = String(candidate.metadata?.verifiedMeasurementFields || '').split(',').filter(Boolean)
     try {
       const reconciled = await this.deviceRegistry.reconcileShellyIdentityEvidence({
         tenantId: ownership.tenantId, siteId: ownership.siteId, deviceId: String(body.deviceId), physicalId: endpoint.id,
-        component: String(body.component), evidenceScanId: snapshot.scanId, observerId,
+        component: String(body.component), physicalInventoryId: inventory.physicalDeviceId,
+        evidenceScanId: snapshot.scanId, evidenceCompletedAt: snapshot.completedAt, observerId,
         ipAddress: endpoint.ipAddress, networkScope: `${observer.scopeId}:${observer.cidr}`,
         identityVerifiedAt: identityObserved.observedAt, componentVerifiedAt: componentObserved.observedAt,
         verifiedMeasurementFields: fields,
       })
       if (!reconciled) throw new ConflictException('No exact enrolled component exists in the authorized site; it was not enrolled or changed.')
-      return { status: 'identity_evidence_reconciled', deviceId: reconciled.id, enrollmentChanged: false,
+      return { status: 'identity_evidence_reconciled', deviceId: reconciled.id,
+        evidenceFreshForMeasurementApproval: isFreshSiteEvidence(identityObserved.observedAt) && isFreshSiteEvidence(componentObserved.observedAt), enrollmentChanged: false,
         measurementAuthorityChanged: false, controlAuthorityChanged: false, device: reconciled }
     } catch (error) {
       if (error instanceof ConflictException || error instanceof BadRequestException) throw error
@@ -1929,6 +2013,17 @@ export function assertPortalAdministrator(request: DeviceProxyRequest): void {
 
 function sameDiscoveryOwner(a: DiscoveryOwnership, b: DiscoveryOwnership): boolean {
   return a.tenantId === b.tenantId && a.siteId === b.siteId
+}
+
+function validEvidenceTimestamp(value: unknown, completedAt: number): boolean {
+  if (typeof value !== 'string') return false
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) && timestamp <= completedAt + 30_000
+}
+
+function isFreshSiteEvidence(value: string, now = Date.now()): boolean {
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) && timestamp <= now + 30_000 && now - timestamp <= 15 * 60_000
 }
 
 function projectShellyStatusEvidence(status: Record<string, unknown>): Record<string, unknown> {

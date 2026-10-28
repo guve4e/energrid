@@ -50,13 +50,14 @@ type LoginResponse = {
 type ShellyReconciliationProposal = {
   deviceId: string; displayName: string; room: string; physicalId: string; component: string;
   evidenceScanId: string; observerId: string; observedAt: string; endpoint: string; model: string;
+  physicalInventoryId: string; identityVerifiedAt: string; componentVerifiedAt: string; evidenceFresh: boolean;
   firmwareVersion: string; verifiedMeasurementFields: string[]; currentIdentitySource: string;
   currentDriver: string; mqttTopicRequiresOperatorBinding: true; reconciled?: boolean;
 };
 type SiteLocalEvidenceImport = {
   status: string; scanId: string; observerId: string; physicalId: string;
   reconciliationProposals: ShellyReconciliationProposal[];
-  reconciliationConflicts: Array<{ deviceId: string; component: string; reason: string }>;
+  reconciliationConflicts: Array<{ deviceId: string; component: string; reason: string; reasonCode?: string }>;
   historicalComponentConflicts: string[];
 };
 
@@ -1454,6 +1455,22 @@ async function importSiteLocalShellyEvidence(request: { report?: unknown; error?
     await loadNetworkSnapshots();
   } catch (cause) {
     siteLocalEvidenceImportError.value = cause instanceof Error ? cause.message : 'Site-local Shelly evidence import failed.';
+  } finally { siteLocalEvidenceImportBusy.value = false; }
+}
+
+async function reviewSavedSiteLocalShellyEvidence(scanId: string): Promise<void> {
+  if (siteLocalEvidenceImportBusy.value) return;
+  siteLocalEvidenceImportBusy.value = true;
+  siteLocalEvidenceImportError.value = '';
+  try {
+    const response = await authFetch(`${apiBase}/portal/network/site-local-shelly-evidence/${encodeURIComponent(scanId)}/review`, {
+      headers: { Authorization: `Bearer ${accessToken.value}` },
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(typeof result.message === 'string' ? result.message : `Saved evidence review failed (${response.status})`);
+    siteLocalEvidenceImport.value = result as SiteLocalEvidenceImport;
+  } catch (cause) {
+    siteLocalEvidenceImportError.value = cause instanceof Error ? cause.message : 'Saved evidence review failed.';
   } finally { siteLocalEvidenceImportBusy.value = false; }
 }
 
@@ -3312,7 +3329,10 @@ async function loadEnrollmentMembership() {
         typeof item.deviceId !== 'string' ||
         !['enrolled', 'suspended', 'retired'].includes(item.status) ||
         ('physicalIdentityValues' in item && (!Array.isArray(item.physicalIdentityValues) || !item.physicalIdentityValues.every((value: unknown) => typeof value === 'string'))) ||
-        ('ambiguousPhysicalIdentityValues' in item && (!Array.isArray(item.ambiguousPhysicalIdentityValues) || !item.ambiguousPhysicalIdentityValues.every((value: unknown) => typeof value === 'string')))
+        ('ambiguousPhysicalIdentityValues' in item && (!Array.isArray(item.ambiguousPhysicalIdentityValues) || !item.ambiguousPhysicalIdentityValues.every((value: unknown) => typeof value === 'string'))) ||
+        ('physicalAssignments' in item && (!Array.isArray(item.physicalAssignments) || !item.physicalAssignments.every((assignment: unknown) =>
+          !!assignment && typeof assignment === 'object' && typeof (assignment as Record<string, unknown>).physicalDeviceId === 'string' &&
+          (!('componentKey' in assignment) || typeof (assignment as Record<string, unknown>).componentKey === 'string'))))
       ) {
         throw new Error('Invalid enrollment record');
       }
@@ -3332,6 +3352,7 @@ async function loadEnrollmentMembership() {
           siteId: item.siteId,
           identityValues: Array.isArray(item.physicalIdentityValues) ? item.physicalIdentityValues as string[] : [],
           ambiguousIdentityValues: Array.isArray(item.ambiguousPhysicalIdentityValues) ? item.ambiguousPhysicalIdentityValues as string[] : [],
+          physicalAssignments: Array.isArray(item.physicalAssignments) ? item.physicalAssignments as LifecycleDeviceRecord['physicalAssignments'] : [],
         });
       } else {
         statuses.set(JSON.stringify([item.tenantId, item.siteId, item.deviceId]), item.status);
@@ -5206,6 +5227,7 @@ onBeforeUnmount(() => {
             @open-device="openEnrolledDevice"
             @investigate-endpoint="investigateSnapshotEndpoint"
             @refresh-endpoint-identity="refreshSnapshotEndpointIdentity"
+            @review-saved-site-local-evidence="reviewSavedSiteLocalShellyEvidence"
             @probe-endpoint="probeSnapshotEndpoint"
             @import-site-local-evidence="importSiteLocalShellyEvidence"
             @reconcile-site-local-evidence="reconcileSiteLocalShellyEvidence"
