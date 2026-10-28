@@ -4,7 +4,7 @@ import { compareDecimal, financeDecimal } from '../domain/decimal';
 import { reconcileReceiptExtraction, validateReceiptExtraction } from '../domain/receipt-extraction';
 import type { ExpenseDraftProposal, ExpenseRecord, FinanceActorContext, ReceiptMetadata } from '../domain/personal-finance.types';
 import type { DocumentUnderstandingPort } from './ports/document-understanding.port';
-import type { PersonalFinanceRepository } from './ports/personal-finance.repository';
+import type { PersonalFinanceRepository, ReceiptReextractionWrite } from './ports/personal-finance.repository';
 import type { PrivateReceiptStoragePort } from './ports/private-receipt-storage.port';
 
 const MAX_RECEIPT_BYTES = 10 * 1024 * 1024;
@@ -31,6 +31,7 @@ export class ReceiptIntelligenceApplication {
     }
 
     const result = await this.understanding.extract({ bytes, mediaType: verifiedType }, { cloudDataConsent });
+    const modelItemCount = Array.isArray((result.extraction as any)?.items) ? (result.extraction as any).items.length : 0;
     const extraction = validateReceiptExtraction(result.extraction);
     const reconciliation = reconcileReceiptExtraction(extraction);
     const currency = extraction.currency.value ? normalizeCurrency(extraction.currency.value) : null;
@@ -58,11 +59,55 @@ export class ReceiptIntelligenceApplication {
         return { duplicate: true, receipt: receipt ?? duplicate, draft, possibleMatches: [] as ExpenseRecord[] };
       }
       const possibleMatches = await this.findPossibleMatches(context.accountId, extraction);
-      return { duplicate: false, draft, possibleMatches, reconciliation };
+      return { duplicate: false, draft, possibleMatches, reconciliation, extractionDiagnostics: diagnostics(result, modelItemCount, extraction, draft, receipt.id) };
     } catch (error) {
       await this.storage.delete(context.accountId, storageKey).catch(() => undefined);
       throw error;
     }
+  }
+
+  async reextract(context: FinanceActorContext, receiptId: string, cloudDataConsent: boolean) {
+    requireContext(context);
+    if (cloudDataConsent !== true) throw new Error('Explicit consent is required before retrying cloud receipt extraction');
+    const existing = await this.repository.getReceipt(context.accountId, receiptId);
+    if (!existing || !existing.draftId || existing.expenseId || existing.documentDeletedAt || existing.userReviewedAt) {
+      throw new Error('Only an unreviewed receipt attached to an active draft can be re-extracted');
+    }
+    if (existing.status !== 'review_required' || !['image/jpeg', 'image/png'].includes(existing.mediaType)) {
+      throw new Error('This receipt is not available for re-extraction');
+    }
+    const draft = await this.repository.getDraft(context.accountId, existing.draftId);
+    if (!draft || !['proposed', 'needs_review'].includes(draft.status)) throw new Error('Only an active receipt draft can be re-extracted');
+    const bytes = await this.storage.get(context.accountId, existing.storageKey);
+    const result = await this.understanding.extract(
+      { bytes, mediaType: existing.mediaType as 'image/jpeg' | 'image/png' },
+      { cloudDataConsent: true },
+    );
+    const modelItemCount = Array.isArray((result.extraction as any)?.items) ? (result.extraction as any).items.length : 0;
+    const extraction = validateReceiptExtraction(result.extraction);
+    const reconciliation = reconcileReceiptExtraction(extraction);
+    const currency = extraction.currency.value ? normalizeCurrency(extraction.currency.value) : null;
+    if (currency && extraction.total.value) assertNewExpenseCurrency(currency);
+    const write: ReceiptReextractionWrite = {
+      extraction,
+      extractedTotals: { subtotal: extraction.subtotal.value, tax: extraction.taxTotal.value, discount: extraction.discountTotal.value, total: extraction.total.value, currency },
+      parserProvider: result.provider, parserModel: result.model,
+      date: extraction.date.value, amount: extraction.total.value, currency,
+      merchantName: extraction.merchant.value,
+      items: toCompleteItems(extraction, currency ?? 'EUR', existing.contentHash),
+    };
+    const updated = await this.repository.replaceReceiptExtraction(context.accountId, context.actorId, receiptId, write);
+    if (!updated) throw new Error('Receipt changed or was reviewed while extraction was running; no draft changes were made');
+    const updatedReceipt = updated.receipts.find((item) => item.id === receiptId);
+    if (!updatedReceipt?.extraction) throw new Error('The refreshed receipt extraction was not returned');
+    return {
+      duplicate: false,
+      draft: updated,
+      receipt: updatedReceipt,
+      possibleMatches: await this.findPossibleMatches(context.accountId, extraction),
+      reconciliation,
+      extractionDiagnostics: diagnostics(result, modelItemCount, extraction, updated, receiptId),
+    };
   }
 
   async getImage(context: FinanceActorContext, receiptId: string) {
@@ -119,6 +164,34 @@ export class ReceiptIntelligenceApplication {
     if (!date || !amount || !currency) return [];
     return this.repository.findPossibleReceiptMatches(accountId, date, amount, currency, extraction.merchant.value);
   }
+}
+
+function diagnostics(
+  result: Awaited<ReturnType<DocumentUnderstandingPort['extract']>>,
+  modelItemCount: number,
+  extraction: ReturnType<typeof validateReceiptExtraction>,
+  draft: import('../domain/personal-finance.types').ExpenseDraft,
+  receiptId: string,
+) {
+  const persistedExtractionItemCount = draft.receipts.find((receipt) => receipt.id === receiptId)?.extraction?.items.length ?? 0;
+  const completeExtractionItemCount = extraction.items.filter((item) => isCompleteExtractedItem(item)).length;
+  return {
+    responseStatus: result.diagnostics?.responseStatus ?? 'completed',
+    ...(result.diagnostics?.outputTokens !== undefined ? { outputTokens: result.diagnostics.outputTokens } : {}),
+    modelItemCount,
+    validatedItemCount: extraction.items.length,
+    persistedExtractionItemCount,
+    completeDraftItemCount: draft.items.length,
+    incompleteExtractionItemCount: extraction.items.length - completeExtractionItemCount,
+    completeButUnmappedItemCount: Math.max(0, completeExtractionItemCount - draft.items.length),
+    reportedArticleCount: extraction.reportedArticleCount.value,
+  };
+}
+
+function isCompleteExtractedItem(item: ReturnType<typeof validateReceiptExtraction>['items'][number]) {
+  return !!item.originalDescription.value && !!item.quantity.value && !!item.unit.value &&
+    item.unitPrice.value !== null && item.lineTotal.value !== null && item.discount.value !== null &&
+    item.tax.value !== null && item.taxIncluded.value !== null;
 }
 
 function toCompleteItems(extraction: ReturnType<typeof validateReceiptExtraction>, currency: string, contentHash: string) {

@@ -5,6 +5,8 @@ export interface DocumentUnderstandingResult {
   extraction: ReceiptExtractionV1;
   provider: string;
   model: string;
+  /** Provider metadata only; never contains receipt text or image data. */
+  diagnostics?: { responseStatus: string; outputTokens?: number };
 }
 
 export interface DocumentUnderstandingPort {

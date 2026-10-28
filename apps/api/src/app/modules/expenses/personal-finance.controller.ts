@@ -28,6 +28,16 @@ export class PersonalFinanceController {
     catch (error) { if (error instanceof HttpException) throw error; throw new BadRequestException(message(error)); }
   }
 
+  @Post('receipts/:id/re-extract')
+  async reextractReceipt(@Param('id') id: string, @Body('cloudDataConsent') consent: unknown, @Req() request: AuthenticatedRequest) {
+    const accountId = requirePrincipal(request).userId;
+    if (consent !== true) throw new BadRequestException('Explicitly consent to sending this saved receipt to the cloud provider again.');
+    try {
+      const result = await this.receipts.reextract({ accountId, actorId: accountId }, id, true);
+      return { ...result, draft: publicDraft(result.draft), receipt: publicReceipt(result.receipt) };
+    } catch (error) { if (error instanceof HttpException) throw error; throw new BadRequestException(message(error)); }
+  }
+
   @Patch('drafts/:id')
   async reviewReceiptDraft(@Param('id') id: string, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
     const accountId = requirePrincipal(request).userId;

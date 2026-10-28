@@ -1,5 +1,6 @@
 import { ServiceUnavailableException } from '@nestjs/common';
 import { PersonalFinanceController, normalizeV2Import } from './personal-finance.controller';
+import type { ReceiptIntelligenceApplication } from './application/receipt-intelligence.application';
 import type { PersonalFinanceApplication } from './application/personal-finance.application';
 import type { PersonalExpenseStore } from './personal-expense.store';
 
@@ -160,5 +161,23 @@ describe('Personal Finance historical import normalization', () => {
     await expect(controller.previewImport({ records }, request)).rejects.toBeInstanceOf(ServiceUnavailableException);
     await expect(controller.import({ records }, request)).rejects.toBeInstanceOf(ServiceUnavailableException);
     expect(finance.importExpenses).not.toHaveBeenCalled();
+  });
+});
+
+describe('receipt re-extraction route', () => {
+  it('requires explicit cloud consent and returns the same account-scoped draft without storage paths', async () => {
+    const receipts = { reextract: jest.fn().mockResolvedValue({
+      draft: { id: 'draft-1', receipts: [{ id: 'receipt-1', storageKey: 'private/account/file.jpg' }] },
+      receipt: { id: 'receipt-1', storageKey: 'private/account/file.jpg' },
+      reconciliation: { matched: false }, extractionDiagnostics: { modelItemCount: 3 },
+    }) } as unknown as ReceiptIntelligenceApplication;
+    const controller = new PersonalFinanceController({} as any, {} as any, receipts);
+    const request = { user: { userId: 'account-a' } } as any;
+    await expect(controller.reextractReceipt('receipt-1', false, request)).rejects.toThrow(/explicitly consent/i);
+    const result = await controller.reextractReceipt('receipt-1', true, request);
+    expect(result).toMatchObject({ draft: { id: 'draft-1', receipts: [{ id: 'receipt-1' }] }, receipt: { id: 'receipt-1' } });
+    expect(result.receipt).not.toHaveProperty('storageKey');
+    expect(result.draft.receipts[0]).not.toHaveProperty('storageKey');
+    expect((receipts.reextract as jest.Mock)).toHaveBeenCalledWith({ accountId: 'account-a', actorId: 'account-a' }, 'receipt-1', true);
   });
 });

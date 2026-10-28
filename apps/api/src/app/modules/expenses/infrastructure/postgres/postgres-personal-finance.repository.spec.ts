@@ -25,6 +25,23 @@ describe('PostgresPersonalFinanceRepository safety boundaries', () => {
     expect(query.mock.calls[0][1][0]).toBe('account-a');
   });
 
+  it('refuses to replace a receipt after the operator has reviewed it', async () => {
+    const statements: string[] = [];
+    const client = {
+      query: jest.fn(async (sql: string) => {
+        statements.push(sql);
+        if (sql.includes('FROM personal_finance.receipts WHERE account_id=$1 AND id=$2 FOR UPDATE')) return { rows: [{ id: 'receipt-1', account_id: 'account-a', draft_id: 'draft-1', expense_id: null, status: 'review_required', user_reviewed_at: '2026-10-28T10:00:00Z', document_deleted_at: null }] };
+        return { rows: [] };
+      }),
+      release: jest.fn(),
+    };
+    const repo = new PostgresPersonalFinanceRepository({ connect: jest.fn().mockResolvedValue(client) } as unknown as Pool);
+    await expect(repo.replaceReceiptExtraction('account-a', 'account-a', 'receipt-1', {} as any)).resolves.toBeNull();
+    expect(statements.some((sql) => sql.startsWith('UPDATE personal_finance.receipts'))).toBe(false);
+    expect(statements.some((sql) => sql.startsWith('UPDATE personal_finance.expense_drafts'))).toBe(false);
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
+
   it('returns account-scoped monthly totals and counts from PostgreSQL', async () => {
     const query = jest.fn(async (sql: string) => {
       if (sql.includes('to_char(expense_date')) return { rows: [{ month: '2025-10', total: '20.50', count: '2' }] };

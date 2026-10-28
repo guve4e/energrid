@@ -8,6 +8,7 @@ import type {
   ReceiptMetadata,
   SpendingSummary,
 } from '../../domain/personal-finance.types';
+import type { ReceiptExtractionV1 } from '../../domain/receipt-extraction.types';
 
 export interface ExpenseWrite {
   date: string;
@@ -45,6 +46,18 @@ export interface ExpenseDraftReviewWrite {
   adjustments: NonNullable<ReceiptMetadata['reviewedAdjustments']>;
 }
 
+export interface ReceiptReextractionWrite {
+  extraction: ReceiptExtractionV1;
+  extractedTotals: NonNullable<ReceiptMetadata['extractedTotals']>;
+  parserProvider: string;
+  parserModel: string | null;
+  date: string | null;
+  amount: string | null;
+  currency: string | null;
+  merchantName: string | null;
+  items: ExpenseDraftProposal['items'];
+}
+
 export interface PersonalFinanceRepository {
   listCategories(accountId: string, includeArchived?: boolean): Promise<FinanceCategory[]>;
   createCategory(accountId: string, actorId: string, input: CategoryWrite): Promise<FinanceCategory>;
@@ -66,6 +79,7 @@ export interface PersonalFinanceRepository {
   findReceiptByHash(accountId: string, contentHash: string): Promise<ReceiptMetadata | null>;
   findPossibleReceiptMatches(accountId: string, date: string, amount: string, currency: string, merchantName: string | null): Promise<ExpenseRecord[]>;
   getReceipt(accountId: string, receiptId: string): Promise<ReceiptMetadata | null>;
+  replaceReceiptExtraction(accountId: string, actorId: string, receiptId: string, input: ReceiptReextractionWrite): Promise<ExpenseDraft | null>;
   markReceiptDocumentDeleted(accountId: string, actorId: string, receiptId: string): Promise<ReceiptMetadata | null>;
   updateDraft(accountId: string, actorId: string, draftId: string, input: ExpenseDraftReviewWrite): Promise<ExpenseDraft | null>;
   attachReceiptToExpense(accountId: string, actorId: string, receiptId: string, expenseId: string): Promise<ReceiptMetadata | null>;

@@ -7,8 +7,12 @@ const fieldKeys = ['value', 'confidence', 'uncertainty', 'sourceText'];
 export function validateReceiptExtraction(value: unknown): ReceiptExtractionV1 {
   if (!isRecord(value) || value.schemaVersion !== 'receipt-extraction-v1' || !Array.isArray(value.items) || !Array.isArray(value.adjustments) || !Array.isArray(value.warnings))
     throw new Error('Receipt extraction does not match receipt-extraction-v1');
-  assertKeys(value, ['schemaVersion', 'documentType', 'merchant', 'date', 'time', 'currency', 'subtotal', 'taxTotal', 'discountTotal', 'depositTotal', 'total', 'adjustments', 'sourceText', 'items', 'warnings'], 'Receipt extraction');
-  const result = value as unknown as ReceiptExtractionV1;
+  const result = {
+    ...value,
+    // Stored V1 extractions predate the optional article-count evidence.
+    reportedArticleCount: value.reportedArticleCount ?? { value: null, confidence: null, uncertainty: null, sourceText: null },
+  } as unknown as ReceiptExtractionV1;
+  assertKeys(result as unknown as Record<string, unknown>, ['schemaVersion', 'documentType', 'merchant', 'date', 'time', 'currency', 'subtotal', 'taxTotal', 'discountTotal', 'depositTotal', 'reportedArticleCount', 'total', 'adjustments', 'sourceText', 'items', 'warnings'], 'Receipt extraction');
   validateField(result.documentType, (item) => typeof item === 'string' && ['receipt', 'invoice', 'other'].includes(item), 'documentType');
   validateField(result.merchant, isString, 'merchant');
   validateField(result.date, isDate, 'date');
@@ -16,6 +20,7 @@ export function validateReceiptExtraction(value: unknown): ReceiptExtractionV1 {
   validateField(result.currency, (item) => typeof item === 'string' && /^[A-Z]{3}$/.test(item), 'currency');
   for (const name of ['subtotal', 'taxTotal', 'discountTotal', 'depositTotal', 'total'] as const)
     validateField(result[name], isDecimal, name);
+  validateField(result.reportedArticleCount, isNonnegativeInteger, 'reportedArticleCount');
   if (result.sourceText !== null && (typeof result.sourceText !== 'string' || result.sourceText.length > 30000)) throw new Error('Receipt source text is invalid');
   if (result.items.length > 1000) throw new Error('Receipt contains too many line items');
   for (const [index, item] of result.items.entries()) {
@@ -39,9 +44,28 @@ export function validateReceiptExtraction(value: unknown): ReceiptExtractionV1 {
   return result;
 }
 
-export function reconcileReceiptExtraction(value: ReceiptExtractionV1): { matched: boolean | null; itemTotal: string | null; total: string | null; difference: string | null; warnings: string[] } {
+export interface ReceiptReconciliation {
+  matched: boolean | null;
+  itemTotal: string | null;
+  total: string | null;
+  difference: string | null;
+  extractedLineCount: number;
+  completeLineCount: number;
+  incompleteLineCount: number;
+  reportedArticleCount: number | null;
+  articleCountMismatch: boolean | null;
+  warnings: string[];
+}
+
+export function reconcileReceiptExtraction(value: ReceiptExtractionV1): ReceiptReconciliation {
   const warnings = [...value.warnings];
   const completeItems = value.items.filter((item) => item.lineTotal.value !== null);
+  const completeLineCount = value.items.filter((item) => isCompleteReceiptItem(item)).length;
+  const incompleteLineCount = value.items.length - completeLineCount;
+  const reportedArticleCount = value.reportedArticleCount?.value ?? null;
+  const articleCountMismatch = reportedArticleCount === null ? null : reportedArticleCount !== value.items.length;
+  if (articleCountMismatch) warnings.push(`The receipt reports ${reportedArticleCount} purchased article(s), while ${value.items.length} line entry/entries were extracted. Receipt counts can include quantities; check that every printed line is represented.`);
+  if (incompleteLineCount > 0) warnings.push(`${incompleteLineCount} extracted line item(s) have missing fields and need review.`);
   const itemTotal = completeItems.length === value.items.length && value.items.length
     ? completeItems.reduce((sum, item) => addDecimal(sum, item.lineTotal.value!), '0')
     : null;
@@ -74,9 +98,17 @@ export function reconcileReceiptExtraction(value: ReceiptExtractionV1): { matche
   const roundedTotal = total === null ? null : roundDecimal(total, scale);
   if (roundedItems !== null && roundedTotal !== null && compareDecimal(roundedItems, roundedTotal) !== 0) warnings.push(`Item totals (${roundedItems}) do not match the printed receipt total (${roundedTotal}).`);
   return {
-    matched: roundedItems === null || roundedTotal === null ? null : compareDecimal(roundedItems, roundedTotal) === 0,
-    itemTotal: roundedItems, total: roundedTotal, difference: roundedItems === null || roundedTotal === null ? null : addDecimal(roundedItems, `-${roundedTotal}`), warnings: [...new Set(warnings)],
+    matched: roundedItems === null || roundedTotal === null || incompleteLineCount > 0 ? null : compareDecimal(roundedItems, roundedTotal) === 0,
+    itemTotal: roundedItems, total: roundedTotal, difference: roundedItems === null || roundedTotal === null ? null : addDecimal(roundedItems, `-${roundedTotal}`),
+    extractedLineCount: value.items.length, completeLineCount, incompleteLineCount, reportedArticleCount, articleCountMismatch,
+    warnings: [...new Set(warnings)],
   };
+}
+
+function isCompleteReceiptItem(item: ReceiptExtractionV1['items'][number]): boolean {
+  return !!item.originalDescription.value && !!item.quantity.value && !!item.unit.value &&
+    item.unitPrice.value !== null && item.lineTotal.value !== null && item.discount.value !== null &&
+    item.tax.value !== null && item.taxIncluded.value !== null;
 }
 
 function validateField<T>(value: unknown, valid: (value: unknown) => boolean, label: string): asserts value is ExtractedField<T> {
@@ -94,4 +126,5 @@ function assertKeys(value: Record<string, unknown>, expected: string[], label: s
 }
 function isString(value: unknown): value is string { return typeof value === 'string' && value.length <= 500; }
 function isDecimal(value: unknown): value is string { if (typeof value !== 'string') return false; try { financeDecimal(value); return true; } catch { return false; } }
+function isNonnegativeInteger(value: unknown): value is number { return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0; }
 function isDate(value: unknown): value is string { return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`)) && new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value; }

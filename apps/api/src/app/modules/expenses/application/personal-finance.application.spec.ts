@@ -8,6 +8,8 @@ function repository(): jest.Mocked<PersonalFinanceRepository> {
     queryExpenses: jest.fn(), getExpense: jest.fn(), updateExpense: jest.fn(), deleteExpense: jest.fn(), findImportedLegacyIds: jest.fn().mockResolvedValue([]), createExpense: jest.fn(), importExpenses: jest.fn(),
     createDraft: jest.fn(async (_account, proposal) => ({ ...proposal, id: 'draft-1', accountId: 'account-1', status: 'proposed', createdAt: '', updatedAt: '' })),
     getDraft: jest.fn(), rejectDraft: jest.fn(), confirmDraft: jest.fn(), addReceiptMetadata: jest.fn(), summarize: jest.fn(),
+    getReceipt: jest.fn(), replaceReceiptExtraction: jest.fn(), findReceiptByHash: jest.fn(), findPossibleReceiptMatches: jest.fn(),
+    markReceiptDocumentDeleted: jest.fn(), updateDraft: jest.fn(), attachReceiptToExpense: jest.fn(), reopenRejectedReceiptDraft: jest.fn(),
   };
 }
 

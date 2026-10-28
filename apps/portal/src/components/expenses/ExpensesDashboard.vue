@@ -49,18 +49,21 @@ const categories = ref<FinanceCategory[]>([]);
 const categoriesOpen = ref(false);
 const receiptOpen = ref(false);
 const receiptConsent = ref(false);
+const receiptRetryConsent = ref(false);
 const receiptInput = ref<HTMLInputElement | null>(null);
 const receiptBusy = ref(false);
 const receiptImageUrl = ref('');
 const receiptDraftId = ref('');
 const receiptId = ref('');
+const receiptHasBeenReviewed = ref(false);
 const receiptDuplicate = ref(false);
 const receiptPossibleMatches = ref<Expense[]>([]);
 const receiptWarnings = ref<string[]>([]);
 const receiptFieldWarnings = ref<Partial<Record<'merchant' | 'date' | 'currency' | 'total', string>>>({});
 const receiptReviewDirty = ref(false);
 const receiptSaveError = ref('');
-const receiptReconciliation = ref<{ matched: boolean | null; itemTotal: string | null; total: string | null; difference: string | null; warnings: string[] } | null>(null);
+const receiptReconciliation = ref<{ matched: boolean | null; itemTotal: string | null; total: string | null; difference: string | null; extractedLineCount: number; completeLineCount: number; incompleteLineCount: number; reportedArticleCount: number | null; articleCountMismatch: boolean | null; warnings: string[] } | null>(null);
+const receiptExtractionDiagnostics = ref<{ responseStatus: string; outputTokens?: number; modelItemCount: number; validatedItemCount: number; persistedExtractionItemCount: number; completeDraftItemCount: number; incompleteExtractionItemCount: number; completeButUnmappedItemCount: number; reportedArticleCount: number | null } | null>(null);
 const receiptTotalOnly = ref(false);
 const receiptForm = reactive({ date: '', amount: '', currency: 'EUR', merchantName: '', category: '', description: '' });
 type ReviewItem = { description: string; normalizedDescription: string; suggestedCategory: string; confidence: number | null; uncertainty: string | null; quantity: string; unit: string; packaging: string; unitPrice: string; discount: string; tax: string; taxIncluded: '' | 'true' | 'false'; lineTotal: string; currency: string; categoryId: string | null; sourceReceiptId: string | null; extractionProvenance: Record<string, unknown> | null };
@@ -221,6 +224,8 @@ function openReceiptCapture() {
   receiptFieldWarnings.value = {};
   receiptSaveError.value = '';
   receiptReconciliation.value = null;
+  receiptExtractionDiagnostics.value = null;
+  receiptRetryConsent.value = false;
   receiptOpen.value = true;
 }
 
@@ -239,62 +244,93 @@ async function uploadReceipt(file?: File) {
     data.append('receipt', file);
     data.append('cloudDataConsent', 'true');
     const result = await api('/personal-finance/receipts/extract', { method: 'POST', body: data });
-    receiptDuplicate.value = result.duplicate === true;
-    receiptPossibleMatches.value = result.possibleMatches || [];
-    receiptReconciliation.value = result.reconciliation ?? null;
     if (!result.draft) {
       error.value = 'This receipt was already uploaded. Its existing transaction remains unchanged.';
       return;
     }
-    const draft = result.draft;
-    receiptDraftId.value = draft.id;
-    const receipt = draft.receipts?.[0];
-    receiptId.value = receipt?.id ?? result.receipt?.id ?? '';
-    const extraction = receipt?.extraction;
-    Object.assign(receiptForm, {
-      date: draft.date ?? extraction?.date?.value ?? '', amount: draft.amount ?? extraction?.total?.value ?? '',
-      currency: draft.currency ?? extraction?.currency?.value ?? 'EUR', merchantName: draft.merchantName ?? extraction?.merchant?.value ?? '',
-      category: draft.category ?? '', description: draft.description ?? extraction?.merchant?.value ?? '',
-    });
-    receiptSourceText.value = extraction?.sourceText ?? '';
-    receiptAdjustments.value = (receipt?.reviewedAdjustments ?? extraction?.adjustments ?? []).map((adjustment: any) => ({
-      label: adjustment.label ?? '', kind: adjustment.kind ?? 'other', amount: adjustment.amount ?? '',
-      includedInTotal: typeof adjustment.includedInTotal === 'boolean' ? String(adjustment.includedInTotal) as 'true' | 'false' : '',
-    }));
-    receiptWarnings.value = [...(result.reconciliation?.warnings ?? []), ...(extraction?.warnings ?? [])];
-    receiptFieldWarnings.value = {};
-    for (const [label, field] of Object.entries({ merchant: extraction?.merchant, date: extraction?.date, currency: extraction?.currency, total: extraction?.total })) {
-      if (field?.uncertainty) receiptFieldWarnings.value[label as keyof typeof receiptFieldWarnings.value] = field.uncertainty;
-      else if (field?.confidence !== null && field?.confidence !== undefined && field.confidence < 0.7) receiptFieldWarnings.value[label as keyof typeof receiptFieldWarnings.value] = `Please check this value (${Math.round(field.confidence * 100)}% confidence).`;
-    }
-    const fieldValue = (value: any) => value && typeof value === 'object' && 'value' in value ? value.value : value;
-    const itemsForReview = receipt?.userReviewedAt ? draft.items ?? [] : extraction?.items ?? draft.items ?? [];
-    receiptItems.value = itemsForReview.map((item: any) => ({
-      description: fieldValue(item.description ?? item.originalDescription) ?? '',
-      normalizedDescription: fieldValue(item.normalizedDescription) ?? '',
-      quantity: fieldValue(item.quantity) ?? '', unit: fieldValue(item.unit) ?? '',
-      packaging: fieldValue(item.packaging) ?? '', unitPrice: fieldValue(item.unitPrice) ?? '',
-      discount: fieldValue(item.discount) ?? '', tax: fieldValue(item.tax) ?? '',
-      taxIncluded: typeof fieldValue(item.taxIncluded) === 'boolean' ? String(fieldValue(item.taxIncluded)) as 'true' | 'false' : '',
-      lineTotal: fieldValue(item.lineTotal) ?? '', currency: receiptForm.currency,
-      suggestedCategory: fieldValue(item.suggestedCategory) ?? '',
-      confidence: item.originalDescription?.confidence ?? null, uncertainty: item.originalDescription?.uncertainty ?? null,
-      categoryId: item.categoryId ?? categories.value.find((category) => category.name.toLocaleLowerCase() === String(fieldValue(item.suggestedCategory) ?? '').toLocaleLowerCase())?.id ?? null,
-      sourceReceiptId: receipt?.id ?? item.sourceReceiptId ?? null,
-      extractionProvenance: item.extractionProvenance ?? { provider: receipt?.parserProvider, schemaVersion: extraction?.schemaVersion, sourceContentHash: receipt?.contentHash },
-    }));
-    receiptTotalOnly.value = false;
-    receiptReviewDirty.value = false;
-    receiptSaveError.value = '';
-    if (receiptId.value) {
-      const imageResponse = await authFetch(`${props.apiBase}/personal-finance/receipts/${encodeURIComponent(receiptId.value)}/content`, { headers: { Authorization: `Bearer ${props.accessToken}` } });
-      if (imageResponse.ok) {
-        if (receiptImageUrl.value) URL.revokeObjectURL(receiptImageUrl.value);
-        receiptImageUrl.value = URL.createObjectURL(await imageResponse.blob());
-      }
-    }
+    await applyReceiptExtractionResult(result);
   } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Receipt extraction failed.'; }
   finally { receiptBusy.value = false; if (receiptInput.value) receiptInput.value.value = ''; }
+}
+
+async function applyReceiptExtractionResult(result: any) {
+  const draft = result.draft;
+  receiptDraftId.value = draft.id;
+  const receipt = result.receipt ?? draft.receipts?.[0];
+  const extraction = receipt?.extraction;
+  receiptDuplicate.value = result.duplicate === true;
+  receiptPossibleMatches.value = result.possibleMatches || [];
+  receiptReconciliation.value = result.reconciliation ?? null;
+  receiptExtractionDiagnostics.value = result.extractionDiagnostics ?? null;
+  Object.assign(receiptForm, {
+    date: draft.date ?? extraction?.date?.value ?? '', amount: draft.amount ?? extraction?.total?.value ?? '',
+    currency: draft.currency ?? extraction?.currency?.value ?? 'EUR', merchantName: draft.merchantName ?? extraction?.merchant?.value ?? '',
+    category: draft.category ?? '', description: draft.description ?? extraction?.merchant?.value ?? '',
+  });
+  receiptId.value = receipt?.id ?? '';
+  receiptHasBeenReviewed.value = Boolean(receipt?.userReviewedAt);
+  receiptSourceText.value = extraction?.sourceText ?? '';
+  receiptAdjustments.value = (receipt?.reviewedAdjustments ?? extraction?.adjustments ?? []).map((adjustment: any) => ({
+    label: adjustment.label ?? '', kind: adjustment.kind ?? 'other', amount: adjustment.amount ?? '',
+    includedInTotal: typeof adjustment.includedInTotal === 'boolean' ? String(adjustment.includedInTotal) as 'true' | 'false' : '',
+  }));
+  receiptWarnings.value = [...(result.reconciliation?.warnings ?? []), ...(extraction?.warnings ?? [])];
+  receiptFieldWarnings.value = {};
+  for (const [label, field] of Object.entries({ merchant: extraction?.merchant, date: extraction?.date, currency: extraction?.currency, total: extraction?.total })) {
+    if ((field as any)?.uncertainty) receiptFieldWarnings.value[label as keyof typeof receiptFieldWarnings.value] = (field as any).uncertainty;
+    else if ((field as any)?.confidence !== null && (field as any)?.confidence !== undefined && (field as any).confidence < 0.7) receiptFieldWarnings.value[label as keyof typeof receiptFieldWarnings.value] = `Please check this value (${Math.round((field as any).confidence * 100)}% confidence).`;
+  }
+  const fieldValue = (value: any) => value && typeof value === 'object' && 'value' in value ? value.value : value;
+  const itemsForReview = receipt?.userReviewedAt ? draft.items ?? [] : extraction?.items ?? draft.items ?? [];
+  receiptItems.value = itemsForReview.map((item: any) => ({
+    description: fieldValue(item.description ?? item.originalDescription) ?? '', normalizedDescription: fieldValue(item.normalizedDescription) ?? '',
+    quantity: fieldValue(item.quantity) ?? '', unit: fieldValue(item.unit) ?? '', packaging: fieldValue(item.packaging) ?? '',
+    unitPrice: fieldValue(item.unitPrice) ?? '', discount: fieldValue(item.discount) ?? '', tax: fieldValue(item.tax) ?? '',
+    taxIncluded: typeof fieldValue(item.taxIncluded) === 'boolean' ? String(fieldValue(item.taxIncluded)) as 'true' | 'false' : '',
+    lineTotal: fieldValue(item.lineTotal) ?? '', currency: receiptForm.currency, suggestedCategory: fieldValue(item.suggestedCategory) ?? '',
+    confidence: item.originalDescription?.confidence ?? null, uncertainty: item.originalDescription?.uncertainty ?? null,
+    categoryId: item.categoryId ?? categories.value.find((category) => category.name.toLocaleLowerCase() === String(fieldValue(item.suggestedCategory) ?? '').toLocaleLowerCase())?.id ?? null,
+    sourceReceiptId: receipt?.id ?? item.sourceReceiptId ?? null,
+    extractionProvenance: item.extractionProvenance ?? { provider: receipt?.parserProvider, schemaVersion: extraction?.schemaVersion, sourceContentHash: receipt?.contentHash },
+  }));
+  receiptTotalOnly.value = false;
+  receiptRetryConsent.value = false;
+  receiptReviewDirty.value = false;
+  receiptSaveError.value = '';
+  if (receiptId.value) {
+    const imageResponse = await authFetch(`${props.apiBase}/personal-finance/receipts/${encodeURIComponent(receiptId.value)}/content`, { headers: { Authorization: `Bearer ${props.accessToken}` } });
+    if (imageResponse.ok) {
+      if (receiptImageUrl.value) URL.revokeObjectURL(receiptImageUrl.value);
+      receiptImageUrl.value = URL.createObjectURL(await imageResponse.blob());
+    }
+  }
+}
+
+async function reextractReceipt() {
+  if (!receiptRetryConsent.value || !receiptId.value) return;
+  receiptBusy.value = true;
+  receiptSaveError.value = '';
+  error.value = '';
+  try {
+    const result = await api(`/personal-finance/receipts/${encodeURIComponent(receiptId.value)}/re-extract`, {
+      method: 'POST', body: JSON.stringify({ cloudDataConsent: true }),
+    });
+    await applyReceiptExtractionResult(result);
+  } catch (cause) { receiptSaveError.value = cause instanceof Error ? cause.message : 'Receipt re-extraction failed; the previous draft remains unchanged.'; }
+  finally { receiptBusy.value = false; receiptRetryConsent.value = false; }
+}
+
+async function openReceiptDraftFromLink(draftId: string) {
+  try {
+    const result = await api(`/personal-finance/drafts/${encodeURIComponent(draftId)}`);
+    const draft = result.draft;
+    const receipt = draft?.receipts?.find((item: any) => item.status === 'review_required') ?? draft?.receipts?.[0];
+    if (!draft || !receipt) throw new Error('This expense draft has no attached receipt to review.');
+    await applyReceiptExtractionResult({ draft, receipt });
+    receiptOpen.value = true;
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Could not open the saved receipt draft.';
+  }
 }
 
 function receiptReviewPayload() {
@@ -363,6 +399,7 @@ function closeReceiptReview() {
   receiptImageUrl.value = '';
   receiptDraftId.value = '';
   receiptId.value = '';
+  receiptHasBeenReviewed.value = false;
   receiptItems.value = [];
   receiptAdjustments.value = [];
   receiptFieldWarnings.value = {};
@@ -584,7 +621,11 @@ function localMonth() {
   return localDate().slice(0, 7);
 }
 
-onMounted(load);
+onMounted(async () => {
+  await load();
+  const receiptDraftIdFromLink = new URLSearchParams(window.location.search).get('receiptDraft');
+  if (receiptDraftIdFromLink) await openReceiptDraftFromLink(receiptDraftIdFromLink);
+});
 onBeforeUnmount(() => {
   if (searchTimer) clearTimeout(searchTimer);
   if (receiptImageUrl.value) URL.revokeObjectURL(receiptImageUrl.value);
@@ -909,6 +950,15 @@ onBeforeUnmount(() => {
               <span v-else>Check the missing amounts, or choose to save without item details.</span>
             </div>
             <div v-else class="receipt-reconciliation pending" role="status"><strong>Check receipt totals</strong><span>Compare the receipt total with the purchased items before saving.</span></div>
+            <p v-if="receiptReconciliation?.articleCountMismatch || receiptReconciliation?.incompleteLineCount" class="receipt-review-warning" role="alert">
+              <template v-if="receiptReconciliation?.reportedArticleCount !== null">The receipt reports {{ receiptReconciliation?.reportedArticleCount }} articles; {{ receiptReconciliation?.extractedLineCount }} line entries were extracted.</template>
+              <template v-if="receiptReconciliation?.incompleteLineCount"> {{ receiptReconciliation.incompleteLineCount }} extracted line(s) are missing required details.</template>
+              Check the receipt image and include every purchased line before confirming item details.
+            </p>
+            <div v-if="receiptId && !receiptHasBeenReviewed" class="receipt-reextract-consent">
+              <label><input v-model="receiptRetryConsent" type="checkbox" :disabled="receiptBusy" /> I consent to send this saved receipt image to the configured cloud provider again.</label>
+              <button class="receipt-text-button" type="button" :disabled="receiptBusy || !receiptRetryConsent" @click="reextractReceipt">{{ receiptBusy ? 'Retrying extraction…' : 'Retry extraction' }}</button>
+            </div>
             <p v-if="receiptSaveError" class="receipt-error" role="alert">{{ receiptSaveError }}</p>
             <p v-else-if="error" class="receipt-error" role="alert">{{ error }}</p>
 
@@ -967,6 +1017,7 @@ onBeforeUnmount(() => {
                   </div>
                 </section>
                 <ul v-if="receiptWarnings.length" class="receipt-warning-list"><li v-for="warning in receiptWarnings" :key="warning">{{ warning }}</li></ul>
+                <p v-if="receiptExtractionDiagnostics" class="receipt-diagnostics">Extraction check: provider status {{ receiptExtractionDiagnostics.responseStatus }}; {{ receiptExtractionDiagnostics.modelItemCount }} returned, {{ receiptExtractionDiagnostics.validatedItemCount }} validated, {{ receiptExtractionDiagnostics.persistedExtractionItemCount }} retained in extraction, {{ receiptExtractionDiagnostics.completeDraftItemCount }} complete draft lines, {{ receiptExtractionDiagnostics.incompleteExtractionItemCount }} extracted lines lack required details, {{ receiptExtractionDiagnostics.completeButUnmappedItemCount }} complete lines could not be normalized.</p>
                 <details v-if="receiptSourceText" class="receipt-source-text"><summary>Text read from receipt</summary><pre>{{ receiptSourceText }}</pre></details>
               </div>
             </details>
@@ -1205,6 +1256,10 @@ onBeforeUnmount(() => {
 .receipt-reconciliation.matched { background: var(--eg-success-soft); border-color: var(--eg-success); }
 .receipt-reconciliation.mismatch { background: var(--eg-danger-soft); border-color: var(--eg-danger); color: var(--eg-danger); }
 .receipt-reconciliation.pending { background: var(--eg-warning-soft); border-color: var(--eg-warning); }
+.receipt-review-warning { background: var(--eg-warning-soft); border: 1px solid var(--eg-warning); border-radius: 9px; color: var(--ink); font-size: 12px; line-height: 1.45; margin: 0; padding: 10px 12px; }
+.receipt-reextract-consent { align-items: center; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 8px 16px; justify-content: space-between; padding-bottom: 10px; }
+.receipt-reextract-consent label { align-items: center; color: var(--muted); display: flex; flex: 1 1 280px; font-size: 12px; gap: 8px; line-height: 1.4; }
+.receipt-diagnostics { color: var(--muted); font-size: 11px; line-height: 1.45; margin: 0; }
 .receipt-optional-panel, .receipt-item { border: 1px solid var(--line); border-radius: 10px; min-width: 0; }
 .receipt-optional-panel > summary { cursor: pointer; font-size: 12px; font-weight: 700; list-style-position: inside; padding: 11px 12px; }
 .receipt-image-frame { align-items: center; background: #101923; border-top: 1px solid var(--line); display: flex; justify-content: center; max-height: 48vh; min-height: 120px; overflow: hidden; padding: 10px; }

@@ -3,7 +3,7 @@ import type { Pool, PoolClient, QueryResultRow } from 'pg';
 import { addDecimal, compareDecimal, decimalString, financeDecimal, roundDecimal } from '../../domain/decimal';
 import { currencyMinorUnits, euroValue, normalizeMerchantName, reconcileItemsAgainstTotal } from '../../domain/expense-rules';
 import type { ExpenseDraft, ExpenseDraftProposal, ExpenseItem, ExpenseQuery, ExpenseRecord, ExpenseSource, ExpenseSourceKind, FinanceCategory, ReceiptMetadata, SpendingSummary } from '../../domain/personal-finance.types';
-import type { CategoryWrite, ExpenseDraftReviewWrite, ExpenseImportRow, ExpenseWrite, PersonalFinanceRepository } from '../../application/ports/personal-finance.repository';
+import type { CategoryWrite, ExpenseDraftReviewWrite, ExpenseImportRow, ExpenseWrite, PersonalFinanceRepository, ReceiptReextractionWrite } from '../../application/ports/personal-finance.repository';
 
 export const PERSONAL_FINANCE_POOL = Symbol('PERSONAL_FINANCE_POOL');
 
@@ -394,6 +394,43 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
   async getReceipt(accountId: string, receiptId: string): Promise<ReceiptMetadata | null> {
     const result = await this.pool.query<ReceiptRow>('SELECT * FROM personal_finance.receipts WHERE account_id=$1 AND id=$2', [accountId, receiptId]);
     return result.rows[0] ? mapReceipt(result.rows[0]) : null;
+  }
+
+  async replaceReceiptExtraction(accountId: string, actorId: string, receiptId: string, input: ReceiptReextractionWrite): Promise<ExpenseDraft | null> {
+    return this.transaction(async (client) => {
+      const selected = await client.query<ReceiptRow>(
+        'SELECT * FROM personal_finance.receipts WHERE account_id=$1 AND id=$2 FOR UPDATE',
+        [accountId, receiptId],
+      );
+      const receipt = selected.rows[0];
+      if (!receipt || !receipt.draft_id || receipt.expense_id || receipt.user_reviewed_at || receipt.document_deleted_at || receipt.status !== 'review_required') return null;
+      const row = await client.query<DraftRow>(
+        'SELECT * FROM personal_finance.expense_drafts WHERE account_id=$1 AND id=$2 FOR UPDATE',
+        [accountId, receipt.draft_id],
+      );
+      if (!row.rows[0] || !['proposed', 'needs_review'].includes(row.rows[0].status)) return null;
+
+      await client.query(
+        `UPDATE personal_finance.receipts SET extracted_totals=$3,parser_provider=$4,parser_model=$5,extraction_result=$6,status='review_required'
+         WHERE account_id=$1 AND id=$2`,
+        [accountId, receiptId, JSON.stringify(input.extractedTotals), input.parserProvider, input.parserModel, JSON.stringify(input.extraction)],
+      );
+      await client.query(
+        `UPDATE personal_finance.expense_drafts SET expense_date=$3,amount=$4,currency=$5,merchant_name=$6,description=$7,
+         extraction_provider=$8,extraction_model=$9,status='needs_review',updated_at=now()
+         WHERE account_id=$1 AND id=$2`,
+        [accountId, receipt.draft_id, input.date, input.amount, input.currency, input.merchantName, input.merchantName, input.parserProvider, input.parserModel],
+      );
+      await client.query('DELETE FROM personal_finance.expense_draft_items WHERE account_id=$1 AND draft_id=$2', [accountId, receipt.draft_id]);
+      const items = input.items.map((item) => ({ ...item, sourceReceiptId: receiptId }));
+      await this.insertDraftItems(client, accountId, receipt.draft_id, items);
+      await this.insertEvent(client, accountId, { kind: 'receipt', id: receiptId, contentHash: receipt.content_hash, provider: input.parserProvider, model: input.parserModel }, 'receipt.reextracted', {
+        draftId: receipt.draft_id, receiptId, actorId, extractedLineCount: input.extraction.items.length,
+        completeDraftItemCount: items.length, reportedArticleCount: input.extraction.reportedArticleCount.value,
+      });
+      const refreshed = await this.getDraftRow(client, accountId, receipt.draft_id);
+      return refreshed ? this.loadDraftWithClient(client, accountId, refreshed) : null;
+    });
   }
 
   async markReceiptDocumentDeleted(accountId: string, actorId: string, receiptId: string): Promise<ReceiptMetadata | null> {

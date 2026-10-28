@@ -31,6 +31,9 @@ export interface ReceiptExtractionV1 {
   discountTotal: ExtractedField<string>;
   depositTotal: ExtractedField<string>;
   total: ExtractedField<string>;
+  /** Count printed on some receipts (for example, “13 articles”). This counts
+   * purchased units and may differ from the number of printed line entries. */
+  reportedArticleCount: ExtractedField<number>;
   adjustments: Array<{ label: string; amount: string | null; kind: 'tax' | 'discount' | 'deposit' | 'return' | 'rounding' | 'other'; includedInTotal: boolean | null }>;
   sourceText: string | null;
   items: ReceiptExtractionItem[];
