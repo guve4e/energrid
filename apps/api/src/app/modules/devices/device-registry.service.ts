@@ -6,8 +6,6 @@ import {
 } from '@energrid/domain-devices';
 import type {
   DeviceCapabilityKind,
-  DeviceExecutionTrace,
-  DeviceExecutionTraceStage,
   DeviceProtocol,
   DeviceTransport,
   DeviceRegistrySnapshot,
@@ -17,7 +15,8 @@ import type {
   ShellyRpcDeviceConfig,
 } from './device-registry.types';
 import { OperationalLogService } from './operational-log.service';
-import { DeviceExecutionInvestigator } from './investigation/device-execution-investigator';
+import { DEVICE_COMMAND_TRACKER, type DeviceCommandTracker, type CommandRequest, type CommandPublication } from './commands/device-command-tracker';
+import { createDeviceCommandTracker } from './commands/device-command-tracker.provider';
 import { DeviceInstallationStore } from './device-installation.store';
 import type { DeviceInstallationRecord } from './device-installation.store';
 import { energridHttpObservationApproval, isEnergridHttpObservationApproval } from './adapters/inbound/energrid/energrid-http-observation-approval';
@@ -161,29 +160,7 @@ export class DeviceRegistryService implements OnModuleInit {
     string,
     RegisteredDeviceState
   >();
-  private readonly commandByDeviceId = new Map<
-    string,
-    NonNullable<RegisteredDeviceState['command']> & {
-      expiresAt: number;
-      displayUntil: number;
-    }
-  >();
-
-  private readonly executionInvestigator = new DeviceExecutionInvestigator();
-
-  private readonly executionTraceByCommandId = new Map<
-    string,
-    DeviceExecutionTrace & {
-      expiresAt: number;
-      settlingUntil: number | null;
-      lastVerifiedValues: Record<
-        string,
-        number | boolean | string | null
-      > | null;
-    }
-  >();
-
-  private readonly latestCommandIdByDeviceId = new Map<string, string>();
+  private commandTracker!: DeviceCommandTracker;
   private readonly persistedInstallations = new Map<string, DeviceInstallationRecord>();
   private readonly enrollmentStatusByDeviceId = new Map<string, DeviceEnrollmentStatus>();
 
@@ -193,7 +170,9 @@ export class DeviceRegistryService implements OnModuleInit {
     @Optional()
     @Inject(DEVICE_ENROLLMENT_SERVICE)
     private readonly enrollment?: DeviceEnrollmentService,
+    @Optional() @Inject(DEVICE_COMMAND_TRACKER) commandTracker?: DeviceCommandTracker,
   ) {
+    this.commandTracker = commandTracker ?? createDeviceCommandTracker(operationalLog);
     const configured: unknown = JSON.parse(
       process.env.HOME_DEVICE_CONTROL_BINDINGS_JSON || '{}',
     );
@@ -2014,253 +1993,40 @@ export class DeviceRegistryService implements OnModuleInit {
     });
   }
 
-  markDeviceCommandPending(
-    deviceId: string,
-    command: {
-      action: NonNullable<RegisteredDeviceState['command']>['action'];
-      expectedValues: Record<string, number | boolean | string | null>;
-      message?: string;
-      ttlMs?: number;
-      actor?: {
-        type: 'user' | 'assistant' | 'automation' | 'system';
-        id?: string;
-        name?: string;
-      };
-    },
-  ): NonNullable<RegisteredDeviceState['command']> {
-    const now = Date.now();
-    const requestedAt = new Date(now).toISOString();
-
-    const previousCommandId = this.latestCommandIdByDeviceId.get(deviceId);
-    const previousTrace = previousCommandId
-      ? this.executionTraceByCommandId.get(previousCommandId)
-      : null;
-
-    if (previousTrace?.outcome === 'running') {
-      replaceActiveTraceStage(previousTrace, 'settling', {
-        stage: 'settling',
-        status: 'warning',
-        observedAt: requestedAt,
-        message: 'Stability window interrupted by a newer command.',
-      });
-
-      appendTraceStage(previousTrace, {
-        stage: 'superseded',
-        status: 'complete',
-        observedAt: requestedAt,
-        message: 'A newer command replaced this execution before completion.',
-        evidence: {
-          supersededByAction: command.action,
-        },
-      });
-
-      this.completeExecutionTrace(previousTrace, 'superseded', requestedAt);
-    }
-
-    const pending = {
-      id: `${deviceId}:${command.action}:${now}`,
-      action: command.action,
-      status: 'pending' as const,
-      requestedAt,
-      expectedValues: command.expectedValues,
-      message: command.message,
-      expiresAt:
-        now +
-        (command.ttlMs || numberFromEnv('HOME_DEVICE_ACK_TIMEOUT_MS', 5000)),
-      displayUntil:
-        now + numberFromEnv('HOME_DEVICE_ACK_TIMEOUT_MS', 5000) + 30000,
-    };
-    this.commandByDeviceId.set(deviceId, pending);
-
-    const trace: DeviceExecutionTrace & {
-      expiresAt: number;
-      settlingUntil: number | null;
-      lastVerifiedValues: Record<
-        string,
-        number | boolean | string | null
-      > | null;
-    } = {
-      id: pending.id,
-      commandId: pending.id,
-      deviceId,
-
-      actor: {
-        type: 'system',
-        name: 'Energrid Control Service',
-      },
-
-      intent: command.message || 'Device command execution',
-
-      action: command.action,
-      expectedValues: { ...command.expectedValues },
-      requestedAt,
-      completedAt: null,
-      outcome: 'running',
-      durationMs: null,
-      diagnosis: this.executionInvestigator.investigate({
-        outcome: 'running',
-        deviceId,
-      }),
-      expiresAt: pending.expiresAt,
-      settlingUntil: null,
-      lastVerifiedValues: null,
-      stages: [
-        {
-          stage: 'requested',
-          status: 'complete',
-          observedAt: requestedAt,
-          message: 'Command was accepted by the Energrid control service.',
-          evidence: {
-            expectedValues: { ...command.expectedValues },
-          },
-        },
-      ],
-    };
-
-    this.executionTraceByCommandId.set(trace.commandId, trace);
-    this.latestCommandIdByDeviceId.set(deviceId, trace.commandId);
-    this.trimExecutionTraces();
-
-    this.operationalLog?.record({
-      level: 'info',
-      source: 'device-control',
-      event: 'command.pending',
-      message: `${deviceId} ${command.action} requested; preparing transport.`,
-      deviceId,
-      status: 'pending',
-      details: {
-        action: command.action,
-        expected: JSON.stringify(command.expectedValues),
-      },
-    });
-    return commandForState(pending);
+  markDeviceCommandPending(deviceId: string, command: CommandRequest) {
+    return this.commandTracker.markDeviceCommandPending(deviceId, command);
   }
 
-  markDeviceCommandPublished(
-    deviceId: string,
-    commandId: string,
-    evidence: {
-      topic?: string;
-      adapter?: string;
-    } = {},
-  ): DeviceExecutionTrace | null {
-    const trace = this.executionTraceByCommandId.get(commandId);
-    if (!trace || trace.deviceId !== deviceId) return null;
-    if (trace.outcome !== 'running') return publicExecutionTrace(trace);
-
-    appendTraceStage(trace, {
-      stage: 'published',
-      status: 'complete',
-      observedAt: new Date().toISOString(),
-      message: 'Command was published to the configured transport.',
-      evidence,
-    });
-
-    return publicExecutionTrace(trace);
+  markDeviceCommandPublished(deviceId: string, commandId: string, evidence: CommandPublication = {}) {
+    return this.commandTracker.markDeviceCommandPublished(deviceId, commandId, evidence);
   }
 
-  markDeviceCommandTransportFailed(
-    deviceId: string,
-    commandId: string,
-    message: string,
-  ): DeviceExecutionTrace | null {
-    const trace = this.executionTraceByCommandId.get(commandId);
-    if (!trace || trace.deviceId !== deviceId) return null;
-
-    const now = new Date().toISOString();
-
-    appendTraceStage(trace, {
-      stage: 'transport_failed',
-      status: 'failed',
-      observedAt: now,
-      message,
-    });
-
-    this.completeExecutionTrace(trace, 'failed', now);
-    return publicExecutionTrace(trace);
+  markDeviceCommandTransportFailed(deviceId: string, commandId: string, message: string) {
+    return this.commandTracker.markDeviceCommandTransportFailed(deviceId, commandId, message);
   }
 
-  getExecutionTraces(limit = 50): DeviceExecutionTrace[] {
-    this.refreshExecutionTraces();
-
-    return [...this.executionTraceByCommandId.values()]
-      .sort(
-        (left, right) =>
-          Date.parse(right.requestedAt) - Date.parse(left.requestedAt),
-      )
-      .slice(0, Math.max(1, limit))
-      .map(publicExecutionTrace);
+  getExecutionTraces(limit = 50) {
+    return this.commandTracker.getExecutionTraces(limit);
   }
 
-  getLatestExecutionTrace(deviceId: string): DeviceExecutionTrace | null {
-    this.refreshExecutionTraces();
-
-    const commandId = this.latestCommandIdByDeviceId.get(deviceId);
-    if (!commandId) return null;
-
-    const trace = this.executionTraceByCommandId.get(commandId);
-    return trace ? publicExecutionTrace(trace) : null;
+  getLatestExecutionTrace(deviceId: string) {
+    return this.commandTracker.getLatestExecutionTrace(deviceId);
   }
 
-  markDeviceCommandFailed(
-    deviceId: string,
-    command: {
-      action: NonNullable<RegisteredDeviceState['command']>['action'];
-      expectedValues: Record<string, number | boolean | string | null>;
-      message?: string;
-    },
-  ): NonNullable<RegisteredDeviceState['command']> {
-    const now = Date.now();
-    const failed = {
-      id: `${deviceId}:${command.action}:${now}`,
-      action: command.action,
-      status: 'failed' as const,
-      requestedAt: new Date(now).toISOString(),
-      expectedValues: command.expectedValues,
-      message: command.message,
-      expiresAt: now,
-      displayUntil: now + 30000,
-    };
-    this.commandByDeviceId.set(deviceId, failed);
-    this.operationalLog?.record({
-      level: 'error',
-      source: 'device-control',
-      event: 'command.failed',
-      message: `${deviceId} ${command.action} failed: ${command.message || 'unknown error'}`,
-      deviceId,
-      status: 'failed',
-      details: {
-        action: command.action,
-        expected: JSON.stringify(command.expectedValues),
-      },
-    });
-    return commandForState(failed);
+  markDeviceCommandFailed(deviceId: string, command: Pick<CommandRequest, 'action' | 'expectedValues' | 'message'>) {
+    return this.commandTracker.markDeviceCommandFailed(deviceId, command);
   }
 
   private withLiveState(device: RegisteredDevice): RegisteredDevice {
-    this.refreshDeviceCommand(device.id);
     const liveState = this.liveStateByDeviceId.get(device.id);
-    const command = this.commandByDeviceId.get(device.id);
-    const authoritative =
-      this.authoritativeObservationByDeviceId.get(device.id);
+    const command = this.refreshDeviceCommand(device.id);
+    const authoritative = this.authoritativeObservationByDeviceId.get(device.id);
+    const owned = this.authoritativeFieldOwnershipByDeviceId.get(device.id);
 
-    const owned =
-      this.authoritativeFieldOwnershipByDeviceId.get(device.id);
+    if (!liveState && !command && !authoritative && !owned?.size) return device;
 
-    if (!liveState && !command && !authoritative && !owned?.size) {
-      return device;
-    }
-
-    const keepUnowned = (
-      values: Record<string, number | boolean | string | null>,
-    ) =>
-      owned
-        ? Object.fromEntries(
-            Object.entries(values).filter(
-              ([field]) => !owned.has(field),
-            ),
-          )
-        : values;
+    const keepUnowned = (values: Record<string, number | boolean | string | null>) =>
+      owned ? Object.fromEntries(Object.entries(values).filter(([field]) => !owned.has(field))) : values;
 
     return {
       ...device,
@@ -2272,15 +2038,15 @@ export class DeviceRegistryService implements OnModuleInit {
           ...keepUnowned(liveState?.values || {}),
           ...(authoritative?.values || {}),
         },
-        ...(authoritative
-          ? {
-              observedAt: authoritative.observedAt,
-              source: 'approved-observation',
-            }
-          : {}),
-        ...(command ? { command: commandForState(command) } : {}),
+        ...(authoritative ? { observedAt: authoritative.observedAt, source: 'approved-observation' } : {}),
+        ...(command ? { command } : {}),
       },
     };
+  }
+
+  /** Refreshes command expiry through the tracker before projecting registry state. */
+  private refreshDeviceCommand(deviceId: string) {
+    return this.commandTracker.getCommand(deviceId);
   }
 
   private observeCommandTelemetry(
@@ -2290,356 +2056,8 @@ export class DeviceRegistryService implements OnModuleInit {
     evidenceCommandId: string | null,
     reason?: string,
   ): void {
-    this.refreshDeviceCommand(deviceId);
-    this.refreshExecutionTraces();
-
-    const command = this.commandByDeviceId.get(deviceId);
-    if (!command || command.status !== 'pending') {
-      this.observePossibleDrift(deviceId, values, observedAt);
-      return;
-    }
-
-    const trace = this.executionTraceByCommandId.get(command.id);
-
-    if (evidenceCommandId && evidenceCommandId !== command.id) {
-      return;
-    }
-
-    const telemetryTime = Date.parse(observedAt);
-    const requestedTime = Date.parse(command.requestedAt);
-
-    if (
-      Number.isFinite(telemetryTime) &&
-      Number.isFinite(requestedTime) &&
-      telemetryTime < requestedTime
-    ) {
-      if (trace) {
-        appendTraceStage(trace, {
-          stage: 'stale',
-          status: 'warning',
-          observedAt: new Date().toISOString(),
-          message:
-            'Telemetry was older than the command and could not verify it.',
-          evidence: {
-            telemetryObservedAt: observedAt,
-            requestedAt: command.requestedAt,
-          },
-        });
-      }
-
-      return;
-    }
-
-    if (!valuesMatch(command.expectedValues, values)) {
-      if (trace && evidenceCommandId === command.id) {
-        appendTraceStage(trace, {
-          stage: 'mismatched',
-          status: 'warning',
-          observedAt: new Date().toISOString(),
-          message:
-            'Device reported state, but it did not match the requested values.',
-          evidence: {
-            expectedValues: { ...command.expectedValues },
-            reportedValues: { ...values },
-            reason: reason || null,
-          },
-        });
-      }
-
-      return;
-    }
-
-    const now = Date.now();
-    const nowIso = new Date(now).toISOString();
-
-    this.commandByDeviceId.set(deviceId, {
-      ...command,
-      status: 'acked',
-      message: 'Device reported the requested state.',
-      displayUntil: now + 5000,
-    });
-
-    if (trace) {
-      appendTraceStage(trace, {
-        stage: 'reported',
-        status: 'complete',
-        observedAt,
-        message: 'Matching device telemetry was received.',
-        evidence: {
-          reportedValues: { ...values },
-          sourceReason: reason || null,
-          commandId: evidenceCommandId,
-        },
-      });
-
-      appendTraceStage(trace, {
-        stage: 'verified',
-        status: 'complete',
-        observedAt: nowIso,
-        message: 'Registry verified that observed values matched the request.',
-        evidence: {
-          expectedValues: { ...command.expectedValues },
-          reportedValues: { ...values },
-        },
-      });
-
-      const settleMs = numberFromEnv('HOME_DEVICE_SETTLE_WINDOW_MS', 2000);
-
-      trace.settlingUntil = now + settleMs;
-      trace.lastVerifiedValues = { ...values };
-
-      appendTraceStage(trace, {
-        stage: 'settling',
-        status: 'active',
-        observedAt: nowIso,
-        message: `Waiting ${settleMs}ms to ensure the device remains stable.`,
-        evidence: {
-          settleWindowMs: settleMs,
-        },
-      });
-    }
-
-    this.operationalLog?.record({
-      level: 'info',
-      source: 'device-registry',
-      event: 'command.acked',
-      message: `${deviceId} reported the requested state.`,
-      deviceId,
-      status: 'acked',
-      details: {
-        action: command.action,
-        expected: JSON.stringify(command.expectedValues),
-        commandId: command.id,
-      },
-    });
+    this.commandTracker.observeTelemetry(deviceId, values, observedAt, evidenceCommandId, reason);
   }
-
-  private observePossibleDrift(
-    deviceId: string,
-    values: Record<string, number | boolean | string | null>,
-    observedAt: string,
-  ): void {
-    const commandId = this.latestCommandIdByDeviceId.get(deviceId);
-    if (!commandId) return;
-
-    const trace = this.executionTraceByCommandId.get(commandId);
-    if (!trace || trace.outcome !== 'running') return;
-    if (!trace.settlingUntil) return;
-
-    if (valuesMatch(trace.expectedValues, values)) return;
-
-    appendTraceStage(trace, {
-      stage: 'drifted',
-      status: 'failed',
-      observedAt,
-      message: 'Device moved away from the requested state during settling.',
-      evidence: {
-        expectedValues: { ...trace.expectedValues },
-        observedValues: { ...values },
-      },
-    });
-
-    this.completeExecutionTrace(trace, 'drifted', observedAt);
-  }
-
-  private completeExecutionTrace(
-    trace: DeviceExecutionTrace & {
-      expiresAt: number;
-      settlingUntil: number | null;
-      lastVerifiedValues: Record<
-        string,
-        number | boolean | string | null
-      > | null;
-    },
-    outcome: Exclude<DeviceExecutionTrace['outcome'], 'running'>,
-    completedAt: string,
-  ): void {
-    completeTrace(trace, outcome, completedAt);
-    trace.diagnosis = this.executionInvestigator.investigate(trace);
-  }
-
-  private refreshExecutionTraces(): void {
-    const now = Date.now();
-
-    for (const trace of this.executionTraceByCommandId.values()) {
-      if (trace.outcome !== 'running') continue;
-
-      if (trace.settlingUntil && now >= trace.settlingUntil) {
-        const completedAt = new Date(trace.settlingUntil).toISOString();
-
-        replaceActiveTraceStage(trace, 'settling', {
-          stage: 'settling',
-          status: 'complete',
-          observedAt: completedAt,
-          message:
-            'The stability window completed without contradictory telemetry.',
-          evidence: {
-            settleWindowCompletedAt: completedAt,
-          },
-        });
-
-        appendTraceStage(trace, {
-          stage: 'settled',
-          status: 'complete',
-          observedAt: completedAt,
-          message: 'The device remained at the requested state.',
-        });
-
-        this.completeExecutionTrace(trace, 'settled', completedAt);
-        continue;
-      }
-
-      if (!trace.settlingUntil && now > trace.expiresAt) {
-        const completedAt = new Date(trace.expiresAt).toISOString();
-
-        appendTraceStage(trace, {
-          stage: 'timed_out',
-          status: 'failed',
-          observedAt: completedAt,
-          message:
-            'No matching telemetry arrived before the acknowledgement deadline.',
-          evidence: {
-            expectedValues: { ...trace.expectedValues },
-          },
-        });
-
-        this.completeExecutionTrace(trace, 'timed_out', completedAt);
-      }
-    }
-  }
-
-  private trimExecutionTraces(): void {
-    const maxTraces = numberFromEnv('HOME_DEVICE_EXECUTION_TRACE_LIMIT', 200);
-
-    const traces = [...this.executionTraceByCommandId.values()].sort(
-      (left, right) =>
-        Date.parse(right.requestedAt) - Date.parse(left.requestedAt),
-    );
-
-    for (const trace of traces.slice(maxTraces)) {
-      this.executionTraceByCommandId.delete(trace.commandId);
-
-      if (
-        this.latestCommandIdByDeviceId.get(trace.deviceId) === trace.commandId
-      ) {
-        this.latestCommandIdByDeviceId.delete(trace.deviceId);
-      }
-    }
-  }
-
-  private refreshDeviceCommand(deviceId: string): void {
-    const command = this.commandByDeviceId.get(deviceId);
-    if (!command) return;
-
-    const now = Date.now();
-    if (command.status === 'pending' && now > command.expiresAt) {
-      this.commandByDeviceId.set(deviceId, {
-        ...command,
-        status: 'no_ack',
-        message: 'Command was published, but no matching telemetry arrived.',
-        displayUntil: now + 30000,
-      });
-      this.operationalLog?.record({
-        level: 'warn',
-        source: 'device-registry',
-        event: 'command.no_ack',
-        message: `${deviceId} did not report the requested state after command publish.`,
-        deviceId,
-        status: 'no_ack',
-        details: {
-          action: command.action,
-          expected: JSON.stringify(command.expectedValues),
-        },
-      });
-      return;
-    }
-
-    if (command.status !== 'pending' && now > command.displayUntil) {
-      this.commandByDeviceId.delete(deviceId);
-    }
-  }
-}
-
-function appendTraceStage(
-  trace: DeviceExecutionTrace,
-  stage: DeviceExecutionTraceStage,
-): void {
-  const previous = trace.stages.at(-1);
-
-  if (previous?.stage === stage.stage && previous.status === stage.status) {
-    return;
-  }
-
-  trace.stages.push(stage);
-}
-
-function replaceActiveTraceStage(
-  trace: DeviceExecutionTrace,
-  stageName: DeviceExecutionTraceStage['stage'],
-  replacement: DeviceExecutionTraceStage,
-): void {
-  let index = -1;
-
-  for (
-    let candidate = trace.stages.length - 1;
-    candidate >= 0;
-    candidate -= 1
-  ) {
-    const stage = trace.stages[candidate];
-
-    if (stage.stage === stageName && stage.status === 'active') {
-      index = candidate;
-      break;
-    }
-  }
-
-  if (index >= 0) {
-    trace.stages[index] = replacement;
-    return;
-  }
-
-  appendTraceStage(trace, replacement);
-}
-
-function completeTrace(
-  trace: DeviceExecutionTrace,
-  outcome: DeviceExecutionTrace['outcome'],
-  completedAt: string,
-): void {
-  trace.outcome = outcome;
-  trace.completedAt = completedAt;
-
-  const started = Date.parse(trace.requestedAt);
-  const completed = Date.parse(completedAt);
-
-  trace.durationMs =
-    Number.isFinite(started) && Number.isFinite(completed)
-      ? Math.max(0, completed - started)
-      : null;
-}
-
-function publicExecutionTrace(
-  trace: DeviceExecutionTrace,
-): DeviceExecutionTrace {
-  return {
-    id: trace.id,
-    commandId: trace.commandId,
-    deviceId: trace.deviceId,
-
-    actor: trace.actor,
-
-    action: trace.action,
-    expectedValues: { ...trace.expectedValues },
-    requestedAt: trace.requestedAt,
-    completedAt: trace.completedAt,
-    outcome: trace.outcome,
-    durationMs: trace.durationMs,
-    diagnosis: trace.diagnosis,
-    stages: trace.stages.map((stage) => ({
-      ...stage,
-      evidence: stage.evidence ? { ...stage.evidence } : undefined,
-    })),
-  };
 }
 
 function metadataString(

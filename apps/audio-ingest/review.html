@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Energrid Audio Review</title>
+  <style>
+    :root{font:14px system-ui,sans-serif;color:#182033;background:#f4f7fb}body{max-width:1100px;margin:24px auto;padding:0 16px}h1{font-size:24px;margin:0 0 6px}.muted{color:#62708a}.bar,.counts,.actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}input,button{font:inherit;border:1px solid #cbd7e8;border-radius:6px;padding:9px;background:#fff}input[type=password]{min-width:240px}button{cursor:pointer;font-weight:650}.counts{margin:16px 0}.count{background:#fff;border:1px solid #dce4f0;border-radius:6px;padding:9px 12px}.list{display:grid;gap:10px}.clip{background:#fff;border:1px solid #dce4f0;border-radius:6px;padding:14px;display:grid;gap:10px}.clip h2{font-size:14px;margin:0}.clip audio{width:100%}.actions span{color:#62708a}.status{margin:10px 0;min-height:20px;color:#44516a}.error{color:#b42318}
+  </style>
+</head>
+<body>
+  <h1>Energrid audio review</h1>
+  <p class="muted">Recordings stay on this Linux storage server. Listen and assign labels manually; model detections are not ground truth.</p>
+  <div class="bar"><input id="token" type="password" autocomplete="current-password" placeholder="LAN upload token"><button id="connect">Connect</button><button id="refresh">Refresh</button></div>
+  <div id="status" class="status" role="status"></div>
+  <div id="counts" class="counts"></div>
+  <main id="clips" class="list"></main>
+  <script>
+    const tokenInput=document.querySelector('#token'), status=document.querySelector('#status'), list=document.querySelector('#clips'), counts=document.querySelector('#counts');
+    const labels=[['confirmed_positive','Positive'],['confirmed_negative','Negative'],['uncertain','Unsure'],['unlabeled','Clear label']];
+    function auth(){return {Authorization:`Bearer ${tokenInput.value}`,'Content-Type':'application/json'}}
+    function message(text,error=false){status.textContent=text;status.className=`status${error?' error':''}`}
+    async function request(path,options={}){const response=await fetch(path,{...options,headers:{...auth(),...(options.headers||{})}});if(!response.ok)throw new Error(`${response.status}: ${(await response.text()).slice(0,240)}`);return response}
+    async function load(){try{const data=await (await request('/v1/segments')).json();counts.replaceChildren();Object.entries(data.counts).forEach(([key,value])=>{const item=document.createElement('span');item.className='count';item.textContent=`${key.replaceAll('_',' ')}: ${value}`;counts.append(item)});list.replaceChildren();for(const clip of data.segments){const article=document.createElement('article');article.className='clip';const title=document.createElement('h2');title.textContent=`${clip.category} · ${clip.started_at} · ${Math.round(Number(clip.duration_seconds||0))} sec`;const detail=document.createElement('div');detail.className='muted';detail.textContent=`${clip.device_id} / ${clip.session_id} · ${clip.upload_status||'uploaded'} · SHA-256 ${clip.sha256}`;const audio=document.createElement('audio');audio.controls=true;audio.preload='none';audio.addEventListener('play',async()=>{if(audio.dataset.loaded)return;audio.pause();try{const blob=await request(`/v1/audio/${encodeURIComponent(clip.clip_id)}`).then(r=>r.blob());audio.src=URL.createObjectURL(blob);audio.dataset.loaded='true';await audio.play()}catch(e){message(e.message,true)}},{once:true});const actions=document.createElement('div');actions.className='actions';const occurrences=Array.isArray(clip.wake_word_occurrences)?clip.wake_word_occurrences.slice():[];const mark=document.createElement('button');mark.textContent='Mark wake word at playhead';mark.onclick=()=>{occurrences.push(Number(audio.currentTime.toFixed(2)));message(`Occurrence marked at ${audio.currentTime.toFixed(2)} seconds`)};actions.append(mark);for(const [value,name] of labels){const button=document.createElement('button');button.textContent=name;button.onclick=async()=>{try{await request(`/v1/labels/${encodeURIComponent(clip.clip_id)}`,{method:'POST',body:JSON.stringify({label:value,wake_word_occurrences:occurrences})});await load()}catch(e){message(e.message,true)}};actions.append(button)}const del=document.createElement('button');del.textContent='Delete recording';del.onclick=async()=>{if(!confirm('Delete this recording permanently?'))return;try{await request(`/v1/segments/${encodeURIComponent(clip.clip_id)}`,{method:'DELETE'});await load()}catch(e){message(e.message,true)}};actions.append(del);const label=document.createElement('span');label.textContent=`Current label: ${clip.label} (${clip.label_source}) · occurrences: ${occurrences.join(', ')||'none'}`;actions.append(label);article.append(title,detail,audio,actions);list.append(article)}message(`Loaded ${data.segments.length} segments · ${Math.round(data.used_bytes/1024/1024)} MiB stored`)}catch(e){message(e.message,true)}}
+    document.querySelector('#connect').onclick=load;document.querySelector('#refresh').onclick=load;
+  </script>
+</body>
+</html>

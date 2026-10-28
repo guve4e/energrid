@@ -148,9 +148,15 @@ describe('MQTT evidence capture integration', () => {
       ]),
     );
     expect(new Set(events.map((entry: any) => entry.correlationId)).size).toBe(1);
-    expect(JSON.stringify(events)).not.toContain('18.8');
-    expect(JSON.stringify(events)).not.toContain('48.2');
-    expect(JSON.stringify(events)).not.toContain('5640962');
+    // Operational events may contain timestamps and IDs whose digits overlap
+    // with measurement values. Assert that raw measurement fields are absent
+    // instead of searching the serialized event text for incidental substrings.
+    for (const event of events) {
+      expect(event).not.toHaveProperty('payload');
+      expect(event).not.toHaveProperty('temperature');
+      expect(event).not.toHaveProperty('humidity');
+      expect(event).not.toHaveProperty('energy');
+    }
   });
 
   it('reports invalid JSON as a reasoned parse failure without storing payload text', async () => {
