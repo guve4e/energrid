@@ -112,6 +112,42 @@ describe('Personal Finance V2 Portal cutover', () => {
     expect(wrapper!.text()).toContain('Add expense');
   });
 
+  it('uses configured category choices and only captures liters for Fuel expenses', async () => {
+    const { calls } = setup();
+    await flushPromises();
+    const addButton = wrapper!.findAll('button').find((button) => button.text().includes('Add expense'))!;
+    await addButton.trigger('click');
+    const category = wrapper!.get('select[aria-label="Expense category"]');
+    expect(category.findAll('option').map((option) => option.text())).toEqual(['Choose a category', 'Fuel', 'Groceries']);
+    expect(wrapper!.text()).not.toContain('Fuel volume');
+
+    await category.setValue('Fuel');
+    expect(wrapper!.text()).toContain('Fuel volume');
+    await wrapper!.get('input[placeholder="Optional"]').setValue('42.5');
+
+    await wrapper!.get('input[type="number"]').setValue('40');
+    await wrapper!.get('input[placeholder="Merchant or what you bought"]').setValue('Fuel stop');
+    await wrapper!.get('.expense-modal form').trigger('submit');
+    await flushPromises();
+    const fuelCall = calls.find(({ url, init }) => url === '/personal-finance/expenses' && init?.method === 'POST');
+    expect(JSON.parse(String(fuelCall?.init?.body))).toMatchObject({ category: 'Fuel', categoryId: 'category-fuel', liters: 42.5 });
+
+    const secondAddButton = wrapper!.findAll('button').find((button) => button.text().includes('Add expense'))!;
+    await secondAddButton.trigger('click');
+    const secondCategory = wrapper!.get('select[aria-label="Expense category"]');
+    await secondCategory.setValue('Fuel');
+    await wrapper!.get('input[placeholder="Optional"]').setValue('42.5');
+    await secondCategory.setValue('Groceries');
+    expect(wrapper!.text()).not.toContain('Fuel volume');
+
+    await wrapper!.get('input[type="number"]').setValue('40');
+    await wrapper!.get('input[placeholder="Merchant or what you bought"]').setValue('Weekly shop');
+    await wrapper!.get('.expense-modal form').trigger('submit');
+    await flushPromises();
+    const createCalls = calls.filter(({ url, init }) => url === '/personal-finance/expenses' && init?.method === 'POST');
+    expect(JSON.parse(String(createCalls[1]?.init?.body))).toMatchObject({ category: 'Groceries', categoryId: 'category-groceries', liters: null });
+  });
+
   it('uses month, calendar-year, and all-history scopes for transactions and summaries', async () => {
     const { calls } = setup();
     await flushPromises();

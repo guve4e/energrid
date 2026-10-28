@@ -56,7 +56,7 @@ const form = reactive({
   amount: '',
   currency: 'EUR',
   fxRate: '',
-  category: 'Groceries',
+  category: '',
   categoryId: null as string | null,
   description: '',
   tags: '',
@@ -64,6 +64,14 @@ const form = reactive({
 });
 
 const categoryOptions = computed(() => [...new Set([...categories.value.map((item) => item.name), ...summary.value.byCategory.map((item) => item.category), ...allHistorySummary.value.byCategory.map((item) => item.category)])].sort((a, b) => a.localeCompare(b)));
+const expenseCategoryOptions = computed(() => {
+  const names = categories.value.filter((item) => item.status === 'active').map((item) => item.name);
+  if (editingId.value && form.category.trim() && !names.some((name) => name.toLocaleLowerCase() === form.category.trim().toLocaleLowerCase())) {
+    names.push(form.category.trim());
+  }
+  return [...new Set(names)].sort((a, b) => a.localeCompare(b));
+});
+const selectedCategoryIsFuel = computed(() => form.category.trim().toLocaleLowerCase() === 'fuel');
 const displaySummary = computed(() => transactionScope.value === 'all'
   ? allHistorySummary.value
   : transactionScope.value === 'year'
@@ -154,6 +162,9 @@ const euroPercent = (value: number) =>
 watch([month, transactionScope], () => {
   transactionPage.value = 1;
   void load();
+});
+watch(() => form.category, () => {
+  if (!selectedCategoryIsFuel.value) form.liters = '';
 });
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
 watch([search, categoryFilter], () => { transactionPage.value = 1; clearTimeout(searchTimer); searchTimer = setTimeout(loadExpenses, 250); });
@@ -267,9 +278,7 @@ async function saveExpense() {
             .split(',')
             .map((tag) => tag.trim())
             .filter(Boolean),
-          ...(form.category === 'Fuel' && form.liters
-            ? { liters: form.liters }
-            : {}),
+          liters: selectedCategoryIsFuel.value && form.liters ? form.liters : null,
         }),
       },
     );
@@ -372,7 +381,7 @@ function resetForm() {
     amount: '',
     currency: 'EUR',
     fxRate: '',
-    category: 'Groceries',
+    category: categories.value.find((item) => item.status === 'active')?.name ?? '',
     categoryId: null,
     description: '',
     tags: '',
@@ -723,16 +732,15 @@ onMounted(load);
                 <option v-if="editingId && form.currency === 'BGN'">BGN</option>
               </select></label
             ><label
-              >Category<input
-                v-model="form.category"
-                list="expense-category-options"
-                required
-                maxlength="80" /><datalist id="expense-category-options">
+              >Category<select v-model="form.category" required aria-label="Expense category">
+                <option disabled value="">Choose a category</option>
                 <option
-                  v-for="category in categories"
-                  :key="category.id"
-                  :value="category.name"
-                ></option></datalist
+                  v-for="category in expenseCategoryOptions"
+                  :key="category"
+                  :value="category"
+                  >{{ category }}</option
+                >
+              </select
             ></label>
           </div>
           <label v-if="form.currency !== 'EUR' && form.currency !== 'BGN'"
@@ -756,7 +764,7 @@ onMounted(load);
             <span class="expense-optional">optional · comma separated</span
             ><input v-model="form.tags" placeholder="e.g. weekly shop, Lidl"
           /></label>
-          <label
+          <label v-if="selectedCategoryIsFuel"
             >Fuel volume <span class="expense-optional">optional · liters</span
             ><input
               v-model="form.liters"
