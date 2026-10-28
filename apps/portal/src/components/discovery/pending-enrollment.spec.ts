@@ -184,6 +184,29 @@ describe('Pending Enrollment presentation', () => {
     expect(cards.map(card => card.ipAddress)).toEqual([null, null]);
   });
 
+  it('groups explicitly site-attributed MQTT Shelly channels as one unverified physical candidate', () => {
+    const candidateA = candidate(`${physicalId}:switch:0`, 'switch:0', `Shelly ${physicalId}`);
+    const candidateB = candidate(`${physicalId}:switch:1`, 'switch:1', `Shelly ${physicalId}`);
+    for (const item of [candidateA, candidateB]) {
+      item.metadata = {
+        physicalId,
+        component: item.id.endsWith('switch:0') ? 'switch:0' : 'switch:1',
+        identityEvidenceSource: 'mqtt-claimed-protocol-id',
+        verificationStatus: 'unverified',
+      };
+    }
+
+    const [card] = buildPendingEnrollmentCards([candidateA, candidateB], {});
+
+    expect(card.componentSummary).toBe('2 components');
+    expect(card.components).toEqual(['switch:0', 'switch:1']);
+    expect(card.details.map(item => item.verificationStatus)).toEqual(['unverified', 'unverified']);
+    expect(card.details.every(item => item.requiresShellyLanVerification)).toBe(true);
+    expect(card.details.map(item => item.evidenceSource)).toEqual([
+      'MQTT protocol message (identity claim)', 'MQTT protocol message (identity claim)',
+    ]);
+  });
+
   it('withholds conflicting or partially identified network addresses', () => {
     const a = candidate(`${physicalId}:em1:0`, 'em1:0', 'Shelly ProEM');
     const b = candidate(`${physicalId}:em1:1`, 'em1:1', 'Shelly ProEM');

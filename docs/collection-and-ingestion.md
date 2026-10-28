@@ -117,6 +117,8 @@ Background ESP polling uses each persisted installation's explicit tenant/site a
 
 One area needs additional care: generic adapter-driven background MQTT routing obtains the registry snapshot's tenant/site for discovery and legacy effects. Background subscriber callbacks have no Portal request context and therefore fall back to configured site context. Exact approved routes carry explicit scope; generic MQTT discovery/legacy routing should not be treated as a complete multi-site broker-to-site binding. See ADR [0005](decisions/0005-background-ingestion-ownership.md).
 
+**Shelly Add Devices projection:** `MqttEvidenceCaptureService` exposes only server-configured source bindings to `MqttEvidenceDiscoveryService`. A Shelly `NotifyStatus` message can update the existing Physical Inventory and create unverified, site-attributed component candidates only when its exact topic has such a binding. The payload's claimed protocol ID is retained as claimed MQTT evidence, never promoted to LAN-verified identity. Component candidates for one claimed physical ID are grouped into one Add Devices card. Existing approved installations in that same tenant/site suppress duplicate candidates. Physical Inventory is the durable source used to restore these candidate projections after API restart. No enrollment, measurement approval or control authority follows from this path.
+
 ## Observer reachability and device health
 
 These are separate concepts:

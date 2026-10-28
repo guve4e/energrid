@@ -172,6 +172,7 @@ export class DeviceMqttMessageRouter {
           effects: [],
           persisted: Promise.all(persistence).then(() => undefined),
           observationAdmissions: admissions,
+          physicalDiscoveries: result.physicalDiscoveries ?? [],
           observationAdmission: admissions.some(item => item.outcome === 'admitted')
             ? { outcome: 'admitted' }
             : { outcome: 'rejected', reasonCode: toApprovedObservationReasonCode(admissions[0]?.reasonCode) },

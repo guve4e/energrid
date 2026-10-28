@@ -123,6 +123,13 @@ function groupKey(
   candidate: PendingCandidateInput,
   identity: PendingIdentityInput | undefined,
 ): string {
+  if (candidate.metadata?.identityEvidenceSource === 'mqtt-claimed-protocol-id' &&
+      typeof candidate.metadata.physicalId === 'string' && candidate.metadata.physicalId) {
+    // Component candidates with the same unverified protocol claim are one
+    // physical-device card. This is presentation grouping only; it does not
+    // verify identity or grant enrollment/measurement authority.
+    return [candidate.tenantId, candidate.siteId, 'mqtt-claim', candidate.metadata.physicalId].join(':');
+  }
   if (identity?.status !== 'not_identified' && identity?.physicalDeviceId &&
     identity.physicalHardwareId && identity.componentId) {
     return [candidate.tenantId, candidate.siteId, identity.physicalDeviceId, identity.physicalHardwareId]
@@ -161,7 +168,10 @@ function toCard(
   const ipAddress = hasConflict ? null : live
     ? currentIdentities.sort((left, right) => (right.lastObservedAt ?? '').localeCompare(left.lastObservedAt ?? ''))[0].ipAddress
     : historicalIdentities[0]?.lastObservedIpAddress ?? null;
-  const components = unique(candidates.map(candidate => identities[candidate.id]?.componentId).filter(isString));
+  const components = unique(candidates.map(candidate =>
+    identities[candidate.id]?.componentId ||
+    (typeof candidate.metadata?.component === 'string' ? candidate.metadata.component : ''),
+  ).filter(isString));
   const capabilities = unique(candidates.flatMap(candidate => candidate.capabilities.map(capability => capability.kind)));
   const details = candidates.map(candidate => detail(candidate, identities[candidate.id]));
 
@@ -226,19 +236,24 @@ function detail(
     candidateId: candidate.id,
     logicalCandidateId: candidate.id,
     displayName: candidate.discovery?.suggestedName || candidate.displayName,
-    componentId: identity?.componentId ?? null,
+    componentId: identity?.componentId ??
+      (typeof candidate.metadata?.component === 'string' ? candidate.metadata.component : null),
     capabilities: candidate.capabilities.map(capability => capability.kind),
     source: identity?.discoverySource || candidate.discovery?.source || 'unknown',
     protocol: identity?.protocol || candidate.adapter.protocol,
     endpoint: identity?.endpoint || candidate.adapter.target || null,
     physicalHardwareId: identity?.physicalHardwareId ?? null,
     physicalDeviceId: identity?.physicalDeviceId ?? null,
-    evidenceSource: identity?.evidenceSource || candidate.discovery?.source || 'unknown',
-    observedAt: identity?.lastObservedAt ?? null,
+    evidenceSource: identity?.evidenceSource ||
+      (candidate.metadata?.identityEvidenceSource === 'mqtt-claimed-protocol-id'
+        ? 'MQTT protocol message (identity claim)' : candidate.discovery?.source || 'unknown'),
+    observedAt: identity?.lastObservedAt ??
+      (typeof candidate.metadata?.mqttObservedAt === 'string' ? candidate.metadata.mqttObservedAt : null),
     confidence: candidate.discovery?.confidence ?? null,
-    verificationStatus: identity?.verificationStatus || 'not_identified',
+    verificationStatus: identity?.verificationStatus ||
+      (candidate.metadata?.verificationStatus === 'unverified' ? 'unverified' : 'not_identified'),
     networkAddressStatus: identity?.networkAddressStatus ?? null,
-    reason: identity?.reason || 'Backend identity evidence is unavailable.',
+    reason: identity?.reason || candidate.discovery?.reason || 'Backend identity evidence is unavailable.',
     retired: candidate.metadata?.previouslyEnrolledRetired === true,
     requiresEnrollmentPlacement: candidate.metadata?.observationApprovalRequired === true || candidate.metadata?.requiresEnrollmentPlacement === true,
     requiresShellyLanVerification: shelly && !freshLanEvidence,

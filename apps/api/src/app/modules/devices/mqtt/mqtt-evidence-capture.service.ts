@@ -10,7 +10,7 @@ import {
   type MqttCaptureScope,
 } from '../../llm/mqtt-captured-evidence.store';
 
-interface CaptureBinding {
+export interface MqttEvidenceSourceBinding {
   scope: MqttCaptureScope;
   deviceId: string;
   topic: string;
@@ -29,7 +29,7 @@ function validId(value: unknown): value is string {
     value.length <= 160;
 }
 
-function parseBindings(raw: string | undefined): CaptureBinding[] {
+function parseBindings(raw: string | undefined): MqttEvidenceSourceBinding[] {
   if (!raw?.trim()) return [];
 
   let parsed: unknown;
@@ -48,7 +48,7 @@ function parseBindings(raw: string | undefined): CaptureBinding[] {
     throw new Error('Invalid MQTT evidence binding count');
   }
 
-  const bindings: CaptureBinding[] = [];
+  const bindings: MqttEvidenceSourceBinding[] = [];
   const topics = new Set<string>();
 
   for (const item of parsed) {
@@ -98,7 +98,7 @@ export class MqttEvidenceCaptureService implements OnModuleDestroy {
   private readonly logger =
     new Logger(MqttEvidenceCaptureService.name);
 
-  private readonly bindings: Map<string, CaptureBinding>;
+  private readonly bindings: Map<string, MqttEvidenceSourceBinding>;
   private readonly store: MqttCapturedEvidenceStore | null;
   private readonly storeDiagnosticId: string;
 
@@ -241,6 +241,19 @@ export class MqttEvidenceCaptureService implements OnModuleDestroy {
         deviceId: binding.deviceId,
         topic: binding.topic,
       }));
+  }
+
+  /** Explicit, server-configured ownership for candidate projection. */
+  listConfiguredBindings(): MqttEvidenceSourceBinding[] {
+    return [...this.bindings.values()].map(binding => ({
+      ...binding,
+      scope: { ...binding.scope },
+    }));
+  }
+
+  getConfiguredBindingForTopic(topic: string): MqttEvidenceSourceBinding | null {
+    const binding = this.bindings.get(topic);
+    return binding ? { ...binding, scope: { ...binding.scope } } : null;
   }
 
   async getCaptureStatus(

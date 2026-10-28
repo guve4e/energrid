@@ -122,6 +122,12 @@ describe('DeviceMqttMessageRouter', () => {
 
     expect(result?.observationAdmission).toEqual({ outcome: 'rejected', reasonCode: 'shelly_observation_runtime_unavailable' });
     expect(result?.physicalDiscovery).toBeUndefined();
+    expect(result?.physicalDiscoveries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        identity: { namespace: 'mqtt:shelly-protocol-id', value: shellyId },
+        components: [{ key: 'switch:0', capabilities: ['power', 'switch'] }],
+      }),
+    ]));
     expect(registry.getDevices().find(device => device.id === `${shellyId}:switch:0`)).toBeUndefined();
     expect(observation.getDevice(`${shellyId}:switch:0`)).toBeNull();
     expect(capture).not.toHaveBeenCalled();
@@ -539,7 +545,7 @@ describe('DeviceMqttMessageRouter', () => {
 it('creates healthy device health after telemetry ingestion', async () => {
   const registry = new DeviceRegistryService();
   const observation = new DeviceObservationService();
-  const health = new DeviceHealthService();
+  const health = new DeviceHealthService(observation);
 
   const router = new DeviceMqttMessageRouter(registry, observation, undefined, undefined, undefined, enrolled);
 

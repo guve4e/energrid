@@ -537,6 +537,36 @@ export class DeviceMqttIngestService implements OnModuleInit, OnModuleDestroy {
       payloadText,
     });
 
+    if (routed?.physicalDiscoveries?.length && this.evidenceDiscovery) {
+      try {
+        const records = await this.evidenceDiscovery.projectShellyMessage(
+          topic,
+          routed.physicalDiscoveries,
+        );
+        if (records) {
+          // Site attribution comes from the exact server-configured evidence
+          // binding, not from the claimed Shelly ID or the active Portal site.
+          routed.physicalDiscovery = Promise.resolve(records);
+        } else {
+          this.operationalLog.recordMqttStage({
+            correlationId,
+            topic,
+            stage: 'discovery',
+            outcome: 'skipped',
+            reasonCode: 'mqtt_site_binding_unavailable',
+          });
+        }
+      } catch {
+        this.operationalLog.recordMqttStage({
+          correlationId,
+          topic,
+          stage: 'discovery',
+          outcome: 'failed',
+          reasonCode: 'physical_inventory_write_failed',
+        });
+      }
+    }
+
     const shellyIdentity = routed?.physicalDiscoveries?.find(
       item => item.identity.namespace === 'mqtt:shelly-protocol-id',
     );

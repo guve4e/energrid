@@ -6324,16 +6324,13 @@ onBeforeUnmount(() => {
 
           <details id="pending-onboarding" class="discovery-accordion discovery-onboarding-accordion">
             <summary>
-              <strong>Pending Energrid onboarding</strong>
+              <strong>Add Devices</strong>
               <span>{{ discoveredDevices.length }} pending</span>
             </summary>
 
           <div class="discovery-empty" v-if="discoveredDevices.length === 0">
-            <strong>No pending devices</strong>
-            <span
-              >MQTT, mDNS, HTTP, Zigbee, and Modbus candidates wait here only
-              after a gateway suggests them for Energrid onboarding.</span
-            >
+            <strong>No unverified candidates observed for this site</strong>
+            <span>Site-attributed MQTT observations and existing discovery evidence appear here for review. Protocol-reported identity still requires independent verification before enrollment.</span>
           </div>
 
           <PendingEnrollmentList
