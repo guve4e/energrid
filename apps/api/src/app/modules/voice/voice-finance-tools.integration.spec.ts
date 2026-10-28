@@ -45,7 +45,7 @@ describe('Voice finance tool execution path', () => {
         send: jest.fn(),
         close: jest.fn(),
         stream: async function* () {
-          const proposalTool = options.tools.find((item: any) => item.name === 'finance.propose_expense');
+          const proposalTool = options.tools.find((item: any) => item.name === 'finance_propose_expense');
           await proposalTool.execute('voice-tool-call-1', {});
           yield { type: 'result', success: true, result: 'I have €76 at Lidl under Groceries. Shall I save it?', conversationId: 'voice-letta-conversation' };
         },
@@ -73,7 +73,7 @@ describe('Voice finance tool execution path', () => {
     } as unknown as ActiveVoiceSession;
     await internal.generateAssistantReply(activeSession);
 
-    expect(sessionOptions.allowedTools).toContain('finance.propose_expense');
+    expect(sessionOptions.allowedTools).toContain('finance_propose_expense');
     expect(financeApplication.proposeExpenseDraft).toHaveBeenCalledWith(expect.objectContaining({
       accountId: principal.userId, text: 'I spent €76 at Lidl.', cloudDataConsent: false,
     }));
