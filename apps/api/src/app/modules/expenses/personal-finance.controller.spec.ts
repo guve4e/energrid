@@ -124,6 +124,7 @@ describe('Personal Finance historical import normalization', () => {
     const finance = {
       summarizeSpending: jest.fn().mockResolvedValue({
         total: '15', transactionCount: 2, excludedUnconvertedCount: 0,
+        byMonth: [{ month: '2025-01', total: '15', count: 2 }],
         byCategory: [
           { category: 'Groceries', total: '10', count: 1 },
           { category: 'Fuel', total: '5', count: 1 },
@@ -138,6 +139,7 @@ describe('Personal Finance historical import normalization', () => {
 
     await expect(controller.summary({ fromDate: '2025-01-01', toDate: '2025-01-31' }, { user: { userId: 'account-a' } } as any)).resolves.toMatchObject({
       total: '30', dailyAverage: '0.97',
+      byMonth: [{ month: '2025-01', total: '30', count: 3 }],
       byCategory: [
         { category: 'Fuel', total: '20', count: 2 },
         { category: 'Groceries', total: '10', count: 1 },

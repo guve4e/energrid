@@ -218,12 +218,18 @@ export class PersonalFinanceController {
       const legacy = old.filter((item) => (!item.legacyRecordId || !migrated.has(item.legacyRecordId))
         && (!query.fromDate || item.date >= query.fromDate) && (!query.toDate || item.date <= query.toDate));
       const totals = new Map(summary.byCategory.map((item) => [categorySummaryKey(item.categoryId, item.category), item]));
+      const monthlyTotals = new Map((summary.byMonth ?? []).map((item) => [item.month, item]));
       let total = summary.total;
       let excludedUnconvertedCount = summary.excludedUnconvertedCount;
       for (const item of legacy) {
         const value = item.amountEur === null ? null : decimalString(item.amountEur);
         if (value === null) excludedUnconvertedCount++;
         else total = addDecimal(total, value);
+        const monthKey = item.date.slice(0, 7);
+        const monthly = monthlyTotals.get(monthKey) ?? { month: monthKey, total: '0', count: 0 };
+        if (value !== null) monthly.total = addDecimal(monthly.total, value);
+        monthly.count++;
+        monthlyTotals.set(monthKey, monthly);
         const key = categorySummaryKey(null, item.category);
         const category = totals.get(key) ?? { categoryId: null, category: item.category, total: '0', count: 0 };
         if (value !== null) category.total = addDecimal(category.total, value);
@@ -234,6 +240,7 @@ export class PersonalFinanceController {
       return { ...summary, total, dailyAverage: paceDays ? divideDecimalByInteger(total, paceDays, 2) : null,
         transactionCount: summary.transactionCount + legacy.length, excludedUnconvertedCount,
         legacyCoverage: legacyRead.available ? 'leveldb-available' : 'leveldb-unavailable',
+        byMonth: [...monthlyTotals.values()].sort((a, b) => a.month.localeCompare(b.month)),
         byCategory: [...totals.values()].sort((a, b) => compareDecimal(b.total, a.total) || a.category.localeCompare(b.category)) };
     }
     catch (error) { throw new BadRequestException(message(error)); }

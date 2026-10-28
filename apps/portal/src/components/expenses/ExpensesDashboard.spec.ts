@@ -10,8 +10,19 @@ function jsonResponse(body: unknown, ok = true, status = 200) {
   return { ok, status, text: async () => JSON.stringify(body) };
 }
 
-function setup(options: { incomplete?: boolean; records?: unknown[]; unavailableMonth?: string } = {}) {
-  const { incomplete = false, records = [], unavailableMonth } = options;
+function setup(options: { incomplete?: boolean; records?: unknown[]; byMonth?: Array<{ month: string; total: string; count: number }> } = {}) {
+  const { incomplete = false, records = [], byMonth = [
+    { month: '2025-01', total: '50.00', count: 2 },
+    { month: '2025-02', total: '0', count: 0 },
+    { month: '2025-03', total: '15.00', count: 1 },
+    { month: '2025-04', total: '18.00', count: 1 },
+    { month: '2025-05', total: '21.00', count: 1 },
+    { month: '2025-06', total: '22.00', count: 1 },
+    { month: '2025-07', total: '23.00', count: 1 },
+    { month: '2025-08', total: '24.00', count: 1 },
+    { month: '2025-09', total: '25.00', count: 1 },
+    { month: '2025-10', total: '26.00', count: 1 },
+  ] } = options;
   setAuthenticatedSession({ accessToken: 'finance-token', expiresIn: 900, user: { id: 'account-1', email: 'user@example.test', name: 'User', role: 'viewer' } });
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
@@ -20,8 +31,7 @@ function setup(options: { incomplete?: boolean; records?: unknown[]; unavailable
     if (url.endsWith('/expenses/import')) return jsonResponse({ imported: 1, duplicates: 0 });
     if (url.endsWith('/personal-finance/categories')) return jsonResponse({ categories: [{ id: 'category-groceries', name: 'Groceries', status: 'active' }, { id: 'category-fuel', name: 'Fuel', status: 'active' }] });
     if (url.includes('/personal-finance/expenses')) return jsonResponse({ expenses: records });
-    if (unavailableMonth && url.includes(`fromDate=${unavailableMonth}-01`)) return jsonResponse({ message: 'Temporary summary failure' }, false, 503);
-    if (url === '/personal-finance/summary') return jsonResponse({ total: '407.77997734979664', dailyAverage: null, transactionCount: 1, excludedUnconvertedCount: 0, legacyCoverage: incomplete ? 'leveldb-unavailable' : 'leveldb-available', byCategory: [{ category: 'Historical', total: '1.25', count: 1 }] });
+    if (url === '/personal-finance/summary') return jsonResponse({ total: '407.77997734979664', dailyAverage: null, transactionCount: 1, excludedUnconvertedCount: 0, legacyCoverage: incomplete ? 'leveldb-unavailable' : 'leveldb-available', byCategory: [{ category: 'Historical', total: '1.25', count: 1 }], byMonth });
     if (url.includes('/personal-finance/summary')) {
       const date = new URL(`http://finance.local${url}`).searchParams.get('fromDate');
       if (date === '2026-04-01') return jsonResponse({ total: '0', dailyAverage: '0', transactionCount: 0, excludedUnconvertedCount: 0, legacyCoverage: 'leveldb-available', byCategory: [] });
@@ -50,9 +60,7 @@ describe('Personal Finance V2 Portal cutover', () => {
     await flushPromises();
     expect(wrapper!.text()).toContain('Year total');
     const monthQueries = calls.filter(({ url }) => url.includes('/personal-finance/summary?fromDate='));
-    for (const key of ['2024-06', '2024-07', '2024-08', '2024-09', '2024-10', '2024-11', '2024-12', '2025-01']) {
-      expect(monthQueries.some(({ url }) => url.includes(`fromDate=${key}-01`))).toBe(true);
-    }
+    expect(monthQueries.some(({ url }) => url.includes('fromDate=2025-01-01'))).toBe(true);
     expect(calls.some(({ url }) => url.includes('/personal-finance/expenses?') && url.includes('fromDate=2025-01-01') && url.includes('toDate=2025-01-31'))).toBe(true);
     await wrapper!.get('input[aria-label="Search expenses"]').setValue('lidl');
     await new Promise((resolve) => setTimeout(resolve, 280));
@@ -117,19 +125,36 @@ describe('Personal Finance V2 Portal cutover', () => {
     expect(calls.some(({ url }) => url.includes('text=lidl') && url.includes('category=Fuel') && !url.includes('fromDate='))).toBe(true);
   });
 
-  it('distinguishes true zero from unavailable monthly data in an eight-month chart', async () => {
-    setup({ unavailableMonth: '2026-05' });
+  it('shows only months with recorded spending and fills every activity bar in the same blue', async () => {
+    setup();
     await flushPromises();
-    const chart = wrapper!.get('[aria-label^="Monthly spending for eight months"]');
+    const chart = wrapper!.get('[aria-label^="Monthly spending for 8 recent months"]');
     expect(chart.findAll('button')).toHaveLength(8);
-    const zeroMonth = chart.findAll('button').find((button) => button.attributes('aria-label')?.includes('April 2026'))!;
-    expect(zeroMonth.attributes('aria-label')).toContain('€0.00');
-    expect(zeroMonth.attributes('aria-label')).toContain('0 expenses');
-    const unavailableMonth = chart.findAll('button').find((button) => button.attributes('aria-label')?.includes('May 2026'))!;
-    expect(unavailableMonth.attributes('aria-label')).toContain('unavailable');
-    await zeroMonth.trigger('click');
+    expect(chart.text()).not.toContain('Feb ’25');
+    expect(chart.text()).toContain('Apr ’25');
+    expect(chart.text()).toContain('Oct ’25');
+    expect(wrapper!.get('.expense-chart-total').text()).toContain('October 2025');
+    expect(wrapper!.get('.expense-chart-total').text()).toContain('€26.00');
+    for (const button of chart.findAll('button')) {
+      const bar = button.get('.expense-chart-bar');
+      expect(bar.attributes('style')).toContain('height:');
+      expect(Number.parseFloat(bar.element.getAttribute('style')!.match(/height:\s*([\d.]+)%/)?.[1] ?? '0')).toBeGreaterThan(0);
+    }
+    const monthButton = chart.findAll('button').find((button) => button.attributes('aria-label')?.includes('April 2025'))!;
+    expect(monthButton.attributes('aria-label')).toContain('€18.00');
+    expect(monthButton.attributes('aria-label')).toContain('1 expenses');
+    await monthButton.trigger('click');
     await flushPromises();
-    expect(wrapper!.get('input[type="month"]').element).toHaveProperty('value', '2026-04');
+    expect(wrapper!.get('input[type="month"]').element).toHaveProperty('value', '2025-04');
+    expect(wrapper!.get('.expense-chart-total').text()).toContain('April 2025');
+    expect(wrapper!.get('.expense-chart-total').text()).toContain('€18.00');
+  });
+
+  it('shows an explicit empty state instead of bars when no month has expense records', async () => {
+    setup({ byMonth: [{ month: '2025-01', total: '0', count: 0 }] });
+    await flushPromises();
+    expect(wrapper!.get('.expense-chart-empty').text()).toBe('No recorded spending yet.');
+    expect(wrapper!.findAll('.expense-chart-column')).toHaveLength(0);
   });
 
   it('turns successful non-JSON API responses into a readable error state', async () => {
