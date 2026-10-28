@@ -25,6 +25,23 @@ describe('PostgresPersonalFinanceRepository safety boundaries', () => {
     expect(query.mock.calls[0][1][0]).toBe('account-a');
   });
 
+  it('returns account-scoped monthly totals and counts from PostgreSQL', async () => {
+    const query = jest.fn(async (sql: string) => {
+      if (sql.includes('to_char(expense_date')) return { rows: [{ month: '2025-10', total: '20.50', count: '2' }] };
+      if (sql.includes('COUNT(*) FILTER')) return { rows: [{ total: '20.50', unconverted: '0' }] };
+      if (sql.includes('COUNT(*)::text AS count FROM personal_finance.expenses')) return { rows: [{ count: '2' }] };
+      return { rows: [] };
+    });
+    const repo = new PostgresPersonalFinanceRepository({ query } as unknown as Pool);
+
+    await expect(repo.summarize('account-a', {})).resolves.toMatchObject({
+      byMonth: [{ month: '2025-10', total: '20.5', count: 2 }],
+    });
+    const monthlyQuery = query.mock.calls.find(([sql]) => sql.includes('to_char(expense_date'));
+    expect(monthlyQuery?.[0]).toContain('account_id=$1');
+    expect(monthlyQuery?.[1]).toEqual(['account-a']);
+  });
+
   it('rolls back an import batch when a related line item fails', async () => {
     const statements: string[] = [];
     const client = {
@@ -67,7 +84,7 @@ describe('PostgresPersonalFinanceRepository safety boundaries', () => {
         statements.push(sql);
         if (sql.includes('expense_drafts WHERE account_id=$1 AND id=$2 FOR UPDATE')) return { rows: [draft] };
         if (sql.startsWith('INSERT INTO personal_finance.expenses')) return { rows: [{ id: 'expense-1' }] };
-        if (sql.includes('FROM personal_finance.expenses WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL')) return { rows: [expense] };
+        if (sql.includes('FROM personal_finance.expenses e LEFT JOIN personal_finance.categories c') && sql.includes('WHERE e.account_id=$1 AND e.id=$2 AND e.deleted_at IS NULL')) return { rows: [expense] };
         return { rows: [] };
       }), release: jest.fn(),
     };

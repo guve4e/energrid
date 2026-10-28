@@ -145,6 +145,7 @@ export interface SpendingSummary {
   total: string;
   transactionCount: number;
   excludedUnconvertedCount: number;
+  byMonth: Array<{ month: string; total: string; count: number }>;
   byCategory: Array<{ categoryId: string | null; category: string; total: string; count: number }>;
   byMerchant: Array<{ merchantId: string | null; merchant: string; total: string; count: number }>;
   byProduct: Array<{ product: string; currency: CurrencyCode; unit: string; total: string; quantity: string; lineCount: number }>;

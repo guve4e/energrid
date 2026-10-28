@@ -22,8 +22,7 @@ const props = defineProps<{ apiBase: string; accessToken: string }>();
 const expenses = ref<Expense[]>([]);
 const summary = ref({ total: '0', dailyAverage: null as string | null, transactionCount: 0, excludedUnconvertedCount: 0, legacyCoverage: 'leveldb-available', byCategory: [] as Array<{ category: string; total: string; count: number }> });
 const yearSummary = ref({ total: '0' });
-const allHistorySummary = ref({ total: '0', transactionCount: 0, byCategory: [] as Array<{ category: string; total: string; count: number }> });
-const monthlySummaries = ref<Record<string, { total: string; transactionCount: number } | null>>({});
+const allHistorySummary = ref({ total: '0', transactionCount: 0, byCategory: [] as Array<{ category: string; total: string; count: number }>, byMonth: [] as Array<{ month: string; total: string; count: number }> });
 const loading = ref(true);
 const error = ref('');
 const busy = ref(false);
@@ -73,26 +72,30 @@ const maxCategoryTotal = computed(() =>
   Math.max(1, ...categoryTotals.value.map((item) => item.total)),
 );
 const chartMonths = computed(() => {
-  const [year, monthNumber] = month.value.split('-').map(Number);
-  return Array.from({ length: 8 }, (_, index) => {
-    const date = new Date(Date.UTC(year, monthNumber - 8 + index, 1));
-    const key = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
-    const summary = monthlySummaries.value[key];
-    return {
-      key,
-      summary,
-      total: summary ? Number(summary.total) : 0,
-      monthLabel: new Intl.DateTimeFormat(undefined, {
-        month: 'short',
-        timeZone: 'UTC',
-      }).format(date),
-      yearLabel: String(date.getUTCFullYear()).slice(-2),
-      fullLabel: new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(date),
-    };
-  });
+  return allHistorySummary.value.byMonth
+    .filter((item) => item.count > 0)
+    .slice(-8)
+    .map((summary) => {
+      const [year, monthNumber] = summary.month.split('-').map(Number);
+      const date = new Date(Date.UTC(year, monthNumber - 1, 1));
+      return {
+        key: summary.month,
+        summary: { total: summary.total, transactionCount: summary.count },
+        total: Number(summary.total),
+        monthLabel: new Intl.DateTimeFormat(undefined, {
+          month: 'short',
+          timeZone: 'UTC',
+        }).format(date),
+        yearLabel: String(date.getUTCFullYear()).slice(-2),
+        fullLabel: new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(date),
+      };
+    });
 });
 const maxMonthTotal = computed(() =>
   Math.max(1, ...chartMonths.value.map((item) => item.total)),
+);
+const chartFocusMonth = computed(() =>
+  chartMonths.value.find((item) => item.key === month.value) ?? chartMonths.value.at(-1),
 );
 const filteredExpenses = computed(() => expenses.value.slice((transactionPage.value - 1) * transactionPageSize, transactionPage.value * transactionPageSize));
 const formatEur = (value: number | string) =>
@@ -149,33 +152,16 @@ async function api(path: string, init?: RequestInit) {
 
 function monthRange(value: string) { const [y, m] = value.split('-').map(Number); return { fromDate: `${value}-01`, toDate: new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10) }; }
 async function refreshSummaries() {
-  const keys = chartMonths.value.map((item) => item.key);
   const monthRangeValue = monthRange(month.value);
   const year = month.value.slice(0, 4);
-  monthlySummaries.value = {};
-  try {
-    const [monthData, yearData, allHistoryData] = await Promise.all([
-      api(`/personal-finance/summary?fromDate=${monthRangeValue.fromDate}&toDate=${monthRangeValue.toDate}`),
-      api(`/personal-finance/summary?fromDate=${year}-01-01&toDate=${year}-12-31`),
-      api('/personal-finance/summary'),
-    ]);
-    const chartResults = await Promise.allSettled(keys.map((key) => {
-      const range = monthRange(key);
-      return api(`/personal-finance/summary?fromDate=${range.fromDate}&toDate=${range.toDate}`);
-    }));
-    summary.value = monthData;
-    yearSummary.value = yearData;
-    allHistorySummary.value = allHistoryData;
-    monthlySummaries.value = Object.fromEntries(keys.map((key, index) => {
-      const result = chartResults[index];
-      return [key, result?.status === 'fulfilled'
-        ? { total: String(result.value.total ?? '0'), transactionCount: Number(result.value.transactionCount ?? 0) }
-        : null];
-    }));
-  } catch (cause) {
-    monthlySummaries.value = Object.fromEntries(keys.map((key) => [key, null]));
-    throw cause;
-  }
+  const [monthData, yearData, allHistoryData] = await Promise.all([
+    api(`/personal-finance/summary?fromDate=${monthRangeValue.fromDate}&toDate=${monthRangeValue.toDate}`),
+    api(`/personal-finance/summary?fromDate=${year}-01-01&toDate=${year}-12-31`),
+    api('/personal-finance/summary'),
+  ]);
+  summary.value = monthData;
+  yearSummary.value = yearData;
+  allHistorySummary.value = allHistoryData;
 }
 
 async function loadExpenses() {
@@ -211,8 +197,6 @@ function selectChartMonth(value: string) {
 }
 
 function chartMonthTitle(item: (typeof chartMonths.value)[number]) {
-  if (item.summary === undefined) return `${item.fullLabel}: loading monthly data`;
-  if (item.summary === null) return `${item.fullLabel}: monthly data unavailable`;
   return `${item.fullLabel}: ${formatEur(item.summary.total)} · ${item.summary.transactionCount} expenses`;
 }
 
@@ -461,32 +445,37 @@ onMounted(load);
         <div class="expense-card-heading">
           <div>
             <h2>Monthly spending</h2>
-            <p>Eight months through {{ selectedMonthLabel }} · EUR</p>
+            <p>Recent months with recorded expenses · EUR</p>
           </div>
-          <span class="expense-chart-total">{{ formatEur(monthTotal) }}</span>
+          <span class="expense-chart-total">
+            <small v-if="chartFocusMonth">{{ chartFocusMonth.fullLabel }}</small>
+            {{ formatEur(chartFocusMonth?.summary.total ?? '0') }}
+          </span>
         </div>
         <div
           class="expense-chart"
+          :style="{ gridTemplateColumns: `repeat(${Math.max(1, chartMonths.length)}, minmax(0, 1fr))` }"
           role="group"
-          :aria-label="`Monthly spending for eight months through ${selectedMonthLabel}`"
+          :aria-label="`Monthly spending for ${chartMonths.length} recent months with recorded expenses`"
         >
+          <p v-if="chartMonths.length === 0" class="expense-chart-empty">No recorded spending yet.</p>
           <button
             v-for="item in chartMonths"
             :key="item.key"
             type="button"
             class="expense-chart-column"
-            :class="{ selected: item.key === month, unavailable: item.summary === null, zero: item.summary && item.total === 0 }"
+            :class="{ selected: item.key === month }"
             :aria-pressed="item.key === month"
             :aria-label="chartMonthTitle(item)"
             :title="chartMonthTitle(item)"
             @click="selectChartMonth(item.key)"
           >
-            <span class="expense-chart-value">{{ item.summary === undefined ? 'Loading' : item.summary === null ? 'Unavailable' : formatEur(item.summary.total) }}</span>
+            <span class="expense-chart-value">{{ formatEur(item.summary.total) }}</span>
             <div class="expense-chart-track">
               <div
                 class="expense-chart-bar"
                 :style="{
-                  height: `${item.summary && item.total > 0 ? Math.max(2, (item.total / maxMonthTotal) * 100) : 0}%`,
+                  height: `${Math.max(2, (item.total / maxMonthTotal) * 100)}%`,
                 }"
               ></div>
             </div>
@@ -495,7 +484,7 @@ onMounted(load);
         </div>
         <div class="expense-chart-foot">
           <span><i></i> Monthly total · keyboard or click to select</span>
-          <span>{{ chartMonths[0]?.fullLabel }} – {{ selectedMonthLabel }}</span>
+          <span v-if="chartMonths.length">{{ chartMonths[0].fullLabel }} – {{ chartMonths[chartMonths.length - 1].fullLabel }}</span>
         </div>
       </article>
 
@@ -965,13 +954,19 @@ onMounted(load);
   color: var(--deep);
   font-size: 15px;
   font-weight: 800;
+  text-align: right;
+}
+.expense-chart-total small {
+  color: var(--muted);
+  display: block;
+  font-size: 9px;
+  font-weight: 600;
 }
 .expense-chart {
   align-items: end;
   border-bottom: 1px solid var(--line);
   display: grid;
   gap: 12px;
-  grid-template-columns: repeat(8, minmax(0, 1fr));
   height: 205px;
   padding-top: 12px;
 }
@@ -1021,22 +1016,15 @@ onMounted(load);
 .expense-chart-column.selected .expense-chart-track {
   background: var(--eg-blue-soft);
 }
-.expense-chart-column.selected .expense-chart-bar {
-  background: linear-gradient(180deg, #a9c4ff, #2863e6);
-}
 .expense-chart-column.selected .expense-chart-label {
   color: var(--deep);
   font-weight: 800;
 }
-.expense-chart-column.unavailable .expense-chart-track {
-  background: repeating-linear-gradient(135deg, transparent 0 4px, var(--line) 4px 6px);
-  border: 1px dashed var(--muted);
-  box-sizing: border-box;
-}
-.expense-chart-column.zero .expense-chart-track {
-  background: transparent;
-  border: 1px solid var(--line);
-  box-sizing: border-box;
+.expense-chart-empty {
+  align-self: center;
+  color: var(--muted);
+  grid-column: 1 / -1;
+  justify-self: center;
 }
 .expense-chart-label {
   color: var(--muted);

@@ -362,7 +362,7 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
     const productWhere = ['e.account_id=$1', 'e.deleted_at IS NULL'];
     if (query.fromDate) productWhere.push('e.expense_date >= $2');
     if (query.toDate) productWhere.push(`e.expense_date <= $${query.fromDate ? 3 : 2}`);
-    const [total, categories, merchants, products, count] = await Promise.all([
+    const [total, categories, merchants, products, months, count] = await Promise.all([
       this.pool.query<{ total: string | null; unconverted: string }>(`SELECT SUM(amount_eur)::text AS total,COUNT(*) FILTER (WHERE amount_eur IS NULL)::text AS unconverted FROM personal_finance.expenses WHERE ${clause}`, values),
       this.pool.query<{ category_id: string | null; category: string; total: string | null; count: string }>(`SELECT e.category_id,COALESCE(c.name,e.category) AS category,SUM(e.amount_eur)::text AS total,COUNT(*)::text AS count FROM personal_finance.expenses e LEFT JOIN personal_finance.categories c ON c.account_id=e.account_id AND c.id=e.category_id WHERE ${clause.replaceAll('account_id', 'e.account_id').replaceAll('deleted_at', 'e.deleted_at').replaceAll('expense_date', 'e.expense_date')} GROUP BY e.category_id,COALESCE(c.name,e.category) ORDER BY SUM(e.amount_eur) DESC NULLS LAST`, values),
       this.pool.query<{ merchant_id: string | null; merchant_name: string | null; total: string | null; count: string }>(`SELECT merchant_id,COALESCE(merchant_name,'Unknown merchant') AS merchant_name,SUM(amount_eur)::text AS total,COUNT(*)::text AS count FROM personal_finance.expenses WHERE ${clause} GROUP BY merchant_id,merchant_name ORDER BY SUM(amount_eur) DESC NULLS LAST`, values),
@@ -371,11 +371,15 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
          FROM personal_finance.expense_items i JOIN personal_finance.expenses e ON e.account_id=i.account_id AND e.id=i.expense_id
          WHERE ${productWhere.join(' AND ')}
          GROUP BY COALESCE(NULLIF(btrim(i.product_code),''),i.description),i.currency,i.unit ORDER BY SUM(i.line_total) DESC`, values),
+      this.pool.query<{ month: string; total: string | null; count: string }>(
+        `SELECT to_char(expense_date,'YYYY-MM') AS month,SUM(amount_eur)::text AS total,COUNT(*)::text AS count
+         FROM personal_finance.expenses WHERE ${clause} GROUP BY to_char(expense_date,'YYYY-MM') ORDER BY month`, values),
       this.pool.query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM personal_finance.expenses WHERE ${clause}`, values),
     ]);
     return {
       currency: 'EUR', total: decimalString(total.rows[0]?.total ?? '0'), transactionCount: Number(count.rows[0]?.count ?? '0'),
       excludedUnconvertedCount: Number(total.rows[0]?.unconverted ?? '0'),
+      byMonth: months.rows.map((row) => ({ month: row.month, total: decimalString(row.total ?? '0'), count: Number(row.count) })),
       byCategory: categories.rows.map((row) => ({ categoryId: row.category_id, category: row.category, total: decimalString(row.total ?? '0'), count: Number(row.count) })),
       byMerchant: merchants.rows.map((row) => ({ merchantId: row.merchant_id, merchant: row.merchant_name ?? 'Unknown merchant', total: decimalString(row.total ?? '0'), count: Number(row.count) })),
       byProduct: products.rows.map((row) => ({ product: row.product, currency: row.currency.trim(), unit: row.unit, total: decimalString(row.total), quantity: decimalString(row.quantity), lineCount: Number(row.line_count) })),
