@@ -99,9 +99,20 @@ export class MqttEvidenceDiscoveryService implements OnModuleInit {
       ]));
       for (const scope of scopes.values()) {
         const records = await this.physicalInventory.list(scope);
+        const boundTopics = new Set(sources
+          .filter(source => source.scope.tenantId === scope.tenantId &&
+            source.scope.siteId === scope.siteId)
+          .map(source => source.topic));
         for (const record of records) {
           if (record.identity?.namespace !== 'mqtt:shelly-protocol-id' ||
               record.identityEvidenceSource !== 'mqtt_protocol_message') continue;
+          // Legacy inventory may have received a default-site scope before
+          // exact MQTT source bindings were required. A record's stored site
+          // alone is not enough to restore it as an onboarding candidate:
+          // reproject only when the exact MQTT endpoint is still explicitly
+          // bound to this tenant/site.
+          if (!record.endpoints.some(endpoint => endpoint.protocol === 'mqtt' &&
+              boundTopics.has(endpoint.address))) continue;
           this.registerShellyRecord(record);
         }
       }
@@ -251,7 +262,7 @@ export class MqttEvidenceDiscoveryService implements OnModuleInit {
     }
 
     try {
-      const { samples } =
+      const { snapshot, samples } =
         await this.capture.readInvestigationEvidence(scope, deviceId);
 
       // Configuration alone is not discovery evidence.
@@ -262,6 +273,14 @@ export class MqttEvidenceDiscoveryService implements OnModuleInit {
           reasonCode: 'no_evidence_samples',
         };
       }
+
+      // The capture store records server receipt time in the evidence
+      // snapshot. Carry the newest timestamp into the candidate so review
+      // shows when this configured source was last observed.
+      const mqttObservedAt = snapshot.evidence
+        .map(evidence => evidence.observedAt)
+        .filter(value => Number.isFinite(Date.parse(value)))
+        .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
 
       const capabilities: Array<'temperature' | 'humidity'> = [];
 
@@ -300,6 +319,7 @@ export class MqttEvidenceDiscoveryService implements OnModuleInit {
           mqttEvidenceCandidate: true,
           mqttEvidenceTopic: topics[0],
           mqttEvidenceSamples: samples.length,
+          ...(mqttObservedAt ? { mqttObservedAt } : {}),
         },
       });
 

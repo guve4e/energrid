@@ -33,6 +33,19 @@ describe('MqttEvidenceDiscoveryService', () => {
         },
       ]),
       readInvestigationEvidence: jest.fn().mockResolvedValue({
+        snapshot: {
+          schemaVersion: 1,
+          deviceId: 'temp-kitchen',
+          createdAt: '2026-10-28T15:41:00.000Z',
+          evidence: samples.map((_, index) => ({
+            id: `capture-${index}`,
+            source: 'mqtt' as const,
+            attribute: 'captured-message',
+            value: 'devices/temp-kitchen/data',
+            observedAt: `2026-10-28T15:4${index}:00.000Z`,
+            confidence: 'observed' as const,
+          })),
+        },
         samples,
       }),
     };
@@ -61,6 +74,7 @@ describe('MqttEvidenceDiscoveryService', () => {
         capabilities: ['temperature', 'humidity'],
         metadata: expect.objectContaining({
           mqttEvidenceCandidate: true,
+          mqttObservedAt: '2026-10-28T15:40:00.000Z',
         }),
       }),
     );
@@ -134,6 +148,12 @@ describe('MQTT discovery after startup', () => {
         },
       ]),
       readInvestigationEvidence: jest.fn().mockResolvedValue({
+        snapshot: {
+          schemaVersion: 1,
+          deviceId: 'temp-garage',
+          createdAt: '2026-10-28T15:40:00.000Z',
+          evidence: [],
+        },
         samples: [],
       }),
     };
@@ -151,6 +171,23 @@ describe('MQTT discovery after startup', () => {
 
     // A valid MQTT message is subsequently captured.
     capture.readInvestigationEvidence.mockResolvedValue({
+      snapshot: {
+        schemaVersion: 1,
+        deviceId: 'temp-garage',
+        createdAt: '2026-10-28T15:41:00.000Z',
+        evidence: [
+          {
+            id: 'older', source: 'mqtt', attribute: 'captured-message',
+            value: 'devices/temp-garage/data', observedAt: '2026-10-28T15:40:00.000Z',
+            confidence: 'observed',
+          },
+          {
+            id: 'newer', source: 'mqtt', attribute: 'captured-message',
+            value: 'devices/temp-garage/data', observedAt: '2026-10-28T15:41:00.000Z',
+            confidence: 'observed',
+          },
+        ],
+      },
       samples: [
         {
           payload: {
@@ -174,6 +211,7 @@ describe('MQTT discovery after startup', () => {
         capabilities: ['temperature', 'humidity'],
         metadata: expect.objectContaining({
           mqttEvidenceCandidate: true,
+          mqttObservedAt: '2026-10-28T15:41:00.000Z',
         }),
       }),
     );
@@ -304,5 +342,31 @@ describe('Shelly Add Devices projection', () => {
     expect(registry.registerDiscoveredDevice).toHaveBeenCalledWith(expect.objectContaining({
       id: `${physicalId}:switch:0`, metadata: expect.objectContaining({ verificationStatus: 'unverified' }),
     }));
+  });
+
+  it('does not restore a legacy Home inventory claim without an exact topic binding', async () => {
+    const { service, registry, inventory } = fixture();
+    await service.projectShellyMessage(topic, notifyStatus());
+    registry.registerDiscoveredDevice.mockClear();
+
+    const restarted = new MqttEvidenceDiscoveryService(
+      {
+        // An unrelated, authorized Home binding makes the Home inventory
+        // scope readable, but does not authorize this Shelly topic.
+        listConfiguredBindings: () => [{
+          scope, deviceId: 'temp-kitchen', topic: 'devices/temp-kitchen/data',
+        }],
+        getConfiguredBindingForTopic: () => null,
+        getConfiguredSources: () => [],
+        readInvestigationEvidence: async () => ({ samples: [] }),
+      } as unknown as MqttEvidenceCaptureService,
+      registry as unknown as DeviceRegistryService,
+      inventory as any,
+    );
+
+    await restarted.onModuleInit();
+
+    expect(inventory.list).toHaveBeenCalledWith(scope);
+    expect(registry.registerDiscoveredDevice).not.toHaveBeenCalled();
   });
 });
