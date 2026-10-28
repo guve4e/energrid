@@ -5,6 +5,8 @@ import NetworkDiscoveryCard from './components/discovery/NetworkDiscoveryCard.vu
 import NetworkIntelligencePanel from './components/discovery/NetworkIntelligencePanel.vue';
 import EnergridChatWidget from './components/assistant/EnergridChatWidget.vue';
 import HomeDashboard from './components/home/HomeDashboard.vue';
+import MobileDashboard from './components/mobile/MobileDashboard.vue';
+import DisplayDashboard from './components/display/DisplayDashboard.vue';
 import { cloudEvidenceConsentMessage, networkEndpointInvestigationKey, type NetworkEndpointHttpProbeResult, type NetworkEndpointHttpProbeState, type NetworkEndpointIdentityRefreshResult, type NetworkEndpointIdentityRefreshState, type NetworkEndpointInvestigationState, type NetworkEndpointInvestigationResult } from './components/discovery/network-endpoint-investigation';
 import { resolveNetworkSnapshotLifecycles, type LifecycleDeviceRecord } from './components/discovery/network-endpoint-lifecycle';
 import PendingEnrollmentList from './components/discovery/PendingEnrollmentList.vue';
@@ -33,6 +35,22 @@ import { matchNetworkDevice, hasVerifiedEnrolledNetworkIdentity } from './compon
 import { canSwitchDevice, controlRouteLabel } from './components/devices/device-control';
 import type { DeviceControlState } from '@energrid/domain-devices';
 import { pageFromPath, pathForPage } from './portal-route';
+
+type NativeWakeWordBridge = {
+  getStatus: () => string;
+  setEnabled: (enabled: boolean) => void;
+  beginCommandCapture: () => void;
+  startManualCommandCapture: () => string;
+  endManualCommandCapture: () => void;
+  assistantTurnFinished: () => void;
+};
+
+declare global {
+  interface Window {
+    EnergridWakeWord?: NativeWakeWordBridge;
+    energridNativeVoiceAudio?: (base64Pcm: string) => void;
+  }
+}
 
 const ExpensesDashboard = defineAsyncComponent(() => import('./components/expenses/ExpensesDashboard.vue'));
 
@@ -584,6 +602,14 @@ const voiceRunsLoading = ref(false);
 const voiceRunsError = ref('');
 const connected = ref(false);
 const recording = ref(false);
+const nativeWakeAvailable = typeof window !== 'undefined' && !!window.EnergridWakeWord;
+const nativeWakeEnabled = ref(false);
+const nativeWakeStatus = ref('unavailable');
+let nativeVoiceTurn = false;
+let nativeVoiceReady = false;
+let nativeVoiceEndPending = false;
+let nativePendingPcm: Int16Array[] = [];
+let nativePendingSamples = 0;
 const theme = ref(localStorage.getItem(themeKey) || 'dark');
 const endpointMode = ref(
   isLocalLivePreview
@@ -651,6 +677,9 @@ const clientTrace = ref({
 });
 
 const navItems = computed(() => [
+  { id: 'home', label: 'Home', active: activePage.value === 'home' },
+  { id: 'mobile', label: 'Mobile', active: activePage.value === 'mobile' },
+  { id: 'display', label: 'Display', active: activePage.value === 'display' },
   {
     id: 'assistant',
     label: 'Assistant',
@@ -3068,6 +3097,116 @@ function updateHttpIdentityVerification(result: { tenantId?: string; siteId?: st
   };
 }
 
+async function sendMobileDeviceAction(deviceId: string, action: 'turn_on' | 'turn_off') {
+  const device = deviceCards.value.find((candidate) => candidate.id === deviceId);
+  if (device) void sendDeviceAction(device, action);
+}
+
+function syncNativeWakeStatus() {
+  const bridge = window.EnergridWakeWord;
+  if (!bridge) return;
+  try {
+    const state = JSON.parse(bridge.getStatus()) as { enabled?: boolean; status?: string };
+    nativeWakeEnabled.value = state.enabled === true;
+    nativeWakeStatus.value = state.status || 'unavailable';
+  } catch {
+    nativeWakeStatus.value = 'unavailable';
+  }
+}
+
+function updateNativeWakeStatus(event: Event) {
+  const detail = (event as CustomEvent<{ enabled?: boolean; status?: string }>).detail;
+  if (typeof detail?.enabled === 'boolean') nativeWakeEnabled.value = detail.enabled;
+  if (typeof detail?.status === 'string') nativeWakeStatus.value = detail.status;
+}
+
+function toggleNativeWakeWord() {
+  const bridge = window.EnergridWakeWord;
+  if (!bridge) return;
+  const next = !nativeWakeEnabled.value;
+  bridge.setEnabled(next);
+  nativeWakeEnabled.value = next;
+  syncNativeWakeStatus();
+}
+
+function queueNativePcm(samples: Int16Array) {
+  if (!samples.length) return;
+  nativePendingPcm.push(samples);
+  nativePendingSamples += samples.length;
+  while (nativePendingSamples > 48_000 && nativePendingPcm.length > 1) {
+    nativePendingSamples -= nativePendingPcm.shift()!.length;
+  }
+}
+
+function receiveNativeVoiceAudio(base64Pcm: string) {
+  if (!nativeVoiceTurn || !base64Pcm) return;
+  try {
+    const binary = atob(base64Pcm);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    if (bytes.byteLength % 2 !== 0) return;
+    const pcm = new Int16Array(bytes.buffer);
+    if (!nativeVoiceReady || !ws || ws.readyState !== WebSocket.OPEN) {
+      queueNativePcm(pcm);
+      return;
+    }
+    enqueueAndFlush(pcm);
+  } catch {
+    appendLog('[audio] invalid native PCM frame discarded');
+  }
+}
+
+async function startNativeVoiceTurn() {
+  if (nativeVoiceTurn) return;
+  nativeVoiceTurn = true;
+  nativeVoiceReady = false;
+  nativeVoiceEndPending = false;
+  nativePendingPcm = [];
+  nativePendingSamples = 0;
+  try {
+    await connectVoice();
+    if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error('Voice connection unavailable');
+    resetTurn();
+    pcmQueue = [];
+    recording.value = true;
+    voiceStatus.value = 'recording';
+    clientTrace.value.recordStartAt = performance.now();
+    nativeVoiceReady = true;
+    window.EnergridWakeWord?.beginCommandCapture();
+    for (const frame of nativePendingPcm) enqueueAndFlush(frame);
+    nativePendingPcm = [];
+    nativePendingSamples = 0;
+    if (nativeVoiceEndPending) endNativeVoiceTurn();
+  } catch (error) {
+    nativeVoiceTurn = false;
+    nativeVoiceReady = false;
+    nativePendingPcm = [];
+    nativePendingSamples = 0;
+    voiceSetupError.value = error instanceof Error ? error.message : 'Native voice connection unavailable';
+    voiceStatus.value = 'connection unavailable';
+    window.EnergridWakeWord?.assistantTurnFinished();
+  }
+}
+
+function handleNativeWakeWord() {
+  void startNativeVoiceTurn();
+}
+
+function endNativeVoiceTurn() {
+  if (!nativeVoiceTurn) return;
+  if (!nativeVoiceReady) {
+    nativeVoiceEndPending = true;
+    return;
+  }
+  nativeVoiceTurn = false;
+  nativeVoiceReady = false;
+  recording.value = false;
+  voiceStatus.value = 'sending';
+  clientTrace.value.releaseAt = performance.now();
+  flushPcm(true);
+  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'end_of_turn' }));
+}
+
 async function sendDeviceAction(
   device: PortalDevice,
   action: 'turn_on' | 'turn_off',
@@ -3741,6 +3880,10 @@ function attachVoiceListeners(socket: WebSocket) {
     if (event.type === 'turn_end') {
       metrics.value = event.metrics || null;
       voiceStatus.value = 'turn complete';
+      if (nativeWakeAvailable) {
+        window.EnergridWakeWord?.assistantTurnFinished();
+        syncNativeWakeStatus();
+      }
       appendLog(`[diagnostic] ${bottleneckMessage.value}`);
       setTimeout(() => void loadVoiceRuns(), 250);
       if (closeCompletedTurnSocket(socket, ws)) {
@@ -3750,7 +3893,13 @@ function attachVoiceListeners(socket: WebSocket) {
         appendLog('[voice] turn session closed; ready for the next request');
       }
     }
-    if (event.type === 'error') voiceStatus.value = `error: ${event.message}`;
+    if (event.type === 'error') {
+      voiceStatus.value = `error: ${event.message}`;
+      if (nativeWakeAvailable) {
+        window.EnergridWakeWord?.assistantTurnFinished();
+        syncNativeWakeStatus();
+      }
+    }
   });
 }
 
@@ -4139,10 +4288,19 @@ if (accessToken.value && user.value) {
 }
 
 window.addEventListener('popstate', handlePortalRouteChange);
+window.energridNativeVoiceAudio = receiveNativeVoiceAudio;
+window.addEventListener('energrid-wake-status', updateNativeWakeStatus);
+window.addEventListener('energrid-native-wake-word', handleNativeWakeWord);
+window.addEventListener('energrid-native-command-ended', endNativeVoiceTurn);
+syncNativeWakeStatus();
 
 onBeforeUnmount(() => {
   unsubscribeAuth();
   window.removeEventListener('popstate', handlePortalRouteChange);
+  window.removeEventListener('energrid-wake-status', updateNativeWakeStatus);
+  window.removeEventListener('energrid-native-wake-word', handleNativeWakeWord);
+  window.removeEventListener('energrid-native-command-ended', endNativeVoiceTurn);
+  window.energridNativeVoiceAudio = undefined;
   window.removeEventListener('energrid:auth-expired', handleAuthExpired);
   stopMqttBusStream();
   disconnectVoice();
@@ -4189,9 +4347,10 @@ onBeforeUnmount(() => {
       v-if="!standaloneAssistantOpen"
       :api-base="apiBase"
       :access-token="accessToken"
-      :native-wake-available="false"
-      :native-wake-enabled="false"
-      native-wake-status="unavailable"
+      :native-wake-available="nativeWakeAvailable"
+      :native-wake-enabled="nativeWakeEnabled"
+      :native-wake-status="nativeWakeStatus"
+      @toggle-wake-word="toggleNativeWakeWord"
       @assistant="openStandaloneAssistant"
     />
 
@@ -6858,6 +7017,40 @@ onBeforeUnmount(() => {
           />
         </section>
 
+        <HomeDashboard
+          v-else-if="activePage === 'home'"
+          :api-base="apiBase"
+          :access-token="accessToken"
+          :native-wake-available="nativeWakeAvailable"
+          :native-wake-enabled="nativeWakeEnabled"
+          :native-wake-status="nativeWakeStatus"
+          @toggle-wake-word="toggleNativeWakeWord"
+          @assistant="setActivePage('assistant')"
+        />
+        <MobileDashboard
+          v-else-if="activePage === 'mobile'"
+          :site-name="state?.site.name || 'Home'"
+          :tenant-name="state?.tenant.name || 'Energrid'"
+          :devices="deviceCards"
+          :sensors="state?.zones.flatMap((zone) => zone.sensors) || []"
+          :unread-count="0"
+          :notifications="[]"
+          :action-busy="deviceActionBusy"
+          :action-errors="deviceActionError"
+          :notifications-available="false"
+          @action="sendMobileDeviceAction"
+          @assistant="setActivePage('assistant')"
+        />
+        <DisplayDashboard
+          v-else-if="activePage === 'display'"
+          :site-name="state?.site.name || 'Home'"
+          :tenant-name="state?.tenant.name || 'Energrid'"
+          :devices="deviceCards"
+          :sensors="state?.zones.flatMap((zone) => zone.sensors) || []"
+          :unread-count="0"
+          :api-base="apiBase"
+          :access-token="accessToken"
+        />
         <WeatherDashboard v-else-if="activePage === 'weather'" :api-base="apiBase" :access-token="accessToken" />
         <EnergyDashboard v-else-if="activePage === 'energy'" :api-base="apiBase" :access-token="accessToken" />
         <ExpensesDashboard v-else-if="activePage === 'expenses'" :api-base="apiBase" :access-token="accessToken" />

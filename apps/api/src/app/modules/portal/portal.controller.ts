@@ -25,6 +25,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   Inject,
   Optional,
   ServiceUnavailableException,
@@ -1654,6 +1655,8 @@ export class PortalController {
   }
 
   @Sse('bus/mqtt/events')
+  @Header('Cache-Control', 'no-cache, no-transform')
+  @Header('X-Accel-Buffering', 'no')
   streamMqttBus(@Req() request: DeviceProxyRequest) {
     assertPortalAdministrator(request)
     return this.mqttIngest.streamDebugMessages().pipe(

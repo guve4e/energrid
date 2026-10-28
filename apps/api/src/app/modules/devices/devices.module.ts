@@ -1,4 +1,5 @@
 import { AuthorizedDeviceObservationReader, ExistingApprovedObservationReader } from './device-intelligence-observation-reader';
+import { deviceCommandTrackerProvider } from './commands/device-command-tracker.provider';
 import { DeviceIntelligenceQueryService } from './device-intelligence-query.service';
 import { Module } from '@nestjs/common'
 import { DeviceControlService } from './device-control.service'
@@ -34,6 +35,7 @@ import { EnergridHttpIdentityAdapter } from './adapters/outbound/network/energri
 @Module({
   imports: [TelemetryModule, DeviceEnrollmentModule],
   providers: [
+    deviceCommandTrackerProvider,
     DeviceRegistryService,
     { provide: DEVICE_REGISTRY_SERVICE, useExisting: DeviceRegistryService },
     ApprovedMqttObservationRuntime,
