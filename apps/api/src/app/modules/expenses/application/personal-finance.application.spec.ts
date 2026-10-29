@@ -13,6 +13,26 @@ function repository(): jest.Mocked<PersonalFinanceRepository> {
   };
 }
 
+function financialDocumentPreviewInput() {
+  const field = <T>(value: T | null, id?: number) => ({ value, confidence: null, uncertainty: null, sourceText: id === undefined ? null : `evidence-${id}`, ...(id === undefined ? {} : { sourceLineIds: [id] }) });
+  const purchase = {
+    kind: field('purchase', 1), description: field('Basket', 1), amount: field('10.00', 1), signedAmount: field(null),
+    quantity: field(null), unit: field(null), unitPrice: field(null), discount: field(null), tax: field(null), taxIncluded: field(null),
+    adjustmentKind: field(null), includedInTotal: field(null), includedInLineTotal: field(null), relatedPurchaseIndex: field(null), suggestedCategory: field(null),
+  };
+  const total = { ...purchase, kind: field('final_total', 2), description: field('Total', 2), amount: field('10.00', 2) };
+  return {
+    schemaVersion: 'financial-document-interpretation-v1' as const,
+    evidence: [{ id: 0, order: 0, text: 'Shop receipt' }, { id: 1, order: 1, text: 'Basket 10.00' }, { id: 2, order: 2, text: 'Total 10.00' }],
+    extraction: {
+      schemaVersion: 'receipt-extraction-v1.1' as const, documentType: field('receipt', 0), merchant: field('Shop', 0),
+      date: field('2026-10-27', 0), time: field(null), currency: field('EUR', 1), subtotal: field(null), taxTotal: field(null),
+      discountTotal: field(null), depositTotal: field(null), total: field('10.00', 2), reportedArticleCount: field(null),
+      adjustments: [], sourceText: 'Basket 10.00\nTotal 10.00', items: [], documentEntries: [purchase, total], warnings: [],
+    },
+  };
+}
+
 describe('PersonalFinanceApplication', () => {
   it('normalizes and account-scopes category creation, rename, archive and listing', async () => {
     const repo = repository();
@@ -42,6 +62,19 @@ describe('PersonalFinanceApplication', () => {
     await app.proposeExpenseDraft({ accountId: 'account-1', text: 'I spent €76 at Lidl.', cloudDataConsent: false });
     expect(repo.createDraft).toHaveBeenCalledWith('account-1', 'account-1', expect.objectContaining({ amount: '76', currency: 'EUR', merchantName: 'Lidl', sourceKind: 'assistant-text' }));
     expect(repo.createExpense).not.toHaveBeenCalled();
+  });
+
+  it('previews financial documents with verified account context and performs no repository writes', () => {
+    const repo = repository();
+    const app = new PersonalFinanceApplication(repo, new LocalExpenseTextExtractor());
+    const input = financialDocumentPreviewInput();
+    const first = app.previewFinancialDocument({ accountId: 'account-a', actorId: 'actor-a' }, input);
+    const second = app.previewFinancialDocument({ accountId: 'account-b', actorId: 'actor-b' }, input);
+    expect(first.status).toBe('reconciled');
+    expect(second).toEqual(first);
+    expect(first).not.toHaveProperty('accountId');
+    expect(() => app.previewFinancialDocument({ accountId: '', actorId: 'actor-a' }, input)).toThrow(/verified finance account/);
+    expect(Object.values(repo).flatMap((method) => method.mock.calls)).toEqual([]);
   });
 
   it('requires the authenticated account itself to confirm or reject mutations', async () => {

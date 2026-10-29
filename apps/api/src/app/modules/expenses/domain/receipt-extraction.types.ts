@@ -3,6 +3,8 @@ export interface ExtractedField<T> {
   confidence: number | null;
   uncertainty: string | null;
   sourceText: string | null;
+  /** Optional line identities from a local or provider-specific OCR evidence set. */
+  sourceLineIds?: number[];
 }
 
 export interface ReceiptExtractionItem {
@@ -26,6 +28,8 @@ export type ReceiptAdjustmentKind = 'tax' | 'discount' | 'deposit' | 'return' | 
  * in provenance so totals, tender and summaries cannot be mistaken for goods. */
 export interface ReceiptDocumentEntryV1_1 {
   kind: ExtractedField<ReceiptDocumentEntryKind>;
+  /** Optional per-entry currency for documents whose rows explicitly use more than one currency. */
+  currency?: ExtractedField<string>;
   description: ExtractedField<string>;
   amount: ExtractedField<string>;
   signedAmount: ExtractedField<string>;

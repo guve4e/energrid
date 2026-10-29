@@ -50,8 +50,10 @@ function validateReceiptExtractionV1_1(value: Record<string, unknown>): ReceiptE
 
 function validateDocumentEntry(value: unknown, index: number): ReceiptDocumentEntryV1_1 {
   if (!isRecord(value)) throw new Error(`Receipt document entry ${index + 1} is invalid`);
-  assertKeys(value, ['kind', 'description', 'amount', 'signedAmount', 'quantity', 'unit', 'unitPrice', 'discount', 'tax', 'taxIncluded', 'adjustmentKind', 'includedInTotal', 'includedInLineTotal', 'relatedPurchaseIndex', 'suggestedCategory'], `Receipt document entry ${index + 1}`);
+  const entryKeys = ['kind', 'description', 'amount', 'signedAmount', 'quantity', 'unit', 'unitPrice', 'discount', 'tax', 'taxIncluded', 'adjustmentKind', 'includedInTotal', 'includedInLineTotal', 'relatedPurchaseIndex', 'suggestedCategory'];
+  assertKeys(value, Object.hasOwn(value, 'currency') ? [...entryKeys, 'currency'] : entryKeys, `Receipt document entry ${index + 1}`);
   validateField(value.kind, (item) => typeof item === 'string' && ['purchase', 'discount', 'adjustment', 'subtotal', 'final_total', 'payment'].includes(item), `entry ${index + 1} kind`);
+  if (value.currency !== undefined) validateField(value.currency, (item) => typeof item === 'string' && /^[A-Z]{3}$/.test(item), `entry ${index + 1} currency`);
   for (const name of ['description', 'unit', 'suggestedCategory'] as const) validateField(value[name], isString, `entry ${index + 1} ${name}`);
   for (const name of ['amount', 'signedAmount', 'quantity', 'unitPrice', 'discount', 'tax'] as const) validateField(value[name], isDecimal, `entry ${index + 1} ${name}`);
   validateField(value.taxIncluded, (item) => typeof item === 'boolean', `entry ${index + 1} taxIncluded`);
@@ -247,11 +249,14 @@ function absoluteDecimal(value: string) {
 function nullField<T>(): ExtractedField<T> { return { value: null, confidence: null, uncertainty: null, sourceText: null }; }
 
 function validateField<T>(value: unknown, valid: (value: unknown) => boolean, label: string): asserts value is ExtractedField<T> {
-  if (!isRecord(value) || Object.keys(value).sort().join('|') !== [...fieldKeys].sort().join('|')) throw new Error(`Receipt extraction field ${label} is malformed`);
+  if (!isRecord(value)) throw new Error(`Receipt extraction field ${label} is malformed`);
+  const keys = Object.keys(value).sort().join('|');
+  if (keys !== [...fieldKeys].sort().join('|') && keys !== [...fieldKeys, 'sourceLineIds'].sort().join('|')) throw new Error(`Receipt extraction field ${label} is malformed`);
   if (value.value !== null && !valid(value.value)) throw new Error(`Receipt extraction field ${label} has an invalid value`);
   if (value.confidence !== null && (typeof value.confidence !== 'number' || !Number.isFinite(value.confidence) || value.confidence < 0 || value.confidence > 1)) throw new Error(`Receipt extraction field ${label} has invalid confidence`);
   if (value.uncertainty !== null && (typeof value.uncertainty !== 'string' || value.uncertainty.length > 500)) throw new Error(`Receipt extraction field ${label} has invalid uncertainty`);
   if (value.sourceText !== null && (typeof value.sourceText !== 'string' || value.sourceText.length > 500)) throw new Error(`Receipt extraction field ${label} has invalid source text`);
+  if ('sourceLineIds' in value && (!Array.isArray(value.sourceLineIds) || value.sourceLineIds.length > 100 || value.sourceLineIds.some((id) => !Number.isSafeInteger(id) || id < 0))) throw new Error(`Receipt extraction field ${label} has invalid source line references`);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }

@@ -3,6 +3,8 @@ import { compareDecimal, decimalString, financeDecimal } from '../domain/decimal
 import type { ExpenseDraftProposal, ExpenseQuery, ExpenseSource, ExpenseSourceKind, FinanceActorContext } from '../domain/personal-finance.types';
 import type { ExpenseTextExtractionPort } from './ports/expense-extraction.port';
 import type { CategoryWrite, ExpenseImportRow, ExpenseWrite, PersonalFinanceRepository } from './ports/personal-finance.repository';
+import { previewFinancialDocument as createFinancialDocumentPreview } from '../domain/financial-document-preview';
+import type { FinancialDocumentPreviewInput } from '../domain/financial-document-preview';
 
 export interface ProposeExpenseDraftCommand {
   accountId: string;
@@ -46,6 +48,12 @@ export class PersonalFinanceApplication {
   archiveCategory(context: FinanceActorContext, categoryId: string) {
     requireFinanceContext(context);
     return this.repository.archiveCategory(context.accountId, context.actorId, categoryId);
+  }
+
+  /** Validates an evidence-linked financial document without touching persistence. */
+  previewFinancialDocument(context: FinanceActorContext, input: FinancialDocumentPreviewInput) {
+    requireFinanceContext(context);
+    return createFinancialDocumentPreview(input);
   }
 
   async proposeExpenseDraft(command: ProposeExpenseDraftCommand) {
