@@ -546,6 +546,8 @@ const scanStartedAt = ref(0);
 const scanElapsedSeconds = ref(0);
 const scanFeedback = ref('');
 let scanTimer: ReturnType<typeof setInterval> | undefined;
+let scanDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
+let scanTimedOut = false;
 let networkScanAbortController: AbortController | undefined;
 const discoveryMemory = ref<DiscoveryMemoryResponse | null>(null);
 const discoveryMemoryLoading = ref(false);
@@ -2557,6 +2559,7 @@ async function scanNetwork(scopeIds?: string[]) {
   const fullSubnetConfirmed = fullSubnetSelected || virtualLabConfirmed;
   if (fullSubnetSelected && !window.confirm(`This will scan the selected subnet(s): ${selectedScopes.filter(scope => scope.cidr && scope.collectionSource !== 'virtual-lab').map(scope => `${scope.name} ${scope.cidr}`).join(', ')}. Each subnet is limited to 254 addresses; when enabled, Nmap checks a fixed set of TCP service ports with bounded concurrency and timeouts. Continue?`)) return;
   scanningNetwork.value = true;
+  scanTimedOut = false;
   scanStartedAt.value = Date.now();
   scanElapsedSeconds.value = 0;
   scanFeedback.value = '';
@@ -2568,6 +2571,11 @@ async function scanNetwork(scopeIds?: string[]) {
   try {
     appendLog('[discovery] scanning selected networks');
     networkScanAbortController = new AbortController();
+    // Leave room for the API's 180-second hard deadline to return its actionable 504.
+    scanDeadlineTimer = setTimeout(() => {
+      scanTimedOut = true;
+      networkScanAbortController?.abort();
+    }, 185_000);
     const response = await authFetch(`${apiBase}/portal/network/scan`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${accessToken.value}`, 'Content-Type': 'application/json' },
@@ -2582,7 +2590,7 @@ async function scanNetwork(scopeIds?: string[]) {
         409: 'Another network scan is already running. Wait for it to finish.',
         429: 'Network discovery is busy. Wait briefly before trying again.',
         503: 'The network discovery collector is unavailable.',
-        504: 'Network discovery exceeded its server time limit. Completed evidence remains in its snapshot.',
+        504: 'Network discovery exceeded its 180-second limit. The observer may not reach the selected subnet; check its route or use an observer on that network. This does not prove any device is offline.',
       };
       throw new Error(failures[response.status] || `Network discovery failed (HTTP ${response.status}). No new snapshot was saved.`);
     }
@@ -2599,7 +2607,9 @@ async function scanNetwork(scopeIds?: string[]) {
     await loadState();
     await loadDiscoveryMemory();
   } catch (error) {
-    stateError.value = networkScanAbortController?.signal.aborted
+    stateError.value = scanTimedOut
+      ? 'The scan timed out after 185 seconds. The Mac may not have a route to the selected network; check the observer network or use an on-site observer. This does not prove that any device is offline.'
+      : networkScanAbortController?.signal.aborted
       ? 'The scan was cancelled. Any completed observations remain available in the saved snapshot.'
       : error instanceof Error ? error.message : 'Network scan unavailable';
     scanFeedback.value = `Scan failed: ${stateError.value}`;
@@ -2607,7 +2617,9 @@ async function scanNetwork(scopeIds?: string[]) {
   } finally {
     scanElapsedSeconds.value = Math.floor((Date.now() - scanStartedAt.value) / 1000);
     if (scanTimer) clearInterval(scanTimer);
+    if (scanDeadlineTimer) clearTimeout(scanDeadlineTimer);
     scanTimer = undefined;
+    scanDeadlineTimer = undefined;
     networkScanAbortController = undefined;
     scanningNetwork.value = false;
   }
@@ -4295,6 +4307,8 @@ window.addEventListener('energrid-native-command-ended', endNativeVoiceTurn);
 syncNativeWakeStatus();
 
 onBeforeUnmount(() => {
+  if (scanTimer) clearInterval(scanTimer);
+  if (scanDeadlineTimer) clearTimeout(scanDeadlineTimer);
   unsubscribeAuth();
   window.removeEventListener('popstate', handlePortalRouteChange);
   window.removeEventListener('energrid-wake-status', updateNativeWakeStatus);

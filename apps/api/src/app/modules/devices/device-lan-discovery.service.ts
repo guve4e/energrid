@@ -36,6 +36,7 @@ import { VirtualLabNetworkEvidenceAdapter, type VirtualLabEnergridHttpEvidence, 
 
 const execFileAsync = promisify(execFile)
 const activeScanConcurrency = 24
+const tcpConnectTimeoutMs = 1_500
 
 export type NetworkCandidate = {
   ipAddress: string
@@ -109,8 +110,9 @@ export class DeviceLanNetworkEvidenceCollector {
     })
     const nmapHostDiscoveryUsed = nmapEnabled && nmap.capability.available
     const allowActiveScanFallback = options.allowActiveScanFallback ?? true
-    const reachableDevices = nmapHostDiscoveryUsed || !allowActiveScanFallback ? [] : await activeScanZones(zones)
-    const tcpDevices = nmapHostDiscoveryUsed || !allowActiveScanFallback ? [] : await tcpDiscoverZones(zones, reachableDevices)
+    throwIfScanAborted(signal)
+    const reachableDevices = nmapHostDiscoveryUsed || !allowActiveScanFallback ? [] : await activeScanZones(zones, signal)
+    const tcpDevices = nmapHostDiscoveryUsed || !allowActiveScanFallback ? [] : await tcpDiscoverZones(zones, reachableDevices, signal)
     const [arpDevices, routerClients] = await Promise.all([
       options.includeNeighborTable === false
         ? Promise.resolve([])
@@ -147,6 +149,7 @@ export class DeviceLanNetworkEvidenceCollector {
       }))), 'seed_ip'),
     ].map(candidate => assignNetworkZone(candidate, zones))
       .filter((candidate) => candidateBelongsToConfiguredZone(candidate, zones))
+    throwIfScanAborted(signal)
     const nmapCandidates: NetworkCandidate[] = nmap.hosts.flatMap(host => {
       const zone = zones.find(item => item.id === host.scopeId)
       if (!zone) return []
@@ -196,8 +199,9 @@ export class DeviceLanNetworkEvidenceCollector {
     observedAt: string,
     allowEndpointEnrichment: boolean,
     allowIdentityProbe = true,
+    signal?: AbortSignal,
   ): Promise<NetworkDiscoveredDevice> {
-    return enrichNetworkDevice(candidate, observedAt, allowEndpointEnrichment, this.energridIdentityAdapter, allowIdentityProbe)
+    return enrichNetworkDevice(candidate, observedAt, allowEndpointEnrichment, this.energridIdentityAdapter, allowIdentityProbe, signal)
   }
 }
 
@@ -293,6 +297,7 @@ export class DeviceLanDiscoveryService {
           runtime: undefined,
         })
       : await this.evidenceCollector.collectEvidence(zones, options.signal)
+    throwIfScanAborted(options.signal)
     const nmapHostDiscoverySelected = !!virtualLabResult ||
       (process.env.HOME_NMAP_ENABLED === 'true' && evidence.nmap.capability.available)
     const discoveredCandidates = evidence.candidates
@@ -309,9 +314,11 @@ export class DeviceLanDiscoveryService {
           networkZoneName: string
         }, startedAt,
         !conflictingEndpoints.has(`${candidate.networkZoneId}:${candidate.ipAddress}`) && matchesExplicitScope,
-        matchesExplicitScope)
+        matchesExplicitScope,
+        options.signal)
       }),
     )
+    throwIfScanAborted(options.signal)
 
     this.lastZones = configuredZones
     this.lastScan = addNmapEndpointEvidence(
@@ -320,16 +327,19 @@ export class DeviceLanDiscoveryService {
     )
     this.lastScanOwnership = ownership
     const boundedEvidence = buildBoundedRawEvidence(discoveredCandidates, this.lastScan, startedAt)
+    throwIfScanAborted(options.signal)
     const completedAt = new Date().toISOString()
     await this.discoveryMemory.recordScan(completedAt, devices.map(device => {
       const observations = (device.observations || []).filter(item => item.method !== 'nmap_tcp_connect_service_scan')
       return { ...device, ...(observations.length ? { observations } : { observations: undefined }) }
     }), ownership)
+    throwIfScanAborted(options.signal)
     if (this.physicalInventory && !virtualLabResult) {
       try {
         const scope = ownership
         const observations: PhysicalLanObservation[] = []
         for (const device of this.lastScan) {
+          throwIfScanAborted(options.signal)
           const candidates = shellyLanCandidates(device)
           const first = candidates[0]
           const physicalId = first?.metadata?.physicalId
@@ -362,6 +372,7 @@ export class DeviceLanDiscoveryService {
         }
         const registeredDevices = this.registry.getSnapshot().devices
         for (const device of this.lastScan) {
+          throwIfScanAborted(options.signal)
           const candidate = energridDiscoveryCandidate(device)
           if (!candidate) continue
           const enrolled = registeredDevices.find(item =>
@@ -393,6 +404,7 @@ export class DeviceLanDiscoveryService {
         throw error
       }
     }
+    throwIfScanAborted(options.signal)
     const collectorInterfaces = virtualLabResult?.collector.interfaces || [...new Set([
       ...interfacesForZones(zones),
       ...evidence.nmap.scopes.flatMap(scope => scope.interfaceName ? [scope.interfaceName] : []),
@@ -446,6 +458,7 @@ export class DeviceLanDiscoveryService {
       topology: { relationships: [] },
       ...(virtualLabResult?.runtime ? { runtime: virtualLabResult.runtime } : evidence.runtime ? { runtime: evidence.runtime } : {}),
     }
+    throwIfScanAborted(options.signal)
     await this.discoveryMemory.recordSnapshot(snapshot)
     const previousSnapshots = await this.discoveryMemory.listSnapshots(ownership, 100)
     const previous = previousSnapshots.find(item => item.scanId !== scanId &&
@@ -1002,6 +1015,7 @@ async function enrichNetworkDevice(
   allowEndpointEnrichment = true,
   energridIdentityAdapter: EnergridHttpIdentityAdapter = new EnergridHttpIdentityAdapter(),
   allowIdentityProbe = true,
+  signal?: AbortSignal,
 ): Promise<NetworkDiscoveredDevice> {
   const base: NetworkDiscoveredDevice = {
     id: candidate.macAddress || candidate.ipAddress,
@@ -1032,7 +1046,7 @@ async function enrichNetworkDevice(
   }
 
   const evidence = allowEndpointEnrichment
-    ? await collectGenericHostEvidence(candidate.ipAddress)
+    ? await collectGenericHostEvidence(candidate.ipAddress, signal)
     : { services: [] }
   const networkEvidenceObservedAt = new Date().toISOString()
 
@@ -1069,7 +1083,7 @@ async function enrichNetworkDevice(
     }
   }
 
-  const shelly = allowEndpointEnrichment
+  const shelly = allowEndpointEnrichment && !signal?.aborted
     ? await probeShelly(candidate.ipAddress)
     : null
   if (!shelly) return base
@@ -1274,6 +1288,7 @@ export function icmpReachabilityCandidate(
 
 async function activeScanZones(
   zones: NetworkDiscoveryZone[],
+  signal?: AbortSignal,
 ): Promise<NetworkCandidate[]> {
   if (process.env.HOME_LAN_ACTIVE_SCAN_ENABLED === 'false') return []
 
@@ -1287,13 +1302,14 @@ async function activeScanZones(
   const reachable: NetworkCandidate[] = []
 
   await runPool(targets, activeScanConcurrency, async ({ ipAddress, zone }) => {
+    if (signal?.aborted) return
     const candidate = icmpReachabilityCandidate(
       ipAddress,
       await pingHost(ipAddress),
       zone,
     )
     if (candidate) reachable.push(candidate)
-  })
+  }, signal)
 
   return reachable
 }
@@ -1303,6 +1319,7 @@ const tcpDiscoveryPorts = [80, 443, 22, 8080, 8443]
 async function tcpDiscoverZones(
   zones: NetworkDiscoveryZone[],
   icmpDevices: NetworkCandidate[],
+  signal?: AbortSignal,
 ): Promise<NetworkCandidate[]> {
   if (process.env.HOME_LAN_ACTIVE_SCAN_ENABLED === 'false') return []
 
@@ -1322,7 +1339,8 @@ async function tcpDiscoverZones(
 
   await runPool(targets, 24, async ({ ipAddress, zone }) => {
     for (const port of tcpDiscoveryPorts) {
-      if (await tcpDiscoveryPortOpen(ipAddress, port)) {
+      if (signal?.aborted) return
+      if (await tcpPortOpen(ipAddress, port, 500, signal)) {
         found.push({
           ipAddress,
           networkZoneId: zone.id,
@@ -1334,32 +1352,9 @@ async function tcpDiscoverZones(
         return
       }
     }
-  })
+  }, signal)
 
   return found
-}
-
-function tcpDiscoveryPortOpen(
-  ipAddress: string,
-  port: number,
-): Promise<boolean> {
-  return new Promise((resolve) => {
-    const socket = new Socket()
-    let settled = false
-
-    const finish = (open: boolean) => {
-      if (settled) return
-      settled = true
-      socket.destroy()
-      resolve(open)
-    }
-
-    socket.setTimeout(500)
-    socket.once('connect', () => finish(true))
-    socket.once('timeout', () => finish(false))
-    socket.once('error', () => finish(false))
-    socket.connect(port, ipAddress)
-  })
 }
 
 async function pingHost(ipAddress: string): Promise<boolean> {
@@ -1383,10 +1378,11 @@ async function runPool<T>(
   items: T[],
   concurrency: number,
   worker: (item: T) => Promise<void>,
+  signal?: AbortSignal,
 ): Promise<void> {
   let cursor = 0
   const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (cursor < items.length) {
+    while (cursor < items.length && !signal?.aborted) {
       const item = items[cursor]
       cursor += 1
       if (item) await worker(item)
@@ -1769,6 +1765,7 @@ function mergeNetworkObservations(
 
 async function collectGenericHostEvidence(
   ipAddress: string,
+  signal?: AbortSignal,
 ): Promise<GenericHostEvidence> {
   const hostnamePromise = Promise.race([
     reverse(ipAddress)
@@ -1788,7 +1785,7 @@ async function collectGenericHostEvidence(
   const results = await Promise.all(
     ports.map(async ({ port, name }) => ({
       name,
-      open: await tcpPortOpen(ipAddress, port),
+      open: await tcpPortOpen(ipAddress, port, tcpConnectTimeoutMs, signal),
     })),
   )
 
@@ -1798,22 +1795,35 @@ async function collectGenericHostEvidence(
   }
 }
 
-function tcpPortOpen(ipAddress: string, port: number): Promise<boolean> {
+export function tcpPortOpen(
+  ipAddress: string,
+  port: number,
+  timeoutMs = tcpConnectTimeoutMs,
+  signal?: AbortSignal,
+): Promise<boolean> {
   return new Promise((resolve) => {
+    if (signal?.aborted) return resolve(false)
     const socket = new Socket()
     let settled = false
+    const timeout = setTimeout(() => finish(false), timeoutMs)
+    const abort = () => finish(false)
 
     const finish = (open: boolean) => {
       if (settled) return
       settled = true
+      clearTimeout(timeout)
+      signal?.removeEventListener('abort', abort)
       socket.destroy()
       resolve(open)
     }
 
-    socket.setTimeout(1500)
+    signal?.addEventListener('abort', abort, { once: true })
     socket.once('connect', () => finish(true))
-    socket.once('timeout', () => finish(false))
     socket.once('error', () => finish(false))
     socket.connect(port, ipAddress)
   })
+}
+
+function throwIfScanAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new Error('Network scan was cancelled or exceeded its execution deadline')
 }

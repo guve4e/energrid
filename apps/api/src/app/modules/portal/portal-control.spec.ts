@@ -102,6 +102,24 @@ describe('portal control configuration authorization', () => {
     expect(registerDiscoveredDevice).not.toHaveBeenCalled()
   })
 
+  it('aborts and returns an actionable gateway timeout when a scan never settles', async () => {
+    jest.useFakeTimers()
+    try {
+      const { controller, scanNow } = setup()
+      scanNow.mockImplementationOnce(() => new Promise(() => undefined))
+      const pending = controller.scanNetwork(
+        { scopeIds: ['home-lan'], fullSubnetConfirmed: true },
+        { method: 'POST', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 } },
+      )
+      const rejection = expect(pending).rejects.toThrow('observer may not be able to reach the selected subnet')
+      await jest.advanceTimersByTimeAsync(180_000)
+      await rejection
+      expect(scanNow.mock.calls[0][0].signal.aborted).toBe(true)
+    } finally {
+      jest.useRealTimers()
+    }
+  })
+
   it('requires Portal authorization before approving a diagnostic probe', async () => {
     const { controller } = setup();
     await expect(controller.executeInvestigationAction(

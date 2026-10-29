@@ -16,6 +16,7 @@ import {
   mergeNeighborCandidates,
   probeShelly,
   probeShellyComponentsWithEvidence,
+  tcpPortOpen,
   DeviceLanNetworkEvidenceCollector,
   DeviceLanDiscoveryService,
 } from './device-lan-discovery.service'
@@ -29,6 +30,7 @@ import { EnergridHttpIdentityAdapter, type EnergridIdentityTransport } from './a
 import type { VirtualLabNetworkEvidenceAdapter } from './adapters/outbound/network/virtual-lab-network-evidence.adapter'
 
 let mockReachableTcpPorts = new Set<number>()
+let mockHangTcpConnections = false
 const TEST_OWNER = { tenantId: 'tenant-demo', siteId: 'site-home' }
 const TEST_DEVICE_OWNER = { tenantId: 'tenant-test', siteId: 'site-test' }
 const TEST_REGISTRY = {
@@ -50,6 +52,7 @@ jest.mock('node:net', () => ({
     }
     setTimeout() { return this }
     connect(port: number) {
+      if (mockHangTcpConnections) return this
       queueMicrotask(() => mockReachableTcpPorts.has(port)
         ? this.listeners.get('connect')?.()
         : this.listeners.get('error')?.(new Error('mocked')))
@@ -67,6 +70,7 @@ describe('LAN discovery evidence persistence', () => {
 
   beforeEach(async () => {
     mockReachableTcpPorts = new Set()
+    mockHangTcpConnections = false
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined)
     directory = await mkdtemp(join(tmpdir(), 'energrid-lan-evidence-'))
     memory = new DeviceDiscoveryMemoryStore(directory)
@@ -92,6 +96,12 @@ describe('LAN discovery evidence persistence', () => {
       },
     ])
     global.fetch = jest.fn().mockRejectedValue(new Error('mocked')) as unknown as typeof fetch
+  })
+
+  it('bounds a TCP connect attempt when the OS leaves it pending without a response', async () => {
+    mockHangTcpConnections = true
+
+    await expect(tcpPortOpen('192.168.7.48', 80, 10)).resolves.toBe(false)
   })
 
   it('records Shelly power capability only when the read-only component status confirms a numeric value', async () => {

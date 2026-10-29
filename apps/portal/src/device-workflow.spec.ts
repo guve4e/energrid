@@ -209,6 +209,34 @@ describe('device onboarding page workflow with mocked services', () => {
     expect(page!.text()).toContain('not authorized for the selected network scope');
   });
 
+  it('ends a scan that never responds and explains observer route timeout without declaring devices offline', async () => {
+    const zones = [{ id: 'eero-lan', name: 'Eero LAN', cidr: '192.168.7.0/24', seedIps: [] }];
+    const state = { ...data(), networkZones: zones };
+    const fetch = vi.fn((url: string, options?: RequestInit) => {
+      if (url === '/portal/network/scan') return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+      });
+      if (url === '/portal/state') return Promise.resolve({ ok: true, json: async () => structuredClone(state) });
+      if (url === '/portal/devices/enrollments') return Promise.resolve({ ok: true, json: async () => ({ enrollments: [] }) });
+      if (url === '/portal/network/capabilities') return Promise.resolve({ ok: true, json: async () => ({ nmap: { available: true, enabled: true }, observer: null }) });
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    await render('/network-intelligence/', fetch);
+    vi.useFakeTimers();
+    try {
+      await button('Scan network').trigger('click');
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(185_000);
+      await flushPromises();
+      expect(fetch.mock.calls.filter(([url]) => url === '/portal/network/scan')).toHaveLength(1);
+      expect(page!.text()).toContain('The scan timed out after 185 seconds');
+      expect(page!.text()).toContain('This does not prove that any device is offline');
+      expect(page!.find('.discovery-scan-progress').exists()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('shows backend network identity evidence and an explicit missing-evidence reason in Pending Enrollment', async () => {
     const physicalId = 'shellyproem50-8c4f00dbd258';
     const shellyCandidate = {

@@ -21,6 +21,7 @@ import {
   All,
   BadRequestException,
   BadGatewayException,
+  GatewayTimeoutException,
   ConflictException,
   Body,
   Controller,
@@ -90,6 +91,8 @@ import {
   PortalDeviceProxyService,
 } from './portal-device-proxy.service'
 import { PortalStateService } from './portal-state.service'
+
+const networkScanDeadlineMs = 180_000
 import { AccessJwtGuard, PublicRoute, RequireRoles, RoleGuard } from '../auth/auth.guard'
 import { AuthConfig } from '../auth/auth-config'
 import { PortalDeviceMeasurementsService } from './portal-device-measurements.service'
@@ -706,13 +709,29 @@ export class PortalController {
     }
     response?.once('close', abortIfDisconnected)
     let scan: Awaited<ReturnType<DeviceLanDiscoveryService['scanNow']>>
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined
     try {
-      scan = await this.lanDiscovery.scanNow({
-        scopeIds: body.scopeIds as string[],
-        fullSubnetConfirmed: body.fullSubnetConfirmed,
-        signal: controller.signal,
-      })
+      const result = await Promise.race([
+        this.lanDiscovery.scanNow({
+          scopeIds: body.scopeIds as string[],
+          fullSubnetConfirmed: body.fullSubnetConfirmed,
+          signal: controller.signal,
+        }),
+        new Promise<null>(resolve => {
+          deadlineTimer = setTimeout(() => {
+            controller.abort()
+            resolve(null)
+          }, networkScanDeadlineMs)
+        }),
+      ])
+      if (!result) {
+        throw new GatewayTimeoutException(
+          'Network scan exceeded the 180-second execution limit. The observer may not be able to reach the selected subnet; check its network route or use an observer on that network. No conclusion about device availability was made.',
+        )
+      }
+      scan = result
     } finally {
+      if (deadlineTimer) clearTimeout(deadlineTimer)
       response?.off('close', abortIfDisconnected)
     }
     const active = this.discoveryOwner()
