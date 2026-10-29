@@ -125,7 +125,7 @@ export class OpenAiDeviceLlmProvider implements LlmProvider {
 
     const client = new OpenAI({
       apiKey,
-      timeout: 15000,
+      timeout: Math.min(Math.max(request.timeoutMs ?? 15000, 1000), 120000),
       maxRetries: 0,
     })
 
@@ -176,6 +176,7 @@ export class OpenAiDeviceLlmProvider implements LlmProvider {
       },
     }
     const outputSchema = request.outputSchema ?? defaultSchema
+    const maxOutputLimit = outputSchema.name === 'local_financial_document_proposal_v1' ? 12000 : 2000;
 
     const response = await client.responses.create({
       model,
@@ -183,7 +184,7 @@ export class OpenAiDeviceLlmProvider implements LlmProvider {
       input: request.userPrompt,
       max_output_tokens: Math.min(
         Math.max(request.maxOutputTokens ?? 1200, 1),
-        2000,
+        maxOutputLimit,
       ),
       text: {
         format: {

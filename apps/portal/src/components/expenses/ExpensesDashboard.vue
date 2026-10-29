@@ -64,6 +64,9 @@ const receiptReviewDirty = ref(false);
 const receiptSaveError = ref('');
 const receiptReconciliation = ref<{ matched: boolean | null; itemTotal: string | null; total: string | null; difference: string | null; adjustmentTotal: string | null; inconsistentLineCount: number; extractedLineCount: number; completeLineCount: number; incompleteLineCount: number; reportedArticleCount: number | null; articleCountMismatch: boolean | null; warnings: string[] } | null>(null);
 const receiptExtractionDiagnostics = ref<{ responseStatus: string; outputTokens?: number; modelItemCount: number; validatedItemCount: number; persistedExtractionItemCount: number; completeDraftItemCount: number; incompleteExtractionItemCount: number; completeButUnmappedItemCount: number; reportedArticleCount: number | null } | null>(null);
+const receiptPreview = ref<{ status: 'reconciled' | 'needs_review' | 'invalid'; reconciliation: { status: string; purchaseTotal: string | null; reportedFinalTotal: string | null; difference: string | null } } | null>(null);
+const receiptFindingsAcknowledged = ref(false);
+const needsReceiptFindingsAcknowledgement = computed(() => Boolean(receiptPreview.value && receiptPreview.value.status !== 'reconciled'));
 const receiptTotalOnly = ref(false);
 const receiptForm = reactive({ date: '', amount: '', currency: 'EUR', merchantName: '', category: '', description: '' });
 type ReviewItem = { description: string; normalizedDescription: string; suggestedCategory: string; confidence: number | null; uncertainty: string | null; quantity: string; unit: string; packaging: string; unitPrice: string; discount: string; tax: string; taxIncluded: '' | 'true' | 'false'; lineTotal: string; currency: string; categoryId: string | null; sourceReceiptId: string | null; extractionProvenance: Record<string, unknown> | null };
@@ -225,6 +228,8 @@ function openReceiptCapture() {
   receiptFieldWarnings.value = {};
   receiptSaveError.value = '';
   receiptReconciliation.value = null;
+  receiptPreview.value = null;
+  receiptFindingsAcknowledged.value = false;
   receiptExtractionDiagnostics.value = null;
   receiptRetryConsent.value = false;
   receiptOpen.value = true;
@@ -262,6 +267,8 @@ async function applyReceiptExtractionResult(result: any) {
   receiptDuplicate.value = result.duplicate === true;
   receiptPossibleMatches.value = result.possibleMatches || [];
   receiptReconciliation.value = result.reconciliation ?? null;
+  receiptPreview.value = result.preview ?? null;
+  receiptFindingsAcknowledged.value = false;
   receiptExtractionDiagnostics.value = result.extractionDiagnostics ?? null;
   Object.assign(receiptForm, {
     date: draft.date ?? extraction?.date?.value ?? '', amount: draft.amount ?? extraction?.total?.value ?? '',
@@ -330,7 +337,7 @@ async function openReceiptDraftFromLink(draftId: string) {
     const draft = result.draft;
     const receipt = draft?.receipts?.find((item: any) => item.status === 'review_required') ?? draft?.receipts?.[0];
     if (!draft || !receipt) throw new Error('This expense draft has no attached receipt to review.');
-    await applyReceiptExtractionResult({ draft, receipt, reconciliation: result.reconciliation });
+    await applyReceiptExtractionResult({ draft, receipt, reconciliation: result.reconciliation, preview: result.preview });
     receiptOpen.value = true;
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : 'Could not open the saved receipt draft.';
@@ -343,6 +350,7 @@ function receiptReviewPayload() {
     description: receiptForm.description.trim() || receiptForm.merchantName.trim(),
     categoryId: categories.value.find((category) => category.name === receiptForm.category)?.id ?? null,
     itemizationReviewed: true,
+    financialFindingsAcknowledged: receiptFindingsAcknowledged.value,
     totalOnly: receiptTotalOnly.value,
     items: receiptTotalOnly.value ? [] : receiptItems.value.map((item) => ({
       description: item.description, productCode: null, quantity: item.quantity, unit: item.unit, unitPrice: item.unitPrice,
@@ -358,6 +366,7 @@ function receiptReviewPayload() {
 async function confirmReceiptDraft() {
   receiptSaveError.value = '';
   if (!receiptDraftId.value || !receiptForm.category || !receiptForm.date || !receiptForm.amount || !(receiptForm.description.trim() || receiptForm.merchantName.trim())) { receiptSaveError.value = 'Add a date, total, category, and merchant before saving.'; return; }
+  if (needsReceiptFindingsAcknowledgement.value && !receiptFindingsAcknowledged.value) { receiptSaveError.value = 'Review and acknowledge the receipt details before saving.'; return; }
   if (receiptReconciliation.value?.matched !== true && !receiptReviewDirty.value && !receiptTotalOnly.value) { receiptSaveError.value = 'Review the receipt amounts before saving. The current itemization has not been verified against its printed total.'; return; }
   if (!receiptTotalOnly.value && receiptItems.value.some((item) => !item.description || !item.quantity || !item.unit || !item.unitPrice || item.discount === '' || item.tax === '' || !item.lineTotal || item.taxIncluded === '')) { receiptSaveError.value = 'Complete the item details, or choose “Save without item details.”'; return; }
   receiptBusy.value = true;
@@ -413,6 +422,8 @@ function closeReceiptReview() {
   receiptItems.value = [];
   receiptAdjustments.value = [];
   receiptDocumentEntries.value = [];
+  receiptPreview.value = null;
+  receiptFindingsAcknowledged.value = false;
   receiptFieldWarnings.value = {};
   receiptReviewDirty.value = false;
   receiptSaveError.value = '';
@@ -950,7 +961,15 @@ onBeforeUnmount(() => {
               <label>Category<select v-model="receiptForm.category" @change="markReceiptReviewDirty()"><option value="">Choose category</option><option v-for="category in categories" :key="category.id" :value="category.name">{{ category.name }}</option></select></label>
             </div>
 
-            <div v-if="receiptReconciliation" class="receipt-reconciliation" :class="{ matched: !receiptReviewDirty && receiptReconciliation.matched === true, mismatch: !receiptReviewDirty && receiptReconciliation.matched === false, pending: receiptReviewDirty || receiptReconciliation.matched === null }" role="status" aria-live="polite">
+            <div v-if="receiptPreview && !receiptReviewDirty" class="receipt-reconciliation" :class="{ matched: receiptPreview.status === 'reconciled', mismatch: receiptPreview.status === 'invalid', pending: receiptPreview.status === 'needs_review' }" role="status" aria-live="polite">
+              <strong v-if="receiptPreview.status === 'reconciled'">Receipt amounts reconcile</strong>
+              <strong v-else-if="receiptPreview.status === 'needs_review'">Please review a few receipt details</strong>
+              <strong v-else>Receipt amounts need correction</strong>
+              <span v-if="receiptPreview.reconciliation.status === 'reconciled'">Purchased items and the printed total agree. Confirm the details below before saving.</span>
+              <span v-else-if="receiptPreview.reconciliation.status === 'unreconciled'">The purchased items and printed total differ. Correct the amounts before saving.</span>
+              <span v-else>Some printed amounts or item details are missing. Check the receipt and correct what is unclear.</span>
+            </div>
+            <div v-else-if="receiptReconciliation" class="receipt-reconciliation" :class="{ matched: !receiptReviewDirty && receiptReconciliation.matched === true, mismatch: !receiptReviewDirty && receiptReconciliation.matched === false, pending: receiptReviewDirty || receiptReconciliation.matched === null }" role="status" aria-live="polite">
               <strong v-if="receiptReviewDirty">Changes need a fresh check</strong>
               <strong v-else-if="receiptReconciliation.matched === true">Items match the receipt total</strong>
               <strong v-else-if="receiptReconciliation.matched === false">The totals do not match yet</strong>
@@ -960,14 +979,15 @@ onBeforeUnmount(() => {
               <span v-else-if="receiptReconciliation.matched === true">Items {{ formatReceiptMoney(receiptReconciliation.itemTotal) }} · receipt {{ formatReceiptMoney(receiptReconciliation.total) }}</span>
               <span v-else>Check the missing amounts, or choose to save without item details.</span>
             </div>
-            <p v-if="receiptReconciliation?.adjustmentTotal && receiptReconciliation.adjustmentTotal !== '0'" class="receipt-adjustment-summary">
+            <p v-if="!receiptPreview && receiptReconciliation?.adjustmentTotal && receiptReconciliation.adjustmentTotal !== '0'" class="receipt-adjustment-summary">
               Discounts and adjustments <strong>{{ formatReceiptMoney(receiptReconciliation.adjustmentTotal) }}</strong> are included in the reconciliation.
             </p>
-            <ul v-if="receiptReconciliation?.matched !== true && !receiptReviewDirty && !receiptTotalOnly && receiptReconciliation?.warnings.length" class="receipt-inline-warnings" role="alert">
+            <ul v-if="!receiptPreview && receiptReconciliation?.matched !== true && !receiptReviewDirty && !receiptTotalOnly && receiptReconciliation?.warnings.length" class="receipt-inline-warnings" role="alert">
               <li v-for="warning in receiptReconciliation.warnings.slice(0, 3)" :key="warning">{{ warning }}</li>
             </ul>
-            <div v-if="!receiptReconciliation" class="receipt-reconciliation pending" role="status"><strong>Check receipt totals</strong><span>Compare the receipt total with the purchased items before saving.</span></div>
-            <p v-if="receiptReconciliation?.articleCountMismatch || receiptReconciliation?.incompleteLineCount" class="receipt-review-warning" role="alert">
+            <div v-if="!receiptReconciliation && !receiptPreview" class="receipt-reconciliation pending" role="status"><strong>Check receipt totals</strong><span>Compare the receipt total with the purchased items before saving.</span></div>
+            <label v-if="needsReceiptFindingsAcknowledgement" class="receipt-findings-acknowledgement"><input v-model="receiptFindingsAcknowledged" type="checkbox" /> I reviewed the receipt details and am satisfied the displayed information is correct.</label>
+            <p v-if="!receiptPreview && (receiptReconciliation?.articleCountMismatch || receiptReconciliation?.incompleteLineCount)" class="receipt-review-warning" role="alert">
               <template v-if="receiptReconciliation?.reportedArticleCount !== null">The receipt reports {{ receiptReconciliation?.reportedArticleCount }} articles; {{ receiptReconciliation?.extractedLineCount }} line entries were extracted.</template>
               <template v-if="receiptReconciliation?.incompleteLineCount"> {{ receiptReconciliation.incompleteLineCount }} extracted line(s) are missing required details.</template>
               Check the receipt image and include every purchased line before confirming item details.
@@ -1058,7 +1078,7 @@ onBeforeUnmount(() => {
         </div>
         <div v-if="receiptDraftId" class="receipt-action-bar">
           <button class="expense-button expense-button--quiet" type="button" :disabled="receiptBusy" @click="rejectReceiptDraft">Discard draft</button>
-          <button class="expense-button expense-button--primary" type="button" :disabled="receiptBusy || (!receiptReviewDirty && receiptReconciliation?.matched !== true && !receiptTotalOnly)" @click="confirmReceiptDraft">{{ receiptBusy ? 'Saving…' : 'Save expense' }}</button>
+          <button class="expense-button expense-button--primary" type="button" :disabled="receiptBusy || (needsReceiptFindingsAcknowledgement && !receiptFindingsAcknowledged) || (!receiptReviewDirty && receiptReconciliation?.matched !== true && !receiptTotalOnly)" @click="confirmReceiptDraft">{{ receiptBusy ? 'Saving…' : 'Save expense' }}</button>
         </div>
       </section>
     </div>
@@ -1282,6 +1302,8 @@ onBeforeUnmount(() => {
 .receipt-reconciliation.matched { background: var(--eg-success-soft); border-color: var(--eg-success); }
 .receipt-reconciliation.mismatch { background: var(--eg-danger-soft); border-color: var(--eg-danger); color: var(--eg-danger); }
 .receipt-reconciliation.pending { background: var(--eg-warning-soft); border-color: var(--eg-warning); }
+.receipt-findings-acknowledgement { align-items: flex-start; color: var(--muted); display: flex; font-size: 12px; gap: 8px; line-height: 1.4; }
+.receipt-findings-acknowledgement input { accent-color: var(--eg-blue); flex: 0 0 auto; margin: 2px 0 0; }
 .receipt-adjustment-summary { align-items: baseline; color: var(--muted); display: flex; flex-wrap: wrap; font-size: 12px; gap: 5px; margin: -6px 0 0; }
 .receipt-adjustment-summary strong { color: var(--ink); }
 .receipt-inline-warnings { background: var(--eg-warning-soft); border-radius: 9px; color: var(--ink); display: grid; font-size: 12px; gap: 5px; line-height: 1.45; margin: -5px 0 0; padding: 10px 12px 10px 28px; }

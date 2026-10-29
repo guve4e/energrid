@@ -472,7 +472,7 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
         if (!selected.rows[0]) throw new Error('Selected category is unavailable for this account');
       }
       const reviewRevisionHash = createHash('sha256').update(JSON.stringify({ date: input.date, amount: input.amount, currency: input.currency, merchantName: input.merchantName, category: input.category, categoryId: input.categoryId, description: input.description, items, adjustments: input.adjustments, totalOnly: input.totalOnly })).digest('hex');
-      await this.insertEvent(client, accountId, { kind: 'receipt', id: draftId }, 'draft.reviewed', { draftId, receiptId: receiptsForReview[0]?.id ?? null, actorId, itemCount: items.length, itemizationReviewed: input.itemizationReviewed, totalOnly: input.totalOnly, adjustmentCount: input.adjustments.length, reviewRevisionHash });
+      await this.insertEvent(client, accountId, { kind: 'receipt', id: draftId }, 'draft.reviewed', { draftId, receiptId: receiptsForReview[0]?.id ?? null, actorId, itemCount: items.length, itemizationReviewed: input.itemizationReviewed, financialFindingsAcknowledged: input.financialFindingsAcknowledged === true, totalOnly: input.totalOnly, adjustmentCount: input.adjustments.length, reviewRevisionHash });
       const refreshed = await this.getDraftRow(client, accountId, draftId);
       return refreshed ? this.loadDraftWithClient(client, accountId, refreshed) : null;
     });

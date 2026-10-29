@@ -42,6 +42,8 @@ export interface ExpenseDraftReviewWrite {
   description: string | null;
   items: ExpenseRecord['items'];
   itemizationReviewed: boolean;
+  /** User explicitly reviewed and accepted non-blocking extraction findings. */
+  financialFindingsAcknowledged?: boolean;
   totalOnly: boolean;
   adjustments: NonNullable<ReceiptMetadata['reviewedAdjustments']>;
 }

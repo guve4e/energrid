@@ -13,6 +13,9 @@ import { PRIVATE_RECEIPT_STORAGE, type PrivateReceiptStoragePort } from './appli
 import { PostgresPersonalFinanceRepository, PERSONAL_FINANCE_POOL } from './infrastructure/postgres/postgres-personal-finance.repository';
 import { LocalExpenseTextExtractor } from './infrastructure/local-expense-text-extractor';
 import { OpenAiDocumentUnderstandingAdapter } from './infrastructure/openai-document-understanding.adapter';
+import { LocalDocumentUnderstandingAdapter } from './infrastructure/local-document-understanding.adapter';
+import { PaddleOcrAdapter } from './infrastructure/paddle-ocr.adapter';
+import { GatewayReceiptInterpreterAdapter } from './infrastructure/gateway-receipt-interpreter.adapter';
 import { LocalPrivateReceiptStorageAdapter } from './infrastructure/local-private-receipt-storage.adapter';
 import {
   LlmGatewayService,
@@ -45,7 +48,16 @@ function createPersonalFinancePool(): Pool {
     { provide: PERSONAL_FINANCE_POOL, useFactory: createPersonalFinancePool },
     { provide: PERSONAL_FINANCE_REPOSITORY, inject: [PERSONAL_FINANCE_POOL], useFactory: (pool: Pool) => new PostgresPersonalFinanceRepository(pool) },
     { provide: EXPENSE_TEXT_EXTRACTION, useFactory: () => new LocalExpenseTextExtractor() },
-    { provide: DOCUMENT_UNDERSTANDING, useFactory: () => new OpenAiDocumentUnderstandingAdapter() },
+    {
+      provide: DOCUMENT_UNDERSTANDING,
+      inject: [LlmGatewayService],
+      useFactory: (gateway: LlmGatewayService): DocumentUnderstandingPort => {
+        const provider = process.env.PERSONAL_FINANCE_RECEIPT_PROVIDER?.trim() || 'openai-vision';
+        if (provider === 'openai-vision') return new OpenAiDocumentUnderstandingAdapter();
+        if (provider === 'paddleocr-text') return new LocalDocumentUnderstandingAdapter(new PaddleOcrAdapter(), new GatewayReceiptInterpreterAdapter(gateway));
+        throw new Error('PERSONAL_FINANCE_RECEIPT_PROVIDER must be openai-vision or paddleocr-text');
+      },
+    },
     { provide: PRIVATE_RECEIPT_STORAGE, useFactory: () => new LocalPrivateReceiptStorageAdapter() },
     {
       provide: PersonalFinanceApplication,
@@ -54,8 +66,8 @@ function createPersonalFinancePool(): Pool {
     },
     {
       provide: ReceiptIntelligenceApplication,
-      inject: [PERSONAL_FINANCE_REPOSITORY, DOCUMENT_UNDERSTANDING, PRIVATE_RECEIPT_STORAGE],
-      useFactory: (repository: PersonalFinanceRepository, understanding: DocumentUnderstandingPort, storage: PrivateReceiptStoragePort) => new ReceiptIntelligenceApplication(repository, understanding, storage),
+      inject: [PERSONAL_FINANCE_REPOSITORY, DOCUMENT_UNDERSTANDING, PRIVATE_RECEIPT_STORAGE, PersonalFinanceApplication],
+      useFactory: (repository: PersonalFinanceRepository, understanding: DocumentUnderstandingPort, storage: PrivateReceiptStoragePort, finance: PersonalFinanceApplication) => new ReceiptIntelligenceApplication(repository, understanding, storage, finance),
     },
     PersonalExpenseStore,
     PersonalExpenseCaptureService,

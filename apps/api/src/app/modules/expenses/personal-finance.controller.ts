@@ -142,7 +142,7 @@ export class PersonalFinanceController {
     const accountId = requirePrincipal(request).userId;
     const result = await this.receipts.getDraft({ accountId, actorId: accountId }, id);
     if (!result) throw new NotFoundException('Expense draft not found');
-    return { draft: publicDraft(result.draft), reconciliation: result.reconciliation };
+    return { draft: publicDraft(result.draft), reconciliation: result.reconciliation, preview: result.preview };
   }
 
   @Post('drafts/:id/confirm')
@@ -364,6 +364,11 @@ function message(error: unknown): string { return error instanceof Error ? error
 
 function publicReceipt<T extends { storageKey: string }>(receipt: T) {
   const { storageKey: _privateStorageKey, ...safe } = receipt;
+  const extraction = (safe as Record<string, any>).extraction;
+  if (extraction?.ocrEvidence) {
+    const { ocrEvidence: _privateOcrEvidence, ...publicExtraction } = extraction;
+    return { ...safe, extraction: publicExtraction };
+  }
   return safe;
 }
 
@@ -417,6 +422,7 @@ function normalizeDraftReview(raw: unknown): ExpenseDraftReviewWrite {
     } satisfies ExpenseItem;
   });
   if (typeof body.itemizationReviewed !== 'boolean') throw new Error('itemizationReviewed must be explicitly selected');
+  if (body.financialFindingsAcknowledged !== undefined && typeof body.financialFindingsAcknowledged !== 'boolean') throw new Error('financialFindingsAcknowledged must be a boolean');
   if (typeof body.totalOnly !== 'boolean') throw new Error('totalOnly must be explicitly selected');
   const date = nullableText('date', 10);
   const amount = nullableText('amount', 64);
@@ -425,7 +431,7 @@ function normalizeDraftReview(raw: unknown): ExpenseDraftReviewWrite {
   return {
     date, amount, currency, merchantName: nullableText('merchantName', 180),
     category: nullableText('category', 80), categoryId, description: nullableText('description', 500),
-    items, itemizationReviewed: body.itemizationReviewed, totalOnly: body.totalOnly, adjustments,
+    items, itemizationReviewed: body.itemizationReviewed, financialFindingsAcknowledged: body.financialFindingsAcknowledged === true, totalOnly: body.totalOnly, adjustments,
   };
 }
 

@@ -178,6 +178,45 @@ describe('Personal Finance V2 Portal cutover', () => {
     expect(reviewed.items[0]).toMatchObject({ description: 'Oat milk', normalizedDescription: 'Milk', quantity: '1', unit: 'each', unitPrice: '3.00', discount: '0', tax: '0', lineTotal: '3.00', packaging: '1 L carton', extractionProvenance: { provider: 'openai', confidence: 0.99 } });
   });
 
+  it('shows one Finance review warning and requires an explicit audited acknowledgment before Save', async () => {
+    setAuthenticatedSession({ accessToken: 'finance-token', expiresIn: 900, user: { id: 'account-1', email: 'user@example.test', name: 'User', role: 'viewer' } });
+    const item = { description: 'Milk', normalizedDescription: 'Milk', quantity: '1', unit: 'each', unitPrice: '3.00', discount: '0', tax: '0', taxIncluded: true, lineTotal: '3.00', currency: 'EUR', categoryId: null, sourceReceiptId: 'receipt-1', extractionProvenance: { provider: 'paddleocr' } };
+    const draft = { id: 'draft-1', status: 'proposed', date: '2026-10-28', amount: '3.00', currency: 'EUR', merchantName: 'Lidl', category: 'Groceries', description: 'Lidl', items: [item], receipts: [{ id: 'receipt-1', contentHash: 'abc', parserProvider: 'local:paddleocr+openai' }], tags: [] };
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init });
+      if (url.endsWith('/receipts/extract')) return jsonResponse({ duplicate: false, draft, receipt: { id: 'receipt-1' }, possibleMatches: [], reconciliation: { matched: true, itemTotal: '3.00', total: '3.00', difference: '0' }, preview: { status: 'needs_review', reconciliation: { status: 'reconciled', purchaseTotal: '3.00', reportedFinalTotal: '3.00', difference: '0' }, findings: [{ message: 'raw model text must stay hidden' }] } });
+      if (url.endsWith('/receipts/receipt-1/content')) return { ok: true, status: 200, blob: async () => new Blob(['image']) };
+      if (url.endsWith('/drafts/draft-1') && init?.method === 'PATCH') return jsonResponse({ draft, reconciliation: { matched: true, itemTotal: '3.00', total: '3.00', difference: '0', adjustmentTotal: '0', inconsistentLineCount: 0, warnings: [] } });
+      if (url.endsWith('/drafts/draft-1/confirm')) return jsonResponse({ expense: { id: 'expense-1' } });
+      if (url.endsWith('/personal-finance/categories')) return jsonResponse({ categories: [{ id: 'groceries-id', name: 'Groceries', status: 'active' }] });
+      if (url.includes('/personal-finance/expenses')) return jsonResponse({ expenses: [] });
+      if (url.includes('/personal-finance/summary')) return jsonResponse({ total: '3.00', transactionCount: 1, excludedUnconvertedCount: 0, byCategory: [] });
+      return jsonResponse({});
+    }));
+    wrapper = mount(ExpensesDashboard, { props: { apiBase: '', accessToken: 'finance-token' } });
+    await flushPromises();
+    await wrapper!.findAll('button').find((button) => button.text().includes('Scan receipt'))!.trigger('click');
+    await wrapper!.findAll('label').find((label) => label.text().includes('I consent to cloud processing'))!.get('input').setValue(true);
+    const fileInput = wrapper!.get('input[accept="image/jpeg,image/png"]');
+    const file = new File([new Uint8Array([0xff, 0xd8, 0xff])], 'receipt.jpg', { type: 'image/jpeg' });
+    Object.defineProperty(fileInput.element, 'files', { configurable: true, value: { 0: file, length: 1, item: (index: number) => index === 0 ? file : null } });
+    await fileInput.trigger('change');
+    await flushPromises();
+    expect(wrapper!.text()).toContain('Please review a few receipt details');
+    expect(wrapper!.text()).not.toContain('raw model text must stay hidden');
+    const save = wrapper!.findAll('button').find((button) => button.text().includes('Save expense'))!;
+    expect((save.element as HTMLButtonElement).disabled).toBe(true);
+    const acknowledgement = wrapper!.findAll('label').find((label) => label.text().includes('I reviewed the receipt details'))!;
+    await acknowledgement.get('input').setValue(true);
+    await wrapper!.findAll('label').find((label) => label.text().includes('Save without item details'))!.get('input').setValue(true);
+    await wrapper!.findAll('button').find((button) => button.text().includes('Save expense'))!.trigger('click');
+    await flushPromises();
+    const reviewCall = calls.find(({ url, init }) => url.endsWith('/drafts/draft-1') && init?.method === 'PATCH');
+    expect(JSON.parse(String(reviewCall?.init?.body))).toMatchObject({ financialFindingsAcknowledged: true });
+    expect(calls.some(({ url }) => url.endsWith('/drafts/draft-1/confirm'))).toBe(true);
+  });
+
   it('opens an existing receipt draft from its URL without running extraction', async () => {
     setAuthenticatedSession({ accessToken: 'finance-token', expiresIn: 900, user: { id: 'account-1', email: 'user@example.test', name: 'User', role: 'viewer' } });
     window.history.replaceState({}, '', '/expenses/?receiptDraft=draft-1');

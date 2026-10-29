@@ -27,7 +27,8 @@ describe('receipt intelligence application', () => {
     } as any;
     const understanding = { extract: jest.fn().mockResolvedValue({ extraction, provider: 'test', model: 'vision' }) };
     const storage = { put: jest.fn().mockResolvedValue('account-a/file.jpg'), get: jest.fn().mockResolvedValue(bytes), delete: jest.fn().mockResolvedValue(undefined) };
-    return { app: new ReceiptIntelligenceApplication(repository, understanding, storage), repository, understanding, storage, categories };
+    const finance = { previewFinancialDocument: jest.fn().mockReturnValue({ schemaVersion: 'financial-document-preview-v1', status: 'needs_review' }) };
+    return { app: new ReceiptIntelligenceApplication(repository, understanding, storage, finance as any), repository, understanding, storage, categories, finance };
   }
 
   it('requires explicit consent and image content/type agreement before inference', async () => {
@@ -48,6 +49,32 @@ describe('receipt intelligence application', () => {
     expect(result.extractionDiagnostics).toMatchObject({ responseStatus: 'completed', modelItemCount: 1, validatedItemCount: 1, persistedExtractionItemCount: 1, completeDraftItemCount: 1, incompleteExtractionItemCount: 0, completeButUnmappedItemCount: 0 });
     expect(repository.createDraft.mock.calls[0][2]).toMatchObject({ category: 'Groceries', items: [{ categoryId: 'category-groceries' }] });
     expect(repository).not.toHaveProperty('confirmDraft');
+  });
+
+  it('calls the independent Finance preview with the OCR evidence before returning the review result', async () => {
+    const { app, understanding, finance } = setup();
+    const evidence = [{ id: 0, order: 0, text: 'LIDL' }, { id: 1, order: 1, text: 'Yogurt 3.00' }, { id: 2, order: 2, text: 'Total 3.00' }];
+    const extracted = {
+      schemaVersion: 'receipt-extraction-v1.1', documentType: { ...field('receipt'), sourceLineIds: [0] },
+      merchant: { ...field('Lidl'), sourceLineIds: [0] }, date: { ...field('2026-10-28'), sourceLineIds: [0] }, time: field(null),
+      currency: { ...field('EUR'), sourceLineIds: [2] }, subtotal: field(null), taxTotal: field(null), discountTotal: field(null), depositTotal: field(null),
+      total: { ...field('3.00'), sourceLineIds: [2] }, reportedArticleCount: field(null), sourceText: 'LIDL\nYogurt 3.00\nTotal 3.00', warnings: [],
+      ocrEvidence: { provider: 'paddleocr', model: 'pp-ocrv5', lines: evidence.map((line) => ({ ...line, confidence: 0.95, box: [0, line.id * 10, 20, line.id * 10 + 8] })) },
+      entries: [
+        previewEntry('purchase', 'Yogurt', '3.00', 1),
+        previewEntry('final_total', 'Total', '3.00', 2),
+      ],
+    };
+    understanding.extract.mockResolvedValue({ extraction: extracted as any, provider: 'local:paddleocr+openai', model: 'gpt-5.5' });
+
+    const result = await app.extract(context, bytes, 'image/jpeg', true);
+
+    expect(finance.previewFinancialDocument).toHaveBeenCalledWith(context, expect.objectContaining({
+      schemaVersion: 'financial-document-interpretation-v1', evidence, extraction: expect.objectContaining({
+        ocrEvidence: expect.objectContaining({ lines: expect.arrayContaining([expect.objectContaining({ confidence: 0.95, box: [0, 10, 20, 18] })]) }),
+      }),
+    }));
+    expect(result.preview).toMatchObject({ status: 'needs_review' });
   });
 
   it('returns backend reconciliation when an authenticated owner reopens an existing receipt draft', async () => {
@@ -162,6 +189,7 @@ describe('receipt intelligence application', () => {
 
   it('returns a server-calculated reconciliation for the user-reviewed total and signed discount', async () => {
     const { app, repository } = setup();
+    repository.getDraft.mockResolvedValue({ id: 'draft-1', receipts: [metadata()] } as any);
     const reviewItems = [{ description: 'Basket', productCode: null, quantity: '1', unit: 'basket', unitPrice: '73.10', discount: '0', tax: '0', lineTotal: '73.10', currency: 'EUR', sourceReceiptId: 'receipt-1', normalizedDescription: null, packaging: null, taxIncluded: true, categoryId: null, extractionProvenance: null }];
     repository.updateDraft.mockResolvedValue({
       id: 'draft-1', status: 'needs_review', amount: '70.54', currency: 'EUR', receipts: [{ ...metadata(), reviewedTotal: '70.54', reviewedCurrency: 'EUR', extraction: { ...extraction, total: field('3') } }],
@@ -174,4 +202,26 @@ describe('receipt intelligence application', () => {
     expect(result?.reconciliation).toMatchObject({ matched: true, itemTotal: '70.54', total: '70.54', adjustmentTotal: '-2.56', difference: '0' });
     expect(repository.updateDraft).toHaveBeenCalledWith('account-a', 'account-a', 'draft-1', expect.objectContaining({ amount: '70.54' }));
   });
+
+  it('requires explicit acknowledgment of Finance preview findings and records it in the review write', async () => {
+    const { app, repository } = setup();
+    repository.getDraft.mockResolvedValue({ id: 'draft-1', receipts: [{ ...metadata(), extraction: { ...extraction, ocrEvidence: { provider: 'paddleocr', model: 'pp-ocrv5', lines: [{ id: 0, order: 0, text: 'receipt', confidence: 0.9, box: [0, 0, 10, 10] }] }, documentEntries: [{}] } }] } as any);
+    const review = {
+      date: '2026-10-28', amount: '3', currency: 'EUR', merchantName: 'Lidl', category: 'Groceries', categoryId: null,
+      description: 'Lidl', items: [], itemizationReviewed: true, totalOnly: true, adjustments: [],
+    };
+    await expect(app.reviewDraft(context, 'draft-1', review)).rejects.toThrow(/acknowledge the receipt findings/i);
+    expect(repository.updateDraft).not.toHaveBeenCalled();
+    await app.reviewDraft(context, 'draft-1', { ...review, financialFindingsAcknowledged: true });
+    expect(repository.updateDraft).toHaveBeenCalledWith('account-a', 'account-a', 'draft-1', expect.objectContaining({ financialFindingsAcknowledged: true }));
+  });
 });
+
+function previewEntry(kind: string, description: string, amount: string, lineId: number) {
+  const f = <T>(value: T | null) => ({ ...field(value), sourceLineIds: value === null ? [] : [lineId] });
+  return {
+    kind: f(kind), description: f(description), amount: f(amount), signedAmount: f(null), quantity: f(null), unit: f(null), unitPrice: f(null),
+    discount: f(null), tax: f(null), taxIncluded: f(null), adjustmentKind: f(null), includedInTotal: f(null),
+    includedInLineTotal: f(null), relatedPurchaseIndex: f(null), suggestedCategory: f(null),
+  };
+}

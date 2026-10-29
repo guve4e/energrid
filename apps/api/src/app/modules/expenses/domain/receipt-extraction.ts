@@ -5,12 +5,22 @@ import type { ExtractedField, ReceiptAdjustment, ReceiptDocumentEntryV1_1, Recei
 const fieldKeys = ['value', 'confidence', 'uncertainty', 'sourceText'];
 
 export function validateReceiptExtraction(value: unknown): ReceiptExtractionV1 {
-  if (isRecord(value) && value.schemaVersion === 'receipt-extraction-v1.1') return validateReceiptExtractionV1_1(value);
+  if (isRecord(value) && value.schemaVersion === 'receipt-extraction-v1.1') {
+    if (Array.isArray(value.documentEntries) && !Array.isArray(value.entries)) {
+      const { schemaVersion, documentType, merchant, date, time, currency, subtotal, taxTotal, discountTotal, depositTotal, reportedArticleCount, total, sourceText, documentEntries, warnings, ocrEvidence } = value;
+      return validateReceiptExtractionV1_1({
+        schemaVersion, documentType, merchant, date, time, currency, subtotal, taxTotal, discountTotal, depositTotal,
+        reportedArticleCount, total, sourceText, entries: documentEntries, warnings, ...(ocrEvidence === undefined ? {} : { ocrEvidence }),
+      });
+    }
+    return validateReceiptExtractionV1_1(value);
+  }
   return validateReceiptExtractionV1(value);
 }
 
 function validateReceiptExtractionV1_1(value: Record<string, unknown>): ReceiptExtractionV1 {
-  assertKeys(value, ['schemaVersion', 'documentType', 'merchant', 'date', 'time', 'currency', 'subtotal', 'taxTotal', 'discountTotal', 'depositTotal', 'reportedArticleCount', 'total', 'sourceText', 'entries', 'warnings'], 'Receipt extraction V1.1');
+  const keys = ['schemaVersion', 'documentType', 'merchant', 'date', 'time', 'currency', 'subtotal', 'taxTotal', 'discountTotal', 'depositTotal', 'reportedArticleCount', 'total', 'sourceText', 'entries', 'warnings'];
+  assertKeys(value, Object.hasOwn(value, 'ocrEvidence') ? [...keys, 'ocrEvidence'] : keys, 'Receipt extraction V1.1');
   if (!Array.isArray(value.entries) || value.entries.length > 2000 || !Array.isArray(value.warnings)) throw new Error('Receipt V1.1 entries or warnings are invalid');
   const entries = value.entries.map(validateDocumentEntry);
   const itemEntries = entries.filter((entry) => entry.kind.value === 'purchase');
@@ -45,7 +55,34 @@ function validateReceiptExtractionV1_1(value: Record<string, unknown>): ReceiptE
     depositTotal: value.depositTotal, reportedArticleCount: value.reportedArticleCount, total: value.total,
     sourceText: value.sourceText, items, adjustments, warnings: value.warnings,
   });
-  return { ...normalized, schemaVersion: 'receipt-extraction-v1.1', documentEntries: entries };
+  return {
+    ...normalized,
+    schemaVersion: 'receipt-extraction-v1.1',
+    documentEntries: entries,
+    ...(value.ocrEvidence === undefined ? {} : { ocrEvidence: validateOcrEvidence(value.ocrEvidence) }),
+  };
+}
+
+function validateOcrEvidence(value: unknown): NonNullable<ReceiptExtractionV1['ocrEvidence']> {
+  if (!isRecord(value) || Object.keys(value).sort().join('|') !== ['provider', 'model', 'lines'].sort().join('|') ||
+      typeof value.provider !== 'string' || !value.provider.trim() || value.provider.length > 100 ||
+      typeof value.model !== 'string' || !value.model.trim() || value.model.length > 160 ||
+      !Array.isArray(value.lines) || value.lines.length < 1 || value.lines.length > 2000) {
+    throw new Error('Receipt OCR evidence is invalid');
+  }
+  const ids = new Set<number>();
+  const lines = value.lines.map((line: unknown) => {
+    if (!isRecord(line) || Object.keys(line).sort().join('|') !== ['id', 'order', 'text', 'confidence', 'box'].sort().join('|') ||
+        typeof line.id !== 'number' || !Number.isSafeInteger(line.id) || line.id < 0 || ids.has(line.id) || typeof line.order !== 'number' || !Number.isSafeInteger(line.order) || line.order < 0 ||
+        typeof line.text !== 'string' || line.text.length > 10000 || !Array.isArray(line.box) || line.box.length < 4 || line.box.length > 16 ||
+        line.box.some((coordinate: unknown) => typeof coordinate !== 'number' || !Number.isFinite(coordinate)) ||
+        (line.confidence !== null && (typeof line.confidence !== 'number' || !Number.isFinite(line.confidence) || line.confidence < 0 || line.confidence > 1))) {
+      throw new Error('Receipt OCR evidence line is invalid');
+    }
+    ids.add(line.id);
+    return line as NonNullable<ReceiptExtractionV1['ocrEvidence']>['lines'][number];
+  });
+  return { provider: value.provider, model: value.model, lines };
 }
 
 function validateDocumentEntry(value: unknown, index: number): ReceiptDocumentEntryV1_1 {

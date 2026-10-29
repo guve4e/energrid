@@ -6,6 +6,8 @@ import type { ExpenseDraftProposal, ExpenseRecord, FinanceActorContext, ReceiptM
 import type { DocumentUnderstandingPort } from './ports/document-understanding.port';
 import type { PersonalFinanceRepository, ReceiptReextractionWrite } from './ports/personal-finance.repository';
 import type { PrivateReceiptStoragePort } from './ports/private-receipt-storage.port';
+import type { FinancialDocumentPreviewInput } from '../domain/financial-document-preview';
+import type { PersonalFinanceApplication } from './personal-finance.application';
 
 const MAX_RECEIPT_BYTES = 10 * 1024 * 1024;
 
@@ -14,6 +16,7 @@ export class ReceiptIntelligenceApplication {
     private readonly repository: PersonalFinanceRepository,
     private readonly understanding: DocumentUnderstandingPort,
     private readonly storage: PrivateReceiptStoragePort,
+    private readonly finance: PersonalFinanceApplication,
   ) {}
 
   async getDraft(context: FinanceActorContext, draftId: string) {
@@ -21,11 +24,13 @@ export class ReceiptIntelligenceApplication {
     const draft = await this.repository.getDraft(context.accountId, draftId);
     if (!draft) return null;
     const receipt = draft.receipts.find((candidate) => candidate.extraction);
-    if (!receipt?.extraction || receipt.reviewedAsTotalOnly) return { draft, reconciliation: null };
+    if (!receipt?.extraction || receipt.reviewedAsTotalOnly) return { draft, reconciliation: null, preview: null };
+    const preview = this.preview(context, receipt.extraction);
     if (receipt.userReviewedAt && receipt.reviewedTotal && receipt.reviewedCurrency) {
       const items = draft.items.filter((item) => item.sourceReceiptId === receipt.id);
       return {
         draft,
+        preview,
         reconciliation: reconcileReceiptReview(receipt.extraction, {
           amount: receipt.reviewedTotal,
           currency: receipt.reviewedCurrency,
@@ -34,7 +39,7 @@ export class ReceiptIntelligenceApplication {
         }),
       };
     }
-    return { draft, reconciliation: reconcileReceiptExtraction(receipt.extraction) };
+    return { draft, reconciliation: reconcileReceiptExtraction(receipt.extraction), preview };
   }
 
   async extract(context: FinanceActorContext, bytes: Uint8Array, mediaType: string, cloudDataConsent: boolean) {
@@ -48,7 +53,8 @@ export class ReceiptIntelligenceApplication {
     if (duplicate) {
       let draft = duplicate.draftId ? await this.repository.getDraft(context.accountId, duplicate.draftId) : null;
       if (draft?.status === 'rejected' && !duplicate.expenseId) draft = await this.repository.reopenRejectedReceiptDraft(context.accountId, context.actorId, duplicate.id);
-      return { duplicate: true, receipt: duplicate, draft, possibleMatches: [] as ExpenseRecord[] };
+      const extraction = draft?.receipts?.find((candidate) => candidate.id === duplicate.id)?.extraction;
+      return { duplicate: true, receipt: duplicate, draft, possibleMatches: [] as ExpenseRecord[], preview: extraction ? this.preview(context, extraction) : null };
     }
 
     const categories = await this.repository.listCategories(context.accountId);
@@ -56,6 +62,7 @@ export class ReceiptIntelligenceApplication {
     const modelItemCount = extractionPurchaseCount(result.extraction);
     const categorized = categorizeExtraction(validateReceiptExtraction(result.extraction), categories);
     const extraction = categorized.extraction;
+    const preview = this.preview(context, extraction);
     const reconciliation = reconcileReceiptExtraction(extraction);
     const currency = extraction.currency.value ? normalizeCurrency(extraction.currency.value) : null;
     const amount = extraction.total.value;
@@ -79,10 +86,10 @@ export class ReceiptIntelligenceApplication {
       const receipt = draft.receipts.find((item) => item.contentHash === contentHash);
       if (!receipt || receipt.storageKey !== storageKey) {
         await this.storage.delete(context.accountId, storageKey);
-        return { duplicate: true, receipt: receipt ?? duplicate, draft, possibleMatches: [] as ExpenseRecord[] };
+        return { duplicate: true, receipt: receipt ?? duplicate, draft, possibleMatches: [] as ExpenseRecord[], preview: receipt?.extraction ? this.preview(context, receipt.extraction) : null };
       }
       const possibleMatches = await this.findPossibleMatches(context.accountId, extraction);
-      return { duplicate: false, draft, possibleMatches, reconciliation, extractionDiagnostics: diagnostics(result, modelItemCount, extraction, draft, receipt.id) };
+      return { duplicate: false, draft, possibleMatches, reconciliation, preview, extractionDiagnostics: diagnostics(result, modelItemCount, extraction, draft, receipt.id) };
     } catch (error) {
       await this.storage.delete(context.accountId, storageKey).catch(() => undefined);
       throw error;
@@ -110,6 +117,7 @@ export class ReceiptIntelligenceApplication {
     const modelItemCount = extractionPurchaseCount(result.extraction);
     const categorized = categorizeExtraction(validateReceiptExtraction(result.extraction), categories);
     const extraction = categorized.extraction;
+    const preview = this.preview(context, extraction);
     const reconciliation = reconcileReceiptExtraction(extraction);
     const currency = extraction.currency.value ? normalizeCurrency(extraction.currency.value) : null;
     if (currency && extraction.total.value) assertNewExpenseCurrency(currency);
@@ -132,6 +140,7 @@ export class ReceiptIntelligenceApplication {
       receipt: updatedReceipt,
       possibleMatches: await this.findPossibleMatches(context.accountId, extraction),
       reconciliation,
+      preview,
       extractionDiagnostics: diagnostics(result, modelItemCount, extraction, updated, receiptId),
     };
   }
@@ -168,6 +177,7 @@ export class ReceiptIntelligenceApplication {
       description: input.description?.trim().slice(0, 500) || null,
       items: input.items.map((item) => validateExpenseItem(item)),
       itemizationReviewed: input.itemizationReviewed === true,
+      financialFindingsAcknowledged: input.financialFindingsAcknowledged === true,
       totalOnly: input.totalOnly === true,
       adjustments: input.adjustments.map((adjustment) => {
         if (!adjustment || typeof adjustment.label !== 'string' || !['tax', 'discount', 'deposit', 'return', 'rounding', 'other'].includes(adjustment.kind)) throw new Error('Receipt adjustment is invalid');
@@ -183,6 +193,13 @@ export class ReceiptIntelligenceApplication {
     if (normalized.totalOnly && normalized.items.length > 0) throw new Error('Total-only review cannot include item lines');
     if (!normalized.totalOnly && normalized.items.length === 0) throw new Error('Choose total-only explicitly when saving a receipt without item lines');
     if (normalized.currency) assertNewExpenseCurrency(normalized.currency);
+    const existing = await this.repository.getDraft(context.accountId, draftId);
+    if (!existing) return null;
+    const sourceReceipt = existing.receipts.find((candidate) => candidate.extraction);
+    const sourcePreview = sourceReceipt?.extraction ? this.preview(context, sourceReceipt.extraction) : null;
+    if (sourcePreview && sourcePreview.status !== 'reconciled' && !normalized.financialFindingsAcknowledged) {
+      throw new Error('Review and acknowledge the receipt findings before saving this document.');
+    }
     const updated = await this.repository.updateDraft(context.accountId, context.actorId, draftId, normalized);
     if (!updated) return null;
     const receipt = updated.receipts.find((candidate) => candidate.extraction);
@@ -198,6 +215,17 @@ export class ReceiptIntelligenceApplication {
     const { value: currency } = extraction.currency;
     if (!date || !amount || !currency) return [];
     return this.repository.findPossibleReceiptMatches(accountId, date, amount, currency, extraction.merchant.value);
+  }
+
+  private preview(context: FinanceActorContext, extraction: ReturnType<typeof validateReceiptExtraction>) {
+    const ocr = extraction.ocrEvidence;
+    if (!ocr || !extraction.documentEntries?.length) return null;
+    const input: FinancialDocumentPreviewInput = {
+      schemaVersion: 'financial-document-interpretation-v1',
+      evidence: ocr.lines.filter(({ text }) => text.trim().length > 0).map(({ id, order, text }) => ({ id, order, text })),
+      extraction,
+    };
+    return this.finance.previewFinancialDocument(context, input);
   }
 }
 

@@ -78,5 +78,11 @@ export interface ReceiptExtractionV1 {
   items: ReceiptExtractionItem[];
   /** Available for V1.1. Keeps every printed row, including excluded summaries and tender. */
   documentEntries?: ReceiptDocumentEntryV1_1[];
+  /** Immutable local OCR observations associated with sourceLineIds. */
+  ocrEvidence?: {
+    provider: string;
+    model: string;
+    lines: Array<{ id: number; order: number; text: string; confidence: number | null; box: number[] }>;
+  };
   warnings: string[];
 }

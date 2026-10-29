@@ -3,6 +3,7 @@ export interface LlmRequest {
   systemPrompt: string
   userPrompt: string
   maxOutputTokens?: number
+  timeoutMs?: number
   outputSchema?: LlmJsonSchema
 }
 
