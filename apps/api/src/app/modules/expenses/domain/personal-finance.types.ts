@@ -72,6 +72,8 @@ export interface ReceiptMetadata {
   extraction?: import('./receipt-extraction.types').ReceiptExtractionV1 | null;
   userReviewedAt?: string | null;
   reviewedAsTotalOnly?: boolean;
+  reviewedTotal?: string | null;
+  reviewedCurrency?: CurrencyCode | null;
   documentDeletedAt?: string | null;
   reviewedAdjustments?: import('./receipt-extraction.types').ReceiptExtractionV1['adjustments'] | null;
   createdAt: string;

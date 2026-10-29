@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import { isoDate, PostgresPersonalFinanceRepository } from './postgres-personal-finance.repository';
+import { isoDate, itemTotalWithIncludedAdjustments, PostgresPersonalFinanceRepository } from './postgres-personal-finance.repository';
 import type { ExpenseImportRow } from '../../application/ports/personal-finance.repository';
 
 function importRow(overrides: Partial<ExpenseImportRow> = {}): ExpenseImportRow {
@@ -12,6 +12,13 @@ function importRow(overrides: Partial<ExpenseImportRow> = {}): ExpenseImportRow 
 }
 
 describe('PostgresPersonalFinanceRepository safety boundaries', () => {
+  it('applies separately signed discounts once and rejects unresolved adjustment inclusion', () => {
+    const item = { lineTotal: '73.10' } as any;
+    expect(itemTotalWithIncludedAdjustments([item], [{ label: 'Discount', amount: '2.56', signedAmount: '-2.56', kind: 'discount', includedInTotal: true, includedInLineTotal: false }])).toBe('70.54');
+    expect(itemTotalWithIncludedAdjustments([item], [{ label: 'Discount already in line', amount: '2.56', signedAmount: '-2.56', kind: 'discount', includedInTotal: true, includedInLineTotal: true }])).toBe('73.1');
+    expect(() => itemTotalWithIncludedAdjustments([item], [{ label: 'Unknown discount', amount: '2.56', signedAmount: '-2.56', kind: 'discount', includedInTotal: true, includedInLineTotal: null }])).toThrow(/already included in a purchase line/i);
+  });
+
   it('preserves PostgreSQL calendar dates in east-of-UTC time zones', () => {
     expect(isoDate(new Date(2026, 9, 26))).toBe('2026-10-26');
     expect(isoDate('2026-10-26')).toBe('2026-10-26');

@@ -10,7 +10,7 @@ export interface DocumentUnderstandingResult {
 }
 
 export interface DocumentUnderstandingPort {
-  extract(image: { bytes: Uint8Array; mediaType: 'image/jpeg' | 'image/png' }, options: { cloudDataConsent: boolean }): Promise<DocumentUnderstandingResult>;
+  extract(image: { bytes: Uint8Array; mediaType: 'image/jpeg' | 'image/png' }, options: { cloudDataConsent: boolean; categories?: readonly string[] }): Promise<DocumentUnderstandingResult>;
 }
 
 export const DOCUMENT_UNDERSTANDING = Symbol('DOCUMENT_UNDERSTANDING');

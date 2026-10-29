@@ -76,7 +76,7 @@ describe('Personal Finance V2 Portal cutover', () => {
     expect(wrapper!.text()).toContain('receipt reports 13 articles');
     expect(wrapper!.get('select[aria-label="Receipt currency"]')).toBeTruthy();
     expect(wrapper!.findAll('select').some((select) => select.element.value === '')).toBe(true);
-    const retry = wrapper!.findAll('button').find((button) => button.text() === 'Retry extraction')!;
+    const retry = wrapper!.findAll('button').find((button) => button.text() === 'Retry with AI')!;
     expect((retry.element as HTMLButtonElement).disabled).toBe(true);
     await wrapper!.findAll('label').find((label) => label.text().includes('send this saved receipt image'))!.get('input').setValue(true);
     await retry.trigger('click');
@@ -149,7 +149,7 @@ describe('Personal Finance V2 Portal cutover', () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
       if (url.endsWith('/receipts/extract')) return jsonResponse({ duplicate: false, draft, possibleMatches: [], reconciliation: { matched: true, itemTotal: '3.00', total: '3.00', difference: '0', warnings: [] } });
       if (url.endsWith('/receipts/receipt-1/content')) return { ok: true, status: 200, blob: async () => new Blob(['image']) };
-      if (url.endsWith('/drafts/draft-1') && init?.method === 'PATCH') { reviewed = JSON.parse(String(init.body)); return jsonResponse({ draft }); }
+      if (url.endsWith('/drafts/draft-1') && init?.method === 'PATCH') { reviewed = JSON.parse(String(init.body)); return jsonResponse({ draft, reconciliation: { matched: true, itemTotal: '3', total: '3', difference: '0', adjustmentTotal: '0', inconsistentLineCount: 0, warnings: [] } }); }
       if (url.endsWith('/drafts/draft-1/confirm')) return jsonResponse({ expense: { id: 'expense-1' } });
       if (url.endsWith('/personal-finance/categories')) return jsonResponse({ categories: [{ id: 'groceries-id', name: 'Groceries', status: 'active' }] });
       if (url.includes('/personal-finance/expenses')) return jsonResponse({ expenses: [] });
@@ -189,7 +189,7 @@ describe('Personal Finance V2 Portal cutover', () => {
     vi.stubGlobal('URL', ReceiptURL);
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
       calls.push({ url, init });
-      if (url.endsWith('/drafts/draft-1')) return jsonResponse({ draft });
+      if (url.endsWith('/drafts/draft-1')) return jsonResponse({ draft, reconciliation: { matched: true, itemTotal: '3.00', total: '3.00', difference: '0', adjustmentTotal: '0', inconsistentLineCount: 0, warnings: [] } });
       if (url.endsWith('/receipts/receipt-1/content')) return { ok: true, status: 200, blob: async () => new Blob(['image']) };
       if (url.endsWith('/personal-finance/categories')) return jsonResponse({ categories: [{ id: 'groceries-id', name: 'Groceries', status: 'active' }] });
       if (url.includes('/personal-finance/expenses')) return jsonResponse({ expenses: [] });
@@ -203,7 +203,7 @@ describe('Personal Finance V2 Portal cutover', () => {
     expect(wrapper!.text()).toContain('Milk');
     const retryConsent = wrapper!.findAll('input[type="checkbox"]').find((input) => input.element.parentElement?.textContent?.includes('send this saved receipt image'))!;
     expect((retryConsent.element as HTMLInputElement).checked).toBe(false);
-    const retryButton = wrapper!.findAll('button').find((button) => button.text().includes('Retry extraction'))!;
+    const retryButton = wrapper!.findAll('button').find((button) => button.text().includes('Retry with AI'))!;
     expect((retryButton.element as HTMLButtonElement).disabled).toBe(true);
     expect(calls.some(({ url }) => url.endsWith('/drafts/draft-1') && !url.endsWith('/confirm'))).toBe(true);
     expect(calls.some(({ url }) => url.endsWith('/re-extract') || url.endsWith('/receipts/extract'))).toBe(false);
@@ -219,6 +219,8 @@ describe('Personal Finance V2 Portal cutover', () => {
       calls.push({ url, init });
       if (url.endsWith('/receipts/extract')) return jsonResponse({ duplicate: false, draft, possibleMatches: [], reconciliation: { matched: false, itemTotal: '2.80', total: '3.00', difference: '-0.20', warnings: [] } });
       if (url.endsWith('/receipts/receipt-2/content')) return { ok: true, status: 200, blob: async () => new Blob(['image']) };
+      if (url.endsWith('/drafts/draft-2') && init?.method === 'PATCH') return jsonResponse({ draft, reconciliation: { matched: false, itemTotal: '2.80', total: '3.01', difference: '-0.21', warnings: ['The reviewed items do not match the printed total.'] } });
+      if (url.endsWith('/drafts/draft-2/confirm')) return jsonResponse({ expense: { id: 'should-not-confirm' } });
       if (url.endsWith('/personal-finance/categories')) return jsonResponse({ categories: [{ id: 'groceries-id', name: 'Groceries', status: 'active' }] });
       if (url.includes('/personal-finance/expenses')) return jsonResponse({ expenses: [] });
       if (url.includes('/personal-finance/summary')) return jsonResponse({ total: '0.00', transactionCount: 0, excludedUnconvertedCount: 0, byCategory: [] });
@@ -241,6 +243,12 @@ describe('Personal Finance V2 Portal cutover', () => {
     expect(saveButton.exists()).toBe(true);
     expect((saveButton.element as HTMLButtonElement).disabled).toBe(true);
     expect(calls.some(({ url }) => url.endsWith('/drafts/draft-2/confirm'))).toBe(false);
+    await wrapper!.find('input[placeholder="Enter total"]').setValue('3.01');
+    await saveButton.trigger('click');
+    await flushPromises();
+    expect(calls.some(({ url, init }) => url.endsWith('/drafts/draft-2') && init?.method === 'PATCH')).toBe(true);
+    expect(calls.some(({ url }) => url.endsWith('/drafts/draft-2/confirm'))).toBe(false);
+    expect(wrapper!.text()).toContain('The reviewed items do not match the printed total.');
   });
 
   it('loads backend summaries and searches through V2 routes', async () => {

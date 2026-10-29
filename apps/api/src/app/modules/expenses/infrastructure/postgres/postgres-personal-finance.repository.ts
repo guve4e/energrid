@@ -34,6 +34,7 @@ type ReceiptRow = QueryResultRow & {
   parser_provider: string | null; parser_model: string | null; created_at: Date | string; extraction_result: ReceiptMetadata['extraction'];
   user_reviewed_at: Date | string | null; reviewed_as_total_only: boolean; document_deleted_at: Date | string | null;
   reviewed_adjustments: ReceiptMetadata['reviewedAdjustments'];
+  reviewed_total: string | null; reviewed_currency: string | null;
 };
 
 export class PostgresPersonalFinanceRepository implements PersonalFinanceRepository {
@@ -417,9 +418,9 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
       );
       await client.query(
         `UPDATE personal_finance.expense_drafts SET expense_date=$3,amount=$4,currency=$5,merchant_name=$6,description=$7,
-         extraction_provider=$8,extraction_model=$9,status='needs_review',updated_at=now()
+         category=$8,extraction_provider=$9,extraction_model=$10,status='needs_review',updated_at=now()
          WHERE account_id=$1 AND id=$2`,
-        [accountId, receipt.draft_id, input.date, input.amount, input.currency, input.merchantName, input.merchantName, input.parserProvider, input.parserModel],
+        [accountId, receipt.draft_id, input.date, input.amount, input.currency, input.merchantName, input.merchantName, input.category, input.parserProvider, input.parserModel],
       );
       await client.query('DELETE FROM personal_finance.expense_draft_items WHERE account_id=$1 AND draft_id=$2', [accountId, receipt.draft_id]);
       const items = input.items.map((item) => ({ ...item, sourceReceiptId: receiptId }));
@@ -461,9 +462,9 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
       await this.insertDraftItems(client, accountId, draftId, items);
       if (receiptsForReview.length) {
         await client.query(
-          `UPDATE personal_finance.receipts SET user_reviewed_at=now(),reviewed_as_total_only=$3,status='review_required',reviewed_adjustments=$4
+          `UPDATE personal_finance.receipts SET user_reviewed_at=now(),reviewed_as_total_only=$3,status='review_required',reviewed_adjustments=$4,reviewed_total=$5,reviewed_currency=$6
            WHERE account_id=$1 AND draft_id=$2`,
-          [accountId, draftId, input.totalOnly, JSON.stringify(input.adjustments)],
+          [accountId, draftId, input.totalOnly, JSON.stringify(input.adjustments), input.amount, input.currency],
         );
       }
       if (input.categoryId) {
@@ -661,8 +662,8 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
   private assertReceiptsReconcile(items: ExpenseItem[], receipts: ReceiptMetadata[], expenseAmount: string, expenseCurrency: string) {
     for (const receipt of receipts) {
       if (!receipt.userReviewedAt) throw new Error('Review the receipt details and confirm its itemization before saving');
-      const total = receipt.extractedTotals?.total;
-      const currency = receipt.extractedTotals?.currency;
+      const total = receipt.reviewedTotal ?? receipt.extractedTotals?.total;
+      const currency = receipt.reviewedCurrency ?? receipt.extractedTotals?.currency;
       if (receipt.status === 'failed') throw new Error('A failed receipt cannot be confirmed');
       const attachedItems = items.filter((item) => item.sourceReceiptId === receipt.id);
       if (!total || !currency) {
@@ -736,13 +737,16 @@ function mapItem(row: ItemRow): ExpenseItem {
 }
 
 function mapReceipt(row: ReceiptRow): ReceiptMetadata {
-  return { id: row.id, accountId: row.account_id, draftId: row.draft_id, expenseId: row.expense_id, contentHash: row.content_hash.trim(), mediaType: row.media_type, byteLength: Number(row.byte_length), storageKey: row.storage_key, status: row.status, extractedTotals: row.extracted_totals, parserProvider: row.parser_provider, parserModel: row.parser_model, extraction: row.extraction_result ?? null, userReviewedAt: row.user_reviewed_at ? isoTimestamp(row.user_reviewed_at) : null, reviewedAsTotalOnly: row.reviewed_as_total_only ?? false, documentDeletedAt: row.document_deleted_at ? isoTimestamp(row.document_deleted_at) : null, reviewedAdjustments: row.reviewed_adjustments ?? null, createdAt: isoTimestamp(row.created_at) };
+  return { id: row.id, accountId: row.account_id, draftId: row.draft_id, expenseId: row.expense_id, contentHash: row.content_hash.trim(), mediaType: row.media_type, byteLength: Number(row.byte_length), storageKey: row.storage_key, status: row.status, extractedTotals: row.extracted_totals, parserProvider: row.parser_provider, parserModel: row.parser_model, extraction: row.extraction_result ?? null, userReviewedAt: row.user_reviewed_at ? isoTimestamp(row.user_reviewed_at) : null, reviewedAsTotalOnly: row.reviewed_as_total_only ?? false, reviewedTotal: row.reviewed_total === null || row.reviewed_total === undefined ? null : decimalString(row.reviewed_total), reviewedCurrency: row.reviewed_currency?.trim() ?? null, documentDeletedAt: row.document_deleted_at ? isoTimestamp(row.document_deleted_at) : null, reviewedAdjustments: row.reviewed_adjustments ?? null, createdAt: isoTimestamp(row.created_at) };
 }
 
-function itemTotalWithIncludedAdjustments(items: ExpenseItem[], adjustments: NonNullable<ReceiptMetadata['reviewedAdjustments']>) {
+export function itemTotalWithIncludedAdjustments(items: ExpenseItem[], adjustments: NonNullable<ReceiptMetadata['reviewedAdjustments']>) {
   return adjustments.reduce((sum, adjustment) => {
     if (adjustment.includedInTotal === null) throw new Error(`Receipt adjustment “${adjustment.label}” needs review`);
     if (adjustment.includedInTotal !== true) return sum;
+    if (adjustment.includedInLineTotal === null) throw new Error(`Receipt adjustment “${adjustment.label}” needs review to determine whether it is already included in a purchase line`);
+    if (adjustment.includedInLineTotal === true) return sum;
+    if (adjustment.signedAmount !== undefined && adjustment.signedAmount !== null) return addDecimal(sum, financeDecimal(adjustment.signedAmount));
     if (adjustment.amount === null) throw new Error(`Receipt adjustment “${adjustment.label}” needs an amount`);
     const amount = financeDecimal(adjustment.amount);
     const signed = adjustment.kind === 'discount' || adjustment.kind === 'return'

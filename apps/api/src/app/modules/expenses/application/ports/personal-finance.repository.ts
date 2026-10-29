@@ -55,6 +55,7 @@ export interface ReceiptReextractionWrite {
   amount: string | null;
   currency: string | null;
   merchantName: string | null;
+  category: string | null;
   items: ExpenseDraftProposal['items'];
 }
 

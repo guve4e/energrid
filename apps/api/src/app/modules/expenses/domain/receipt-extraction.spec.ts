@@ -1,4 +1,4 @@
-import { reconcileReceiptExtraction, validateReceiptExtraction } from './receipt-extraction';
+import { reconcileReceiptExtraction, reconcileReceiptReview, validateReceiptExtraction } from './receipt-extraction';
 import type { ReceiptExtractionV1 } from './receipt-extraction.types';
 
 const field = <T>(value: T | null) => ({ value, confidence: value === null ? null : 0.98, uncertainty: null, sourceText: value === null ? null : String(value) });
@@ -58,6 +58,45 @@ describe('receipt extraction domain', () => {
     expect(fixture.reportedArticleCount.value).toBe(13);
     expect(fixture.items).toHaveLength(13);
     expect(result).toMatchObject({ matched: true, extractedLineCount: 13, completeLineCount: 13, itemTotal: '70.54', total: '70.54', difference: '0', articleCountMismatch: false });
+  });
+
+  it('normalizes V1.1 printed rows, counts only purchases, and applies the signed Lidl discount once', () => {
+    const fixture = require('./fixtures/lidl-2026-10-27.v1-1.redacted.fixture.json') as unknown;
+    const extraction = validateReceiptExtraction(fixture);
+    const reconciliation = reconcileReceiptExtraction(extraction);
+    expect(extraction.schemaVersion).toBe('receipt-extraction-v1.1');
+    expect(extraction.documentEntries).toHaveLength(17);
+    expect(extraction.items).toHaveLength(13);
+    expect(extraction.adjustments).toMatchObject([{ amount: '2.56', signedAmount: '-2.56', kind: 'discount', includedInTotal: true, includedInLineTotal: false }]);
+    expect(reconciliation).toMatchObject({ matched: true, itemTotal: '70.54', total: '70.54', difference: '0', adjustmentTotal: '-2.56', extractedLineCount: 13 });
+  });
+
+  it('leaves a signed adjustment unresolved when the receipt does not show whether it is already in the purchase line', () => {
+    const fixture = JSON.parse(JSON.stringify(require('./fixtures/lidl-2026-10-27.v1-1.redacted.fixture.json')));
+    const discount = fixture.entries.find((entry: any) => entry.kind.value === 'discount');
+    discount.includedInLineTotal = field(null);
+    const result = reconcileReceiptExtraction(validateReceiptExtraction(fixture));
+    expect(result.matched).toBeNull();
+    expect(result.warnings.join(' ')).toMatch(/already included in a purchase line/i);
+  });
+
+  it('blocks V1.1 purchase lines whose quantity and price do not equal the printed final line amount', () => {
+    const fixture = JSON.parse(JSON.stringify(require('./fixtures/lidl-2026-10-27.v1-1.redacted.fixture.json')));
+    const purchase = fixture.entries.find((entry: any) => entry.kind.value === 'purchase');
+    purchase.amount = field('5.12');
+    const result = reconcileReceiptExtraction(validateReceiptExtraction(fixture));
+    expect(result.matched).toBe(false);
+    expect(result.inconsistentLineCount).toBe(1);
+  });
+
+  it('reconciles explicitly reviewed line amounts and signed adjustments with exact decimal rules', () => {
+    const original = validateReceiptExtraction(receipt({ total: field('73.10'), adjustments: [] }));
+    const result = reconcileReceiptReview(original, {
+      amount: '70.54', currency: 'EUR',
+      items: [{ description: 'Groceries', quantity: '1', unit: 'basket', unitPrice: '73.10', discount: '0', tax: '0', taxIncluded: true, lineTotal: '73.10' }],
+      adjustments: [{ label: 'Discount', amount: '2.56', signedAmount: '-2.56', kind: 'discount', includedInTotal: true, includedInLineTotal: false }],
+    });
+    expect(result).toMatchObject({ matched: true, itemTotal: '70.54', total: '70.54', adjustmentTotal: '-2.56', difference: '0' });
   });
 
   it('keeps missing and ambiguous fields unknown and reports a material mismatch', () => {

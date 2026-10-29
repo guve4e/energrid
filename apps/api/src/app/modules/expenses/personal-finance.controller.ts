@@ -44,7 +44,7 @@ export class PersonalFinanceController {
     try {
       const result = await this.receipts.reviewDraft({ accountId, actorId: accountId }, id, normalizeDraftReview(body));
       if (!result) throw new NotFoundException('Reviewable expense draft not found');
-      return { draft: publicDraft(result) };
+      return { draft: publicDraft(result.draft), reconciliation: result.reconciliation };
     } catch (error) { if (error instanceof HttpException) throw error; throw new BadRequestException(message(error)); }
   }
 
@@ -139,9 +139,10 @@ export class PersonalFinanceController {
 
   @Get('drafts/:id')
   async getDraft(@Param('id') id: string, @Req() request: AuthenticatedRequest) {
-    const draft = await this.finance.getExpenseDraft(requirePrincipal(request).userId, id);
-    if (!draft) throw new NotFoundException('Expense draft not found');
-    return { draft: publicDraft(draft) };
+    const accountId = requirePrincipal(request).userId;
+    const result = await this.receipts.getDraft({ accountId, actorId: accountId }, id);
+    if (!result) throw new NotFoundException('Expense draft not found');
+    return { draft: publicDraft(result.draft), reconciliation: result.reconciliation };
   }
 
   @Post('drafts/:id/confirm')
@@ -386,8 +387,11 @@ function normalizeDraftReview(raw: unknown): ExpenseDraftReviewWrite {
     const adjustment = value as Record<string, unknown>;
     if (typeof adjustment.label !== 'string' || adjustment.label.length > 160 || !['tax', 'discount', 'deposit', 'return', 'rounding', 'other'].includes(String(adjustment.kind))) throw new Error(`Receipt adjustment ${index + 1} is invalid`);
     if (adjustment.amount !== null && typeof adjustment.amount !== 'string') throw new Error(`Receipt adjustment ${index + 1} amount must be text or null`);
+    if (adjustment.signedAmount !== null && adjustment.signedAmount !== undefined && typeof adjustment.signedAmount !== 'string') throw new Error(`Receipt adjustment ${index + 1} signed amount must be text or null`);
     if (adjustment.includedInTotal !== null && typeof adjustment.includedInTotal !== 'boolean') throw new Error(`Receipt adjustment ${index + 1} inclusion must be true, false, or null`);
-    return { label: adjustment.label, kind: adjustment.kind as 'tax' | 'discount' | 'deposit' | 'return' | 'rounding' | 'other', amount: adjustment.amount as string | null, includedInTotal: adjustment.includedInTotal as boolean | null };
+    if (adjustment.includedInLineTotal !== null && adjustment.includedInLineTotal !== undefined && typeof adjustment.includedInLineTotal !== 'boolean') throw new Error(`Receipt adjustment ${index + 1} line inclusion must be true, false, or null`);
+    if (adjustment.relatedPurchaseIndex !== null && adjustment.relatedPurchaseIndex !== undefined && (!Number.isSafeInteger(adjustment.relatedPurchaseIndex) || Number(adjustment.relatedPurchaseIndex) < 0)) throw new Error(`Receipt adjustment ${index + 1} purchase reference is invalid`);
+    return { label: adjustment.label, kind: adjustment.kind as 'tax' | 'discount' | 'deposit' | 'return' | 'rounding' | 'other', amount: adjustment.amount as string | null, signedAmount: adjustment.signedAmount as string | null | undefined, includedInTotal: adjustment.includedInTotal as boolean | null, includedInLineTotal: adjustment.includedInLineTotal as boolean | null | undefined, relatedPurchaseIndex: adjustment.relatedPurchaseIndex as number | null | undefined };
   });
   const items = body.items.map((value, index) => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Receipt line ${index + 1} is invalid`);

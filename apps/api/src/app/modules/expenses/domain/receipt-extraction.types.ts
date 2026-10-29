@@ -19,8 +19,43 @@ export interface ReceiptExtractionItem {
   suggestedCategory: ExtractedField<string>;
 }
 
+export type ReceiptDocumentEntryKind = 'purchase' | 'discount' | 'adjustment' | 'subtotal' | 'final_total' | 'payment';
+export type ReceiptAdjustmentKind = 'tax' | 'discount' | 'deposit' | 'return' | 'rounding' | 'other';
+
+/** A typed transcription of one printed document row. Non-purchase rows remain
+ * in provenance so totals, tender and summaries cannot be mistaken for goods. */
+export interface ReceiptDocumentEntryV1_1 {
+  kind: ExtractedField<ReceiptDocumentEntryKind>;
+  description: ExtractedField<string>;
+  amount: ExtractedField<string>;
+  signedAmount: ExtractedField<string>;
+  quantity: ExtractedField<string>;
+  unit: ExtractedField<string>;
+  unitPrice: ExtractedField<string>;
+  discount: ExtractedField<string>;
+  tax: ExtractedField<string>;
+  taxIncluded: ExtractedField<boolean>;
+  adjustmentKind: ExtractedField<ReceiptAdjustmentKind>;
+  includedInTotal: ExtractedField<boolean>;
+  includedInLineTotal: ExtractedField<boolean>;
+  relatedPurchaseIndex: ExtractedField<number>;
+  suggestedCategory: ExtractedField<string>;
+}
+
+export interface ReceiptAdjustment {
+  label: string;
+  amount: string | null;
+  kind: ReceiptAdjustmentKind;
+  includedInTotal: boolean | null;
+  /** Signed effect on the transaction total; V1 records infer sign from kind. */
+  signedAmount?: string | null;
+  /** True when already reflected in a purchase line's final line total. */
+  includedInLineTotal?: boolean | null;
+  relatedPurchaseIndex?: number | null;
+}
+
 export interface ReceiptExtractionV1 {
-  schemaVersion: 'receipt-extraction-v1';
+  schemaVersion: 'receipt-extraction-v1' | 'receipt-extraction-v1.1';
   documentType: ExtractedField<'receipt' | 'invoice' | 'other'>;
   merchant: ExtractedField<string>;
   date: ExtractedField<string>;
@@ -34,8 +69,10 @@ export interface ReceiptExtractionV1 {
   /** Count printed on some receipts (for example, “13 articles”). This counts
    * purchased units and may differ from the number of printed line entries. */
   reportedArticleCount: ExtractedField<number>;
-  adjustments: Array<{ label: string; amount: string | null; kind: 'tax' | 'discount' | 'deposit' | 'return' | 'rounding' | 'other'; includedInTotal: boolean | null }>;
+  adjustments: ReceiptAdjustment[];
   sourceText: string | null;
   items: ReceiptExtractionItem[];
+  /** Available for V1.1. Keeps every printed row, including excluded summaries and tender. */
+  documentEntries?: ReceiptDocumentEntryV1_1[];
   warnings: string[];
 }

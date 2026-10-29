@@ -14,7 +14,12 @@ describe('receipt intelligence application', () => {
   const metadata = (storageKey = 'account-a/file.jpg', contentHash = 'hash', storedExtraction = extraction) => ({ id: 'receipt-1', accountId: 'account-a', draftId: 'draft-1', expenseId: null, contentHash, mediaType: 'image/jpeg', byteLength: 4, storageKey, status: 'review_required', extractedTotals: { subtotal: '3', tax: null, discount: null, total: '3', currency: 'EUR' }, parserProvider: 'test', parserModel: 'vision', extraction: storedExtraction, createdAt: '2026-10-28T10:00:00.000Z' });
 
   function setup() {
+    const categories = [
+      { id: 'category-groceries', accountId: 'account-a', name: 'Groceries', description: null, parentId: null, status: 'active', createdAt: '', updatedAt: '', archivedAt: null },
+      { id: 'category-fuel', accountId: 'account-a', name: 'Fuel', description: null, parentId: null, status: 'active', createdAt: '', updatedAt: '', archivedAt: null },
+    ];
     const repository = {
+      listCategories: jest.fn().mockResolvedValue(categories),
       findReceiptByHash: jest.fn().mockResolvedValue(null), createDraft: jest.fn().mockImplementation(async (_account, _actor, proposal) => ({ id: 'draft-1', accountId: 'account-a', status: 'proposed', ...proposal, receipts: [metadata(proposal.receipts[0].storageKey, proposal.receipts[0].contentHash, proposal.receipts[0].extraction)] })),
       getDraft: jest.fn(), findPossibleReceiptMatches: jest.fn().mockResolvedValue([]), getReceipt: jest.fn().mockResolvedValue(metadata()),
       replaceReceiptExtraction: jest.fn(),
@@ -22,7 +27,7 @@ describe('receipt intelligence application', () => {
     } as any;
     const understanding = { extract: jest.fn().mockResolvedValue({ extraction, provider: 'test', model: 'vision' }) };
     const storage = { put: jest.fn().mockResolvedValue('account-a/file.jpg'), get: jest.fn().mockResolvedValue(bytes), delete: jest.fn().mockResolvedValue(undefined) };
-    return { app: new ReceiptIntelligenceApplication(repository, understanding, storage), repository, understanding, storage };
+    return { app: new ReceiptIntelligenceApplication(repository, understanding, storage), repository, understanding, storage, categories };
   }
 
   it('requires explicit consent and image content/type agreement before inference', async () => {
@@ -36,13 +41,20 @@ describe('receipt intelligence application', () => {
   it('creates a reviewable draft and stores the image privately without confirming an expense', async () => {
     const { app, repository, understanding, storage } = setup();
     const result = await app.extract(context, bytes, 'image/jpeg', true);
-    expect(understanding.extract).toHaveBeenCalledWith({ bytes, mediaType: 'image/jpeg' }, { cloudDataConsent: true });
+    expect(understanding.extract).toHaveBeenCalledWith({ bytes, mediaType: 'image/jpeg' }, { cloudDataConsent: true, categories: ['Groceries', 'Fuel'] });
     expect(storage.put).toHaveBeenCalledWith('account-a', 'image/jpeg', bytes);
     expect(repository.createDraft).toHaveBeenCalledWith('account-a', 'account-a', expect.objectContaining({ sourceKind: 'receipt', amount: '3', currency: 'EUR' }));
     expect(result).toMatchObject({ duplicate: false, draft: { id: 'draft-1', status: 'proposed' } });
     expect(result.extractionDiagnostics).toMatchObject({ responseStatus: 'completed', modelItemCount: 1, validatedItemCount: 1, persistedExtractionItemCount: 1, completeDraftItemCount: 1, incompleteExtractionItemCount: 0, completeButUnmappedItemCount: 0 });
-    expect(repository.createDraft.mock.calls[0][2].category).toBeNull();
+    expect(repository.createDraft.mock.calls[0][2]).toMatchObject({ category: 'Groceries', items: [{ categoryId: 'category-groceries' }] });
     expect(repository).not.toHaveProperty('confirmDraft');
+  });
+
+  it('returns backend reconciliation when an authenticated owner reopens an existing receipt draft', async () => {
+    const { app, repository } = setup();
+    repository.getDraft.mockResolvedValue({ id: 'draft-1', accountId: 'account-a', receipts: [metadata()] } as any);
+    await expect(app.getDraft(context, 'draft-1')).resolves.toMatchObject({ draft: { id: 'draft-1' }, reconciliation: { matched: true, itemTotal: '3', total: '3', difference: '0' } });
+    expect(repository.getDraft).toHaveBeenCalledWith('account-a', 'draft-1');
   });
 
   it('reports model, validated, persisted, and normalized item counts without hiding dropped incomplete lines', async () => {
@@ -66,8 +78,8 @@ describe('receipt intelligence application', () => {
     } as any));
     const result = await app.reextract(context, 'receipt-1', true);
     expect(storage.get).toHaveBeenCalledWith('account-a', 'account-a/file.jpg');
-    expect(understanding.extract).toHaveBeenCalledWith({ bytes, mediaType: 'image/jpeg' }, { cloudDataConsent: true });
-    expect(repository.replaceReceiptExtraction).toHaveBeenCalledWith('account-a', 'account-a', 'receipt-1', expect.objectContaining({ extraction, amount: '3' }));
+    expect(understanding.extract).toHaveBeenCalledWith({ bytes, mediaType: 'image/jpeg' }, { cloudDataConsent: true, categories: ['Groceries', 'Fuel'] });
+    expect(repository.replaceReceiptExtraction).toHaveBeenCalledWith('account-a', 'account-a', 'receipt-1', expect.objectContaining({ extraction, amount: '3', category: 'Groceries', items: expect.arrayContaining([expect.objectContaining({ categoryId: 'category-groceries' })]) }));
     expect(repository.createDraft).not.toHaveBeenCalled();
     expect(result.draft.id).toBe('draft-1');
     expect(result.receipt.id).toBe('receipt-1');
@@ -110,6 +122,19 @@ describe('receipt intelligence application', () => {
     expect(storage.put).not.toHaveBeenCalled();
   });
 
+  it('maps content category suggestions only to active categories owned by the account', async () => {
+    const { app, repository, understanding } = setup();
+    const foreignSuggestion = { ...extraction.items[0], suggestedCategory: field('Construction') };
+    const mixed = { ...extraction, items: [extraction.items[0], foreignSuggestion] };
+    understanding.extract.mockResolvedValue({ extraction: mixed, provider: 'test', model: 'vision' });
+    const result = await app.extract(context, bytes, 'image/jpeg', true);
+    const proposal = repository.createDraft.mock.calls[0][2];
+    expect(proposal.category).toBe('Groceries');
+    expect(proposal.items.map((item: any) => item.categoryId)).toEqual(['category-groceries', null]);
+    expect(proposal.receipts[0].extraction.items.map((item: any) => item.suggestedCategory.value)).toEqual(['Groceries', null]);
+    expect(result.draft.status).toBe('proposed');
+  });
+
   it('cleans up the private image if transactional draft persistence fails', async () => {
     const { app, repository, storage } = setup();
     repository.createDraft.mockRejectedValue(new Error('database unavailable'));
@@ -133,5 +158,20 @@ describe('receipt intelligence application', () => {
       description: 'Lidl', items: [], itemizationReviewed: true, totalOnly: false, adjustments: [],
     })).rejects.toThrow(/total-only explicitly/);
     expect(repository.updateDraft).not.toHaveBeenCalled();
+  });
+
+  it('returns a server-calculated reconciliation for the user-reviewed total and signed discount', async () => {
+    const { app, repository } = setup();
+    const reviewItems = [{ description: 'Basket', productCode: null, quantity: '1', unit: 'basket', unitPrice: '73.10', discount: '0', tax: '0', lineTotal: '73.10', currency: 'EUR', sourceReceiptId: 'receipt-1', normalizedDescription: null, packaging: null, taxIncluded: true, categoryId: null, extractionProvenance: null }];
+    repository.updateDraft.mockResolvedValue({
+      id: 'draft-1', status: 'needs_review', amount: '70.54', currency: 'EUR', receipts: [{ ...metadata(), reviewedTotal: '70.54', reviewedCurrency: 'EUR', extraction: { ...extraction, total: field('3') } }],
+    } as any);
+    const result = await app.reviewDraft(context, 'draft-1', {
+      date: '2026-10-28', amount: '70.54', currency: 'EUR', merchantName: 'Lidl', category: 'Groceries', categoryId: null,
+      description: 'Lidl', items: reviewItems, itemizationReviewed: true, totalOnly: false,
+      adjustments: [{ label: 'Discount', amount: '2.56', signedAmount: '-2.56', kind: 'discount', includedInTotal: true, includedInLineTotal: false }],
+    });
+    expect(result?.reconciliation).toMatchObject({ matched: true, itemTotal: '70.54', total: '70.54', adjustmentTotal: '-2.56', difference: '0' });
+    expect(repository.updateDraft).toHaveBeenCalledWith('account-a', 'account-a', 'draft-1', expect.objectContaining({ amount: '70.54' }));
   });
 });

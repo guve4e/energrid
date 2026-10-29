@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { assertNewExpenseCurrency, normalizeCurrency, validateDraftProposal, validateExpenseItem } from '../domain/expense-rules';
-import { compareDecimal, financeDecimal } from '../domain/decimal';
-import { reconcileReceiptExtraction, validateReceiptExtraction } from '../domain/receipt-extraction';
+import { addDecimal, compareDecimal, financeDecimal } from '../domain/decimal';
+import { reconcileReceiptExtraction, reconcileReceiptReview, validateReceiptExtraction } from '../domain/receipt-extraction';
 import type { ExpenseDraftProposal, ExpenseRecord, FinanceActorContext, ReceiptMetadata } from '../domain/personal-finance.types';
 import type { DocumentUnderstandingPort } from './ports/document-understanding.port';
 import type { PersonalFinanceRepository, ReceiptReextractionWrite } from './ports/personal-finance.repository';
@@ -15,6 +15,27 @@ export class ReceiptIntelligenceApplication {
     private readonly understanding: DocumentUnderstandingPort,
     private readonly storage: PrivateReceiptStoragePort,
   ) {}
+
+  async getDraft(context: FinanceActorContext, draftId: string) {
+    requireContext(context);
+    const draft = await this.repository.getDraft(context.accountId, draftId);
+    if (!draft) return null;
+    const receipt = draft.receipts.find((candidate) => candidate.extraction);
+    if (!receipt?.extraction || receipt.reviewedAsTotalOnly) return { draft, reconciliation: null };
+    if (receipt.userReviewedAt && receipt.reviewedTotal && receipt.reviewedCurrency) {
+      const items = draft.items.filter((item) => item.sourceReceiptId === receipt.id);
+      return {
+        draft,
+        reconciliation: reconcileReceiptReview(receipt.extraction, {
+          amount: receipt.reviewedTotal,
+          currency: receipt.reviewedCurrency,
+          items,
+          adjustments: receipt.reviewedAdjustments ?? receipt.extraction.adjustments,
+        }),
+      };
+    }
+    return { draft, reconciliation: reconcileReceiptExtraction(receipt.extraction) };
+  }
 
   async extract(context: FinanceActorContext, bytes: Uint8Array, mediaType: string, cloudDataConsent: boolean) {
     requireContext(context);
@@ -30,9 +51,11 @@ export class ReceiptIntelligenceApplication {
       return { duplicate: true, receipt: duplicate, draft, possibleMatches: [] as ExpenseRecord[] };
     }
 
-    const result = await this.understanding.extract({ bytes, mediaType: verifiedType }, { cloudDataConsent });
-    const modelItemCount = Array.isArray((result.extraction as any)?.items) ? (result.extraction as any).items.length : 0;
-    const extraction = validateReceiptExtraction(result.extraction);
+    const categories = await this.repository.listCategories(context.accountId);
+    const result = await this.understanding.extract({ bytes, mediaType: verifiedType }, { cloudDataConsent, categories: categories.map(({ name }) => name) });
+    const modelItemCount = extractionPurchaseCount(result.extraction);
+    const categorized = categorizeExtraction(validateReceiptExtraction(result.extraction), categories);
+    const extraction = categorized.extraction;
     const reconciliation = reconcileReceiptExtraction(extraction);
     const currency = extraction.currency.value ? normalizeCurrency(extraction.currency.value) : null;
     const amount = extraction.total.value;
@@ -47,8 +70,8 @@ export class ReceiptIntelligenceApplication {
     const sourceId = `receipt:sha256:${contentHash}`;
     const proposal: ExpenseDraftProposal = validateDraftProposal({
       date: extraction.date.value, amount, currency, merchantName: extraction.merchant.value,
-      category: null, description: extraction.merchant.value, tags: [],
-      items: toCompleteItems(extraction, currency ?? 'EUR', contentHash), receipts: [metadata],
+      category: categorized.category, description: extraction.merchant.value, tags: [],
+      items: toCompleteItems(extraction, currency ?? 'EUR', contentHash, categories), receipts: [metadata],
       sourceKind: 'receipt', sourceId, extractionProvider: result.provider, extractionModel: result.model,
     });
     try {
@@ -79,12 +102,14 @@ export class ReceiptIntelligenceApplication {
     const draft = await this.repository.getDraft(context.accountId, existing.draftId);
     if (!draft || !['proposed', 'needs_review'].includes(draft.status)) throw new Error('Only an active receipt draft can be re-extracted');
     const bytes = await this.storage.get(context.accountId, existing.storageKey);
+    const categories = await this.repository.listCategories(context.accountId);
     const result = await this.understanding.extract(
       { bytes, mediaType: existing.mediaType as 'image/jpeg' | 'image/png' },
-      { cloudDataConsent: true },
+      { cloudDataConsent: true, categories: categories.map(({ name }) => name) },
     );
-    const modelItemCount = Array.isArray((result.extraction as any)?.items) ? (result.extraction as any).items.length : 0;
-    const extraction = validateReceiptExtraction(result.extraction);
+    const modelItemCount = extractionPurchaseCount(result.extraction);
+    const categorized = categorizeExtraction(validateReceiptExtraction(result.extraction), categories);
+    const extraction = categorized.extraction;
     const reconciliation = reconcileReceiptExtraction(extraction);
     const currency = extraction.currency.value ? normalizeCurrency(extraction.currency.value) : null;
     if (currency && extraction.total.value) assertNewExpenseCurrency(currency);
@@ -94,7 +119,8 @@ export class ReceiptIntelligenceApplication {
       parserProvider: result.provider, parserModel: result.model,
       date: extraction.date.value, amount: extraction.total.value, currency,
       merchantName: extraction.merchant.value,
-      items: toCompleteItems(extraction, currency ?? 'EUR', existing.contentHash),
+      category: categorized.category,
+      items: toCompleteItems(extraction, currency ?? 'EUR', existing.contentHash, categories),
     };
     const updated = await this.repository.replaceReceiptExtraction(context.accountId, context.actorId, receiptId, write);
     if (!updated) throw new Error('Receipt changed or was reviewed while extraction was running; no draft changes were made');
@@ -147,14 +173,23 @@ export class ReceiptIntelligenceApplication {
         if (!adjustment || typeof adjustment.label !== 'string' || !['tax', 'discount', 'deposit', 'return', 'rounding', 'other'].includes(adjustment.kind)) throw new Error('Receipt adjustment is invalid');
         const amount = adjustment.amount === null ? null : financeDecimal(adjustment.amount);
         if (amount !== null && adjustment.kind !== 'rounding' && compareDecimal(amount, '0') < 0) throw new Error('Receipt adjustment amounts must be nonnegative');
-        return { ...adjustment, label: adjustment.label.trim().slice(0, 160), amount };
+        const signedAmount = adjustment.signedAmount === undefined || adjustment.signedAmount === null ? adjustment.signedAmount : financeDecimal(adjustment.signedAmount);
+        if (adjustment.includedInLineTotal !== undefined && adjustment.includedInLineTotal !== null && typeof adjustment.includedInLineTotal !== 'boolean') throw new Error('Receipt adjustment line inclusion is invalid');
+        if (adjustment.relatedPurchaseIndex !== undefined && adjustment.relatedPurchaseIndex !== null && (!Number.isSafeInteger(adjustment.relatedPurchaseIndex) || adjustment.relatedPurchaseIndex < 0)) throw new Error('Receipt adjustment purchase reference is invalid');
+        return { ...adjustment, label: adjustment.label.trim().slice(0, 160), amount, signedAmount };
       }),
     };
     if (!normalized.itemizationReviewed) throw new Error('Review the extracted itemization before continuing');
     if (normalized.totalOnly && normalized.items.length > 0) throw new Error('Total-only review cannot include item lines');
     if (!normalized.totalOnly && normalized.items.length === 0) throw new Error('Choose total-only explicitly when saving a receipt without item lines');
     if (normalized.currency) assertNewExpenseCurrency(normalized.currency);
-    return this.repository.updateDraft(context.accountId, context.actorId, draftId, normalized);
+    const updated = await this.repository.updateDraft(context.accountId, context.actorId, draftId, normalized);
+    if (!updated) return null;
+    const receipt = updated.receipts.find((candidate) => candidate.extraction);
+    const reconciliation = receipt?.extraction && !normalized.totalOnly && normalized.amount && normalized.currency
+      ? reconcileReceiptReview(receipt.extraction, { amount: normalized.amount, currency: normalized.currency, items: normalized.items, adjustments: normalized.adjustments })
+      : null;
+    return { draft: updated, reconciliation };
   }
 
   private async findPossibleMatches(accountId: string, extraction: ReturnType<typeof validateReceiptExtraction>) {
@@ -188,14 +223,43 @@ function diagnostics(
   };
 }
 
+function extractionPurchaseCount(value: unknown): number {
+  if (!value || typeof value !== 'object') return 0;
+  const candidate = value as { items?: unknown[]; entries?: Array<{ kind?: { value?: unknown } }> };
+  if (Array.isArray(candidate.entries)) return candidate.entries.filter((entry) => entry?.kind?.value === 'purchase').length;
+  return Array.isArray(candidate.items) ? candidate.items.length : 0;
+}
+
 function isCompleteExtractedItem(item: ReturnType<typeof validateReceiptExtraction>['items'][number]) {
   return !!item.originalDescription.value && !!item.quantity.value && !!item.unit.value &&
     item.unitPrice.value !== null && item.lineTotal.value !== null && item.discount.value !== null &&
     item.tax.value !== null && item.taxIncluded.value !== null;
 }
 
-function toCompleteItems(extraction: ReturnType<typeof validateReceiptExtraction>, currency: string, contentHash: string) {
+function categorizeExtraction(
+  extraction: ReturnType<typeof validateReceiptExtraction>,
+  categories: Awaited<ReturnType<PersonalFinanceRepository['listCategories']>>,
+) {
+  const byName = new Map(categories.filter((category) => category.status === 'active').map((category) => [category.name.normalize('NFKC').trim().toLowerCase(), category]));
+  const totals = new Map<string, { name: string; total: string; firstIndex: number }>();
+  const items = extraction.items.map((item, index) => {
+    const suggested = item.suggestedCategory.value?.normalize('NFKC').trim().toLowerCase();
+    const category = suggested ? byName.get(suggested) : undefined;
+    if (!category) return { ...item, suggestedCategory: { ...item.suggestedCategory, value: null } };
+    if (item.lineTotal.value) {
+      const current = totals.get(category.id) ?? { name: category.name, total: '0', firstIndex: index };
+      try { current.total = addDecimal(current.total, item.lineTotal.value); } catch { /* Invalid item amounts remain subject to normal receipt validation. */ }
+      totals.set(category.id, current);
+    }
+    return { ...item, suggestedCategory: { ...item.suggestedCategory, value: category.name } };
+  });
+  const category = [...totals.values()].sort((a, b) => compareDecimal(b.total, a.total) || a.firstIndex - b.firstIndex)[0]?.name ?? null;
+  return { extraction: { ...extraction, items }, category };
+}
+
+function toCompleteItems(extraction: ReturnType<typeof validateReceiptExtraction>, currency: string, contentHash: string, categories: Awaited<ReturnType<PersonalFinanceRepository['listCategories']>>) {
   if (!extraction.currency.value || extraction.currency.value.toUpperCase() !== currency.toUpperCase()) return [];
+  const byName = new Map(categories.filter((category) => category.status === 'active').map((category) => [category.name.normalize('NFKC').trim().toLowerCase(), category.id]));
   const mapped = [];
   for (const item of extraction.items) {
     const description = item.originalDescription.value;
@@ -213,7 +277,8 @@ function toCompleteItems(extraction: ReturnType<typeof validateReceiptExtraction
         lineTotal, currency, sourceReceiptId: null,
         normalizedDescription: item.normalizedDescription.value,
         packaging: item.packaging.value,
-        extractionProvenance: { provider: 'openai', schemaVersion: 'receipt-extraction-v1', sourceContentHash: contentHash, confidence: item },
+        categoryId: item.suggestedCategory.value ? byName.get(item.suggestedCategory.value.normalize('NFKC').trim().toLowerCase()) ?? null : null,
+        extractionProvenance: { provider: 'openai', schemaVersion: extraction.schemaVersion, sourceContentHash: contentHash, confidence: item },
       }));
     } catch { /* Keep extracted values in receipt provenance; never bend them to fit finance rules. */ }
   }
