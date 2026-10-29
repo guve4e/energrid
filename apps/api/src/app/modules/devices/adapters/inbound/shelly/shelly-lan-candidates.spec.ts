@@ -68,6 +68,27 @@ describe('Shelly LAN onboarding candidates', () => {
       observations: device.observations?.filter(item => item.value !== 'switch:1'),
     }).map(item => item.id)).not.toContain(`${device.id}:switch:1`);
   });
+  it('uses the newest identity and component RPC evidence from oldest-first Discovery Memory history', () => {
+    const oldAt = '2026-10-29T05:00:00.000Z';
+    const freshAt = '2026-10-29T05:05:00.000Z';
+    const historical: NetworkDiscoveredDevice = {
+      ...device,
+      discoveredAt: freshAt,
+      components: [{ component: 'em1:0', channel: 0 }],
+      observations: [
+        { source: 'http_rpc', attribute: 'shelly.device_id', value: device.id, observedAt: oldAt },
+        { source: 'http_rpc', attribute: 'shelly.component_status', value: 'em1:0', observedAt: oldAt, method: 'EM1.GetStatus?id=0' },
+        { source: 'http_rpc', attribute: 'shelly.device_id', value: device.id, observedAt: freshAt },
+        { source: 'http_rpc', attribute: 'shelly.component_status', value: 'em1:0', observedAt: freshAt, method: 'EM1.GetStatus?id=0' },
+      ],
+    };
+
+    expect(shellyLanCandidates(historical)[0].metadata).toMatchObject({
+      identityVerifiedAt: freshAt,
+      componentVerifiedAt: freshAt,
+      componentVerificationMethod: 'EM1.GetStatus?id=0',
+    });
+  });
   it('requires an exact, timestamped RPC identity and rejects identity conflicts', () => {
     expect(shellyLanCandidates({
       ...device,

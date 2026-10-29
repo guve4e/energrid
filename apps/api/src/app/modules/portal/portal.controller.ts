@@ -321,7 +321,11 @@ export class PortalController {
     const networkHistory = await this.discoveryMemory.listIdentityEvidence(ownership).catch(() => [])
     // Discovery memory is durable across API restarts; rebuild eligible
     // pending candidates from exact, site-owned physical identity evidence.
-    for (const record of networkHistory) {
+    // listIdentityEvidence is newest-first. Replaying it in that order lets an
+    // older endpoint alias overwrite the same pending component last, which
+    // can hide fresh RPC evidence and keep Portal enrollment disabled. Restore
+    // oldest-first so the latest verified record wins in the registry.
+    for (const record of [...networkHistory].reverse()) {
       const energridCandidate = energridDiscoveryCandidate(record.device)
       if (energridCandidate) this.registerOwnedDiscoveryCandidate(energridCandidate, ownership, site.name)
       for (const shellyCandidate of shellyLanCandidates(record.device)) {

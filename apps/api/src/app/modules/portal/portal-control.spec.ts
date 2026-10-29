@@ -270,6 +270,73 @@ describe('portal control configuration authorization', () => {
     expect(otherState.devices).toEqual([]);
   });
 
+  it('keeps the newest verified Shelly scan evidence when older discovery aliases are replayed', async () => {
+    const physicalId = 'shellyproem50-8c4f00dbd258';
+    const component = { component: 'em1:0', channel: 0 };
+    const oldAt = new Date(Date.now() - 40 * 60_000).toISOString();
+    const freshAt = new Date().toISOString();
+    const record = (observedAt: string, identity: string) => ({
+      schemaVersion: 2,
+      ownership: { tenantId: 'tenant-demo', siteId: 'site-home' },
+      identity,
+      firstSeenAt: oldAt,
+      lastSeenAt: observedAt,
+      lastScanId: `scan-${observedAt}`,
+      device: {
+        id: physicalId, ipAddress: '192.168.7.54', vendor: 'Shelly', generation: 2,
+        status: 'online', protocol: 'http', networkZoneId: 'eero-lan', networkZoneName: 'Eero LAN',
+        confidence: 0.9, discoveredAt: observedAt,
+        reason: 'Shelly HTTP API responded on the local network.', components: [component],
+        observations: [
+          { source: 'http_rpc', attribute: 'shelly.device_id', value: physicalId, observedAt },
+          { source: 'http_rpc', attribute: 'shelly.component_status', value: 'em1:0', observedAt, method: 'EM1.GetStatus?id=0' },
+        ],
+      },
+    });
+    // Discovery Memory returns records newest-first. Replaying this array as-is
+    // previously let the older entry overwrite the fresh candidate metadata.
+    const history = [record(freshAt, 'latest-endpoint'), record(oldAt, 'historical-endpoint')];
+    const candidateConfigs = new Map<string, any>();
+    const registry = {
+      registerDiscoveredDevice: jest.fn(config => { candidateConfigs.set(config.id, config); return true; }),
+      getSnapshot: () => ({
+        tenant: { id: 'tenant-demo' }, site: { id: 'site-home', name: 'Home' },
+        devices: [...candidateConfigs.values()].map(config => ({
+          ...config, tenantId: 'tenant-demo', siteId: 'site-home', siteName: 'Home', zoneId: 'whole-home', zoneName: 'Whole home',
+          trustStatus: 'discovered', kind: 'physical',
+          capabilities: config.capabilities.map((kind: string) => ({ kind, actions: ['read'] })),
+          adapter: { protocol: config.protocol, target: config.target, driver: config.driver },
+          state: { values: {}, observedAt: null, source: 'registry', status: 'unknown' },
+        })),
+      }),
+    };
+    const controller = new PortalController(
+      { getState: () => ({ devices: [] }) } as never,
+      { getLastScan: () => [] } as never, {} as never, {} as never, {} as never,
+      registry as never, {} as never, {} as never, {} as never, {} as never,
+      { listIdentityEvidence: jest.fn().mockResolvedValue(history) } as never,
+      undefined, undefined,
+      { list: jest.fn().mockResolvedValue([]), listRecentMqttPublisherEvidence: jest.fn().mockResolvedValue([]) } as never,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      { list: jest.fn().mockResolvedValue([]) } as never,
+    );
+
+    const result = await controller.getState({
+      method: 'GET', url: '/', headers: {},
+      user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 },
+    });
+    const candidate = result.devices.find((item: any) => item.id === `${physicalId}:em1:0`);
+    expect(candidate).toMatchObject({
+      trustStatus: 'discovered',
+      metadata: {
+        identityEvidenceSource: 'verified_shelly_http_rpc',
+        componentEvidenceSource: 'verified_shelly_component_status_rpc',
+        identityVerifiedAt: freshAt,
+        componentVerifiedAt: freshAt,
+      },
+    });
+  });
+
   it('projects a pending Shelly candidate from scoped inventory plus an exact current LAN protocol match', async () => {
     const candidate = {
       id: 'shellyproem50-8c4f00dbd258:em1:0', tenantId: 'tenant-demo', siteId: 'site-home',

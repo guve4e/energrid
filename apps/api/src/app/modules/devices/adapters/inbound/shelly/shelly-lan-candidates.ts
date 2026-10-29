@@ -5,12 +5,12 @@ import type { DiscoveredDeviceConfig } from '../../../device-registry.service';
 export function shellyLanCandidates(
   device: NetworkDiscoveredDevice,
 ): DiscoveredDeviceConfig[] {
-  const identityVerified = device.observations?.some(observation =>
+  const identityObservation = latestObservation(device.observations?.filter(observation =>
     ((observation.source === 'http_rpc' && observation.attribute === 'shelly.device_id') ||
       (observation.source === 'http_identity' && observation.attribute === 'identity.device_id')) &&
-    observation.value === device.id &&
-    Number.isFinite(Date.parse(observation.observedAt)),
-  );
+    observation.value === device.id,
+  ));
+  const identityVerified = !!identityObservation;
   if (
     device.vendor !== 'Shelly' ||
     device.status !== 'online' ||
@@ -39,13 +39,13 @@ export function shellyLanCandidates(
     const relay = component.startsWith('switch:');
     const statusMethod = relay ? 'Switch' : 'EM1';
     const id = `${device.id}:${component}`;
-    const componentObservation = device.observations?.find(observation =>
+    const componentObservation = latestObservation(device.observations?.filter(observation =>
       ['http_rpc', 'site_local_http_rpc'].includes(observation.source) &&
       observation.attribute === 'shelly.component_status' &&
       observation.value === component &&
       typeof observation.method === 'string' &&
       typeof observation.observedAt === 'string',
-    );
+    ));
     // The component must have been confirmed by its own read-only status RPC.
     // A component list or an MQTT claim alone is not onboarding evidence.
     if (!componentObservation) continue;
@@ -82,7 +82,7 @@ export function shellyLanCandidates(
         ipAddress: device.ipAddress,
         identityEvidenceSource: siteLocal ? 'verified_site_local_shelly_rpc' : 'verified_shelly_http_rpc',
         identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo',
-        identityVerifiedAt: device.discoveredAt,
+        identityVerifiedAt: identityObservation!.observedAt,
         componentEvidenceSource: siteLocal ? 'verified_site_local_shelly_rpc' : 'verified_shelly_component_status_rpc',
         componentVerificationMethod,
         componentVerifiedAt,
@@ -100,4 +100,10 @@ export function shellyLanCandidates(
     });
   }
   return [...candidates.values()];
+}
+
+function latestObservation<T extends { observedAt: string }>(observations: T[] | undefined): T | undefined {
+  return observations
+    ?.filter(observation => Number.isFinite(Date.parse(observation.observedAt)))
+    .sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt))[0];
 }
