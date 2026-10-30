@@ -25,9 +25,9 @@ echo "Fetching origin/main..."
 git -C "$repo_root" fetch origin main
 head_commit="$(git -C "$repo_root" rev-parse HEAD)"
 remote_commit="$(git -C "$repo_root" rev-parse origin/main)"
-if [[ "$head_commit" != "$remote_commit" ]]; then
-  if [[ -n "$(git -C "$repo_root" status --porcelain)" ]]; then
-    echo "Local edits are present and origin/main moved. Commit or stash them, pull, then rerun." >&2
+if ! git -C "$repo_root" merge-base --is-ancestor "$remote_commit" "$head_commit"; then
+  if ! git -C "$repo_root" diff --quiet || ! git -C "$repo_root" diff --cached --quiet; then
+    echo "Tracked local edits are present and origin/main moved. Commit or preserve them, fast-forward, then rerun." >&2
     exit 1
   fi
   git -C "$repo_root" merge --ff-only origin/main
