@@ -67,7 +67,26 @@ if [[ -L "$root/current" ]]; then
     echo "Bootstrap already configured for the verified shared release path; root helper updated idempotently."
     exit 0
   fi
-  die "a current-release layout exists but does not match this bootstrap; inspect before modifying it."
+  current_id="$(basename "$current_target")"
+  legacy_portal="$(readlink -f "$root/dist/apps/portal")"
+  legacy_core="$(readlink -f "$root/dist/apps/core")"
+  legacy_root_count="$(grep -cE '^[[:space:]]*root[[:space:]]+/var/www/energrid/dist/apps/portal;' "$nginx_conf" || true)"
+  if [[ "$current_id" =~ ^[a-f0-9]{12}-[0-9]{8}T[0-9]{6}Z$ &&
+        "$current_target" == "$releases/$current_id" &&
+        "$legacy_portal" == "$current_target/dist/apps/portal" &&
+        "$legacy_core" == "$current_target/dist/apps/core" &&
+        "$current_api_exec" == *"$current_id/dist/api/main.js"* &&
+        "$current_api_exec" != *"/var/www/energrid/current/dist/api/main.js"* &&
+        "$current_core_exec" == *"/var/www/energrid/dist/apps/core/main.js"* &&
+        "$stable_root_count" == 0 && "$legacy_root_count" == 1 &&
+        ! -e "$sudoers_file" && ! -L "$sudoers_file" &&
+        ! -e "$core_dropin" && ! -L "$core_dropin" &&
+        ! -e "$release_env" && ! -L "$release_env" &&
+        ! -e "$state/deploy-user" && ! -L "$state/deploy-user" ]]; then
+    echo "Recognized the prior bootstrap rollback state; existing services still use the original release. Continuing safely."
+  else
+    die "a current-release layout exists but differs from the verified prior-release rollback state; refusing changes."
+  fi
 fi
 
 [[ -f "$api_unit" && ! -L "$api_unit" ]] || die "expected API environment drop-in is missing."
