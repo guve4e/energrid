@@ -113,7 +113,7 @@ echo "Staging release on $target..."
 ssh "${ssh_args[@]}" "$target" "mkdir '$remote_release'"
 scp "${ssh_args[@]}" "$archive" "$target:/tmp/energrid-release-$release.tar.gz"
 ssh "${ssh_args[@]}" "$target" \
-  "printf '%s  %s\\n' '$archive_sha' '/tmp/energrid-release-$release.tar.gz' | sha256sum -c - && tar -xzf '/tmp/energrid-release-$release.tar.gz' -C '$remote_release' && rm -f '/tmp/energrid-release-$release.tar.gz' && cd '$remote_release' && pnpm install --frozen-lockfile"
+  "printf '%s  %s\\n' '$archive_sha' '/tmp/energrid-release-$release.tar.gz' | sha256sum -c - && tar -xzf '/tmp/energrid-release-$release.tar.gz' -C '$remote_release' && chmod 0755 '$remote_release' && rm -f '/tmp/energrid-release-$release.tar.gz' && cd '$remote_release' && pnpm install --frozen-lockfile"
 
 echo "Requesting passwordless activation through the fixed root-owned helper..."
 ssh "${ssh_args[@]}" "$target" \

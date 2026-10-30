@@ -29,6 +29,7 @@ test('normal deployment packages committed main and uses strict noninteractive S
   assertIncludes(deploy, 'StrictHostKeyChecking=yes');
   assertIncludes(deploy, 'BatchMode=yes');
   assertIncludes(deploy, 'sha256sum -c -');
+  assertIncludes(deploy, "chmod 0755 '$remote_release'");
   assertIncludes(deploy, 'sudo -n /usr/local/sbin/energrid-deploy-activate');
   assertIncludes(deploy, 'release-manifest.txt');
 });
