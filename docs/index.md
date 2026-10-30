@@ -32,6 +32,7 @@ These documents predate the handbook and remain useful for narrower topics. Read
 
 ### Portal and deployment
 
+- [One-command Pi deployment](one-command-pi-deployment.md)
 - [Portal authentication](portal-authentication.md)
 - [Personal expenses](personal-expenses.md): account-scoped spending, local persistence and legacy JSON import.
 - [Portal Cloudflare / Pi deployment](portal-cloudflare-pi-deploy.md)

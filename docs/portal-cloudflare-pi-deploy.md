@@ -55,21 +55,13 @@ The core app can run privately when needed:
 energrid-core.service -> node /var/www/energrid/dist/apps/core/main.js, port 3102
 ```
 
-## Build On The Pi
+## Application Releases
 
-```sh
-cd /var/www/energrid
-git pull
-pnpm install --frozen-lockfile
-pnpm nx build api --skip-nx-cache
-VITE_BACKEND_LABEL=same-origin pnpm nx build portal --skip-nx-cache
-```
-
-Build core too when you want the private core service running:
-
-```sh
-pnpm nx build core --skip-nx-cache
-```
+Use the versioned deployment procedure in [One-command Pi deployment](one-command-pi-deployment.md).
+The Pi runs the API and Core as systemd services and serves the static Portal
+through Nginx. Mosquitto is separate and is not restarted by application
+releases. Do not build directly in a live service directory or run database
+migrations as part of an application deployment.
 
 ## Install Nginx Config
 
