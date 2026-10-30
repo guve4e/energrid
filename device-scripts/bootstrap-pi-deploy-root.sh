@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+set -euo pipefail
 
 [[ "${EUID:-$(id -u)}" == 0 ]] || { echo "Run this bootstrap as root." >&2; exit 77; }
 deploy_user="${1:-}"
@@ -219,11 +219,23 @@ nginx -t
 systemctl restart energrid-core energrid-api
 systemctl reload nginx
 
-api_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 4 http://127.0.0.1:3000/portal/state 2>/dev/null)"
-core_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 4 http://127.0.0.1:3102/core/weather/performance 2>/dev/null)"
-portal_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 4 http://127.0.0.1/ 2>/dev/null)"
-[[ "$api_status" == 200 || "$api_status" == 401 ]] || die "API health check failed after stable-path configuration."
-[[ "$core_status" == 2* && "$portal_status" == 2* ]] || die "Core/Portal health check failed after stable-path configuration."
+echo "Waiting up to 60 seconds for API, Core and Portal readiness..."
+health_deadline=$((SECONDS + 60))
+api_status=000
+core_status=000
+portal_status=000
+services_ready=0
+while (( SECONDS < health_deadline )); do
+  api_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --connect-timeout 1 --max-time 2 http://127.0.0.1:3000/portal/state 2>/dev/null || true)"
+  core_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --connect-timeout 1 --max-time 2 http://127.0.0.1:3102/core/weather/performance 2>/dev/null || true)"
+  portal_status="$(curl --silent --output /dev/null --write-out '%{http_code}' --connect-timeout 1 --max-time 2 http://127.0.0.1/ 2>/dev/null || true)"
+  if [[ "$api_status" == 200 || "$api_status" == 401 ]] && [[ "$core_status" == 2* ]] && [[ "$portal_status" == 2* ]]; then
+    services_ready=1
+    break
+  fi
+  sleep 1
+done
+[[ "$services_ready" == 1 ]] || die "health check timed out after 60 seconds (API=$api_status Core=$core_status Portal=$portal_status)."
 [[ "$(readlink -f "$root/current")" == "$current_release" ]] || die "shared current link does not resolve to the prior release."
 [[ "$(systemctl show energrid-api --property=ExecStart --value)" == *"/var/www/energrid/current/dist/api/main.js"* ]] || die "API unit does not use the shared current link."
 [[ "$(systemctl show energrid-core --property=ExecStart --value)" == *"/var/www/energrid/current/dist/apps/core/main.js"* ]] || die "Core unit does not use the shared current link."

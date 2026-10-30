@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+set -euo pipefail
 
 # Installed once as root at /usr/local/sbin/energrid-deploy-activate.
 # The deploy account may invoke this with no arguments only.

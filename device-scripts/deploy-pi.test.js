@@ -67,6 +67,10 @@ test('one-time bootstrap clearly discloses its controlled service restart', () =
     rootBootstrap.indexOf('core_tmp="$(mktemp "${core_dropin}.bootstrap.XXXXXX")"'));
   assertIncludes(rootBootstrap, 'existing activation helper does not match this verified bootstrap payload.');
   assertIncludes(rootBootstrap, 'Bootstrap failed at line $failed_line (status $rc): $failed_command');
+  assertIncludes(rootBootstrap, 'health_deadline=$((SECONDS + 60))');
+  assertIncludes(rootBootstrap, '|| true)"');
+  assert.match(rootBootstrap, /set -euo pipefail/);
+  assert.doesNotMatch(source['deploy-pi-activate.sh'], /set -Eeuo pipefail/);
   assert.ok(rootBootstrap.indexOf("trap 'rollback_bootstrap") < rootBootstrap.indexOf('mv -f "$helper_tmp" "$helper_dest"'));
   assertIncludes(rootBootstrap, 'Recognized the prior bootstrap rollback state; existing services still use the original release. Continuing safely.');
 });
