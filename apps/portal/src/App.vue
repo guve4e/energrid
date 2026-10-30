@@ -30,7 +30,7 @@ import {
 } from './voice-microphone';
 import { closeCompletedTurnSocket } from './voice-turn-socket';
 import { diagnoseVoicePerformance } from './voice-performance-diagnosis';
-import { filterInventoryDevices, inventoryConnectionStatus, isExampleDevice, needsControlSetup } from './components/devices/device-inventory';
+import { filterInventoryDevices, formatDeviceObservationTime, inventoryConnectionStatus, isExampleDevice, needsControlSetup } from './components/devices/device-inventory';
 import { matchNetworkDevice, hasVerifiedEnrolledNetworkIdentity } from './components/devices/device-network';
 import { canSwitchDevice, controlRouteLabel } from './components/devices/device-control';
 import type { DeviceControlState } from '@energrid/domain-devices';
@@ -3026,7 +3026,7 @@ function deviceValuePreview(device: PortalDevice) {
 
 function deviceStateDetail(device: PortalDevice) {
   const freshness = inventoryConnectionStatus(device);
-  if (freshness === 'stale') return 'Last observation is stale · current reachability unknown';
+  if (freshness === 'stale') return `Stale · Last observed ${formatDeviceObservationTime(device.state.observedAt)} · current reachability unknown`;
   if (freshness === 'unknown' && device.state.observedAt)
     return 'Current reachability unknown';
   const command = device.state.command;

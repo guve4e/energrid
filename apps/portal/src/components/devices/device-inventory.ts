@@ -33,6 +33,14 @@ export function inventoryConnectionStatus(device: Pick<InventoryDevice, 'state'>
   return freshness === 'fresh' ? 'online' : freshness;
 }
 
+export function formatDeviceObservationTime(value: string | null | undefined): string {
+  if (!value) return 'unknown';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
 export function isExampleDevice(device: ControlSetupDevice): boolean {
   return (
     device.metadata?.simulated === true ||

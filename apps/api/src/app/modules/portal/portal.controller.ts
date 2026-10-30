@@ -80,6 +80,7 @@ import type {
 } from '../devices/enrollment/physical-device-inventory.repository'
 import type { RegisteredDevice } from '../devices/device-registry.types'
 import { projectPendingDeviceIdentity } from './pending-device-identity.projection'
+import { projectDeviceSummaryObservation } from './portal-device-summary-observation'
 import { projectEnrollmentIdentityLinks } from './enrollment-identity-projection'
 import { findExactShellyInventoryAssignment } from './site-local-shelly-inventory-match'
 import { isNetworkObservationFresh } from '../devices/network-observation-freshness'
@@ -335,7 +336,22 @@ export class PortalController {
         this.registerOwnedDiscoveryCandidate(shellyCandidate, ownership, site.name)
       }
     }
-    const currentDevices = this.deviceRegistry.getSnapshot().devices ?? state.devices ?? []
+    const registryDevices = this.deviceRegistry.getSnapshot().devices ?? state.devices ?? []
+    // Registry state is process-local. After an API restart, restore only the
+    // existing authorized observation read model for enrolled devices whose
+    // summary has no state, while preserving the registry's connectivity
+    // status as-is.
+    const currentDevices = await Promise.all(registryDevices.map(async device => {
+      if (device.trustStatus !== 'approved' || device.kind !== 'physical' ||
+          device.tenantId !== ownership.tenantId || device.siteId !== ownership.siteId ||
+          device.state.observedAt !== null) return device
+      try {
+        const observation = await this.deviceMeasurements.current(ownership, device.id)
+        return projectDeviceSummaryObservation(device, observation)
+      } catch {
+        return device
+      }
+    }))
     const visibleCandidates = currentDevices.filter(device =>
       device.trustStatus === 'discovered' && device.tenantId === tenant.id && device.siteId === site.id,
     )

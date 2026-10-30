@@ -4,6 +4,7 @@ import {
   isExampleDevice,
   needsControlSetup,
   inventoryConnectionStatus,
+  formatDeviceObservationTime,
   type InventoryDevice,
   type InventoryFilters,
 } from './device-inventory';
@@ -41,6 +42,12 @@ const ready = {
   control: { status: 'ready' as const, binding: null, reason: 'Configured' },
 };
 describe('inventory filtering', () => {
+  it('formats the persisted observation timestamp for stale device summaries', () => {
+    const timestamp = '2026-10-28T19:09:00.000Z';
+    expect(formatDeviceObservationTime(timestamp)).toBe(
+      new Date(timestamp).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }),
+    );
+  });
   it('does not label a device offline without an observation', () => {
     const unknown = { ...relay, state: { status: 'offline', observedAt: null } };
     expect(inventoryConnectionStatus(unknown)).toBe('unknown');
