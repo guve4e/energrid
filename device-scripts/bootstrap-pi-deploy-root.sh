@@ -144,15 +144,21 @@ awk -v old='/var/www/energrid/dist/apps/portal' -v new='/var/www/energrid/curren
   "$backup_dir/nginx.conf" >"$nginx_tmp"
 chmod 0644 "$nginx_tmp"
 
+bootstrap_failure_handled=0
 rollback_bootstrap() {
-  local rc=$?
+  local rc="${1:-$?}"
+  local failed_line="${2:-unknown}"
+  local failed_command="${3:-unknown command}"
+  if (( bootstrap_failure_handled )); then exit "$rc"; fi
+  bootstrap_failure_handled=1
   trap - ERR
+  set +e +E
+  echo "Bootstrap failed at line $failed_line (status $rc): $failed_command" >&2
   if (( changed == 0 )); then
     rm -f "$helper_dest" "$helper_dest.new" "$api_tmp" "$core_tmp" "$nginx_tmp"
     exit "$rc"
   fi
-  set +e
-  echo "Bootstrap verification failed; restoring the prior paths and service configuration." >&2
+  echo "Restoring the prior paths and service configuration." >&2
   ln -s "$current_release" "$root/current.rollback-$$" && mv -Tf "$root/current.rollback-$$" "$root/current"
   install -o root -g root -m 0644 "$backup_dir/api-unit" "$api_unit"
   rm -f "$core_dropin"
@@ -169,7 +175,7 @@ rollback_bootstrap() {
   echo "Bootstrap rollback finished; API/Core/Nginx health should be rechecked."
   exit "$rc"
 }
-trap rollback_bootstrap ERR
+trap 'rollback_bootstrap "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
 helper_tmp="$helper_dest.new"
 install -o root -g root -m 0755 "$helper_source" "$helper_tmp"
