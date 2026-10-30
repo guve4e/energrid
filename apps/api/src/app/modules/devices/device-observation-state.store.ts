@@ -291,9 +291,12 @@ export class DeviceObservationStateStore {
       const partialCounterReset = !!(uptimeReset || sampleCountReset || sampleTimeReset) && !countersReset;
 
       if (previous) {
-        // Never infer a firmware boot from wall time. Reject discontinuities
-        // until the API host clock and monotonic clock agree again.
-        if (previous.apiUptimeMs !== undefined && wallClockJump(previous, apiUptimeMs, observedAt)) {
+        // An all-counter reset is direct firmware evidence of a new device
+        // boot. Evaluate it before host clock continuity: after a host reboot,
+        // os.uptime() restarts at zero, but that must not mask a confirmed
+        // device reboot or strand this source cursor indefinitely.
+        if (!countersReset && previous.apiUptimeMs !== undefined &&
+            wallClockJump(previous, apiUptimeMs, observedAt)) {
           throw new Error('source_sample_session_ambiguous');
         }
 

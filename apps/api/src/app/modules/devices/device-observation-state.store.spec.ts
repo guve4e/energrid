@@ -106,6 +106,25 @@ describe('Persistent Device Observation State', () => {
     expect(afterDeviceRestart).toContain('boot-1:sample-2-2000');
   });
 
+  it('recognizes a confirmed device reboot even when the host monotonic clock also reset', async () => {
+    const source = 'energrid-http-status';
+    const beforeDeviceReboot = await store.sourceSampleEvidenceId(scope, 'esp8266-device', source, {
+      uptimeMs: 173_788_347, sampleCount: 86_894, lastSampleUptimeMs: 173_786_000,
+      observedAt: '2026-10-29T12:00:00.000Z', apiUptimeMs: 172_800_000,
+    });
+
+    // The Mac restarted after the last cursor was stored, so os.uptime()
+    // restarted too. All three firmware counters reset together, which is
+    // stronger evidence of a new device boot than the host clock discontinuity.
+    const afterDeviceReboot = await store.sourceSampleEvidenceId(scope, 'esp8266-device', source, {
+      uptimeMs: 721_192, sampleCount: 361, lastSampleUptimeMs: 719_000,
+      observedAt: '2026-10-29T22:00:00.000Z', apiUptimeMs: 60_000,
+    });
+
+    expect(afterDeviceReboot).not.toBe(beforeDeviceReboot);
+    expect(afterDeviceReboot).toContain('boot-1:sample-361-719000');
+  });
+
   it('defers an ambiguous sample after a long interruption instead of inventing a boot session', async () => {
     const source = 'energrid-http-status';
     const first = await store.sourceSampleEvidenceId(scope, 'esp8266-device', source, {
