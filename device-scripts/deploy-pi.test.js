@@ -65,6 +65,8 @@ test('one-time bootstrap clearly discloses its controlled service restart', () =
   assertIncludes(rootBootstrap, 'rm -f "$helper_dest" "$helper_dest.new" "$api_tmp" "$core_tmp" "$nginx_tmp"');
   assert.ok(rootBootstrap.indexOf('install -d -o root -g root -m 0755 "$(dirname "$core_dropin")"') <
     rootBootstrap.indexOf('core_tmp="$(mktemp "${core_dropin}.bootstrap.XXXXXX")"'));
+  assertIncludes(rootBootstrap, 'existing activation helper does not match this verified bootstrap payload.');
+  assert.ok(rootBootstrap.indexOf('trap rollback_bootstrap ERR') < rootBootstrap.indexOf('mv -f "$helper_tmp" "$helper_dest"'));
 });
 
 test('bootstrap rejects an invalid target before changing anything', () => {

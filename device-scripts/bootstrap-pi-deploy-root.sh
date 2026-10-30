@@ -92,7 +92,12 @@ current_api_exec="$(systemctl show energrid-api --property=ExecStart --value)"
 root_count="$(grep -cE '^[[:space:]]*root[[:space:]]+/var/www/energrid/dist/apps/portal;' "$nginx_conf" || true)"
 [[ "$root_count" == 1 ]] || die "Nginx Portal root differs from the expected existing layout."
 [[ ! -e "$sudoers_file" && ! -L "$sudoers_file" ]] || die "sudoers file already exists; inspect it before bootstrapping."
-[[ ! -e "$helper_dest" && ! -L "$helper_dest" ]] || die "activation helper already exists outside the configured current-release layout; inspect before bootstrapping."
+if [[ -e "$helper_dest" || -L "$helper_dest" ]]; then
+  [[ -f "$helper_dest" && ! -L "$helper_dest" && "$(stat -c '%U:%G:%a' "$helper_dest")" == "root:root:755" ]] ||
+    die "existing activation helper has unexpected type, ownership or permissions."
+  [[ "$(sha256sum "$helper_dest" | awk '{print $1}')" == "$expected_helper_sha" ]] ||
+    die "existing activation helper does not match this verified bootstrap payload."
+fi
 if [[ -e "$release_env" || -L "$release_env" ]]; then
   [[ -f "$release_env" && ! -L "$release_env" ]] || die "release identity path exists but is not a regular file."
 fi
@@ -101,7 +106,7 @@ state=/var/lib/energrid-deploy
 install -d -o root -g root -m 0711 "$state"
 install -d -o "$deploy_user" -g "$(id -gn "$deploy_user")" -m 0700 "$state/request"
 install -d -o root -g root -m 0700 "$state/backups" "$backup_root"
-backup_dir="$backup_root/$(date -u +%Y%m%dT%H%M%SZ)"
+backup_dir="$backup_root/$(date -u +%Y%m%dT%H%M%SZ)-$$"
 mkdir -m 0700 "$backup_dir"
 install -o root -g root -m 0600 "$api_unit" "$backup_dir/api-unit"
 install -o root -g root -m 0600 "$nginx_conf" "$backup_dir/nginx.conf"
@@ -116,13 +121,6 @@ old_api_pid="$(systemctl show energrid-api --property=MainPID --value)"
 old_core_pid="$(systemctl show energrid-core --property=MainPID --value)"
 node_bin="$(systemctl show energrid-api --property=ExecStart --value | sed -n 's/.*path=\([^ ;]*\).*/\1/p' | head -n 1)"
 [[ -x "$node_bin" ]] || die "cannot resolve the API Node.js runtime."
-
-helper_tmp="$helper_dest.new"
-install -o root -g root -m 0755 "$helper_source" "$helper_tmp"
-[[ "$(sha256sum "$helper_tmp" | awk '{print $1}')" == "$expected_helper_sha" ]] || {
-  rm -f "$helper_tmp"; die "installed activation helper checksum mismatch.";
-}
-mv -f "$helper_tmp" "$helper_dest"
 
 api_tmp="$(mktemp "${api_unit}.bootstrap.XXXXXX")"
 {
@@ -172,6 +170,13 @@ rollback_bootstrap() {
   exit "$rc"
 }
 trap rollback_bootstrap ERR
+
+helper_tmp="$helper_dest.new"
+install -o root -g root -m 0755 "$helper_source" "$helper_tmp"
+[[ "$(sha256sum "$helper_tmp" | awk '{print $1}')" == "$expected_helper_sha" ]] || {
+  rm -f "$helper_tmp"; die "installed activation helper checksum mismatch.";
+}
+mv -f "$helper_tmp" "$helper_dest"
 
 changed=1
 ln -s "$current_release" "$root/current.bootstrap-$$"
