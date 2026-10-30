@@ -24,6 +24,8 @@ test('normal deployment packages committed main and uses strict noninteractive S
   const deploy = source['deploy-pi.sh'];
   assertIncludes(deploy, '[[ "$branch" == main ]]');
   assertIncludes(deploy, 'git -C "$repo_root" archive --format=tar HEAD');
+  assertIncludes(deploy, 'energrid-pi-release.XXXXXX\")');
+  assert.ok(deploy.indexOf('trap cleanup EXIT') < deploy.indexOf('archive=\"$(mktemp'));
   assertIncludes(deploy, 'StrictHostKeyChecking=yes');
   assertIncludes(deploy, 'BatchMode=yes');
   assertIncludes(deploy, 'sha256sum -c -');

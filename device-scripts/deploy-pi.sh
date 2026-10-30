@@ -59,9 +59,13 @@ fi
 
 release="${short_commit}-$(date -u +%Y%m%dT%H%M%SZ)"
 temp_root="$(mktemp -d "${TMPDIR:-/tmp}/energrid-pi-build.XXXXXX")"
-archive="$(mktemp "${TMPDIR:-/tmp}/energrid-pi-release.XXXXXX.tar.gz")"
-cleanup() { rm -rf "$temp_root"; rm -f "$archive"; }
+archive=""
+cleanup() {
+  [[ -z "$temp_root" ]] || rm -rf "$temp_root"
+  [[ -z "$archive" ]] || rm -f "$archive"
+}
 trap cleanup EXIT
+archive="$(mktemp "${TMPDIR:-/tmp}/energrid-pi-release.XXXXXX")"
 
 echo "Building committed main $short_commit in a clean temporary source tree..."
 git -C "$repo_root" archive --format=tar HEAD | tar -xf - -C "$temp_root"
