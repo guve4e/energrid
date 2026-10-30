@@ -7,6 +7,46 @@ export interface ShellyRpcDeviceInfo {
   app?: string;
   gen?: number;
   firmware?: string;
+  method?: string;
+  observedAt?: string;
+}
+
+export type ShellyRpcIdentityReadResult =
+  | { status: 'verified'; info: ShellyRpcDeviceInfo }
+  | { status: 'timeout' }
+  | { status: 'unavailable' }
+  | { status: 'invalid_response' };
+
+/** Exact Gen2+ identity call used when fresh RPC identity is a gate. */
+export async function readOnlyShellyRpcDeviceInfo(
+  ipAddress: string,
+  timeoutMs = 1200,
+  externalSignal?: AbortSignal,
+): Promise<ShellyRpcIdentityReadResult> {
+  if (!isIPv4Address(ipAddress)) return { status: 'unavailable' };
+  let baseUrl: string;
+  try { baseUrl = privateShellyBaseUrl(`http://${ipAddress}`); }
+  catch { return { status: 'unavailable' }; }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const abort = () => controller.abort();
+  if (externalSignal?.aborted) controller.abort();
+  else externalSignal?.addEventListener('abort', abort, { once: true });
+  try {
+    const response = await fetch(`${baseUrl}/rpc/Shelly.GetDeviceInfo`, {
+      method: 'GET', signal: controller.signal,
+      headers: { Accept: 'application/json' }, redirect: 'error',
+    });
+    if (!response.ok) return { status: 'invalid_response' };
+    const body = await response.json() as Record<string, unknown>;
+    if (!looksLikeShelly(body)) return { status: 'invalid_response' };
+    return { status: 'verified', info: deviceInfo(body, 'GET /rpc/Shelly.GetDeviceInfo') };
+  } catch {
+    return controller.signal.aborted ? { status: 'timeout' } : { status: 'unavailable' };
+  } finally {
+    clearTimeout(timeout);
+    externalSignal?.removeEventListener('abort', abort);
+  }
 }
 
 export async function readOnlyShellyDeviceInfo(
@@ -34,14 +74,7 @@ export async function readOnlyShellyDeviceInfo(
         if (!response.ok) continue;
         const body = await response.json() as Record<string, unknown>;
         if (!looksLikeShelly(body)) continue;
-        return {
-          ...(stringValue(body.id) ? { id: stringValue(body.id) } : {}),
-          ...(stringValue(body.mac) ? { mac: stringValue(body.mac) } : {}),
-          ...(stringValue(body.model || body.type) ? { model: stringValue(body.model || body.type) } : {}),
-          ...(stringValue(body.app || body.app_name) ? { app: stringValue(body.app || body.app_name) } : {}),
-          ...(numberValue(body.gen) !== undefined ? { gen: numberValue(body.gen) } : {}),
-          ...(stringValue(body.fw_id) || stringValue(body.fw) ? { firmware: stringValue(body.fw_id) || stringValue(body.fw) } : {}),
-        };
+        return deviceInfo(body, `GET ${path}`);
       } catch {
         if (controller.signal.aborted) return null;
       }
@@ -50,6 +83,19 @@ export async function readOnlyShellyDeviceInfo(
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function deviceInfo(body: Record<string, unknown>, method: string): ShellyRpcDeviceInfo {
+  return {
+    method,
+    observedAt: new Date().toISOString(),
+    ...(stringValue(body.id) ? { id: stringValue(body.id) } : {}),
+    ...(stringValue(body.mac) ? { mac: stringValue(body.mac) } : {}),
+    ...(stringValue(body.model || body.type) ? { model: stringValue(body.model || body.type) } : {}),
+    ...(stringValue(body.app || body.app_name) ? { app: stringValue(body.app || body.app_name) } : {}),
+    ...(numberValue(body.gen) !== undefined ? { gen: numberValue(body.gen) } : {}),
+    ...(stringValue(body.fw_id) || stringValue(body.fw) ? { firmware: stringValue(body.fw_id) || stringValue(body.fw) } : {}),
+  };
 }
 
 export function isIPv4Address(value: string): boolean {

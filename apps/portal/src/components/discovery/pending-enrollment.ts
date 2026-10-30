@@ -69,6 +69,10 @@ export interface PendingCandidateDetails {
   retired: boolean;
   requiresEnrollmentPlacement: boolean;
   requiresShellyLanVerification: boolean;
+  shellyLanVerificationReason: string | null;
+  canVerifyShelly: boolean;
+  identityVerificationObservedAt: string | null;
+  componentVerificationObservedAt: string | null;
   brokerObservedPeerIpAddress: string | null;
   brokerObservedAt: string | null;
   brokerIdentityVerification: string | null;
@@ -224,14 +228,7 @@ function detail(
   identity: PendingIdentityInput | undefined,
 ): PendingCandidateDetails {
   const shelly = /^shelly[a-z0-9._-]{1,114}$/i.test(String(candidate.metadata?.physicalId || identity?.physicalHardwareId || ''));
-  const identityVerifiedAt = Date.parse(String(candidate.metadata?.identityVerifiedAt || ''));
-  const componentVerifiedAt = Date.parse(String(candidate.metadata?.componentVerifiedAt || ''));
-  const freshLanEvidence = candidate.adapter.driver === 'shelly-lan' &&
-    candidate.metadata?.identityEvidenceSource === 'verified_shelly_http_rpc' &&
-    candidate.metadata?.componentEvidenceSource === 'verified_shelly_component_status_rpc' &&
-    Number.isFinite(identityVerifiedAt) && Number.isFinite(componentVerifiedAt) &&
-    Date.now() >= identityVerifiedAt && Date.now() >= componentVerifiedAt &&
-    Date.now() - identityVerifiedAt <= 15 * 60_000 && Date.now() - componentVerifiedAt <= 15 * 60_000;
+  const shellyLanVerificationReason = shelly ? getShellyLanVerificationReason(candidate) : null;
   return {
     candidateId: candidate.id,
     logicalCandidateId: candidate.id,
@@ -256,11 +253,63 @@ function detail(
     reason: identity?.reason || candidate.discovery?.reason || 'Backend identity evidence is unavailable.',
     retired: candidate.metadata?.previouslyEnrolledRetired === true,
     requiresEnrollmentPlacement: candidate.metadata?.observationApprovalRequired === true || candidate.metadata?.requiresEnrollmentPlacement === true,
-    requiresShellyLanVerification: shelly && !freshLanEvidence,
+    requiresShellyLanVerification: shellyLanVerificationReason !== null,
+    shellyLanVerificationReason,
+    canVerifyShelly: shellyLanVerificationReason !== null && candidate.adapter.driver === 'shelly-lan' &&
+      /^shelly[a-z0-9._-]{1,114}$/i.test(String(candidate.metadata?.physicalId || '')) &&
+      /^(?:switch|em1):\d+$/.test(String(candidate.metadata?.component || '')) &&
+      /^(?:\d{1,3}\.){3}\d{1,3}$/.test(String(candidate.metadata?.ipAddress || '')) &&
+      typeof candidate.metadata?.networkScope === 'string' && candidate.metadata.networkScope.length > 0,
+    identityVerificationObservedAt: typeof candidate.metadata?.identityVerifiedAt === 'string' ? candidate.metadata.identityVerifiedAt : null,
+    componentVerificationObservedAt: typeof candidate.metadata?.componentVerifiedAt === 'string' ? candidate.metadata.componentVerifiedAt : null,
     brokerObservedPeerIpAddress: identity?.brokerObservedPeerIpAddress ?? null,
     brokerObservedAt: identity?.brokerObservedAt ?? null,
     brokerIdentityVerification: identity?.brokerIdentityVerification ?? null,
   };
+}
+
+/** Keep the review UI aligned with DeviceOnboardingService's fail-closed evidence gate. */
+function getShellyLanVerificationReason(candidate: PendingCandidateInput): string | null {
+  if (candidate.adapter.driver !== 'shelly-lan') {
+    return 'this candidate is not backed by a Shelly LAN/RPC discovery record';
+  }
+
+  const identitySource = candidate.metadata?.identityEvidenceSource;
+  const componentSource = candidate.metadata?.componentEvidenceSource;
+  const directRpc = identitySource === 'verified_shelly_http_rpc' &&
+    componentSource === 'verified_shelly_component_status_rpc';
+  const siteLocalRpc = identitySource === 'verified_site_local_shelly_rpc' &&
+    componentSource === 'verified_site_local_shelly_rpc';
+  if (!directRpc && !siteLocalRpc) {
+    return 'independent Shelly LAN identity and component RPC evidence is missing';
+  }
+  if (siteLocalRpc && !(typeof candidate.metadata?.siteLocalObserverId === 'string' && candidate.metadata.siteLocalObserverId.length > 0)) {
+    return 'the site-local RPC report has no recorded observer identity';
+  }
+
+  const component = String(candidate.metadata?.component || '');
+  const channel = /^(switch|em1):(\d+)$/.exec(component);
+  const expectedMethod = channel
+    ? `${channel[1] === 'switch' ? 'Switch' : 'EM1'}.GetStatus?id=${channel[2]}`
+    : '';
+  if (candidate.metadata?.identityVerificationMethod !== 'GET /rpc/Shelly.GetDeviceInfo') {
+    return 'the Shelly device identity RPC verification method is missing or does not match';
+  }
+  if (!expectedMethod || candidate.metadata?.componentVerificationMethod !== expectedMethod) {
+    return 'the component status RPC verification method does not match the selected component';
+  }
+
+  const now = Date.now();
+  for (const [label, value] of [
+    ['device identity', candidate.metadata?.identityVerifiedAt],
+    ['component status', candidate.metadata?.componentVerifiedAt],
+  ] as const) {
+    const timestamp = Date.parse(String(value || ''));
+    if (!Number.isFinite(timestamp)) return `the ${label} verification timestamp is missing or invalid`;
+    if (timestamp > now) return `the ${label} verification timestamp is in the future`;
+    if (now - timestamp > 15 * 60_000) return `the ${label} verification is older than 15 minutes`;
+  }
+  return null;
 }
 
 function unique(values: string[]): string[] {

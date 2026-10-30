@@ -777,6 +777,16 @@ export class PortalController {
     return scan
   }
 
+  @Post('discovery/:deviceId/verify-shelly')
+  async verifyShellyDiscoveryCandidate(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalAdministrator(request)
+    const { ownership } = this.discoveryOwner()
+    return this.lanDiscovery.verifyShellyCandidate(deviceId, ownership)
+  }
+
   @Post('network/site-local-shelly-evidence')
   async importSiteLocalShellyEvidence(
     @Body() body: unknown,

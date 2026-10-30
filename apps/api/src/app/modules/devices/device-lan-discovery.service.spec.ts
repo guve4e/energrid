@@ -44,6 +44,7 @@ jest.mock('node:dns/promises', () => ({
   reverse: jest.fn().mockRejectedValue(new Error('mocked')),
 }))
 jest.mock('node:net', () => ({
+  ...jest.requireActual('node:net'),
   Socket: class {
     private readonly listeners = new Map<string, (...args: unknown[]) => void>()
     once(event: string, listener: (...args: unknown[]) => void) {
@@ -96,6 +97,142 @@ describe('LAN discovery evidence persistence', () => {
       },
     ])
     global.fetch = jest.fn().mockRejectedValue(new Error('mocked')) as unknown as typeof fetch
+  })
+
+  function selectedShellyVerifier(options: { registerCandidate?: boolean } = {}) {
+    const physicalId = 'shellyproem50-8c4f00dbd258'
+    const ipAddress = '192.168.7.54'
+    const candidateId = `${physicalId}:em1:0`
+    process.env.HOME_NETWORK_ZONES_JSON = JSON.stringify({
+      zones: [{ id: 'eero-lan', name: 'Eero LAN', cidr: '192.168.7.0/24' }],
+    })
+    const candidate = {
+      id: candidateId, tenantId: TEST_OWNER.tenantId, siteId: TEST_OWNER.siteId,
+      displayName: 'Shelly Pro EM-50 em1:0', trustStatus: 'discovered', kind: 'physical',
+      adapter: { protocol: 'http', driver: 'shelly-lan', target: `http://${ipAddress}/rpc/EM1.GetStatus?id=0` },
+      metadata: { physicalId, component: 'em1:0', ipAddress, networkScope: 'gateway-unknown:eero-lan' },
+      capabilities: [{ kind: 'power', actions: ['read'] }],
+    }
+    const registry = {
+      getSnapshot: () => ({ tenant: { id: TEST_OWNER.tenantId }, site: { id: TEST_OWNER.siteId, name: 'Home' } }),
+      getDevices: () => options.registerCandidate === false ? [] : [candidate],
+      registerDiscoveredDevice: jest.fn(() => true),
+    }
+    const observedAt = new Date(Date.now() - 16 * 60_000).toISOString()
+    const prior: NetworkDiscoveredDevice = {
+      id: physicalId, ipAddress, networkZoneId: 'eero-lan', networkZoneName: 'Eero LAN',
+      vendor: 'Shelly', protocol: 'http', confidence: 0.9, status: 'online', generation: 2,
+      components: [{ component: 'em1:0', channel: 0 }, { component: 'em1:1', channel: 1 }, { component: 'switch:0', channel: 0 }],
+      discoveredAt: observedAt,
+      observations: [
+        { source: 'http_rpc', attribute: 'shelly.device_id', value: physicalId, observedAt,
+          scopeId: 'eero-lan', method: 'GET /rpc/Shelly.GetDeviceInfo' },
+        ...['em1:0', 'em1:1', 'switch:0'].map(component => ({
+          source: 'http_rpc' as const, attribute: 'shelly.component_status', value: component, observedAt,
+          scopeId: 'eero-lan', method: `GET /rpc/${component.startsWith('switch:') ? 'Switch' : 'EM1'}.GetStatus?id=${component.split(':')[1]}`,
+        })),
+      ],
+    }
+    const inventory = {
+      physicalDeviceId: 'physical-eero-inventory', scope: TEST_OWNER,
+      identity: { namespace: 'mqtt:shelly-protocol-id', value: physicalId },
+      components: ['em1:0', 'em1:1', 'switch:0', 'input:0'].map(key => ({
+        key, capabilities: key.startsWith('switch:') ? ['switch'] : ['power'], firstSeenAt: observedAt, lastSeenAt: observedAt,
+      })),
+      assignments: [], endpoints: [], networkObservations: [], verificationStatus: 'protocol_observed',
+      firstSeenAt: observedAt, lastSeenAt: observedAt,
+    }
+    const physicalInventory = {
+      list: jest.fn().mockResolvedValue([inventory]),
+      discover: jest.fn().mockResolvedValue(inventory),
+      refreshNetworkObservations: jest.fn().mockResolvedValue(undefined),
+    }
+    const service = new DeviceLanDiscoveryService(memory, registry as never,
+      new DeviceLanNetworkEvidenceCollector(), physicalInventory as never)
+    return { service, registry, physicalInventory, candidate, candidateId, physicalId, ipAddress, prior }
+  }
+
+  function mockFreshShellyRpc(components = ['em1:0', 'em1:1', 'switch:0']) {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 'shellyproem50-8c4f00dbd258', mac: '8C:4F:00:DB:D2:58', model: 'SPEM-50', app: 'ProEM-50', gen: 2, fw_id: '1.0.0' }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ components: components.map(key => ({ key })), total: components.length }) })
+    for (const component of components) {
+      const [kind, channel] = component.split(':')
+      global.fetch.mockResolvedValueOnce({ ok: true, json: async () => kind === 'switch'
+        ? { id: Number(channel), output: false, apower: 0 }
+        : { id: Number(channel), act_power: 0 } })
+    }
+  }
+
+  it('revalidates an expired saved Shelly endpoint and persists only fresh read-only evidence', async () => {
+    const fixture = selectedShellyVerifier()
+    await memory.recordScan(new Date(Date.now() - 16 * 60_000).toISOString(), [fixture.prior], TEST_OWNER)
+    mockReachableTcpPorts.add(80)
+    mockFreshShellyRpc()
+
+    const result = await fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER)
+
+    expect(result).toMatchObject({ status: 'verified', physicalId: fixture.physicalId,
+      physicalDeviceId: 'physical-eero-inventory', componentKeys: ['em1:0', 'em1:1', 'switch:0'] })
+    expect(Date.parse(result.identityVerifiedAt)).toBeGreaterThan(Date.now() - 15 * 60_000)
+    expect(fixture.physicalInventory.discover).toHaveBeenCalledWith(expect.objectContaining({
+      physicalDeviceId: 'physical-eero-inventory', scope: TEST_OWNER, evidenceSource: 'selected_device_read_only_rpc_verification',
+    }))
+    expect(fixture.registry.registerDiscoveredDevice).toHaveBeenCalledTimes(3)
+    const saved = await memory.listIdentityEvidence(TEST_OWNER)
+    expect(saved.find(item => item.device.id === fixture.physicalId)?.device.observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'http_rpc', attribute: 'shelly.device_id', observedAt: result.identityVerifiedAt }),
+    ]))
+  })
+
+  it('rebuilds the selected candidate from site-owned Discovery Memory after runtime candidate state is lost', async () => {
+    const fixture = selectedShellyVerifier({ registerCandidate: false })
+    await memory.recordScan(new Date(Date.now() - 16 * 60_000).toISOString(), [fixture.prior], TEST_OWNER)
+    mockReachableTcpPorts.add(80)
+    mockFreshShellyRpc()
+
+    const result = await fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER)
+
+    expect(result.status).toBe('verified')
+    expect(result.componentKeys).toEqual(['em1:0', 'em1:1', 'switch:0'])
+    expect(fixture.registry.registerDiscoveredDevice).toHaveBeenCalledTimes(3)
+  })
+
+  it('reports an unreachable saved endpoint without issuing RPC or persisting verification', async () => {
+    const fixture = selectedShellyVerifier()
+    await memory.recordScan(new Date(Date.now() - 16 * 60_000).toISOString(), [fixture.prior], TEST_OWNER)
+    mockHangTcpConnections = true
+
+    await expect(fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER))
+      .rejects.toThrow(/timed out after 1500 ms/)
+    expect(global.fetch).not.toHaveBeenCalled()
+    expect(fixture.physicalInventory.discover).not.toHaveBeenCalled()
+  })
+
+  it('rejects a fresh RPC hardware identity mismatch before writing evidence', async () => {
+    const fixture = selectedShellyVerifier()
+    await memory.recordScan(new Date(Date.now() - 16 * 60_000).toISOString(), [fixture.prior], TEST_OWNER)
+    mockReachableTcpPorts.add(80)
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => ({
+      id: 'shellyproem50-other', mac: '8C:4F:00:00:00:00', gen: 2,
+    }) }) as unknown as typeof fetch
+
+    await expect(fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER))
+      .rejects.toThrow(/identity mismatch/)
+    expect(fixture.physicalInventory.discover).not.toHaveBeenCalled()
+    expect(fixture.registry.registerDiscoveredDevice).not.toHaveBeenCalled()
+  })
+
+  it('rejects a component profile mismatch without refreshing the candidate', async () => {
+    const fixture = selectedShellyVerifier()
+    await memory.recordScan(new Date(Date.now() - 16 * 60_000).toISOString(), [fixture.prior], TEST_OWNER)
+    mockReachableTcpPorts.add(80)
+    mockFreshShellyRpc(['em1:0', 'switch:0'])
+
+    await expect(fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER))
+      .rejects.toThrow(/component profile mismatch.*em1:1/)
+    expect(fixture.physicalInventory.discover).not.toHaveBeenCalled()
+    expect(fixture.registry.registerDiscoveredDevice).not.toHaveBeenCalled()
   })
 
   it('bounds a TCP connect attempt when the OS leaves it pending without a response', async () => {

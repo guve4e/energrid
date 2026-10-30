@@ -23,6 +23,7 @@ describe('portal control configuration authorization', () => {
     const scanNow = jest
       .fn()
       .mockResolvedValue({ devices: [], zones: [], scannedAt: 'now' });
+    const verifyShellyCandidate = jest.fn().mockResolvedValue({ status: 'verified' });
     const getZones = jest.fn(() => [{ id: 'home-lan', name: 'Home LAN', cidr: '192.168.7.0/24', seedIps: [] }]);
     const getLastScan = jest.fn(() => []);
     const registerDiscoveredDevice = jest.fn();
@@ -38,6 +39,7 @@ describe('portal control configuration authorization', () => {
       execute,
       check,
       scanNow,
+      verifyShellyCandidate,
       getZones,
       getLastScan,
       registerDiscoveredDevice,
@@ -49,7 +51,7 @@ describe('portal control configuration authorization', () => {
       listIdentityEvidence,
       controller: new PortalController(
         { getState } as unknown as PortalStateService,
-        { scanNow, getZones, getLastScan } as unknown as DeviceLanDiscoveryService,
+        { scanNow, getZones, getLastScan, verifyShellyCandidate } as unknown as DeviceLanDiscoveryService,
         {} as PortalDeviceProxyService,
         { configure, execute } as unknown as DeviceControlService,
         {} as DeviceMqttIngestService,
@@ -75,6 +77,19 @@ describe('portal control configuration authorization', () => {
       ),
     };
   }
+  it('authorizes selected Shelly verification and derives ownership from the active Portal site', async () => {
+    const { controller, verifyShellyCandidate } = setup();
+    const request = { method: 'POST', url: '/', headers: {}, user: {
+      userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0,
+    } };
+    await expect(controller.verifyShellyDiscoveryCandidate('shellyproem50-8c4f00dbd258:em1:0', request as never))
+      .resolves.toEqual({ status: 'verified' });
+    expect(verifyShellyCandidate).toHaveBeenCalledWith('shellyproem50-8c4f00dbd258:em1:0', {
+      tenantId: 'tenant-demo', siteId: 'site-home',
+    });
+    await expect(controller.verifyShellyDiscoveryCandidate('candidate', { method: 'POST', url: '/', headers: {} }))
+      .rejects.toThrow(UnauthorizedException);
+  });
   it('authorizes read-only diagnostics without executing or configuring a switch', () => {
     const { controller, check, configure, execute } = setup();
     expect(() => controller.checkDeviceConnection('relay', { method: 'POST', url: '/', headers: {} })).toThrow(UnauthorizedException);

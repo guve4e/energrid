@@ -5,12 +5,14 @@ import type { PendingEnrollmentCardModel } from './pending-enrollment';
 defineProps<{
   cards: PendingEnrollmentCardModel[];
   busyByCandidateId: Readonly<Record<string, string>>;
+  verificationMessageByCandidateId: Readonly<Record<string, string>>;
   zones: Array<{ id: string; name: string }>;
 }>();
 
 const emit = defineEmits<{
   review: [candidateId: string];
   decide: [candidateId: string, action: 'approve' | 'block', zoneId?: string];
+  verify: [candidateId: string];
   rename: [candidateId: string];
 }>();
 
@@ -35,6 +37,10 @@ function brokerEvidenceLabel(status: string | null): string {
 
 function toggleReview(cardKey: string) {
   expandedCardKey.value = expandedCardKey.value === cardKey ? null : cardKey;
+}
+
+function verificationCandidate(card: PendingEnrollmentCardModel) {
+  return card.details.find(item => item.canVerifyShelly);
 }
 </script>
 
@@ -96,6 +102,12 @@ function toggleReview(cardKey: string) {
       </div>
 
       <section v-if="expandedCardKey === card.key" class="pending-review-details" aria-label="Device evidence and actions">
+        <div v-if="verificationCandidate(card)" class="pending-physical-verification">
+          <button type="button" :disabled="!!busyByCandidateId[verificationCandidate(card)!.candidateId]" @click="emit('verify', verificationCandidate(card)!.candidateId)">
+            {{ busyByCandidateId[verificationCandidate(card)!.candidateId] === 'verify' ? 'Verifying selected device…' : 'Verify selected device' }}
+          </button>
+          <span>Checks this device's saved LAN endpoint and supported components; no subnet scan or authority change.</span>
+        </div>
         <article v-for="item in card.details" :key="item.candidateId" class="pending-channel-detail">
           <header>
             <div>
@@ -119,7 +131,15 @@ function toggleReview(cardKey: string) {
             </div>
           </header>
           <p v-if="item.requiresShellyLanVerification" class="shelly-verification-required" role="status">
-            Fresh Shelly LAN identity and component verification is required before enrollment. MQTT identity claims alone are not enough. Run a configured-scope scan and review the new evidence.
+            Enrollment is blocked because {{ item.shellyLanVerificationReason }}. MQTT identity claims alone are not enough.
+            {{ item.canVerifyShelly ? 'Verify selected device checks only this saved endpoint; no subnet scan is run.' : 'A saved, site-owned LAN endpoint and physical inventory match are required before selected-device verification is available.' }}
+          </p>
+          <p v-if="verificationMessageByCandidateId[item.candidateId]" class="shelly-verification-result" role="status">
+            {{ verificationMessageByCandidateId[item.candidateId] }}
+          </p>
+          <p v-if="item.identityVerificationObservedAt || item.componentVerificationObservedAt" class="shelly-verification-times">
+            RPC evidence · Device identity: {{ item.identityVerificationObservedAt ? formatObservationTime(item.identityVerificationObservedAt) : 'not recorded' }}
+            · Component status: {{ item.componentVerificationObservedAt ? formatObservationTime(item.componentVerificationObservedAt) : 'not recorded' }}
           </p>
           <dl>
             <div><dt>Logical candidate</dt><dd><code>{{ item.logicalCandidateId }}</code></dd></div>
@@ -162,6 +182,10 @@ function toggleReview(cardKey: string) {
 .pending-review-button { min-height: 40px; padding: 8px 18px; border: 1px solid transparent; border-radius: 999px; background: var(--discovery-text); color: var(--discovery-surface); font-weight: 700; cursor: pointer; }
 .pending-review-button:focus-visible, .pending-secondary-actions button:focus-visible { outline: 2px solid #20ac7c; outline-offset: 2px; }
 .pending-review-details { display: grid; gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--discovery-border); }
+.pending-physical-verification { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.pending-physical-verification button { min-height: 36px; padding: 6px 12px; border: 1px solid var(--discovery-border); border-radius: 7px; background: transparent; color: var(--discovery-text); font-weight: 700; cursor: pointer; }
+.pending-physical-verification button:disabled { opacity: 0.55; cursor: wait; }
+.pending-physical-verification span { color: var(--discovery-muted); font-size: 11px; }
 .pending-channel-detail { min-width: 0; padding: 12px; border: 1px solid var(--discovery-border); border-radius: 8px; }
 .pending-channel-detail > header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; }
 .pending-channel-detail > header > div:first-child { display: grid; gap: 3px; min-width: 0; }
@@ -170,7 +194,8 @@ function toggleReview(cardKey: string) {
 .pending-secondary-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .pending-secondary-actions button { min-height: 34px; padding: 5px 10px; border: 1px solid var(--discovery-border); border-radius: 7px; background: transparent; color: var(--discovery-text); font-size: 11px; cursor: pointer; }
 .pending-secondary-actions button:disabled { opacity: 0.55; cursor: wait; }
-.shelly-verification-required { margin: 10px 0 0; color: var(--discovery-muted); font-size: 12px; }
+.shelly-verification-required, .shelly-verification-result { margin: 10px 0 0; color: var(--discovery-muted); font-size: 12px; }
+.shelly-verification-result { color: var(--discovery-text); }
 .pending-room-choice { display: grid; gap: 3px; color: var(--discovery-muted); font-size: 10px; }
 .pending-room-choice select { min-height: 34px; border: 1px solid var(--discovery-border); border-radius: 7px; background: var(--discovery-surface); color: var(--discovery-text); padding: 4px 8px; }
 .pending-channel-detail dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 18px; margin: 12px 0 0; }

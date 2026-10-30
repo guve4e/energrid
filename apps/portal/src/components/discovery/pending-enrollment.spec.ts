@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { mount } from '@vue/test-utils';
 import { buildPendingEnrollmentCards, type PendingCandidateInput, type PendingIdentityInput } from './pending-enrollment';
+import PendingEnrollmentList from './PendingEnrollmentList.vue';
 
 const physicalId = 'shellyproem50-8c4f00dbd258';
 function candidate(id: string, component: string, name = id): PendingCandidateInput {
@@ -118,22 +120,122 @@ describe('Pending Enrollment presentation', () => {
     expect(card.details[0].requiresEnrollmentPlacement).toBe(false);
   });
 
-  it('allows room selection only after recent LAN identity and component RPC verification', () => {
+  it('allows an EM-50 em1:0 after fresh identity and matching component RPC verification', () => {
     const now = new Date().toISOString();
     const shelly: PendingCandidateInput = {
-      ...candidate(`${physicalId}:switch:0`, 'switch:0'),
-      adapter: { protocol: 'http', driver: 'shelly-lan', target: 'http://192.168.1.220/rpc/Switch.GetStatus?id=0' },
+      ...candidate(`${physicalId}:em1:0`, 'em1:0'),
+      adapter: { protocol: 'http', driver: 'shelly-lan', target: 'http://192.168.7.54/rpc/EM1.GetStatus?id=0' },
       metadata: {
-        physicalId, component: 'switch:0',
+        physicalId, component: 'em1:0',
         identityEvidenceSource: 'verified_shelly_http_rpc', identityVerifiedAt: now,
         componentEvidenceSource: 'verified_shelly_component_status_rpc', componentVerifiedAt: now,
+        identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo',
+        componentVerificationMethod: 'EM1.GetStatus?id=0',
         requiresEnrollmentPlacement: true,
       },
     };
     const [card] = buildPendingEnrollmentCards([shelly], {
-      [shelly.id]: identity(shelly.id, 'switch:0', { discoverySource: 'http', protocol: 'http', verificationStatus: 'verified', status: 'correlated', networkAddressStatus: 'current' }),
+      [shelly.id]: identity(shelly.id, 'em1:0', { discoverySource: 'http', protocol: 'http', verificationStatus: 'verified', status: 'correlated', networkAddressStatus: 'current' }),
     });
-    expect(card.details[0]).toMatchObject({ requiresShellyLanVerification: false, requiresEnrollmentPlacement: true });
+    expect(card.details[0]).toMatchObject({
+      requiresShellyLanVerification: false,
+      shellyLanVerificationReason: null,
+      identityVerificationObservedAt: now,
+      componentVerificationObservedAt: now,
+      requiresEnrollmentPlacement: true,
+    });
+  });
+
+  it('accepts fresh site-local RPC evidence only when observer and methods are present', () => {
+    const now = new Date().toISOString();
+    const shelly: PendingCandidateInput = {
+      ...candidate(`${physicalId}:em1:0`, 'em1:0'),
+      adapter: { protocol: 'http', driver: 'shelly-lan', target: 'http://192.168.7.54/rpc/EM1.GetStatus?id=0' },
+      metadata: {
+        physicalId, component: 'em1:0',
+        identityEvidenceSource: 'verified_site_local_shelly_rpc',
+        componentEvidenceSource: 'verified_site_local_shelly_rpc',
+        siteLocalObserverId: 'pi-home/eth0',
+        identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo',
+        componentVerificationMethod: 'EM1.GetStatus?id=0',
+        identityVerifiedAt: now, componentVerifiedAt: now,
+      },
+    };
+    const [card] = buildPendingEnrollmentCards([shelly], {});
+    expect(card.details[0]).toMatchObject({ requiresShellyLanVerification: false, shellyLanVerificationReason: null });
+  });
+
+  it('explains missing and expired verification instead of showing a generic warning', () => {
+    const shelly: PendingCandidateInput = {
+      ...candidate(`${physicalId}:em1:0`, 'em1:0'),
+      adapter: { protocol: 'http', driver: 'shelly-lan', target: 'http://192.168.7.54/rpc/EM1.GetStatus?id=0' },
+      metadata: { physicalId, component: 'em1:0' },
+    };
+    const missing = buildPendingEnrollmentCards([shelly], {})[0].details[0];
+    expect(missing).toMatchObject({ requiresShellyLanVerification: true });
+    expect(missing.shellyLanVerificationReason).toContain('LAN identity and component RPC evidence is missing');
+
+    const old = new Date(Date.now() - 16 * 60_000).toISOString();
+    const expired: PendingCandidateInput = {
+      ...shelly,
+      adapter: { protocol: 'http', driver: 'shelly-lan', target: 'http://192.168.7.54/rpc/EM1.GetStatus?id=0' },
+      metadata: {
+        physicalId, component: 'em1:0',
+        identityEvidenceSource: 'verified_shelly_http_rpc',
+        componentEvidenceSource: 'verified_shelly_component_status_rpc',
+        identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo',
+        componentVerificationMethod: 'EM1.GetStatus?id=0',
+        identityVerifiedAt: old, componentVerifiedAt: old,
+      },
+    };
+    const expiredDetail = buildPendingEnrollmentCards([expired], {})[0].details[0];
+    expect(expiredDetail.requiresShellyLanVerification).toBe(true);
+    expect(expiredDetail.canVerifyShelly).toBe(false);
+    expect(expiredDetail.shellyLanVerificationReason).toContain('older than 15 minutes');
+    expect(expiredDetail.componentVerificationObservedAt).toBe(old);
+  });
+
+  it('offers selected-device verification for an expired LAN candidate with a saved endpoint and scope', () => {
+    const old = new Date(Date.now() - 16 * 60_000).toISOString();
+    const shelly: PendingCandidateInput = {
+      ...candidate(`${physicalId}:em1:0`, 'em1:0'),
+      adapter: { protocol: 'http', driver: 'shelly-lan', target: 'http://192.168.7.54/rpc/EM1.GetStatus?id=0' },
+      metadata: {
+        physicalId, component: 'em1:0', ipAddress: '192.168.7.54', networkScope: 'gateway-home:eero-lan',
+        identityEvidenceSource: 'verified_shelly_http_rpc', componentEvidenceSource: 'verified_shelly_component_status_rpc',
+        identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo', componentVerificationMethod: 'EM1.GetStatus?id=0',
+        identityVerifiedAt: old, componentVerifiedAt: old,
+      },
+    };
+    const detail = buildPendingEnrollmentCards([shelly], {})[0].details[0];
+
+    expect(detail).toMatchObject({ requiresShellyLanVerification: true, canVerifyShelly: true });
+    expect(detail.shellyLanVerificationReason).toContain('older than 15 minutes');
+  });
+
+  it('renders the selected-device action for stale saved LAN evidence and emits only that candidate', async () => {
+    const old = new Date(Date.now() - 16 * 60_000).toISOString();
+    const shelly: PendingCandidateInput = {
+      ...candidate(`${physicalId}:em1:0`, 'em1:0'),
+      adapter: { protocol: 'http', driver: 'shelly-lan', target: 'http://192.168.7.54/rpc/EM1.GetStatus?id=0' },
+      metadata: {
+        physicalId, component: 'em1:0', ipAddress: '192.168.7.54', networkScope: 'gateway-home:eero-lan',
+        identityEvidenceSource: 'verified_shelly_http_rpc', componentEvidenceSource: 'verified_shelly_component_status_rpc',
+        identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo', componentVerificationMethod: 'EM1.GetStatus?id=0',
+        identityVerifiedAt: old, componentVerifiedAt: old,
+      },
+    };
+    const card = buildPendingEnrollmentCards([shelly], {})[0];
+    const wrapper = mount(PendingEnrollmentList, { props: {
+      cards: [card], busyByCandidateId: {}, verificationMessageByCandidateId: {}, zones: [],
+    } });
+    await wrapper.get('button.pending-review-button').trigger('click');
+
+    const verify = wrapper.findAll('button').find(button => button.text() === 'Verify selected device');
+    expect(verify).toBeDefined();
+    await verify!.trigger('click');
+    expect(wrapper.emitted('verify')).toEqual([[shelly.id]]);
+    expect(wrapper.findAll('button').some(button => button.text() === 'Enroll device')).toBe(false);
   });
 
   it('shows broker peer evidence separately without treating it as a verified LAN address', () => {

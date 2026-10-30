@@ -317,7 +317,7 @@ describe('device onboarding page workflow with mocked services', () => {
     expect(channelRows).toHaveLength(2);
     const approveButton = channelRows[1].findAll('button').find(candidateButton => candidateButton.text() === 'Approve')!;
     expect(approveButton.attributes('disabled')).toBeDefined();
-    expect(channelRows[1].text()).toContain('Fresh Shelly LAN identity and component verification is required before enrollment');
+    expect(channelRows[1].text()).toContain('Enrollment is blocked because independent Shelly LAN identity and component RPC evidence is missing');
     expect(fetch.mock.calls.some(([url]) => String(url).includes('/portal/discovery/') && String(url).includes('%3Aem1%3A1/approve'))).toBe(false);
   });
 

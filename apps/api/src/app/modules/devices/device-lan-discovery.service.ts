@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable, Logger, Optional } from '@nestjs/common'
+import { BadGatewayException, BadRequestException, ConflictException, GatewayTimeoutException, Inject, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common'
 import {
   dedupeNetworkEndpoints,
   normalizeNetworkHostname,
@@ -10,7 +10,7 @@ import { readFile } from 'node:fs/promises'
 import { hostname as localHostname, networkInterfaces } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { reverse } from 'node:dns/promises'
-import { Socket } from 'node:net'
+import { BlockList, isIP, Socket } from 'node:net'
 import { promisify } from 'node:util'
 import { privateShellyBaseUrl } from '@energrid/domain-devices'
 import type {
@@ -23,7 +23,7 @@ import type { PhysicalDeviceInventoryService } from './enrollment/physical-devic
 import type { PhysicalLanObservation } from './enrollment/physical-device-inventory.repository'
 import { shellyLanCandidates } from './adapters/inbound/shelly/shelly-lan-candidates'
 import { energridDiscoveryCandidate } from './adapters/inbound/energrid/energrid-discovery-candidate'
-import { readOnlyShellyDeviceInfo } from './adapters/inbound/shelly/read-only-shelly-rpc'
+import { readOnlyShellyDeviceInfo, readOnlyShellyRpcDeviceInfo } from './adapters/inbound/shelly/read-only-shelly-rpc'
 import { compareNetworkSnapshots, type NetworkDiscoverySnapshot, type NetworkDiscoverySnapshotDiff } from './network-discovery-snapshot'
 import { NmapNetworkEvidenceAdapter, type NmapCapability, type NmapScanResult } from './adapters/outbound/network/nmap-network-evidence.adapter'
 import {
@@ -238,6 +238,223 @@ export class DeviceLanDiscoveryService {
 
   getConfiguredZone(scopeId: string): NetworkDiscoveryZone | undefined {
     return configuredNetworkZones().find(zone => zone.id === scopeId)
+  }
+
+  async verifyShellyCandidate(candidateId: string, ownership: DiscoveryOwnership): Promise<{
+    status: 'verified'; scanId: string; physicalId: string; physicalDeviceId: string;
+    componentKeys: string[]; identityVerifiedAt: string; componentsVerifiedAt: string;
+  }> {
+    const controller = new AbortController()
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        this.verifyShellyCandidateWithinDeadline(candidateId, ownership, controller.signal),
+        new Promise<never>((_resolve, reject) => {
+          deadlineTimer = setTimeout(() => {
+            controller.abort()
+            reject(new GatewayTimeoutException('Selected-device verification exceeded 12 seconds. No subnet scan was run; check the observer route to this endpoint and retry.'))
+          }, 12_000)
+        }),
+      ])
+    } finally {
+      if (deadlineTimer) clearTimeout(deadlineTimer)
+      controller.abort()
+    }
+  }
+
+  private async verifyShellyCandidateWithinDeadline(
+    candidateId: string,
+    ownership: DiscoveryOwnership,
+    signal: AbortSignal,
+  ) {
+    const active = this.registry.getSnapshot()
+    if (active.tenant.id !== ownership.tenantId || active.site.id !== ownership.siteId) {
+      throw new ConflictException('The active Portal site changed. Reopen Add Devices and retry verification.')
+    }
+    const candidateMatch = candidateId.match(/^(shelly[a-z0-9._-]{1,114}):((?:switch|em1):\d+)$/i)
+    if (!candidateMatch) throw new BadRequestException('The selected ID is not a Shelly physical-device component candidate.')
+    const physicalId = candidateMatch[1]
+    const component = candidateMatch[2]
+    const registryMatches = this.registry.getDevices(true).filter(device => device.id === candidateId)
+    if (registryMatches.some(device => device.tenantId !== ownership.tenantId || device.siteId !== ownership.siteId)) {
+      throw new ConflictException('The selected Shelly component is registered under a different tenant or site.')
+    }
+    const registered = registryMatches.find(device => device.tenantId === ownership.tenantId && device.siteId === ownership.siteId)
+    if (registered && registered.trustStatus !== 'discovered') {
+      throw new ConflictException('The selected Shelly component is already enrolled or is no longer pending.')
+    }
+    if (registered && registered.adapter.driver !== 'shelly-lan') {
+      throw new ConflictException('The selected component is not registered as a Shelly LAN candidate.')
+    }
+    if (!this.physicalInventory) throw new BadGatewayException('Physical inventory is unavailable; the selected candidate cannot be verified safely.')
+    const inventories = await this.physicalInventory.list(ownership)
+    const matchingInventory = inventories.filter(item =>
+      item.scope.tenantId === ownership.tenantId && item.scope.siteId === ownership.siteId &&
+      item.identity?.namespace === 'mqtt:shelly-protocol-id' && typeof item.identity.value === 'string' &&
+      item.identity.value.toLowerCase() === physicalId.toLowerCase(),
+    )
+    if (matchingInventory.length !== 1) {
+      throw new ConflictException('No unique site-owned physical inventory record matches this Shelly identity.')
+    }
+    const inventory = matchingInventory[0]
+    if (!inventory.components.some(item => item.key === component)) {
+      throw new ConflictException(`Physical inventory ${inventory.physicalDeviceId} has no expected ${component} component.`)
+    }
+    const componentAssignments = inventory.assignments.filter(item => item.componentKey === component)
+    if (componentAssignments.some(item => item.deviceId !== candidateId)) {
+      throw new ConflictException(`Physical inventory component ${component} is already assigned to another logical device.`)
+    }
+    const assignments = inventory.assignments.filter(item => item.deviceId === candidateId)
+    if (assignments.length > 1 || assignments.some(item =>
+      item.physicalDeviceId !== inventory.physicalDeviceId || item.componentKey !== component,
+    )) {
+      throw new ConflictException('The selected logical component has a conflicting physical inventory assignment.')
+    }
+
+    const history = await this.discoveryMemory.listIdentityEvidence(ownership)
+    const matchingHistory = history
+      .filter(record => record.ownership?.tenantId === ownership.tenantId && record.ownership.siteId === ownership.siteId &&
+        record.device.vendor === 'Shelly' && record.device.id.toLowerCase() === physicalId.toLowerCase() &&
+        record.device.components?.some(item => item.component === component) &&
+        record.device.observations?.some(item =>
+          ['http_rpc', 'http_identity'].includes(item.source) &&
+          ['shelly.device_id', 'identity.device_id'].includes(item.attribute) &&
+          typeof item.value === 'string' && item.value.toLowerCase() === physicalId.toLowerCase(),
+        ),
+      )
+      .map(record => ({
+        record,
+        candidate: shellyLanCandidates(record.device).find(item => item.id === candidateId),
+      }))
+      .filter((item): item is { record: typeof item.record; candidate: NonNullable<typeof item.candidate> } => !!item.candidate)
+      .sort((a, b) => b.record.lastSeenAt.localeCompare(a.record.lastSeenAt))[0]
+    if (!matchingHistory) throw new ConflictException('No saved site-owned LAN evidence supports this physical identity and verified component.')
+    const priorCandidate = matchingHistory.candidate
+    const candidate = registered || priorCandidate
+    const candidatePhysicalId = typeof candidate.metadata?.physicalId === 'string' ? candidate.metadata.physicalId : ''
+    const candidateComponent = typeof candidate.metadata?.component === 'string' ? candidate.metadata.component : ''
+    const ipAddress = typeof candidate.metadata?.ipAddress === 'string' ? candidate.metadata.ipAddress : ''
+    if (candidatePhysicalId.toLowerCase() !== physicalId.toLowerCase() || candidateComponent !== component ||
+        ipAddress !== matchingHistory.record.device.ipAddress || isIP(ipAddress) !== 4) {
+      throw new ConflictException('The pending candidate does not match the latest saved physical identity, component, and endpoint evidence.')
+    }
+    const prior = matchingHistory.record
+    const zone = this.getConfiguredZone(prior.device.networkZoneId)
+    if (!zone || zone.collectionSource === 'virtual-lab' || !ipIsInZone(ipAddress, zone)) {
+      throw new BadRequestException('The saved endpoint is no longer inside an authorized physical network scope.')
+    }
+
+    const reachability = await probeTcpConnection(ipAddress, 80, 1_500, signal)
+    if (reachability.status !== 'connected') {
+      throw new BadGatewayException(reachability.message || `The observer could not connect to ${ipAddress}:80.`)
+    }
+    const identityRead = await readOnlyShellyRpcDeviceInfo(ipAddress, 1_500, signal)
+    if (identityRead.status === 'timeout') {
+      throw new GatewayTimeoutException(`Shelly.GetDeviceInfo timed out at ${ipAddress} after 1.5 seconds.`)
+    }
+    if (identityRead.status === 'unavailable') {
+      throw new BadGatewayException(`The observer connected to ${ipAddress}:80, but could not complete the Shelly.GetDeviceInfo RPC.`)
+    }
+    if (identityRead.status !== 'verified') {
+      throw new ConflictException(`The endpoint at ${ipAddress} did not return a valid Shelly.GetDeviceInfo response.`)
+    }
+    const identity = identityRead.info
+    if (identity.id?.toLowerCase() !== physicalId.toLowerCase() || typeof identity.gen !== 'number' || identity.gen < 2) {
+      throw new ConflictException(`Fresh RPC identity mismatch at ${ipAddress}: expected ${physicalId}; no evidence was saved.`)
+    }
+    if (identity.method !== 'GET /rpc/Shelly.GetDeviceInfo') {
+      throw new ConflictException('The endpoint did not answer Shelly.GetDeviceInfo over RPC; no evidence was saved.')
+    }
+    const expectedMac = [candidate.metadata?.deviceReportedMacAddress, candidate.metadata?.macAddress]
+      .find((value): value is string => typeof value === 'string' && !!value.trim())
+    if (expectedMac && (!identity.mac || normalizeMacAddress(expectedMac) !== normalizeMacAddress(identity.mac))) {
+      throw new ConflictException('The device-reported MAC differs from the known physical candidate; no evidence was saved.')
+    }
+    const savedInterfaceName = prior.device.observations?.find(item =>
+      item.attribute === 'shelly.device_id' && item.interfaceName,
+    )?.interfaceName
+    const componentEvidence = await probeShellyComponentsWithEvidence(ipAddress, zone.id, savedInterfaceName, signal)
+    if (componentEvidence.failureReason) throw new BadGatewayException(componentEvidence.failureReason)
+    const observedKeys = componentEvidence.components.map(item => item.component).sort()
+    const expectedKeys = inventory.components.map(item => item.key).filter(key => /^(?:switch|em1):\d+$/.test(key)).sort()
+    if (expectedKeys.length === 0) {
+      throw new ConflictException('Physical inventory has no supported Shelly switch or EM1 components to verify.')
+    }
+    if (!observedKeys.includes(component) || expectedKeys.some(key => !observedKeys.includes(key)) ||
+        observedKeys.some(key => !expectedKeys.includes(key))) {
+      throw new ConflictException(`RPC component profile mismatch: inventory expects [${expectedKeys.join(', ')}], device reports [${observedKeys.join(', ')}]. No evidence or inventory changes were saved.`)
+    }
+    throwIfScanAborted(signal)
+
+    const completedAt = new Date().toISOString()
+    const identityVerifiedAt = identity.observedAt || completedAt
+    const componentsVerifiedAt = componentEvidence.observations
+      .filter(item => item.attribute === 'shelly.component_status')
+      .map(item => item.observedAt).sort().at(-1) || completedAt
+    const verifiedDevice: NetworkDiscoveredDevice = {
+      ...prior.device,
+      id: physicalId,
+      ipAddress,
+      networkZoneId: zone.id,
+      networkZoneName: zone.name,
+      vendor: 'Shelly',
+      protocol: 'http',
+      status: 'online',
+      generation: identity.gen,
+      model: identity.model || prior.device.model,
+      app: identity.app || prior.device.app,
+      firmwareVersion: identity.firmware || prior.device.firmwareVersion,
+      macAddress: identity.mac || prior.device.macAddress,
+      deviceReportedMacAddress: identity.mac || prior.device.deviceReportedMacAddress,
+      components: componentEvidence.components,
+      discoveredAt: completedAt,
+      reason: 'Fresh read-only Shelly RPC identity and component status verified from the selected candidate endpoint.',
+      observations: [
+        ...(prior.device.observations || []),
+        { source: 'http_rpc', attribute: 'shelly.device_id', value: physicalId, observedAt: identityVerifiedAt, scopeId: zone.id, method: identity.method || 'GET /rpc/Shelly.GetDeviceInfo' },
+        ...(identity.mac ? [{ source: 'http_rpc' as const, attribute: 'shelly.device_reported_mac', value: identity.mac, observedAt: identityVerifiedAt, scopeId: zone.id, method: identity.method || 'GET /rpc/Shelly.GetDeviceInfo' }] : []),
+        ...componentEvidence.observations,
+      ],
+    }
+    const candidates = shellyLanCandidates(verifiedDevice)
+    if (!candidates.some(item => item.id === candidateId)) {
+      throw new ConflictException('Fresh RPC evidence did not reproduce the selected logical component candidate.')
+    }
+    throwIfScanAborted(signal)
+    const scanId = randomUUID()
+    await this.discoveryMemory.recordScan(completedAt, [verifiedDevice], ownership)
+    throwIfScanAborted(signal)
+    await this.discoveryMemory.recordSnapshot({
+      schemaVersion: 2, scanId, ownership, startedAt: completedAt, completedAt,
+      collector: { id: `${localHostname()}/${savedInterfaceName || 'interface-unknown'}`, host: localHostname(), interfaces: savedInterfaceName ? [savedInterfaceName] : [] },
+      scopes: [{ id: zone.id, name: zone.name, ...(zone.cidr ? { cidr: zone.cidr } : {}), complete: false, gatewayIpsObserved: [],
+        collectionStages: { hostDiscovery: { durationMs: 0, complete: false, targetCount: 0, hostsReported: 0 },
+          serviceEnrichment: { durationMs: 0, complete: true, targetCount: 1, hostsReported: 1 } } }],
+      methods: ['operator_selected_shelly_read_only_rpc'], successes: 1, failures: [],
+      limitations: ['One previously observed endpoint was revalidated; no subnet discovery was run.'],
+      rawEvidence: [], rawEvidenceOmitted: 0, endpoints: [verifiedDevice], topology: { relationships: [] },
+    })
+    throwIfScanAborted(signal)
+    await this.physicalInventory.discover({
+      scope: ownership, physicalDeviceId: inventory.physicalDeviceId,
+      identity: { namespace: 'mqtt:shelly-protocol-id', value: physicalId }, vendor: 'Shelly',
+      hardwareModel: identity.model || inventory.hardwareModel, firmwareVersion: identity.firmware || inventory.firmwareVersion,
+      evidenceSource: 'selected_device_read_only_rpc_verification', observedAt: completedAt,
+      components: candidates.map(item => ({ key: String(item.metadata?.component), capabilities: item.capabilities || [] })),
+      endpoint: { protocol: 'http', kind: 'rpc', address: `http://${ipAddress}` },
+    })
+    throwIfScanAborted(signal)
+    await this.physicalInventory.refreshNetworkObservations(ownership, [{
+      physicalDeviceId: inventory.physicalDeviceId, ipAddress, ...(identity.mac ? { macAddress: normalizeMacAddress(identity.mac) } : {}),
+      networkScope: `${prior.device.gatewayId || 'gateway-unknown'}:${zone.id}`, observedAt: completedAt, evidenceSource: 'selected_device_read_only_rpc_verification',
+    }])
+    throwIfScanAborted(signal)
+    const activeSiteName = this.registry.getSnapshot().site.name
+    for (const item of candidates) this.registry.registerDiscoveredDevice({
+      ...item, tenantId: ownership.tenantId, siteId: ownership.siteId, siteName: activeSiteName,
+    })
+    return { status: 'verified' as const, scanId, physicalId, physicalDeviceId: inventory.physicalDeviceId,
+      componentKeys: observedKeys, identityVerifiedAt, componentsVerifiedAt }
   }
 
   readVirtualLabEnergridHttpEvidence(
@@ -1472,6 +1689,7 @@ function normalizeMacAddress(value: unknown): string | undefined {
 export type ShellyComponentProbeEvidence = {
   components: NonNullable<NetworkDiscoveredDevice['components']>
   observations: NonNullable<NetworkDiscoveredDevice['observations']>
+  failureReason?: string
 }
 
 const maxShellyComponents = 32
@@ -1485,22 +1703,28 @@ export async function probeShellyComponentsWithEvidence(
   ipAddress: string,
   scopeId?: string,
   interfaceName?: string,
+  externalSignal?: AbortSignal,
 ): Promise<ShellyComponentProbeEvidence> {
-  return probeShellyComponentEvidence(ipAddress, scopeId, interfaceName)
+  return probeShellyComponentEvidence(ipAddress, scopeId, interfaceName, externalSignal)
 }
 
 async function probeShellyComponentEvidence(
   ipAddress: string,
   scopeId?: string,
   interfaceName?: string,
+  externalSignal?: AbortSignal,
 ): Promise<ShellyComponentProbeEvidence> {
   let baseUrl: string
   try { baseUrl = privateShellyBaseUrl(`http://${ipAddress}`) }
-  catch { return { components: [], observations: [] } }
+  catch { return { components: [], observations: [], failureReason: 'The saved Shelly endpoint is not a safe HTTP RPC target.' } }
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 1500)
+  const abort = () => controller.abort()
+  if (externalSignal?.aborted) controller.abort()
+  else externalSignal?.addEventListener('abort', abort, { once: true })
   try {
     const componentsResponse = await readShellyRpcJson(baseUrl, 'Shelly.GetComponents', controller.signal)
+    if (!componentsResponse) return { components: [], observations: [], failureReason: 'Shelly.GetComponents did not respond within 1.5 seconds.' }
     const reportedComponents = await componentKeysFromComponentsPages(baseUrl, componentsResponse, controller.signal)
     const statusComponents = reportedComponents === null
       ? componentKeysFromStatus(componentsResponse)
@@ -1508,9 +1732,10 @@ async function probeShellyComponentEvidence(
     const componentKeys = reportedComponents ?? (statusComponents.length > 0
       ? statusComponents
       : componentKeysFromStatus(await readShellyRpcJson(baseUrl, 'Shelly.GetStatus', controller.signal)))
-    if (controller.signal.aborted) return { components: [], observations: [] }
+    if (controller.signal.aborted) return { components: [], observations: [], failureReason: 'Shelly component RPC exceeded the 1.5-second deadline.' }
 
     const components = componentKeys.slice(0, maxShellyComponents)
+    if (components.length === 0) return { components: [], observations: [], failureReason: 'Shelly RPC did not report supported switch or EM1 components.' }
     const confirmed: ShellyComponentProbeEvidence = { components: [], observations: [] }
     for (let offset = 0; offset < components.length && !controller.signal.aborted; offset += shellyComponentProbeConcurrency) {
       const batch = components.slice(offset, offset + shellyComponentProbeConcurrency)
@@ -1558,11 +1783,15 @@ async function probeShellyComponentEvidence(
           })
       }
     }
-    return confirmed
-  } catch {
-    return { components: [], observations: [] }
+    const missing = components.filter(item => !confirmed.components.some(found => found.component === item.component))
+    return missing.length
+      ? { ...confirmed, failureReason: `Read-only status RPC did not confirm ${missing.map(item => item.component).join(', ')} within 1.5 seconds.` }
+      : confirmed
+  } catch (error) {
+    return { components: [], observations: [], failureReason: error instanceof Error ? error.message : 'Shelly component RPC failed.' }
   } finally {
     clearTimeout(timeout)
+    externalSignal?.removeEventListener('abort', abort)
   }
 }
 
@@ -1801,27 +2030,62 @@ export function tcpPortOpen(
   timeoutMs = tcpConnectTimeoutMs,
   signal?: AbortSignal,
 ): Promise<boolean> {
+  return probeTcpConnection(ipAddress, port, timeoutMs, signal).then(result => result.status === 'connected')
+}
+
+export function probeTcpConnection(
+  ipAddress: string,
+  port: number,
+  timeoutMs = tcpConnectTimeoutMs,
+  signal?: AbortSignal,
+): Promise<{ status: 'connected' | 'timeout' | 'refused' | 'unreachable' | 'error' | 'aborted'; message: string }> {
   return new Promise((resolve) => {
-    if (signal?.aborted) return resolve(false)
+    if (signal?.aborted) return resolve({ status: 'aborted', message: 'Verification was cancelled.' })
     const socket = new Socket()
     let settled = false
-    const timeout = setTimeout(() => finish(false), timeoutMs)
-    const abort = () => finish(false)
+    const timeout = setTimeout(() => finish({
+      status: 'timeout', message: `TCP connection to ${ipAddress}:${port} timed out after ${timeoutMs} ms; verify the observer route and network scope.`,
+    }), timeoutMs)
+    const abort = () => finish({ status: 'aborted', message: 'Verification was cancelled.' })
 
-    const finish = (open: boolean) => {
+    const finish = (result: { status: 'connected' | 'timeout' | 'refused' | 'unreachable' | 'error' | 'aborted'; message: string }) => {
       if (settled) return
       settled = true
       clearTimeout(timeout)
       signal?.removeEventListener('abort', abort)
       socket.destroy()
-      resolve(open)
+      resolve(result)
     }
 
     signal?.addEventListener('abort', abort, { once: true })
-    socket.once('connect', () => finish(true))
-    socket.once('error', () => finish(false))
+    socket.once('connect', () => finish({ status: 'connected', message: '' }))
+    socket.once('error', (error: NodeJS.ErrnoException) => {
+      const code = error?.code || 'UNKNOWN'
+      const status = code === 'ECONNREFUSED' ? 'refused'
+        : code === 'ENETUNREACH' || code === 'EHOSTUNREACH' ? 'unreachable' : 'error'
+      const message = status === 'refused'
+        ? `The observer reached ${ipAddress}, but TCP port ${port} refused the connection.`
+        : status === 'unreachable'
+          ? `The observer reports no route to ${ipAddress} (${code}). Check the authorized network scope.`
+          : `TCP connection to ${ipAddress}:${port} failed (${code}).`
+      finish({ status, message })
+    })
     socket.connect(port, ipAddress)
   })
+}
+
+function ipIsInZone(ipAddress: string, zone: NetworkDiscoveryZone): boolean {
+  if (isIP(ipAddress) !== 4) return false
+  if (zone.cidr) {
+    const [network, prefixText, extra] = zone.cidr.split('/')
+    const prefix = Number(prefixText)
+    if (!extra && isIP(network) === 4 && Number.isInteger(prefix) && prefix >= 0 && prefix <= 32) {
+      const allowed = new BlockList()
+      allowed.addSubnet(network, prefix, 'ipv4')
+      if (allowed.check(ipAddress, 'ipv4')) return true
+    }
+  }
+  return zone.seedIps.includes(ipAddress)
 }
 
 function throwIfScanAborted(signal?: AbortSignal): void {

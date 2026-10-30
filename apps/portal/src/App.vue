@@ -566,6 +566,7 @@ const networkEndpointIdentityRefreshes = ref<Record<string, NetworkEndpointIdent
 const nmapCapability = ref<NmapCapability | null>(null);
 const networkRuntime = ref<NetworkRuntime | null>(null);
 const discoveryDecisionBusy = ref<Record<string, string>>({});
+const shellyVerificationMessages = ref<Record<string, string>>({});
 const discoveryView = ref<'capable' | 'all'>('all');
 const mqttTopicFilter = ref('');
 const mqttPublishTopic = ref('');
@@ -2527,6 +2528,40 @@ function logDiscoveryDecision(device: PortalDevice, action: string) {
 function applyPendingDecision(candidateId: string, action: 'approve' | 'block', zoneId?: string) {
   const device = discoveredDevices.value.find(candidate => candidate.id === candidateId);
   if (device) void applyDiscoveryDecision(device, action, zoneId);
+}
+
+async function verifyPendingShelly(candidateId: string) {
+  if (discoveryDecisionBusy.value[candidateId]) return;
+  discoveryDecisionBusy.value = { ...discoveryDecisionBusy.value, [candidateId]: 'verify' };
+  shellyVerificationMessages.value = { ...shellyVerificationMessages.value, [candidateId]: '' };
+  const controller = new AbortController();
+  const deadline = window.setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await authFetch(`${apiBase}/portal/discovery/${encodeURIComponent(candidateId)}/verify-shelly`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken.value}` },
+      signal: controller.signal,
+    });
+    const result = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(typeof result?.message === 'string' ? result.message : `Verification failed (${response.status}).`);
+    await loadState();
+    shellyVerificationMessages.value = {
+      ...shellyVerificationMessages.value,
+      [candidateId]: `Fresh identity and component RPC evidence saved for ${result.physicalId}. Enrollment is still a separate operator action.`,
+    };
+  } catch (error) {
+    shellyVerificationMessages.value = {
+      ...shellyVerificationMessages.value,
+      [candidateId]: controller.signal.aborted
+        ? 'The Portal request exceeded 15 seconds. No enrollment or device control was performed; check API connectivity before retrying.'
+        : error instanceof Error ? error.message : 'Selected-device verification failed.',
+    };
+  } finally {
+    window.clearTimeout(deadline);
+    const next = { ...discoveryDecisionBusy.value };
+    delete next[candidateId];
+    discoveryDecisionBusy.value = next;
+  }
 }
 
 function renamePendingCandidate(candidateId: string) {
@@ -6351,8 +6386,10 @@ onBeforeUnmount(() => {
             v-else
             :cards="pendingEnrollmentCards"
             :busy-by-candidate-id="discoveryDecisionBusy"
+            :verification-message-by-candidate-id="shellyVerificationMessages"
             :zones="state?.zones || []"
             @decide="applyPendingDecision"
+            @verify="verifyPendingShelly"
             @rename="renamePendingCandidate"
           />
           <p v-if="discoveredDevices.some(device => device.metadata?.observationApprovalRequired === true)" class="discovery-empty compact">
