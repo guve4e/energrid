@@ -44,7 +44,11 @@ trap cleanup EXIT
 echo "Installing local dependencies and building API, Core and Portal..."
 (
   cd "$repo_root"
-  pnpm install --frozen-lockfile
+  if [[ ! -x "$repo_root/node_modules/.bin/nx" ]]; then
+    pnpm install --frozen-lockfile
+  else
+    echo "Using the existing verified local dependencies."
+  fi
   pnpm nx build api --skip-nx-cache
   pnpm nx build core --skip-nx-cache
   VITE_BACKEND_LABEL=same-origin pnpm nx build portal --skip-nx-cache
