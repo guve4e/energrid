@@ -59,9 +59,12 @@ test('one-time bootstrap clearly discloses its controlled service restart', () =
   const bootstrap = source['bootstrap-pi-deploy.sh'];
   assertIncludes(bootstrap, 'restart the existing API and Core once');
   assertIncludes(bootstrap, 'reload Nginx once');
-  assertIncludes(source['bootstrap-pi-deploy-root.sh'], 'release-env-was-absent');
-  assertIncludes(source['bootstrap-pi-deploy-root.sh'], 'API is not running the current release identity.');
-  assertIncludes(source['bootstrap-pi-deploy-root.sh'], 'rm -f "$helper_dest" "$helper_dest.new" "$api_tmp" "$core_tmp" "$nginx_tmp"');
+  const rootBootstrap = source['bootstrap-pi-deploy-root.sh'];
+  assertIncludes(rootBootstrap, 'release-env-was-absent');
+  assertIncludes(rootBootstrap, 'API is not running the current release identity.');
+  assertIncludes(rootBootstrap, 'rm -f "$helper_dest" "$helper_dest.new" "$api_tmp" "$core_tmp" "$nginx_tmp"');
+  assert.ok(rootBootstrap.indexOf('install -d -o root -g root -m 0755 "$(dirname "$core_dropin")"') <
+    rootBootstrap.indexOf('core_tmp="$(mktemp "${core_dropin}.bootstrap.XXXXXX")"'));
 });
 
 test('bootstrap rejects an invalid target before changing anything', () => {

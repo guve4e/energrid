@@ -133,6 +133,7 @@ api_tmp="$(mktemp "${api_unit}.bootstrap.XXXXXX")"
 } >"$api_tmp"
 chmod 0644 "$api_tmp"
 
+install -d -o root -g root -m 0755 "$(dirname "$core_dropin")"
 core_tmp="$(mktemp "${core_dropin}.bootstrap.XXXXXX")"
 {
   printf '[Service]\nEnvironmentFile=%s\nExecStart=\nExecStart=/usr/bin/node %s/current/dist/apps/core/main.js\n' "$release_env" "$root"
@@ -181,7 +182,6 @@ chown root:root "$release_env_tmp"
 chmod 0644 "$release_env_tmp"
 mv -f "$release_env_tmp" "$release_env"
 mv -f "$api_tmp" "$api_unit"
-install -d -o root -g root -m 0755 "$(dirname "$core_dropin")"
 mv -f "$core_tmp" "$core_dropin"
 mv -f "$nginx_tmp" "$nginx_conf"
 systemctl daemon-reload
