@@ -2593,7 +2593,7 @@ async function scanNetwork(scopeIds?: string[]) {
   const fullSubnetSelected = selectedScopes.some(scope => !!scope.cidr && scope.collectionSource !== 'virtual-lab');
   const virtualTargets = [...new Set(virtualLabScopes.flatMap(scope => scope.seedIps || []))];
   const virtualLabConfirmed = virtualLabScopes.length > 0 && window.confirm(
-    `This will query only the ${virtualTargets.length} configured Virtual Lab device address(es): ${virtualTargets.join(', ')} on the isolated ${virtualLabScopes[0].cidr || 'Lab network'}. No other Lab or home-network addresses will be scanned. Continue?`,
+    `This will scan up to 14 usable addresses in the authorized isolated Virtual Lab scope ${virtualLabScopes[0].cidr || 'Lab network'}. No Home networks or addresses outside this scope will be scanned. Continue?`,
   );
   if (virtualLabScopes.length && !virtualLabConfirmed) return;
   const fullSubnetConfirmed = fullSubnetSelected || virtualLabConfirmed;

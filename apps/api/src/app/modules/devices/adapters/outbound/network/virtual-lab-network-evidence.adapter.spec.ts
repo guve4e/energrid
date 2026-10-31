@@ -1,4 +1,5 @@
 import { VirtualLabNetworkEvidenceAdapter } from './virtual-lab-network-evidence.adapter'
+import { Logger } from '@nestjs/common'
 import type { NetworkDiscoveredDevice, NetworkDiscoveryZone } from '../../../device-registry.types'
 
 const zone: NetworkDiscoveryZone = {
@@ -9,6 +10,7 @@ const zone: NetworkDiscoveryZone = {
   seedIps: ['172.30.250.10', '172.30.250.11'],
   collectionSource: 'virtual-lab',
 }
+const scopeTargets = Array.from({ length: 14 }, (_, index) => `172.30.250.${index + 1}`)
 
 function device(ipAddress: string, id: string, protocol: NetworkDiscoveredDevice['protocol']): NetworkDiscoveredDevice {
   return {
@@ -30,19 +32,20 @@ function payload(overrides: Record<string, unknown> = {}) {
   const devices = [
     device('172.30.250.10', 'esp8266:a1b2c3', 'http'),
     device('172.30.250.11', 'shellyplus1-00c0de000001', 'http'),
+    device('172.30.250.13', 'shellyplus1-00c0de000002', 'http'),
   ]
   return {
     schemaVersion: 2,
-    scope: { id: zone.id, name: zone.name, configuredNetworkCidr: zone.cidr, interfaceName: 'eth0', explicitTargets: [...zone.seedIps] },
+    scope: { id: zone.id, name: zone.name, configuredNetworkCidr: zone.cidr, interfaceName: 'eth0', explicitTargets: [...scopeTargets] },
     collector: { id: 'virtual-lab-docker/192.168.1.138/eth0', host: '192.168.1.138', interfaces: ['eth0'] },
     nmap: {
       capability: { available: true, version: '7.93' }, hosts: [], methods: ['nmap_host_discovery', 'nmap_tcp_connect_service_scan'],
-      scopes: [{ scopeId: zone.id, complete: true, targetCount: 2, hostsReported: 2,
-        hostDiscovery: { durationMs: 12, complete: true, targetCount: 2, hostsReported: 2 },
-        serviceEnrichment: { durationMs: 30, complete: true, targetCount: 2, hostsReported: 2 } }],
+      scopes: [{ scopeId: zone.id, complete: true, targetCount: 14, hostsReported: 3,
+        hostDiscovery: { durationMs: 12, complete: true, targetCount: 14, hostsReported: 3 },
+        serviceEnrichment: { durationMs: 30, complete: true, targetCount: 14, hostsReported: 3 } }],
       failures: [], limitations: [], cancelled: false,
     },
-    normalizedCandidates: zone.seedIps.map(ipAddress => ({ ipAddress, networkZoneId: zone.id, networkZoneName: zone.name })),
+    normalizedCandidates: devices.map(item => ({ ipAddress: item.ipAddress, networkZoneId: zone.id, networkZoneName: zone.name })),
     networkDevices: devices,
     startedAt: '2026-10-25T09:59:00.000Z', completedAt: '2026-10-25T10:00:00.000Z',
     ...overrides,
@@ -65,7 +68,7 @@ describe('VirtualLabNetworkEvidenceAdapter', () => {
     else process.env.HOME_VIRTUAL_LAB_DOCKER_HOST = originalHost
   })
 
-  it('runs only the fixed scanner on the configured private network and validates both identities', async () => {
+  it('scans only the fixed authorized /28 and discovers configured plus unknown devices', async () => {
     const calls: Array<{ args: string[]; options: { timeout: number; maxBuffer: number } }> = []
     const run = jest.fn(async (args: string[], options: { timeout: number; maxBuffer: number }) => {
       calls.push({ args, options })
@@ -78,17 +81,47 @@ describe('VirtualLabNetworkEvidenceAdapter', () => {
     })
     const result = await new VirtualLabNetworkEvidenceAdapter(run).scan(zone)
 
-    expect(result.devices.map(item => item.id)).toEqual(['esp8266:a1b2c3', 'shellyplus1-00c0de000001'])
+    expect(result.devices.map(item => item.id)).toEqual([
+      'esp8266:a1b2c3', 'shellyplus1-00c0de000001', 'shellyplus1-00c0de000002',
+    ])
     expect(result.collector).toEqual({ id: 'virtual-lab-docker/192.168.1.138/eth0', host: '192.168.1.138', interfaces: ['eth0'] })
     expect(calls[1].args).toEqual(['--context', 'energrid-lab-ssh', 'network', 'inspect', 'energrid-device-lab-vlan', '--format', '{{.Name}} {{.Driver}} {{.Internal}}'])
     expect(calls[2].args).toContain('--network')
     expect(calls[2].args).toContain('energrid-device-lab-vlan')
     expect(calls[2].args).toContain('--pull=never')
     expect(calls[2].args).toContain('energrid-device-lab-core-scan-m2:local')
-    expect(calls[2].args).toContain('M2_SCAN_TARGETS_JSON=["172.30.250.10","172.30.250.11"]')
+    expect(calls[2].args).toContain(`M2_SCAN_TARGETS_JSON=${JSON.stringify(scopeTargets)}`)
+    expect(calls[2].args).toContain('M2_MAX_HOSTS=14')
     expect(calls[2].args).not.toContain('--publish')
     expect(calls[2].args).not.toContain('sh')
     expect(calls[2].options.timeout).toBe(150_000)
+  })
+
+  it('logs safe structured categories for transport, runner, and invalid output failures', async () => {
+    const logger = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+    const transportRun = jest.fn().mockRejectedValue(Object.assign(new Error('ssh password=do-not-log'), { code: 'ETIMEDOUT' }))
+    await expect(new VirtualLabNetworkEvidenceAdapter(transportRun).scan(zone)).rejects.toThrow('context is unavailable')
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining('"category":"ssh_docker_failure"'))
+    expect(logger.mock.calls.flat().join(' ')).not.toContain('do-not-log')
+
+    logger.mockClear()
+    const runnerError = Object.assign(new Error('private runner output'), { code: 1, stderr: 'token=do-not-log' })
+    const runnerRun = jest.fn()
+      .mockResolvedValueOnce({ stdout: 'ssh://lab@192.168.1.138', stderr: '' })
+      .mockResolvedValueOnce({ stdout: 'energrid-device-lab-vlan bridge true', stderr: '' })
+      .mockRejectedValueOnce(runnerError)
+    await expect(new VirtualLabNetworkEvidenceAdapter(runnerRun).scan(zone)).rejects.toThrow('scanner failed')
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining('"category":"runner_failure"'))
+    expect(logger.mock.calls.flat().join(' ')).not.toContain('do-not-log')
+
+    logger.mockClear()
+    const invalidRun = jest.fn()
+      .mockResolvedValueOnce({ stdout: 'ssh://lab@192.168.1.138', stderr: '' })
+      .mockResolvedValueOnce({ stdout: 'energrid-device-lab-vlan bridge true', stderr: '' })
+      .mockResolvedValueOnce({ stdout: 'not-json secret=do-not-log', stderr: '' })
+    await expect(new VirtualLabNetworkEvidenceAdapter(invalidRun).scan(zone)).rejects.toThrow('malformed bounded evidence')
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining('"category":"invalid_output"'))
+    expect(logger.mock.calls.flat().join(' ')).not.toContain('do-not-log')
   })
 
   it('reads only the fixed Energrid identity and status endpoints through the internal Lab network', async () => {
@@ -134,7 +167,7 @@ describe('VirtualLabNetworkEvidenceAdapter', () => {
           : JSON.stringify({
             identity: { id: 'shellyplus1-00c0de000001', gen: 2 },
             componentKeys: ['switch:0'],
-            componentStatuses: [{ componentKey: 'switch:0', body: { id: 0, output: false } }],
+            componentStatuses: [{ componentKey: 'switch:0', body: { id: 0, output: false }, observedAt: '2026-10-31T12:00:00.000Z' }],
           })
       return { stdout, stderr: '' }
     })
@@ -146,7 +179,7 @@ describe('VirtualLabNetworkEvidenceAdapter', () => {
     expect(result).toMatchObject({
       identity: { id: 'shellyplus1-00c0de000001', gen: 2 },
       componentKeys: ['switch:0'],
-      componentStatuses: [{ componentKey: 'switch:0', body: { id: 0, output: false } }],
+      componentStatuses: [{ componentKey: 'switch:0', body: { id: 0, output: false }, observedAt: '2026-10-31T12:00:00.000Z' }],
       observer: { id: 'virtual-lab-docker/192.168.1.138/eth0', host: '192.168.1.138', interfaceName: 'eth0' },
     })
     expect(calls).toHaveLength(3)
@@ -157,6 +190,7 @@ describe('VirtualLabNetworkEvidenceAdapter', () => {
     expect(calls[2].args).toContain('--read-only')
     expect(calls[2].args).toContain('--user')
     expect(calls[2].args).toContain('M6_TARGET_IP=172.30.250.11')
+    expect(calls[2].args).toContain(`M6_ALLOWED_TARGETS_JSON=${JSON.stringify(scopeTargets)}`)
     expect(calls[2].args).toContain('M6_EXPECTED_COMPONENTS_JSON=["switch:0"]')
     expect(calls[2].args).not.toContain('--publish')
     expect(calls[2].args).not.toContain('sh')
@@ -166,6 +200,34 @@ describe('VirtualLabNetworkEvidenceAdapter', () => {
     expect(script).toContain('/rpc/Shelly.GetComponents')
     expect(script).toContain("(kind === 'switch' ? 'Switch' : 'EM1') + '.GetStatus?id='")
     expect(script).not.toContain('Switch.Set')
+  })
+
+  it('verifies an in-scope saved endpoint not present in seedIps without running a subnet scan', async () => {
+    const calls: string[][] = []
+    const run = jest.fn(async (args: string[]) => {
+      calls.push(args)
+      const stdout = args[0] === 'context'
+        ? 'ssh://lab@192.168.1.138\n'
+        : args.includes('network')
+          ? 'energrid-device-lab-vlan bridge true\n'
+          : JSON.stringify({
+            identity: { id: 'shellyplus1-00c0de000002', gen: 2 },
+            componentKeys: ['switch:0'],
+            componentStatuses: [{ componentKey: 'switch:0', body: { id: 0, output: false }, observedAt: '2026-10-31T12:00:00.000Z' }],
+          })
+      return { stdout, stderr: '' }
+    })
+
+    const result = await new VirtualLabNetworkEvidenceAdapter(run).verifyShellyComponent(
+      zone, '172.30.250.13', 'shellyplus1-00c0de000002', ['switch:0'],
+    )
+
+    expect(result.identity.id).toBe('shellyplus1-00c0de000002')
+    expect(calls).toHaveLength(3)
+    expect(calls[2]).toContain('M6_TARGET_IP=172.30.250.13')
+    expect(calls[2]).toContain(`M6_ALLOWED_TARGETS_JSON=${JSON.stringify(scopeTargets)}`)
+    expect(calls[2].join(' ')).not.toContain('M2_SCAN_TARGETS_JSON')
+    expect(calls[2].join(' ')).not.toContain('nmap')
   })
 
   it('rejects malformed selected Shelly RPC output before returning observer evidence', async () => {
@@ -184,13 +246,36 @@ describe('VirtualLabNetworkEvidenceAdapter', () => {
     expect(run).toHaveBeenCalledTimes(3)
   })
 
-  it('rejects a selected target or component outside the configured candidate before remote execution', async () => {
+  it('preserves the bounded Docker runner exception as a cause without exposing command output', async () => {
+    const rootCause = Object.assign(new Error('runner timed out'), { code: 'ETIMEDOUT', stderr: 'UNRESTRICTED_RUNNER_OUTPUT' })
+    const run = jest.fn()
+      .mockResolvedValueOnce({ stdout: 'ssh://lab@192.168.1.138\n', stderr: '' })
+      .mockResolvedValueOnce({ stdout: 'energrid-device-lab-vlan bridge true\n', stderr: '' })
+      .mockRejectedValueOnce(rootCause)
+
+    let wrapped: Error & { code?: string; cause?: unknown } | undefined
+    try {
+      await new VirtualLabNetworkEvidenceAdapter(run).verifyShellyComponent(
+        zone, '172.30.250.13', 'shellyplus1-00c0de000002', ['switch:0'],
+      )
+    } catch (error) {
+      wrapped = error as Error & { code?: string; cause?: unknown }
+    }
+
+    expect(wrapped).toBeInstanceOf(Error)
+    expect(wrapped?.message).toBe('Virtual Lab Shelly verification exceeded its 15-second execution limit.')
+    expect(wrapped?.code).toBe('VIRTUAL_LAB_SHELLY_EXECUTION_TIMEOUT')
+    expect(wrapped?.cause).toBe(rootCause)
+    expect(wrapped?.message).not.toContain('UNRESTRICTED_RUNNER_OUTPUT')
+  })
+
+  it('rejects an out-of-scope target or unsupported component before remote execution', async () => {
     const run = jest.fn()
     const adapter = new VirtualLabNetworkEvidenceAdapter(run)
-    await expect(adapter.verifyShellyComponent(zone, '172.30.250.12', 'shellyplus1-00c0de000001', ['switch:0']))
-      .rejects.toThrow('not an explicitly configured candidate endpoint')
+    await expect(adapter.verifyShellyComponent(zone, '172.30.251.13', 'shellyplus1-00c0de000001', ['switch:0']))
+      .rejects.toThrow('outside the authorized observer scope')
     await expect(adapter.verifyShellyComponent(zone, '172.30.250.11', 'shellyplus1-00c0de000001', ['cover:0']))
-      .rejects.toThrow('not an explicitly configured candidate endpoint')
+      .rejects.toThrow('outside the authorized observer scope')
     expect(run).not.toHaveBeenCalled()
   })
 
@@ -202,11 +287,60 @@ describe('VirtualLabNetworkEvidenceAdapter', () => {
     expect(run).not.toHaveBeenCalled()
   })
 
-  it('refuses scopes with any target count other than the two explicitly configured addresses', async () => {
+  it('rejects seed addresses outside the authorized Virtual Lab /28 before remote execution', async () => {
     const run = jest.fn()
-    await expect(new VirtualLabNetworkEvidenceAdapter(run).scan({ ...zone, seedIps: [...zone.seedIps, '172.30.250.12'] }))
-      .rejects.toThrow('exactly two in-scope seed addresses')
+    await expect(new VirtualLabNetworkEvidenceAdapter(run).scan({ ...zone, seedIps: [...zone.seedIps, '172.30.251.12'] }))
+      .rejects.toThrow('only in-scope seed addresses')
     expect(run).not.toHaveBeenCalled()
+  })
+
+  it('can discover an unknown in-scope endpoint without adding it to seedIps', async () => {
+    const run = jest.fn(async (args: string[], options: { timeout: number; maxBuffer: number }) => {
+      const stdout = args[0] === 'context'
+        ? 'ssh://lab@192.168.1.138\n'
+        : args.includes('network')
+          ? 'energrid-device-lab-vlan bridge true\n'
+          : JSON.stringify(payload())
+      return { stdout, stderr: '' }
+    })
+    const result = await new VirtualLabNetworkEvidenceAdapter(run).scan({ ...zone, seedIps: [] })
+
+    expect(result.devices.find(item => item.ipAddress === '172.30.250.13')?.id)
+      .toBe('shellyplus1-00c0de000002')
+    expect(run.mock.calls[2][0]).toContain(`M2_SCAN_TARGETS_JSON=${JSON.stringify(scopeTargets)}`)
+  })
+
+  it('rejects scope expansion to any network other than the authorized Virtual Lab /28', async () => {
+    const run = jest.fn()
+    await expect(new VirtualLabNetworkEvidenceAdapter(run).scan({
+      ...zone, id: 'other-lab', cidr: '172.30.251.0/28', seedIps: [],
+    })).rejects.toThrow('restricted to the configured device-lab-vlan scope')
+    expect(run).not.toHaveBeenCalled()
+  })
+
+  it('retains reachable devices when some authorized /28 hosts are unresponsive', async () => {
+    const partialPayload = payload({
+      nmap: {
+        ...payload().nmap,
+        failures: ['One or more targets did not respond before the per-host timeout.'],
+        limitations: ['Host discovery was incomplete for unresponsive targets.'],
+        scopes: [{ scopeId: zone.id, complete: false, targetCount: 14, hostsReported: 3,
+          hostDiscovery: { durationMs: 1_000, complete: false, targetCount: 14, hostsReported: 3,
+            failure: 'Per-host timeout elapsed.' },
+          serviceEnrichment: { durationMs: 200, complete: true, targetCount: 3, hostsReported: 3 } }],
+      },
+    })
+    const run = jest.fn(async (args: string[]) => ({
+      stdout: args[0] === 'context' ? 'ssh://lab@192.168.1.138\n'
+        : args.includes('network') ? 'energrid-device-lab-vlan bridge true\n'
+          : JSON.stringify(partialPayload),
+      stderr: '',
+    }))
+    const result = await new VirtualLabNetworkEvidenceAdapter(run).scan(zone)
+
+    expect(result.devices).toHaveLength(3)
+    expect(result.nmap.failures).toContain('One or more targets did not respond before the per-host timeout.')
+    expect(result.nmap.scopes[0].complete).toBe(false)
   })
 
   it('rejects a non-SSH Docker context before starting a container', async () => {

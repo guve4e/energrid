@@ -96,6 +96,7 @@ describe('LAN discovery evidence persistence', () => {
         components: [{ component: 'switch:0', channel: 0 }],
       },
     ])
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined)
     global.fetch = jest.fn().mockRejectedValue(new Error('mocked')) as unknown as typeof fetch
   })
 
@@ -164,9 +165,12 @@ describe('LAN discovery evidence persistence', () => {
     }
   }
 
-  function virtualShellyVerifier(componentStatus: Record<string, unknown> = { id: 0, source: 'init', output: false }) {
-    const physicalId = 'shellyplus1-00c0de000001'
-    const ipAddress = '172.30.250.11'
+  function virtualShellyVerifier(
+    componentStatus: Record<string, unknown> = { id: 0, source: 'init', output: false },
+    options: { physicalId?: string; ipAddress?: string } = {},
+  ) {
+    const physicalId = options.physicalId || 'shellyplus1-00c0de000001'
+    const ipAddress = options.ipAddress || '172.30.250.11'
     const component = 'switch:0'
     const candidateId = `${physicalId}:${component}`
     const zone = {
@@ -302,6 +306,41 @@ describe('LAN discovery evidence persistence', () => {
         ]),
       })],
     })
+  })
+
+  it('verifies a discovered Virtual Lab Shelly endpoint that is in the saved scope but not in seedIps', async () => {
+    const fixture = virtualShellyVerifier(undefined, {
+      physicalId: 'shellyplus1-00c0de000002', ipAddress: '172.30.250.13',
+    })
+    await memory.recordScan(fixture.prior.discoveredAt, [fixture.prior], TEST_OWNER)
+
+    const result = await fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER)
+
+    expect(fixture.virtualLabEvidence.verifyShellyComponent).toHaveBeenCalledWith(
+      expect.objectContaining({ id: fixture.zone.id, cidr: '172.30.250.0/28' }),
+      '172.30.250.13', 'shellyplus1-00c0de000002', ['switch:0'], expect.any(AbortSignal),
+    )
+    expect(result).toMatchObject({ status: 'verified', physicalId: 'shellyplus1-00c0de000002',
+      physicalDeviceId: 'physical-virtual-shelly', componentKeys: ['switch:0'] })
+    expect(fixture.physicalInventory.discover).toHaveBeenCalledWith(expect.objectContaining({
+      scope: TEST_OWNER, identity: { namespace: 'mqtt:shelly-protocol-id', value: 'shellyplus1-00c0de000002' },
+      evidenceSource: 'selected_device_read_only_rpc_verification',
+    }))
+    expect(fixture.registry.registerDiscoveredDevice).toHaveBeenCalledTimes(1)
+    expect(fixture.registry.getDevices()[0].trustStatus).toBe('discovered')
+    expect(fixture.registry.getDevices()[0].metadata.verifiedMeasurementFields).toBeUndefined()
+    expect(fixture.registry.getDevices()[0].capabilities).toEqual([{ kind: 'switch', actions: ['read'] }])
+  })
+
+  it('rejects an endpoint changed to an unsaved address before selected-device RPC', async () => {
+    const fixture = virtualShellyVerifier()
+    fixture.registry.getDevices()[0].metadata.ipAddress = '172.30.250.14'
+    await memory.recordScan(fixture.prior.discoveredAt, [fixture.prior], TEST_OWNER)
+
+    await expect(fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER))
+      .rejects.toThrow('does not match the latest saved physical identity, component, and endpoint evidence')
+    expect(fixture.virtualLabEvidence.verifyShellyComponent).not.toHaveBeenCalled()
+    expect(fixture.physicalInventory.discover).not.toHaveBeenCalled()
   })
 
   it('refreshes evidence for an existing unlinked Lab enrollment without projecting a second candidate', async () => {
@@ -659,7 +698,7 @@ describe('LAN discovery evidence persistence', () => {
     expect(await memory.listSnapshots(TEST_OWNER)).toHaveLength(1)
   })
 
-  it('persists fixed-target Virtual Lab results through Discovery Memory without local probing or physical inventory writes', async () => {
+  it('persists scope-discovered Virtual Lab results through Discovery Memory without local probing or physical inventory writes', async () => {
     process.env.HOME_VIRTUAL_LAB_ENABLED = 'true'
     process.env.HOME_NETWORK_ZONES_JSON = JSON.stringify({ zones: [{
       id: 'device-lab-vlan', name: 'Virtual Lab LAN', cidr: '172.30.250.0/28',
@@ -669,6 +708,7 @@ describe('LAN discovery evidence persistence', () => {
     const identities = [
       { ipAddress: '172.30.250.10', id: 'esp8266:a1b2c3', macAddress: '5e:24:06:c6:81:59', deviceReportedMacAddress: undefined, protocol: 'http' as const, vendor: 'Energrid' },
       { ipAddress: '172.30.250.11', id: 'shellyplus1-00c0de000001', macAddress: '56:73:18:cd:7a:d9', deviceReportedMacAddress: '02:c0:de:00:00:01', protocol: 'http' as const, vendor: 'Shelly' },
+      { ipAddress: '172.30.250.13', id: 'shellyplus1-00c0de000002', macAddress: 'ee:af:a0:2a:ef:2a', deviceReportedMacAddress: '02:c0:de:00:00:02', protocol: 'http' as const, vendor: 'Shelly' },
     ]
     const devices: NetworkDiscoveredDevice[] = identities.map(item => ({
       ...item, networkZoneId: 'device-lab-vlan', networkZoneName: 'Virtual Lab LAN',
@@ -692,9 +732,9 @@ describe('LAN discovery evidence persistence', () => {
         })),
         nmap: {
           capability: { available: true, version: '7.93' }, hosts: [],
-          scopes: [{ scopeId: 'device-lab-vlan', complete: true, targetCount: 2, hostsReported: 2,
-            hostDiscovery: { durationMs: 12, complete: true, targetCount: 2, hostsReported: 2 },
-            serviceEnrichment: { durationMs: 31, complete: true, targetCount: 2, hostsReported: 2 } }],
+          scopes: [{ scopeId: 'device-lab-vlan', complete: true, targetCount: 14, hostsReported: 3,
+            hostDiscovery: { durationMs: 12, complete: true, targetCount: 14, hostsReported: 3 },
+            serviceEnrichment: { durationMs: 31, complete: true, targetCount: 14, hostsReported: 3 } }],
           methods: ['nmap_host_discovery', 'nmap_tcp_connect_service_scan'], failures: [], limitations: [], cancelled: false,
         },
         collector: { id: 'virtual-lab-docker/192.168.1.138/eth0', host: '192.168.1.138', interfaces: ['eth0'] },
@@ -715,15 +755,47 @@ describe('LAN discovery evidence persistence', () => {
       id: 'device-lab-vlan', collectionSource: 'virtual-lab', seedIps: ['172.30.250.10', '172.30.250.11'],
     }), undefined)
     expect(localScan).not.toHaveBeenCalled()
-    expect(result.devices.map(device => device.id)).toEqual(['esp8266:a1b2c3', 'shellyplus1-00c0de000001'])
+    expect(result.devices.map(device => device.id)).toEqual([
+      'esp8266:a1b2c3', 'shellyplus1-00c0de000001', 'shellyplus1-00c0de000002',
+    ])
     expect(saved?.collector).toEqual({ id: 'virtual-lab-docker/192.168.1.138/eth0', host: '192.168.1.138', interfaces: ['eth0'] })
     expect(saved?.scopes[0]).toMatchObject({ collectionSource: 'virtual-lab', complete: true, cidr: '172.30.250.0/28' })
     expect(saved?.endpoints.find(item => item.id.startsWith('shelly'))).toMatchObject({
       ipAddress: '172.30.250.11', macAddress: '56:73:18:cd:7a:d9', deviceReportedMacAddress: '02:c0:de:00:00:01',
     })
-    expect(historicalEvidence.map(record => record.device.id).sort()).toEqual(['esp8266:a1b2c3', 'shellyplus1-00c0de000001'])
+    expect(historicalEvidence.map(record => record.device.id).sort()).toEqual([
+      'esp8266:a1b2c3', 'shellyplus1-00c0de000001', 'shellyplus1-00c0de000002',
+    ])
     expect(physicalInventory.discover).not.toHaveBeenCalled()
     expect(physicalInventory.refreshNetworkObservations).not.toHaveBeenCalled()
+  })
+
+  it('logs a bounded persistence failure category without logging storage error details', async () => {
+    const logger = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined)
+    const failure = new Error('private storage path and driver details')
+    jest.spyOn(memory, 'recordScan').mockRejectedValue(failure)
+    process.env.HOME_VIRTUAL_LAB_ENABLED = 'true'
+    process.env.HOME_NETWORK_ZONES_JSON = JSON.stringify({ zones: [{
+      id: 'device-lab-vlan', name: 'Virtual Lab LAN', cidr: '172.30.250.0/28',
+      interfaceName: 'eth0', seedIps: ['172.30.250.10', '172.30.250.11'],
+      collectionSource: 'virtual-lab', role: 'service',
+    }] })
+    const virtualLab = {
+      scan: jest.fn().mockResolvedValue({
+        devices: [], candidates: [],
+        nmap: { capability: { available: true }, hosts: [], scopes: [], methods: [], failures: [], limitations: [] },
+        collector: { id: 'virtual-lab-docker/192.168.1.138/eth0', host: '192.168.1.138', interfaces: ['eth0'] },
+      }),
+    }
+    const service = new DeviceLanDiscoveryService(
+      memory, TEST_REGISTRY, new DeviceLanNetworkEvidenceCollector(), undefined, virtualLab as never,
+    )
+
+    await expect(service.scanNow({ scopeIds: ['device-lab-vlan'], fullSubnetConfirmed: true })).rejects.toBe(failure)
+
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining('"category":"persistence_failure"'))
+    expect(logger).toHaveBeenCalledWith(expect.stringContaining('"stage":"discovery_memory_record_scan"'))
+    expect(logger.mock.calls.flat().join(' ')).not.toContain('private storage path')
   })
 
   it('binds a snapshot to the server-authorized site captured before asynchronous collection', async () => {

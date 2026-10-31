@@ -187,7 +187,7 @@ describe('device onboarding page workflow with mocked services', () => {
     await button('Scan network').trigger('click')
     await flushPromises()
 
-    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('only the 2 configured Virtual Lab device address(es): 172.30.250.10, 172.30.250.11'))
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('up to 14 usable addresses in the authorized isolated Virtual Lab scope 172.30.250.0/28'))
     const scanCall = fetch.mock.calls.find(([url]) => url === '/portal/network/scan')
     expect(JSON.parse(String(scanCall?.[1]?.body))).toEqual({ scopeIds: ['device-lab-vlan'], fullSubnetConfirmed: true })
     expect(JSON.stringify(scanCall?.[1]?.body)).not.toContain('192.168.')

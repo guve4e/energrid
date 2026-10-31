@@ -14,6 +14,7 @@ import { BlockList, isIP, Socket } from 'node:net'
 import { promisify } from 'node:util'
 import { privateShellyBaseUrl } from '@energrid/domain-devices'
 import { normalizeMacAddress } from './mac-address'
+import { parseShellySwitchStatus } from './adapters/inbound/shelly/shelly-switch-status'
 import type {
   NetworkDiscoveredDevice,
   NetworkDiscoveryZone,
@@ -340,9 +341,6 @@ export class DeviceLanDiscoveryService {
     if (virtualLab && process.env.HOME_VIRTUAL_LAB_ENABLED !== 'true') {
       throw new BadGatewayException('Virtual Lab selected-device verification is disabled.')
     }
-    if (virtualLab && !zone.seedIps.includes(ipAddress)) {
-      throw new BadRequestException('The saved endpoint is not one of the explicitly configured Virtual Lab targets.')
-    }
     if (!inventory && !virtualLab) {
       throw new ConflictException('No unique site-owned physical inventory record matches this Shelly identity.')
     }
@@ -549,6 +547,25 @@ export class DeviceLanDiscoveryService {
     return this.virtualLabEvidence.readEnergridHttpEvidence(zone, targetIp, physicalId, signal)
   }
 
+  readVirtualLabShellyStatusEvidence(
+    scopeId: string,
+    targetIp: string,
+    physicalId: string,
+    expectedComponentKeys: string[],
+    signal?: AbortSignal,
+  ) {
+    if (process.env.HOME_VIRTUAL_LAB_ENABLED !== 'true') {
+      throw new Error('Virtual Lab Shelly status observation is disabled.')
+    }
+    const zone = this.getConfiguredZone(scopeId)
+    if (!zone || zone.collectionSource !== 'virtual-lab') {
+      throw new Error('Shelly status observation requires a configured Virtual Lab scope.')
+    }
+    return this.virtualLabEvidence.verifyShellyComponent(
+      zone, targetIp, physicalId, expectedComponentKeys, signal,
+    )
+  }
+
   getNmapCapability(): Promise<NmapCapability & { enabled: boolean }> {
     return this.evidenceCollector.getNmapCapability()
   }
@@ -622,10 +639,20 @@ export class DeviceLanDiscoveryService {
     const boundedEvidence = buildBoundedRawEvidence(discoveredCandidates, this.lastScan, startedAt)
     throwIfScanAborted(options.signal)
     const completedAt = new Date().toISOString()
-    await this.discoveryMemory.recordScan(completedAt, devices.map(device => {
-      const observations = (device.observations || []).filter(item => item.method !== 'nmap_tcp_connect_service_scan')
-      return { ...device, ...(observations.length ? { observations } : { observations: undefined }) }
-    }), ownership)
+    try {
+      await this.discoveryMemory.recordScan(completedAt, devices.map(device => {
+        const observations = (device.observations || []).filter(item => item.method !== 'nmap_tcp_connect_service_scan')
+        return { ...device, ...(observations.length ? { observations } : { observations: undefined }) }
+      }), ownership)
+    } catch (error) {
+      this.logger.error(JSON.stringify({
+        event: 'network_discovery_persistence_failure',
+        category: 'persistence_failure',
+        stage: 'discovery_memory_record_scan',
+        scopeIds: zones.map(zone => zone.id),
+      }))
+      throw error
+    }
     throwIfScanAborted(options.signal)
     if (this.physicalInventory && !virtualLabResult) {
       try {
@@ -691,9 +718,13 @@ export class DeviceLanDiscoveryService {
           observations,
         )
       } catch (error) {
-        this.logger.warn(
-          `Could not refresh associated network identity evidence: ${error instanceof Error ? error.message : 'unknown error'}`,
-        )
+        this.logger.warn(JSON.stringify({
+          event: 'network_discovery_persistence_failure',
+          category: 'persistence_failure',
+          stage: 'physical_inventory_network_observations',
+          scopeIds: zones.map(zone => zone.id),
+          discoveryMemoryRecorded: true,
+        }))
         throw error
       }
     }
@@ -1145,7 +1176,7 @@ function virtualLabMethods(result: VirtualLabScanResult): string[] {
 function virtualLabLimitations(zones: NetworkDiscoveryZone[], result: VirtualLabScanResult): string[] {
   return [
     ...scanLimitations(zones).filter(item => !item.startsWith('No remote network observer is configured')),
-    `The remote observer queried only the ${zones[0].seedIps.length} explicitly configured virtual-device addresses; other addresses in ${zones[0].cidr} were not scanned.`,
+    'The remote observer queried only the 14 usable addresses in the explicitly authorized Virtual Lab 172.30.250.0/28; addresses outside that scope were not scanned.',
     ...result.nmap.limitations,
   ]
 }
@@ -1922,7 +1953,7 @@ function isConfirmedShellyComponentStatus(
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const status = value as Record<string, unknown>
   if (status.id !== component.channel) return false
-  if (component.component.startsWith('switch:')) return typeof status.output === 'boolean'
+  if (component.component.startsWith('switch:')) return parseShellySwitchStatus(value, component.component) !== null
   return typeof status.act_power === 'number' && Number.isFinite(status.act_power)
 }
 

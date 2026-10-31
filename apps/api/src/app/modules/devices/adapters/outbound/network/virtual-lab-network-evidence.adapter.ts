@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { Logger } from '@nestjs/common'
 import type { NetworkDiscoveredDevice, NetworkDiscoveryZone } from '../../../device-registry.types'
 import type { LocalNetworkRuntimeReport } from './local-network-runtime.adapter'
 import type { NmapCapability, NmapScanResult } from './nmap-network-evidence.adapter'
@@ -7,6 +8,9 @@ import type { NmapCapability, NmapScanResult } from './nmap-network-evidence.ada
 const DOCKER_CONTEXT_ENV = 'HOME_VIRTUAL_LAB_DOCKER_CONTEXT'
 const DOCKER_CONTEXT = 'energrid-lab-ssh'
 const DOCKER_NETWORK = 'energrid-device-lab-vlan'
+const VIRTUAL_LAB_SCOPE_ID = 'device-lab-vlan'
+const VIRTUAL_LAB_CIDR = '172.30.250.0/28'
+const VIRTUAL_LAB_MAX_HOSTS = 14
 const SCANNER_IMAGE = 'energrid-device-lab-core-scan-m2:local'
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 const SCAN_TIMEOUT_MS = 150_000
@@ -50,7 +54,7 @@ export interface VirtualLabEnergridHttpEvidence {
 export interface VirtualLabShellyRpcEvidence {
   identity: Record<string, unknown>
   componentKeys: string[]
-  componentStatuses: Array<{ componentKey: string; body: Record<string, unknown> }>
+  componentStatuses: Array<{ componentKey: string; body: Record<string, unknown>; observedAt: string }>
   observer: { id: string; host: string; interfaceName: string }
 }
 
@@ -79,6 +83,8 @@ type ScannerPayload = {
  * It never accepts a command, image, network, or address from a Portal request.
  */
 export class VirtualLabNetworkEvidenceAdapter {
+  private readonly logger = new Logger(VirtualLabNetworkEvidenceAdapter.name)
+
   constructor(private readonly run: CommandRunner = runDocker) {}
 
   /** Read the two fixed firmware GET endpoints from the isolated observer network. */
@@ -114,24 +120,24 @@ export class VirtualLabNetworkEvidenceAdapter {
     expectedComponentKeys: string[],
     signal?: AbortSignal,
   ): Promise<VirtualLabShellyRpcEvidence> {
-    const { targets } = validateVirtualLabZone(zone)
+    const targets = authorizedVirtualLabScanTargets(zone)
     const components = [...new Set(expectedComponentKeys)].sort()
     if (!targets.includes(targetIp) || !/^shelly[a-z0-9._-]{1,114}$/i.test(expectedPhysicalId) ||
         components.length === 0 || components.length > 32 ||
         components.some(component => !/^(?:switch|em1):(?:[0-9]|[12][0-9]|3[01])$/.test(component))) {
-      throw new Error('Virtual Lab Shelly verification target is not an explicitly configured candidate endpoint and component set.')
+      throw shellyAdapterError('Virtual Lab Shelly verification target is outside the authorized observer scope or has an unsupported identity/component set.', 'VIRTUAL_LAB_SHELLY_SCOPE_REJECTED', undefined)
     }
     const context = process.env[DOCKER_CONTEXT_ENV]
     const expectedHost = process.env.HOME_VIRTUAL_LAB_DOCKER_HOST
     if (context !== DOCKER_CONTEXT || !expectedHost || !isIpv4(expectedHost)) {
-      throw new Error(`Virtual Lab verification requires HOME_VIRTUAL_LAB_DOCKER_CONTEXT=${DOCKER_CONTEXT} and an explicitly configured Docker host.`)
+      throw shellyAdapterError(`Virtual Lab verification requires HOME_VIRTUAL_LAB_DOCKER_CONTEXT=${DOCKER_CONTEXT} and an explicitly configured Docker host.`, 'VIRTUAL_LAB_SHELLY_OBSERVER_UNAVAILABLE', undefined)
     }
     const host = await this.remoteDockerHost(context, signal)
-    if (host !== expectedHost) throw new Error('Virtual Lab Docker context host does not match the explicitly configured Lab host.')
+    if (host !== expectedHost) throw shellyAdapterError('Virtual Lab Docker context host does not match the explicitly configured Lab host.', 'VIRTUAL_LAB_SHELLY_OBSERVER_MISMATCH', undefined)
     await this.assertInternalNetwork(context, signal)
     const payload = await this.runFixedShellyRead(context, targetIp, expectedPhysicalId, components, targets, signal)
     if (!validShellyRpcPayload(payload, components)) {
-      throw new Error('Virtual Lab returned malformed or incomplete bounded Shelly RPC evidence.')
+      throw shellyAdapterError('Virtual Lab returned malformed or incomplete bounded Shelly RPC evidence.', 'VIRTUAL_LAB_SHELLY_INVALID_OUTPUT', undefined)
     }
     return {
       identity: payload.identity,
@@ -143,17 +149,26 @@ export class VirtualLabNetworkEvidenceAdapter {
   }
 
   async scan(zone: NetworkDiscoveryZone, signal?: AbortSignal): Promise<VirtualLabScanResult> {
-    const config = validateVirtualLabZone(zone)
+    const targets = authorizedVirtualLabScanTargets(zone)
     const context = process.env[DOCKER_CONTEXT_ENV]
     const expectedHost = process.env.HOME_VIRTUAL_LAB_DOCKER_HOST
     if (context !== DOCKER_CONTEXT || !expectedHost || !isIpv4(expectedHost)) {
       throw new Error(`Virtual Lab scans require HOME_VIRTUAL_LAB_DOCKER_CONTEXT=${DOCKER_CONTEXT} and an explicitly configured Docker host.`)
     }
     const host = await this.remoteDockerHost(context, signal)
-    if (host !== expectedHost) throw new Error('Virtual Lab Docker context host does not match the explicitly configured Lab host.')
+    if (host !== expectedHost) {
+      this.logScanFailure('ssh_docker_failure', 'configured_observer_mismatch', zone.id)
+      throw new Error('Virtual Lab Docker context host does not match the explicitly configured Lab host.')
+    }
     await this.assertInternalNetwork(context, signal)
-    const payload = await this.runFixedScanner(context, zone, config.targets, host, signal)
-    const validated = validateScannerPayload(payload, zone, config.targets)
+    const payload = await this.runFixedScanner(context, zone, targets, host, signal)
+    let validated: ScannerPayload
+    try {
+      validated = validateScannerPayload(payload, zone, targets)
+    } catch (error) {
+      this.logScanFailure('invalid_output', 'scanner_payload_validation', zone.id)
+      throw error
+    }
     return {
       devices: validated.networkDevices,
       candidates: validated.normalizedCandidates,
@@ -184,8 +199,9 @@ export class VirtualLabNetworkEvidenceAdapter {
       const parsed = new URL(endpoint)
       if (parsed.protocol !== 'ssh:' || !parsed.hostname) throw new Error('not an SSH Docker context')
       return parsed.hostname
-    } catch {
-      throw new Error('Virtual Lab Docker context is unavailable or is not an SSH context.')
+    } catch (error) {
+      this.logScanFailure('ssh_docker_failure', 'docker_context_inspect', undefined, error)
+      throw shellyAdapterError('Virtual Lab Docker context is unavailable or is not an SSH context.', 'VIRTUAL_LAB_SHELLY_OBSERVER_UNAVAILABLE', error)
     }
   }
 
@@ -196,8 +212,9 @@ export class VirtualLabNetworkEvidenceAdapter {
         '--format', '{{.Name}} {{.Driver}} {{.Internal}}',
       ], { timeout: 5_000, maxBuffer: 16 * 1024, ...(signal ? { signal } : {}) })
       if (result.stdout.trim() !== `${DOCKER_NETWORK} bridge true`) throw new Error('network isolation is not enabled')
-    } catch {
-      throw new Error('Virtual Lab Docker network failed its private internal-bridge check; no scan was run.')
+    } catch (error) {
+      this.logScanFailure('ssh_docker_failure', 'private_network_inspect', undefined, error)
+      throw shellyAdapterError('Virtual Lab Docker network failed its private internal-bridge check; no scan was run.', 'VIRTUAL_LAB_SHELLY_NETWORK_CHECK_FAILED', error)
     }
   }
 
@@ -229,12 +246,21 @@ export class VirtualLabNetworkEvidenceAdapter {
         maxBuffer: MAX_OUTPUT_BYTES,
         ...(signal ? { signal } : {}),
       })
-      return JSON.parse(String(result.stdout || '')) as ScannerPayload
+      try {
+        return JSON.parse(String(result.stdout || '')) as ScannerPayload
+      } catch {
+        this.logScanFailure('invalid_output', 'scanner_json_parse', zone.id)
+        throw new Error('Virtual Lab scanner returned malformed bounded evidence; no snapshot was saved.')
+      }
     } catch (error) {
       if (signal?.aborted) throw new Error('Virtual Lab scan was cancelled by the operator.')
-      if (isTimeout(error)) throw new Error('Virtual Lab scan exceeded its 150-second execution limit.')
-      if (error instanceof SyntaxError) throw new Error('Virtual Lab scanner returned malformed JSON evidence.')
-      throw new Error('Virtual Lab scanner failed. Confirm the two configured devices and scanner image are available.')
+      if (isTimeout(error)) {
+        this.logScanFailure('runner_failure', 'scanner_execution_deadline', zone.id)
+        throw new Error('Virtual Lab scan exceeded its 150-second execution limit.')
+      }
+      if (error instanceof Error && error.message === 'Virtual Lab scanner returned malformed bounded evidence; no snapshot was saved.') throw error
+      this.logScanFailure(isSshOrDockerFailure(error) ? 'ssh_docker_failure' : 'runner_failure', 'scanner_container_run', zone.id, error)
+      throw new Error('Virtual Lab scanner failed within the authorized bounded scope; no snapshot was saved. Check the scanner image, observer connectivity, and Nmap coverage diagnostics.')
     }
   }
 
@@ -307,12 +333,46 @@ export class VirtualLabNetworkEvidenceAdapter {
       }
       return JSON.parse(String(result.stdout || '')) as unknown
     } catch (error) {
-      if (signal?.aborted) throw new Error('Virtual Lab Shelly verification was cancelled.')
-      if (isTimeout(error)) throw new Error('Virtual Lab Shelly verification exceeded its 15-second execution limit.')
-      if (error instanceof SyntaxError) throw new Error('Virtual Lab Shelly observer returned malformed RPC evidence.')
-      throw new Error('Virtual Lab bounded Shelly RPC verification failed.')
+      if (signal?.aborted) throw shellyAdapterError('Virtual Lab Shelly verification was cancelled.', 'VIRTUAL_LAB_SHELLY_CANCELLED', error)
+      if (isTimeout(error)) throw shellyAdapterError('Virtual Lab Shelly verification exceeded its 15-second execution limit.', 'VIRTUAL_LAB_SHELLY_EXECUTION_TIMEOUT', error)
+      if (error instanceof SyntaxError) throw shellyAdapterError('Virtual Lab Shelly observer returned malformed RPC evidence.', 'VIRTUAL_LAB_SHELLY_INVALID_OUTPUT', error)
+      throw shellyAdapterError('Virtual Lab bounded Shelly RPC verification failed.', 'VIRTUAL_LAB_SHELLY_EXECUTION_FAILED', error)
     }
   }
+
+  private logScanFailure(
+    category: 'ssh_docker_failure' | 'runner_failure' | 'invalid_output',
+    stage: string,
+    scopeId?: string,
+    error?: unknown,
+  ): void {
+    const record: Record<string, string | number> = { event: 'virtual_lab_scan_failure', category, stage }
+    if (scopeId) record.scopeId = scopeId
+    const code = safeProcessErrorCode(error)
+    if (code !== undefined) record.exitCode = code
+    this.logger.warn(JSON.stringify(record))
+  }
+}
+
+function shellyAdapterError(message: string, code: string, cause: unknown): Error {
+  const error = new Error(message, { cause }) as Error & { code: string }
+  error.code = code
+  return error
+}
+
+function safeProcessErrorCode(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') return undefined
+  const code = (error as { code?: unknown }).code
+  return typeof code === 'number' && Number.isInteger(code) && code >= 0 && code <= 255 ? code : undefined
+}
+
+function isSshOrDockerFailure(error: unknown): boolean {
+  if (safeProcessErrorCode(error) === 125) return true
+  if (!error || typeof error !== 'object') return false
+  const record = error as { code?: unknown; stderr?: unknown; message?: unknown }
+  if (typeof record.code === 'string' && /^(?:ECONN[A-Z]+|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EPIPE|ENOENT)$/.test(record.code)) return true
+  const diagnostic = `${typeof record.message === 'string' ? record.message : ''} ${typeof record.stderr === 'string' ? record.stderr : ''}`
+  return /(?:ssh: connect to host|connection timed out|connection refused|could not resolve hostname|docker daemon|error response from daemon|error during connect|operation not permitted)/i.test(diagnostic)
 }
 
 // This program is fixed in the API source and passed as one argv value (never a
@@ -355,13 +415,13 @@ async function get(path, maxBytes) {
 `;
 
 // Fixed selected-target RPC read. It cannot accept a command, image, network,
-// or target beyond the server-supplied configured Lab seed list.
+// or target beyond the server-supplied authorized Lab scope.
 const FIXED_SHELLY_READ_SCRIPT = String.raw`
 const allowed = JSON.parse(process.env.M6_ALLOWED_TARGETS_JSON || 'null');
 const expectedComponents = JSON.parse(process.env.M6_EXPECTED_COMPONENTS_JSON || 'null');
 const ip = process.env.M6_TARGET_IP || '';
 const expectedId = (process.env.M6_EXPECTED_PHYSICAL_ID || '').toLowerCase();
-if (!Array.isArray(allowed) || allowed.length !== 2 || !allowed.includes(ip) ||
+if (!Array.isArray(allowed) || allowed.length !== ${VIRTUAL_LAB_MAX_HOSTS} || !allowed.includes(ip) ||
     !/^shelly[a-z0-9._-]{1,114}$/.test(expectedId) || !Array.isArray(expectedComponents) ||
     expectedComponents.length < 1 || expectedComponents.length > 32 ||
     expectedComponents.some(key => !/^(switch|em1):(0|[1-9]|[12][0-9]|3[01])$/.test(key))) throw Error('target rejected');
@@ -408,7 +468,7 @@ async function get(path, maxBytes = 16384) {
       const body = await get('/rpc/' + (kind === 'switch' ? 'Switch' : 'EM1') + '.GetStatus?id=' + id);
       if (body.id !== id || (kind === 'switch' ? typeof body.output !== 'boolean' : typeof body.act_power !== 'number'))
         throw Error('component status mismatch');
-      return { componentKey, body };
+      return { componentKey, body, observedAt: new Date().toISOString() };
     }));
     statuses.push(...results);
   }
@@ -419,7 +479,7 @@ async function get(path, maxBytes = 16384) {
 function validShellyRpcPayload(
   value: unknown,
   expectedComponents: string[],
-): value is { identity: Record<string, unknown>; componentKeys: string[]; componentStatuses: Array<{ componentKey: string; body: Record<string, unknown> }> } {
+): value is { identity: Record<string, unknown>; componentKeys: string[]; componentStatuses: Array<{ componentKey: string; body: Record<string, unknown>; observedAt: string }> } {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const record = value as Record<string, unknown>
   if (!record.identity || typeof record.identity !== 'object' || Array.isArray(record.identity) ||
@@ -432,7 +492,8 @@ function validShellyRpcPayload(
   return expectedComponents.every(key => componentKeys.includes(key)) && expectedComponents.every(key => statuses.some(item => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return false
     const status = item as Record<string, unknown>
-    return status.componentKey === key && !!status.body && typeof status.body === 'object' && !Array.isArray(status.body)
+    return status.componentKey === key && !!status.body && typeof status.body === 'object' && !Array.isArray(status.body) &&
+      typeof status.observedAt === 'string' && Number.isFinite(Date.parse(status.observedAt))
   }))
 }
 
@@ -451,13 +512,38 @@ function validHttpResponse(value: unknown): value is VirtualLabHttpResponse {
 }
 
 function validateVirtualLabZone(zone: NetworkDiscoveryZone): { targets: string[] } {
+  const config = validateVirtualLabScope(zone)
+  if (config.targets.length !== 2) {
+    throw new Error('Virtual Lab single-device reads require exactly two in-scope configured seed addresses.')
+  }
+  return { targets: config.targets }
+}
+
+function validateVirtualLabScope(zone: NetworkDiscoveryZone): { targets: string[] } {
   const cidr = parseCidr(zone.cidr)
-  const targets = [...new Set(zone.seedIps)]
+  const seedIps = Array.isArray(zone.seedIps) ? zone.seedIps : []
+  const targets = [...new Set(seedIps)]
   if (zone.collectionSource !== 'virtual-lab' || !cidr || cidr.prefix < 28 || cidr.prefix > 29 ||
-      targets.length !== 2 || targets.some(target => !isIpv4(target) || !insideCidr(target, zone.cidr!))) {
-    throw new Error('Virtual Lab scope must define one private /28 or /29 and exactly two in-scope seed addresses.')
+      targets.length > VIRTUAL_LAB_MAX_HOSTS || targets.some(target => !isIpv4(target) || !insideCidr(target, zone.cidr!))) {
+    throw new Error('Virtual Lab scope must define one private /28 or /29 and only in-scope seed addresses.')
   }
   return { targets: targets.sort(compareIpv4) }
+}
+
+function authorizedVirtualLabScanTargets(zone: NetworkDiscoveryZone): string[] {
+  validateVirtualLabScope(zone)
+  if (zone.id !== VIRTUAL_LAB_SCOPE_ID || zone.cidr !== VIRTUAL_LAB_CIDR ||
+      (zone.interfaceName && zone.interfaceName !== 'eth0')) {
+    throw new Error(`Virtual Lab subnet scans are restricted to the configured ${VIRTUAL_LAB_SCOPE_ID} scope (${VIRTUAL_LAB_CIDR}) on eth0.`)
+  }
+  const parsed = parseCidr(zone.cidr)
+  if (!parsed) throw new Error('Virtual Lab scope must be a valid authorized IPv4 network.')
+  const addressCount = 2 ** (32 - parsed.prefix)
+  const targets = Array.from({ length: addressCount - 2 }, (_, index) => ipv4FromNumber(parsed.network + index + 1))
+  if (targets.length !== VIRTUAL_LAB_MAX_HOSTS || targets.some(target => !insideCidr(target, VIRTUAL_LAB_CIDR))) {
+    throw new Error('Virtual Lab scope exceeded its fixed bounded target limit.')
+  }
+  return targets
 }
 
 function validateScannerPayload(
@@ -541,6 +627,10 @@ function isIpv4(value: string): boolean {
 
 function ipv4Number(value: string): number {
   return value.split('.').reduce((sum, part) => (sum * 256 + Number(part)) >>> 0, 0)
+}
+
+function ipv4FromNumber(value: number): string {
+  return [24, 16, 8, 0].map(shift => (value >>> shift) & 0xff).join('.')
 }
 
 function compareIpv4(left: string, right: string): number {
