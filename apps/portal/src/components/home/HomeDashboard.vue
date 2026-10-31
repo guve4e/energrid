@@ -2,14 +2,14 @@
 import { computed, onMounted, onBeforeUnmount, ref } from 'vue';
 import HomeIntelligence from './HomeIntelligence.vue';
 import { authFetch } from '../../auth/auth-client';
+import { canSwitchDevice, type ControlSetupDevice } from '../devices/device-control';
 
-type Device = {
+type Device = Omit<ControlSetupDevice, 'capabilities' | 'adapter'> & {
   id: string;
   displayName: string;
   zoneName: string;
-  capabilities: Array<{ kind: string; unit?: string; actions?: string[] }>;
-  trustStatus?: 'approved' | 'discovered' | 'blocked';
-  adapter?: { protocol?: string; driver?: string; configured?: boolean };
+  capabilities: Array<{ kind: string; unit?: string; actions: string[] }>;
+  adapter: ControlSetupDevice['adapter'] & { configured?: boolean };
   state: {
     values: Record<string, number | boolean | string | null>;
     observedAt: string | null;
@@ -106,11 +106,12 @@ const climate = computed(() =>
 const relayDevices = computed(() =>
   devices.value.filter((device) => {
     const description = `${device.displayName} ${device.adapter?.driver || ''} ${device.capabilities.map((capability) => capability.kind).join(' ')}`;
-    const actions = new Set(device.capabilities.flatMap((capability) => capability.actions || []));
     return device.trustStatus === 'approved' &&
       device.adapter?.configured === true &&
       /shelly|relay|switch|light/i.test(description) &&
-      actions.has('turn_on') && actions.has('turn_off');
+      device.capabilities.some((capability) =>
+        capability.actions.includes('turn_on') && capability.actions.includes('turn_off'),
+      );
   }),
 );
 
@@ -405,10 +406,10 @@ onBeforeUnmount(() => {
     <section v-if="relayDevices.length" class="home-section relay-section">
       <div class="section-heading">
         <div>
-          <p class="eyebrow">APPROVED CONTROLS</p>
+          <p class="eyebrow">SWITCHES &amp; RELAYS</p>
           <h2>Lights &amp; relays</h2>
         </div>
-        <span>Actions are checked by Energrid Core</span>
+        <span>Actions appear only when a control route is authorized</span>
       </div>
       <div class="relay-grid">
         <article v-for="device in relayDevices" :key="device.id" class="relay-card">
@@ -418,8 +419,11 @@ onBeforeUnmount(() => {
             <small>{{ relayValue(device) }} · {{ deviceConnectivityLabel(device) }}</small>
           </div>
           <div class="relay-actions">
-            <button type="button" :disabled="!!actionBusy[device.id]" @click="sendRelayAction(device, 'turn_on')">On</button>
-            <button type="button" :disabled="!!actionBusy[device.id]" @click="sendRelayAction(device, 'turn_off')">Off</button>
+            <template v-if="canSwitchDevice(device)">
+              <button type="button" :disabled="!!actionBusy[device.id]" @click="sendRelayAction(device, 'turn_on')">On</button>
+              <button type="button" :disabled="!!actionBusy[device.id]" @click="sendRelayAction(device, 'turn_off')">Off</button>
+            </template>
+            <span v-else class="relay-read-only">Read only · {{ device.control?.reason || 'Control route not configured.' }}</span>
           </div>
           <p v-if="actionFeedback[device.id]" class="relay-feedback" aria-live="polite">{{ actionFeedback[device.id] }}</p>
         </article>
