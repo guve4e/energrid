@@ -120,6 +120,32 @@ describe('PhysicalDeviceInventoryService', () => {
     expect(repository.discoverLanIdentity.mock.calls[0][0]).not.toHaveProperty('hardwareVerifiedAt');
   });
 
+  it('normalizes compact and colon-separated MAC claims consistently', async () => {
+    const { repository, service } = harness();
+    const base = {
+      device: { ...scope, deviceId: 'temp-kitchen' }, networkScope: 'gateway-home:iot',
+      ipAddress: '192.168.1.133', observedAt: '2026-10-19T12:00:00.000Z',
+      evidenceSource: 'lan_discovery', actor: 'portal-operator',
+    };
+    await service.associateLanIdentity({ ...base, macAddress: '02C0DE000001' });
+    await service.associateLanIdentity({ ...base, macAddress: '02:c0:de:00:00:01' });
+    expect(repository.discoverLanIdentity.mock.calls.map(call => call[0].macAddress))
+      .toEqual(['02:c0:de:00:00:01', '02:c0:de:00:00:01']);
+    expect(repository.discoverLanIdentity.mock.calls.every(call =>
+      !Object.prototype.hasOwnProperty.call(call[0], 'hardwareVerifiedAt'))).toBe(true);
+  });
+
+  it('rejects malformed MAC evidence before repository or enrollment access', async () => {
+    const { repository, enrollment, service } = harness();
+    await expect(service.associateLanIdentity({
+      device: { ...scope, deviceId: 'temp-kitchen' }, networkScope: 'gateway-home:iot',
+      ipAddress: '192.168.1.133', macAddress: '02C0DE00000Z',
+      observedAt: '2026-10-19T12:00:00.000Z', evidenceSource: 'lan_discovery', actor: 'portal-operator',
+    })).rejects.toThrow('LAN MAC evidence is invalid');
+    expect(enrollment.find).not.toHaveBeenCalled();
+    expect(repository.discoverLanIdentity).not.toHaveBeenCalled();
+  });
+
   it('does not make an IP-only observation a durable protocol identity', async () => {
     const { repository, service } = harness();
     await service.associateLanIdentity({

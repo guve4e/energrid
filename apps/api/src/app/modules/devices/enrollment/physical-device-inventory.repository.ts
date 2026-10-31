@@ -11,6 +11,15 @@ export interface PhysicalDeviceIdentityEvidence {
   value: string;
 }
 
+export function hasPhysicalDeviceIdentityClaim(
+  record: PhysicalDeviceInventoryRecord,
+  namespace: string,
+  value: string,
+): boolean {
+  const claims = record.identities ?? (record.identity ? [record.identity] : []);
+  return claims.some(claim => claim.namespace === namespace && claim.value.toLowerCase() === value.toLowerCase());
+}
+
 export interface PhysicalDeviceComponentEvidence {
   key: string;
   capabilities: DeviceCapabilityKind[];
@@ -126,6 +135,8 @@ export interface PhysicalDeviceInventoryRecord {
   physicalDeviceId: string;
   scope: PhysicalDeviceScope;
   identity?: PhysicalDeviceIdentityEvidence;
+  /** All current claims; `identity` remains the legacy primary-claim projection. */
+  identities?: PhysicalDeviceIdentityEvidence[];
   identityEvidenceSource?: string;
   identityLastObservedAt?: string;
   vendor?: string;

@@ -13,6 +13,7 @@ import { reverse } from 'node:dns/promises'
 import { BlockList, isIP, Socket } from 'node:net'
 import { promisify } from 'node:util'
 import { privateShellyBaseUrl } from '@energrid/domain-devices'
+import { normalizeMacAddress } from './mac-address'
 import type {
   NetworkDiscoveredDevice,
   NetworkDiscoveryZone,
@@ -20,7 +21,7 @@ import type {
 import type { DeviceRegistryService } from './device-registry.service'
 import { PHYSICAL_DEVICE_INVENTORY_SERVICE } from './enrollment/physical-device-inventory.token'
 import type { PhysicalDeviceInventoryService } from './enrollment/physical-device-inventory.service'
-import type { PhysicalLanObservation } from './enrollment/physical-device-inventory.repository'
+import { hasPhysicalDeviceIdentityClaim, type PhysicalLanObservation } from './enrollment/physical-device-inventory.repository'
 import { shellyLanCandidates } from './adapters/inbound/shelly/shelly-lan-candidates'
 import { energridDiscoveryCandidate } from './adapters/inbound/energrid/energrid-discovery-candidate'
 import { readOnlyShellyDeviceInfo, readOnlyShellyRpcDeviceInfo, readOnlyShellyRpcDeviceInfoFromBody } from './adapters/inbound/shelly/read-only-shelly-rpc'
@@ -280,7 +281,13 @@ export class DeviceLanDiscoveryService {
       throw new ConflictException('The selected Shelly component is registered under a different tenant or site.')
     }
     const registered = registryMatches.find(device => device.tenantId === ownership.tenantId && device.siteId === ownership.siteId)
-    if (registered && registered.trustStatus !== 'discovered') {
+    const registeredPhysicalId = typeof registered?.metadata?.physicalId === 'string'
+      ? registered.metadata.physicalId : ''
+    const partialEnrollment = !!registered && registered.trustStatus === 'approved' &&
+      registered.metadata?.approvedFromDiscovery === true &&
+      registeredPhysicalId.toLowerCase() === physicalId.toLowerCase() &&
+      registered.metadata?.component === component;
+    if (registered && registered.trustStatus !== 'discovered' && !partialEnrollment) {
       throw new ConflictException('The selected Shelly component is already enrolled or is no longer pending.')
     }
     if (registered && registered.adapter.driver !== 'shelly-lan') {
@@ -290,8 +297,7 @@ export class DeviceLanDiscoveryService {
     const inventories = await this.physicalInventory.list(ownership)
     const matchingInventory = inventories.filter(item =>
       item.scope.tenantId === ownership.tenantId && item.scope.siteId === ownership.siteId &&
-      item.identity?.namespace === 'mqtt:shelly-protocol-id' && typeof item.identity.value === 'string' &&
-      item.identity.value.toLowerCase() === physicalId.toLowerCase(),
+      hasPhysicalDeviceIdentityClaim(item, 'mqtt:shelly-protocol-id', physicalId),
     )
     if (matchingInventory.length > 1) {
       throw new ConflictException('More than one site-owned physical inventory record matches this Shelly identity.')
@@ -342,6 +348,19 @@ export class DeviceLanDiscoveryService {
     }
     if (inventory && !inventory.components.some(item => item.key === component)) {
       throw new ConflictException(`Physical inventory ${inventory.physicalDeviceId} has no expected ${component} component.`)
+    }
+    if (partialEnrollment) {
+      if (!inventory) throw new ConflictException('The enrolled Shelly has no unique same-site physical inventory record.')
+      const enrollmentTarget = await this.registry.getShellyReconciliationTargetDecision(
+        ownership.tenantId, ownership.siteId, candidateId, physicalId, component, inventory.physicalDeviceId,
+      )
+      if (!enrollmentTarget.matched) {
+        throw new ConflictException(`The enrolled Shelly cannot be recovered safely (${enrollmentTarget.reasonCode}).`)
+      }
+      const currentAssignment = inventory.assignments.find(item => item.deviceId === candidateId)
+      if (currentAssignment && (currentAssignment.physicalDeviceId !== inventory.physicalDeviceId || currentAssignment.componentKey)) {
+        throw new ConflictException('The enrolled component already has a component assignment; reload Network Identity before retrying.')
+      }
     }
     if (inventory) {
       const componentAssignments = inventory.assignments.filter(item => item.componentKey === component)
@@ -496,9 +515,20 @@ export class DeviceLanDiscoveryService {
     }])
     throwIfScanAborted(signal)
     const activeSiteName = this.registry.getSnapshot().site.name
-    for (const item of candidates) this.registry.registerDiscoveredDevice({
-      ...item, tenantId: ownership.tenantId, siteId: ownership.siteId, siteName: activeSiteName,
-    })
+    if (partialEnrollment && registered) {
+      const refreshed = await this.registry.refreshShellyVerificationEvidence({
+        tenantId: ownership.tenantId, siteId: ownership.siteId, deviceId: candidateId,
+        physicalId, component, physicalInventoryId: verifiedInventory.physicalDeviceId,
+        ipAddress, networkScope: `${prior.device.gatewayId || observerIdentity?.id || 'gateway-unknown'}:${zone.id}`,
+        identityVerifiedAt, componentVerifiedAt: componentsVerifiedAt,
+        ...(observerIdentity ? { observerId: observerIdentity.id } : {}),
+      })
+      if (!refreshed) throw new ConflictException('The approved component changed during verification; no identity association was recorded.')
+    } else {
+      for (const item of candidates) this.registry.registerDiscoveredDevice({
+        ...item, tenantId: ownership.tenantId, siteId: ownership.siteId, siteName: activeSiteName,
+      })
+    }
     return { status: 'verified' as const, scanId, physicalId, physicalDeviceId: verifiedInventory.physicalDeviceId,
       componentKeys: observedKeys, identityVerifiedAt, componentsVerifiedAt }
   }
@@ -1723,13 +1753,6 @@ export async function probeShelly(ipAddress: string): Promise<{
     app: info.app,
     gen: info.gen,
   }
-}
-
-function normalizeMacAddress(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined
-  const hex = value.replace(/[^0-9a-f]/gi, '').toLowerCase()
-  if (hex.length !== 12) return undefined
-  return hex.match(/.{2}/g)?.join(':')
 }
 
 export type ShellyComponentProbeEvidence = {

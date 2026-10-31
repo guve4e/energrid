@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, NotFoundException } from '@nest
 import { isIP } from 'node:net';
 import type { DeviceEnrollmentIdentity } from '@energrid/domain-devices';
 import type { DeviceEnrollmentService } from './device-enrollment.service';
+import { normalizeMacAddress } from '../mac-address';
 import type {
   PhysicalDeviceDiscovery,
   PhysicalDeviceInventoryRecord,
@@ -85,7 +86,12 @@ export class PhysicalDeviceInventoryService {
     physicalDeviceId?: string;
   }): Promise<PhysicalDeviceInventoryRecord> {
     if (!this.enrollment) throw new NotFoundException('Enrollment service is unavailable');
-    const macAddress = normalizeMac(input.macAddress);
+    const macAddress = input.macAddress === undefined
+      ? undefined
+      : normalizeMacAddress(input.macAddress);
+    if (input.macAddress !== undefined && !macAddress) {
+      throw new BadRequestException('LAN MAC evidence is invalid');
+    }
     if (!input.actor.trim() || !input.networkScope.trim() || !isIP(input.ipAddress) ||
       !input.evidenceSource.trim() || !Number.isFinite(Date.parse(input.observedAt))) {
       throw new BadRequestException('LAN identity evidence is invalid');
@@ -185,15 +191,6 @@ function validateDiscovery(input: PhysicalDeviceDiscovery): void {
     !input.endpoint.address?.trim() || containsCredential(input.endpoint.address))) {
     throw new BadRequestException('Communication endpoint evidence is invalid');
   }
-}
-
-function normalizeMac(value?: string): string | undefined {
-  if (value === undefined) return undefined;
-  const octets = value.trim().split(/[:-]/);
-  if (octets.length !== 6 || octets.some(octet => !/^[0-9a-f]{1,2}$/i.test(octet))) {
-    throw new BadRequestException('LAN MAC evidence is invalid');
-  }
-  return octets.map(octet => octet.padStart(2, '0').toLowerCase()).join(':');
 }
 
 function containsCredential(address: string): boolean {

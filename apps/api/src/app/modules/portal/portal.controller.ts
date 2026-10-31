@@ -443,12 +443,16 @@ export class PortalController {
       evidenceSource: current.evidenceSource,
       verificationStatus: current.verificationStatus,
     } : null
+    const recovery = this.onboarding
+      ? await this.onboarding.getShellyIdentityRecovery(deviceId)
+      : { status: 'not_recoverable' as const, reason: 'Device onboarding is unavailable.' }
     return {
       logicalDeviceId: deviceId,
       logicalAssignment,
       association,
       history,
       physicalDevice,
+      recovery,
     }
   }
 

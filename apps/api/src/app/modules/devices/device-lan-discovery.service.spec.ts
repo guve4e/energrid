@@ -304,6 +304,39 @@ describe('LAN discovery evidence persistence', () => {
     })
   })
 
+  it('refreshes evidence for an existing unlinked Lab enrollment without projecting a second candidate', async () => {
+    const fixture = virtualShellyVerifier()
+    const candidate = fixture.registry.getDevices()[0]
+    fixture.inventoryRecord.identity = { namespace: 'mac', value: '02:c0:de:00:00:01' }
+    fixture.inventoryRecord.identities = [
+      { namespace: 'mac', value: '02:c0:de:00:00:01' },
+      { namespace: 'mqtt:shelly-protocol-id', value: fixture.physicalId },
+    ]
+    fixture.registry.getDevices = () => [{ ...candidate, trustStatus: 'approved', metadata: {
+      ...candidate.metadata, approvedFromDiscovery: true,
+    } }]
+    ;(fixture.registry as any).getShellyReconciliationTargetDecision = jest.fn().mockResolvedValue({
+      matched: true, device: fixture.registry.getDevices()[0],
+    })
+    ;(fixture.registry as any).refreshShellyVerificationEvidence = jest.fn().mockResolvedValue(fixture.registry.getDevices()[0])
+    fixture.physicalInventory.list.mockResolvedValue([fixture.inventoryRecord])
+    await memory.recordScan(fixture.prior.discoveredAt, [fixture.prior], TEST_OWNER)
+
+    const result = await fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER)
+
+    expect(result.status).toBe('verified')
+    expect((fixture.registry as any).getShellyReconciliationTargetDecision).toHaveBeenCalledWith(
+      TEST_OWNER.tenantId, TEST_OWNER.siteId, fixture.candidateId, fixture.physicalId, 'switch:0', 'physical-virtual-shelly',
+    )
+    expect((fixture.registry as any).refreshShellyVerificationEvidence).toHaveBeenCalledWith(expect.objectContaining({
+      tenantId: TEST_OWNER.tenantId, siteId: TEST_OWNER.siteId, deviceId: fixture.candidateId,
+      physicalId: fixture.physicalId, component: 'switch:0', physicalInventoryId: 'physical-virtual-shelly',
+      observerId: 'virtual-lab-docker/192.168.1.138/eth0',
+    }))
+    expect(fixture.registry.registerDiscoveredDevice).not.toHaveBeenCalled()
+    expect(fixture.inventoryRecord.assignments).toEqual([])
+  })
+
   it('rejects a remote observer identity that differs from the server-resolved physical candidate', async () => {
     const fixture = virtualShellyVerifier()
     await memory.recordScan(fixture.prior.discoveredAt, [fixture.prior], TEST_OWNER)

@@ -1,4 +1,5 @@
 import { Inject, Injectable, Optional, OnModuleInit } from '@nestjs/common';
+import { isIP } from 'node:net';
 import {
   deviceControlState,
   parseDeviceControlBinding,
@@ -829,6 +830,59 @@ export class DeviceRegistryService implements OnModuleInit {
         physicalId, component, observerId: input.observerId, scanId: input.evidenceScanId,
         ipAddress: input.ipAddress, verifiedMeasurementFields: [...new Set(input.verifiedMeasurementFields)].join(','),
       }, 'portal-admin');
+      return updated;
+    } catch (error) {
+      this.liveApprovedDeviceConfigs.set(key, previous);
+      throw error;
+    }
+  }
+
+  /**
+   * Refreshes read-only Shelly RPC evidence on an existing enrolled component
+   * whose inventory association is incomplete. This changes evidence metadata
+   * only; it preserves installation, capabilities, room, and authority.
+   */
+  async refreshShellyVerificationEvidence(input: {
+    tenantId: string; siteId: string; deviceId: string; physicalId: string; component: string;
+    physicalInventoryId: string; ipAddress: string; networkScope: string;
+    identityVerifiedAt: string; componentVerifiedAt: string; observerId?: string;
+  }): Promise<RegisteredDevice | null> {
+    const { tenantId, siteId, deviceId, physicalId, component } = input;
+    if (!/^shelly[a-z0-9._-]{1,114}$/i.test(physicalId) ||
+        !/^(?:switch|em1):(?:[0-9]|[12][0-9]|3[01])$/.test(component) ||
+        deviceId !== `${physicalId}:${component}` || !input.physicalInventoryId ||
+        !input.networkScope || isIP(input.ipAddress) !== 4 ||
+        !freshSiteEvidenceTime(input.identityVerifiedAt) || !freshSiteEvidenceTime(input.componentVerifiedAt)) {
+      throw new Error('Fresh, exact Shelly RPC identity and component evidence is required.');
+    }
+    const decision = await this.getShellyReconciliationTargetDecision(
+      tenantId, siteId, deviceId, physicalId, component, input.physicalInventoryId,
+    );
+    if (!decision.matched) return null;
+    const key = scopedDeviceKey(deviceId, tenantId, siteId);
+    const config = this.liveApprovedDeviceConfigs.get(key);
+    const installation = this.persistedInstallations.get(key);
+    if (!config || !installation || installation.device.tenantId !== tenantId || installation.device.siteId !== siteId) return null;
+    const previous = config;
+    const identitySource = input.observerId ? 'verified_site_local_shelly_rpc' : 'verified_shelly_http_rpc';
+    const metadata = cleanMetadata({
+      ...installation.device.metadata,
+      identityEvidenceSource: identitySource,
+      componentEvidenceSource: input.observerId ? identitySource : 'verified_shelly_component_status_rpc',
+      identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo',
+      identityVerifiedAt: input.identityVerifiedAt,
+      componentVerificationMethod: `${component.startsWith('switch:') ? 'Switch' : 'EM1'}.GetStatus?id=${component.split(':')[1]}`,
+      componentVerifiedAt: input.componentVerifiedAt,
+      ipAddress: input.ipAddress,
+      networkScope: input.networkScope,
+      networkObservedAt: input.componentVerifiedAt,
+      ...(input.observerId ? { siteLocalObserverId: input.observerId } : {}),
+    });
+    const updatedConfig = { ...config, metadata };
+    this.liveApprovedDeviceConfigs.set(key, updatedConfig);
+    try {
+      const updated: RegisteredDevice = { ...installation.device, metadata };
+      await this.persistInstallation(updated);
       return updated;
     } catch (error) {
       this.liveApprovedDeviceConfigs.set(key, previous);

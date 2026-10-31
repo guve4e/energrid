@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { authFetch } from '../../auth/auth-client';
-import { onMounted, ref, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 type IdentityEvidence = {
   ipAddress: string;
   macAddress?: string;
@@ -22,9 +22,17 @@ type PhysicalDevice = {
   firmwareVersion?: string;
   verificationStatus: string;
   identity?: { namespace: string; value: string };
+  identities?: Array<{ namespace: string; value: string }>;
   components: Array<{ key: string; capabilities: string[] }>;
   endpoints: Array<{ protocol: string; kind: string; address: string }>;
-  assignments: Array<{ deviceId: string; componentKey?: string; role?: string }>;
+  assignments: Array<{ deviceId: string; physicalDeviceId?: string; componentKey?: string; role?: string }>;
+};
+type IdentityRecovery = {
+  status: 'ready' | 'verification_required' | 'not_recoverable';
+  reason: string;
+  physicalDeviceId?: string;
+  physicalId?: string;
+  componentKey?: string;
 };
 
 const props = defineProps<{
@@ -41,22 +49,26 @@ const association = ref<IdentityEvidence | null>(null);
 const history = ref<IdentityEvidence[]>([]);
 const physicalDevice = ref<PhysicalDevice | null>(null);
 const logicalAssignment = ref<PhysicalDevice['assignments'][number] | null>(null);
+const recovery = ref<IdentityRecovery | null>(null);
+const displayedIdentity = computed(() =>
+  physicalDevice.value?.identities?.find(item => item.namespace === 'mqtt:shelly-protocol-id')
+    || physicalDevice.value?.identity || null,
+);
 const logicalRole = ref('');
 const editingRole = ref(false);
 const busy = ref(false);
 const error = ref('');
-const emit = defineEmits<{ retired: []; reenrolled: [] }>();
+const emit = defineEmits<{ retired: []; reenrolled: []; recovered: [] }>();
 
-async function load() {
+async function fetchIdentity(): Promise<boolean> {
   if (props.enrollmentStatus === 'not_enrolled' || props.enrollmentStatus === 'unknown') {
     association.value = null;
     history.value = [];
     physicalDevice.value = null;
     logicalAssignment.value = null;
-    return;
+    recovery.value = null;
+    return true;
   }
-  busy.value = true;
-  error.value = '';
   try {
     const response = await authFetch(
       `${props.apiBase}/portal/devices/${encodeURIComponent(props.deviceId)}/network-identity`,
@@ -69,8 +81,81 @@ async function load() {
     physicalDevice.value = result.physicalDevice || null;
     logicalAssignment.value = result.logicalAssignment || null;
     logicalRole.value = result.logicalAssignment?.role || '';
+    recovery.value = result.recovery || null;
+    return true;
   } catch {
     error.value = 'Network identity details are currently unavailable.';
+    recovery.value = null;
+    return false;
+  }
+}
+
+async function load() {
+  busy.value = true;
+  error.value = '';
+  try {
+    await fetchIdentity();
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function verifySelectedDevice() {
+  if (busy.value || recovery.value?.status !== 'verification_required' ||
+      !recovery.value.physicalId || !recovery.value.componentKey) return;
+  busy.value = true;
+  error.value = '';
+  try {
+    const selected = recovery.value;
+    const response = await authFetch(
+      `${props.apiBase}/portal/discovery/${encodeURIComponent(`${selected.physicalId}:${selected.componentKey}`)}/verify-shelly`,
+      { method: 'POST', headers: { Authorization: `Bearer ${props.accessToken}` } },
+    );
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(typeof result.message === 'string' ? result.message : 'Selected-device verification failed.');
+    if (result.status !== 'verified' || result.physicalId !== selected.physicalId ||
+        !Array.isArray(result.componentKeys) || !result.componentKeys.includes(selected.componentKey)) {
+      throw new Error('Verification returned without confirming this physical identity and component.');
+    }
+    if (!await fetchIdentity()) return;
+    const refreshedRecovery = recovery.value as IdentityRecovery | null;
+    if (refreshedRecovery?.status !== 'ready') {
+      throw new Error(refreshedRecovery?.reason || 'Fresh verification did not make the existing association recoverable.');
+    }
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Selected-device verification failed.';
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function completeIdentityAssociation() {
+  if (busy.value || recovery.value?.status !== 'ready' || !recovery.value.physicalDeviceId ||
+      !recovery.value.physicalId || !recovery.value.componentKey) return;
+  busy.value = true;
+  error.value = '';
+  const expected = { ...recovery.value };
+  try {
+    const response = await authFetch(
+      `${props.apiBase}/portal/discovery/${encodeURIComponent(`${expected.physicalId}:${expected.componentKey}`)}/approve`,
+      { method: 'POST', headers: { Authorization: `Bearer ${props.accessToken}`, 'Content-Type': 'application/json' }, body: '{}' },
+    );
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(typeof result.message === 'string' ? result.message : 'Identity association could not be completed.');
+    if (result.status !== 'approved' || result.enrollment !== 'enrolled' || result.device?.id !== props.deviceId) {
+      throw new Error('The server response did not confirm recovery of this existing enrollment.');
+    }
+    if (!await fetchIdentity()) return;
+    if (physicalDevice.value?.physicalDeviceId !== expected.physicalDeviceId ||
+        logicalAssignment.value?.deviceId !== props.deviceId ||
+        logicalAssignment.value?.physicalDeviceId !== expected.physicalDeviceId ||
+        logicalAssignment.value?.componentKey !== expected.componentKey) {
+      throw new Error('The request returned, but the authoritative physical identity association is still incomplete. Reload to inspect the current state.');
+    }
+    recovery.value = null;
+    emit('recovered');
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Identity association could not be completed.';
   } finally {
     busy.value = false;
   }
@@ -172,7 +257,7 @@ watch(() => [props.deviceId, props.enrollmentStatus], load);
     <dl class="device-network-identity-facts">
       <div><dt>Logical device ID</dt><dd><code>{{ deviceId }}</code></dd><small>Portal device record</small></div>
       <div><dt>Physical inventory ID</dt><dd>{{ physicalDevice?.physicalDeviceId || 'Not linked' }}</dd><small>Separate from the logical device ID</small></div>
-      <div><dt>Firmware identity</dt><dd>{{ physicalDevice?.identity ? `${physicalDevice.identity.namespace} · ${physicalDevice.identity.value}` : 'Unknown' }}</dd><small>Protocol-reported identity</small></div>
+      <div><dt>Firmware identity</dt><dd>{{ displayedIdentity ? `${displayedIdentity.namespace} · ${displayedIdentity.value}` : 'Unknown' }}</dd><small>{{ displayedIdentity?.namespace === 'mqtt:shelly-protocol-id' ? 'Shelly protocol identity' : 'Primary inventory identity claim' }}</small></div>
       <div>
         <dt>{{ association?.isCurrent ? 'Current IP address' : association ? 'Last known IP address' : 'IP address' }}</dt>
         <dd>{{ association?.ipAddress || 'Unknown' }}</dd>
@@ -185,6 +270,18 @@ watch(() => [props.deviceId, props.enrollmentStatus], load);
 
     <p v-if="!association" class="device-identity-empty">No LAN identity is associated with {{ deviceName }}.</p>
 
+    <div v-if="recovery" class="device-identity-recovery">
+      <strong v-if="recovery.status === 'not_recoverable'">Identity recovery unavailable</strong>
+      <p>{{ recovery.reason }}</p>
+      <p v-if="recovery.status === 'ready'">Link this existing component to Physical Inventory {{ recovery.physicalDeviceId }} as {{ recovery.componentKey }}. No measurement or control authority is added.</p>
+      <button v-if="recovery.status === 'verification_required'" type="button" class="ghost" :disabled="busy" @click="verifySelectedDevice">
+        {{ busy ? 'Verifying…' : 'Verify selected device' }}
+      </button>
+      <button v-else-if="recovery.status === 'ready'" type="button" class="primary" :disabled="busy" @click="completeIdentityAssociation">
+        {{ busy ? 'Completing…' : 'Complete identity association' }}
+      </button>
+    </div>
+
     <details class="device-identity-technical">
       <summary>Endpoint, provenance and physical components</summary>
       <dl class="device-identity-technical-grid">
@@ -193,7 +290,7 @@ watch(() => [props.deviceId, props.enrollmentStatus], load);
         <div><dt>Last observed</dt><dd>{{ observedAt(association?.observedAt) }}</dd></div>
         <div><dt>Last verified</dt><dd>{{ observedAt(association?.hardwareVerifiedAt || (association?.verificationStatus === 'hardware_verified' ? association.observedAt : undefined)) }}</dd></div>
         <div><dt>Hostname</dt><dd>{{ association?.hostname || 'Unknown' }}</dd></div>
-        <div><dt>Protocol identity</dt><dd>{{ physicalDevice?.identity ? `${physicalDevice.identity.namespace} · ${physicalDevice.identity.value}` : 'Unknown' }}</dd></div>
+        <div><dt>Protocol identity</dt><dd>{{ displayedIdentity ? `${displayedIdentity.namespace} · ${displayedIdentity.value}` : 'Unknown' }}</dd></div>
         <div v-if="physicalDevice?.vendor || physicalDevice?.hardwareModel || physicalDevice?.firmwareVersion"><dt>Inventory metadata</dt><dd>{{ [physicalDevice?.vendor, physicalDevice?.hardwareModel, physicalDevice?.firmwareVersion].filter(Boolean).join(' · ') }}</dd><small>Stored inventory details; firmware health reports its current version separately.</small></div>
         <div><dt>Component and role</dt><dd>{{ [logicalAssignment?.componentKey, logicalAssignment?.role].filter(Boolean).join(' · ') || 'Not assigned' }}</dd></div>
       </dl>
@@ -253,6 +350,8 @@ watch(() => [props.deviceId, props.enrollmentStatus], load);
 .physical-component { display: grid; gap: 4px; min-width: 0; padding: 10px; border: 1px solid var(--eg-border, #d8e0ec); border-radius: var(--eg-control-radius, 8px); font-size: 11px; overflow-wrap: anywhere; }
 .physical-component span { color: var(--eg-muted, #58677e); }
 .device-network-identity-role { margin-top: 10px; }
+.device-identity-recovery { display: grid; justify-items: start; gap: 8px; padding: 12px; border: 1px solid var(--eg-border, #d8e0ec); border-radius: var(--eg-control-radius, 8px); background: var(--eg-surface-soft, #f5f8fc); }
+.device-identity-recovery p { margin: 0; color: var(--eg-muted, #58677e); font-size: 12px; }
 .device-network-identity-association { display: grid; gap: 10px; margin-top: 10px; }
 .device-network-identity-association label { display: grid; gap: 6px; }
 .device-network-identity-association input { min-width: 0; padding: 10px; }

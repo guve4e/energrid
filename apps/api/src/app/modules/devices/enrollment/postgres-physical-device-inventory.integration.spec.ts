@@ -436,4 +436,63 @@ describe('PostgreSQL physical-device inventory integration', () => {
       await pool.end();
     }
   }, 30000);
+
+  testWithDatabase('fills a missing component key on the same enrolled physical assignment idempotently', async () => {
+    const pool = await createVerifiedEnrollmentTestPool({ max: 2, connectionTimeoutMillis: 1000 });
+    const runId = randomUUID();
+    const tenantId = `partial-component-recovery-${runId}`;
+    const siteId = `site-${runId}`;
+    const scope = { tenantId, siteId };
+    const identity = {
+      tenantId, siteId, deviceId: `shellyplus1-${runId}:switch:0`, displayName: 'Lab Switch',
+    };
+    const observedAt = new Date().toISOString();
+    const physicalRepository = new PostgresPhysicalDeviceInventoryRepository(pool);
+    const enrollment = new DeviceEnrollmentService(new PostgresDeviceEnrollmentRepository(pool));
+    try {
+      await enrollment.enroll(identity, 'integration-test');
+      const physical = await physicalRepository.discover({
+        scope,
+        identity: { namespace: 'mqtt:shelly-protocol-id', value: identity.deviceId.replace(/:switch:0$/, '') },
+        evidenceSource: 'selected_device_read_only_rpc_verification', observedAt,
+        components: [{ key: 'switch:0', capabilities: ['switch'] }],
+      });
+      await physicalRepository.discoverLanIdentity({
+        scope, networkScope: 'virtual-observer:device-lab-vlan', ipAddress: '172.30.250.11',
+        observedAt, evidenceSource: 'selected_device_read_only_rpc_verification', associatedAt: observedAt,
+        associatedBy: 'integration-test', device: identity, physicalDeviceId: physical.physicalDeviceId,
+      });
+      const partial = await physicalRepository.forLogicalDevice(scope, identity.deviceId);
+      expect(partial?.physicalDeviceId).toBe(physical.physicalDeviceId);
+      expect(partial?.assignments).toEqual([expect.objectContaining({ deviceId: identity.deviceId })]);
+      expect(partial?.assignments[0].componentKey).toBeUndefined();
+
+      await physicalRepository.assignComponent({
+        scope, device: identity, physicalDeviceId: physical.physicalDeviceId, componentKey: 'switch:0',
+        role: 'Lab Switch', assignedAt: new Date(Date.now() + 1000).toISOString(), assignedBy: 'integration-test',
+      });
+      await physicalRepository.assignComponent({
+        scope, device: identity, physicalDeviceId: physical.physicalDeviceId, componentKey: 'switch:0',
+        assignedAt: new Date(Date.now() + 2000).toISOString(), assignedBy: 'retry-test',
+      });
+
+      const recovered = await physicalRepository.forLogicalDevice(scope, identity.deviceId);
+      expect(recovered?.physicalDeviceId).toBe(physical.physicalDeviceId);
+      expect(recovered?.assignments).toHaveLength(1);
+      expect(recovered?.assignments[0]).toEqual(expect.objectContaining({
+        deviceId: identity.deviceId, physicalDeviceId: physical.physicalDeviceId,
+        componentKey: 'switch:0', role: 'Lab Switch', assignedBy: 'integration-test',
+      }));
+    } finally {
+      await pool.query('DELETE FROM device_inventory.logical_component_assignments WHERE tenant_id=$1 AND site_id=$2', [tenantId, siteId]);
+      await pool.query('DELETE FROM device_inventory.physical_device_network_observations WHERE tenant_id=$1 AND site_id=$2', [tenantId, siteId]);
+      await pool.query('DELETE FROM device_inventory.physical_device_endpoints WHERE tenant_id=$1 AND site_id=$2', [tenantId, siteId]);
+      await pool.query('DELETE FROM device_inventory.physical_device_components WHERE tenant_id=$1 AND site_id=$2', [tenantId, siteId]);
+      await pool.query('DELETE FROM device_inventory.physical_device_identity_claims WHERE tenant_id=$1 AND site_id=$2', [tenantId, siteId]);
+      await pool.query('DELETE FROM device_inventory.physical_devices WHERE tenant_id=$1 AND site_id=$2', [tenantId, siteId]);
+      await pool.query('DELETE FROM device_inventory.enrollment_events WHERE tenant_id=$1 AND site_id=$2', [tenantId, siteId]);
+      await pool.query('DELETE FROM device_inventory.enrollments WHERE tenant_id=$1 AND site_id=$2', [tenantId, siteId]);
+      await pool.end();
+    }
+  }, 30000);
 });

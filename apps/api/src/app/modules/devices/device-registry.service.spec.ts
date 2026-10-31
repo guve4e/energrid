@@ -24,6 +24,51 @@ describe('DeviceRegistryService', () => {
     expect(device?.supportedCapabilities).toEqual([]);
     expect(device?.capabilities).toEqual([]);
   });
+  it('refreshes only Shelly verification metadata on an existing enrollment', async () => {
+    const physicalId = 'shellyplus1-00c0de000001';
+    const component = 'switch:0';
+    const deviceId = `${physicalId}:${component}`;
+    const verifiedAt = new Date().toISOString();
+    process.env.PORTAL_TENANT_ID = 'tenant-demo';
+    process.env.PORTAL_SITE_ID = 'site-virtual-lab';
+    process.env.PORTAL_SITE_NAME = 'Virtual Device Lab';
+    const authority = { source: 'existing-authority', bindings: [] };
+    const initialDevice = {
+      id: deviceId, tenantId: 'tenant-demo', siteId: 'site-virtual-lab', displayName: 'Virtual Shelly',
+      trustStatus: 'approved', kind: 'physical', zoneId: 'unassigned', zoneName: 'Unassigned',
+      adapter: { protocol: 'http', transport: 'http', driver: 'shelly-lan', target: 'http://172.30.250.11/rpc', configured: true },
+      capabilities: [{ kind: 'switch', actions: ['read'] }], supportedCapabilities: [{ kind: 'switch', actions: ['read'] }],
+      control: { status: 'unavailable' }, assistantEnabled: false,
+      metadata: { approvedFromDiscovery: true, physicalId, component,
+        identityEvidenceSource: 'claimed_mqtt_identity', discoveryTenantId: 'tenant-demo', discoverySiteId: 'site-virtual-lab' },
+      state: { values: {}, observedAt: null, status: 'unknown' },
+    } as any;
+    const record = { schemaVersion: 1, device: initialDevice, observationAuthority: authority,
+      physicalOutcome: { status: 'not_confirmed', confirmedAt: null, confirmedBy: null }, updatedAt: verifiedAt };
+    let saved: any = record;
+    const store = { listAll: jest.fn(async () => [record]), save: jest.fn(async value => { saved = value; }), append: jest.fn() };
+    const enrollment = { list: jest.fn(async () => [{ deviceId, status: 'enrolled' }]),
+      find: jest.fn(async () => ({ status: 'enrolled' })) };
+    const registry = new DeviceRegistryService(undefined, store as any, enrollment as any);
+    await registry.ensureInstallationsLoaded();
+    const result = await registry.refreshShellyVerificationEvidence({
+      tenantId: 'tenant-demo', siteId: 'site-virtual-lab', deviceId, physicalId, component,
+      physicalInventoryId: '3e709572-76c5-4d5f-8c89-ec23a8d7c55b', ipAddress: '172.30.250.11',
+      networkScope: 'observer-lab:virtual-device-lab', identityVerifiedAt: verifiedAt,
+      componentVerifiedAt: verifiedAt, observerId: 'virtual-observer',
+    });
+    expect(result?.metadata).toEqual(expect.objectContaining({
+      identityEvidenceSource: 'verified_site_local_shelly_rpc',
+      componentEvidenceSource: 'verified_site_local_shelly_rpc', physicalId, component,
+    }));
+    expect(saved.device.zoneName).toBe('Unassigned');
+    expect(saved.device.capabilities).toEqual(initialDevice.capabilities);
+    expect(saved.device.assistantEnabled).toBe(false);
+    expect(saved.device.observationAuthority).toBeUndefined();
+    expect(saved.observationAuthority).toBe(authority);
+    expect(saved.device.metadata).not.toHaveProperty('measurementApproval');
+    expect(result?.metadata).not.toHaveProperty('controlBinding');
+  });
   afterEach(() => {});
 
   const originalEnv = process.env;

@@ -84,6 +84,88 @@ describe('DeviceNetworkIdentityPanel', () => {
     expect(page.emitted('reenrolled')).toHaveLength(1);
   });
 
+  it('does not expose recovery when the server says the device is linked or not recoverable', async () => {
+    fetchMock.mockResolvedValue(response({ association: null, history: [],
+      recovery: { status: 'not_recoverable', reason: 'The logical component is already linked.' } }));
+    const page = mountPanel('shellyplus1-00c0de000001:switch:0');
+    await flushPromises();
+    expect(page.text()).toContain('Identity recovery unavailable');
+    expect(page.text()).toContain('The logical component is already linked.');
+    expect(page.text()).not.toContain('Complete identity association');
+    expect(page.text()).not.toContain('Verify selected device');
+  });
+
+  it('completes the existing enrollment retry and confirms the authoritative inventory assignment', async () => {
+    const physicalDeviceId = '3e709572-76c5-4d5f-8c89-ec23a8d7c55b';
+    const physicalId = 'shellyplus1-00c0de000001';
+    const deviceId = `${physicalId}:switch:0`;
+    const base = { physicalDeviceId, physicalId, componentKey: 'switch:0' };
+    const linked = { deviceId, physicalDeviceId, componentKey: 'switch:0' };
+    fetchMock.mockImplementation((url: string, options) => {
+      if (options?.method === 'POST') return Promise.resolve(response({ status: 'approved', enrollment: 'enrolled', device: { id: deviceId } }));
+      return Promise.resolve(response({ association: null, history: [],
+        physicalDevice: { physicalDeviceId, verificationStatus: 'protocol_observed',
+          identity: { namespace: 'mac', value: '02:c0:de:00:00:01' },
+          identities: [
+            { namespace: 'mac', value: '02:c0:de:00:00:01' },
+            { namespace: 'mqtt:shelly-protocol-id', value: physicalId },
+          ],
+          components: [{ key: 'switch:0', capabilities: ['switch'] }], endpoints: [], assignments: [linked] },
+        logicalAssignment: linked,
+        recovery: { status: 'ready', reason: 'Fresh identity and component evidence is available.', ...base },
+      }));
+    });
+    const page = mountPanel(deviceId);
+    await flushPromises();
+    await page.get('button').trigger('click');
+    await flushPromises();
+    const post = fetchMock.mock.calls.find(call => call[1]?.method === 'POST');
+    expect(post?.[0]).toContain(`/portal/discovery/${encodeURIComponent(deviceId)}/approve`);
+    expect(post?.[1].body).toBe('{}');
+    expect(fetchMock.mock.calls.filter(call => !call[1]?.method)).toHaveLength(2);
+    expect(page.text()).toContain(physicalDeviceId);
+    expect(page.text()).toContain(`mqtt:shelly-protocol-id · ${physicalId}`);
+    expect(page.text()).not.toContain('Complete identity association');
+    expect(page.emitted('recovered')).toHaveLength(1);
+  });
+
+  it('runs selected-device verification when evidence is stale and only shows recovery after refreshed server eligibility', async () => {
+    const physicalDeviceId = '3e709572-76c5-4d5f-8c89-ec23a8d7c55b';
+    const physicalId = 'shellyplus1-00c0de000001';
+    const deviceId = `${physicalId}:switch:0`;
+    let gets = 0;
+    fetchMock.mockImplementation((url: string, options) => {
+      if (String(url).includes('/verify-shelly')) return Promise.resolve(response({ status: 'verified', physicalId, componentKeys: ['switch:0'] }));
+      if (options?.method === 'POST') return Promise.resolve(response({ status: 'approved', enrollment: 'enrolled', device: { id: deviceId } }));
+      gets += 1;
+      return Promise.resolve(response({ association: null, history: [], recovery: gets === 1
+        ? { status: 'verification_required', reason: 'Fresh selected-device RPC verification is required.', physicalDeviceId, physicalId, componentKey: 'switch:0' }
+        : { status: 'ready', reason: 'Fresh verification is available.', physicalDeviceId, physicalId, componentKey: 'switch:0' } }));
+    });
+    const page = mountPanel(deviceId);
+    await flushPromises();
+    expect(page.text()).toContain('Verify selected device');
+    await page.get('button').trigger('click');
+    await flushPromises();
+    const verify = fetchMock.mock.calls.find(call => String(call[0]).includes('/verify-shelly'));
+    expect(verify?.[0]).toContain(`/portal/discovery/${encodeURIComponent(deviceId)}/verify-shelly`);
+    expect(page.text()).toContain('Complete identity association');
+    expect(page.emitted('recovered')).toBeUndefined();
+  });
+
+  it('keeps recovery unavailable when selected-device verification fails', async () => {
+    fetchMock.mockImplementation((url: string) => String(url).includes('/verify-shelly')
+      ? Promise.resolve({ ok: false, json: async () => ({ message: 'RPC identity mismatch' }) })
+      : Promise.resolve(response({ association: null, history: [], recovery: { status: 'verification_required', reason: 'Fresh RPC verification is required.', physicalDeviceId: 'p', physicalId: 'shellyplus1-00c0de000001', componentKey: 'switch:0' } })));
+    const page = mountPanel('shellyplus1-00c0de000001:switch:0');
+    await flushPromises();
+    await page.get('button').trigger('click');
+    await flushPromises();
+    expect(page.text()).toContain('RPC identity mismatch');
+    expect(page.text()).not.toContain('Complete identity association');
+    expect(page.emitted('recovered')).toBeUndefined();
+  });
+
   it('assigns a protocol-identified component and an explicit logical role', async () => {
     const inventory = {
       physicalDevice: {

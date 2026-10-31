@@ -464,7 +464,10 @@ describe('portal control configuration authorization', () => {
       {} as never,
       { list: jest.fn().mockRejectedValue(new Error('Discovery offline')) } as never,
       { find: jest.fn().mockResolvedValue({ status: 'enrolled' }) } as never,
-      undefined,
+      { getShellyIdentityRecovery: jest.fn().mockResolvedValue({
+        status: 'verification_required', reason: 'Fresh selected-device RPC verification is required.',
+        physicalDeviceId: 'physical-proem', physicalId: 'shellypro3em-001122334455', componentKey: 'em1:0',
+      }) } as never,
       {
         forLogicalDevice: jest.fn().mockResolvedValue(physicalDevice),
         list: jest.fn().mockResolvedValue([physicalDevice]),
@@ -476,6 +479,7 @@ describe('portal control configuration authorization', () => {
     })).resolves.toMatchObject({
       association: expect.objectContaining({ ipAddress: '192.168.1.204' }),
       physicalDevice,
+      recovery: { status: 'verification_required', physicalDeviceId: 'physical-proem', componentKey: 'em1:0' },
     });
   });
   it('projects one physical identity onto two logical devices with distinct components', async () => {

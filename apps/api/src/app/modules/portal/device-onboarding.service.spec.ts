@@ -211,10 +211,127 @@ describe('DeviceOnboardingService', () => {
       endpoint: { protocol: 'http', kind: 'rpc', address: 'http://192.168.1.220' },
     }));
     expect(physicalInventory.associateLanIdentity).toHaveBeenCalledWith(expect.objectContaining({
+      physicalDeviceId: 'physical-plus1',
       ipAddress: '192.168.1.220', macAddress: '88:13:bf:cd:c8:bc',
       evidenceSource: 'lan_discovery_protocol_match',
     }));
+    expect(registry.getDevices()[0].capabilities).toEqual([{ kind: 'switch', actions: ['read'] }]);
+    expect(registry.getDevices()[0].capabilities.flatMap(capability => capability.actions || []))
+      .not.toEqual(expect.arrayContaining(['turn_on', 'turn_off']));
+    expect(registry.getDevices()[0].metadata).not.toHaveProperty('measurementApproval');
+    expect(registry.getDevices()[0].metadata).not.toHaveProperty('controlBinding');
     expect(registry.setEnrollmentStatus).toHaveBeenCalledWith(deviceId, 'enrolled');
+  });
+
+  it('rejects malformed Shelly MAC evidence before installation or enrollment persists', async () => {
+    const deviceId = 'shellyplus1-00c0de000001:switch:0';
+    const { service, registry, enrollment } = createHarness(undefined, {
+      physicalId: 'shellyplus1-00c0de000001', component: 'switch:0',
+      identityEvidenceSource: 'verified_shelly_http_rpc', identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo',
+      identityVerifiedAt: new Date().toISOString(),
+      componentEvidenceSource: 'verified_shelly_component_status_rpc',
+      componentVerificationMethod: 'Switch.GetStatus?id=0', componentVerifiedAt: new Date().toISOString(),
+      httpBaseUrl: 'http://172.30.250.11',
+      macAddress: '02C0DE00000Z', ipAddress: '172.30.250.11', networkScope: 'virtual-lab',
+      networkObservedAt: new Date().toISOString(),
+    }, deviceId, 'http');
+
+    await expect(service.approve(deviceId)).rejects.toThrow('LAN MAC evidence is invalid');
+    expect(registry.approveDiscoveredDevice).not.toHaveBeenCalled();
+    expect(registry.persistInstallation).not.toHaveBeenCalled();
+    expect(enrollment.enroll).not.toHaveBeenCalled();
+  });
+
+  it('retries a partial Shelly enrollment idempotently after inventory association fails', async () => {
+    const deviceId = 'shellyplus1-00c0de000001:switch:0';
+    const physicalDeviceId = '3e709572-76c5-4d5f-8c89-ec23a8d7c55b';
+    let assignedPhysicalDeviceId: string | undefined;
+    const physicalInventory = {
+      forLogicalDevice: jest.fn(async () => assignedPhysicalDeviceId
+        ? { physicalDeviceId: assignedPhysicalDeviceId }
+        : null),
+      discover: jest.fn().mockResolvedValue({ physicalDeviceId }),
+      associateLanIdentity: jest.fn()
+        .mockRejectedValueOnce(new Error('temporary inventory write failure'))
+        .mockImplementation(async input => {
+          assignedPhysicalDeviceId = input.physicalDeviceId;
+          return { physicalDeviceId } as any;
+        }),
+      assignComponent: jest.fn().mockResolvedValue({ physicalDeviceId }),
+    };
+    const { service, registry, enrollment } = createHarness(physicalInventory, {
+      physicalId: 'shellyplus1-00c0de000001', component: 'switch:0',
+      httpBaseUrl: 'http://172.30.250.11', ipAddress: '172.30.250.11',
+      networkScope: 'virtual-device-lab', networkObservedAt: new Date().toISOString(),
+      macAddress: '02C0DE000001',
+      identityEvidenceSource: 'verified_shelly_http_rpc', identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo',
+      identityVerifiedAt: new Date().toISOString(),
+      componentEvidenceSource: 'verified_shelly_component_status_rpc',
+      componentVerificationMethod: 'Switch.GetStatus?id=0', componentVerifiedAt: new Date().toISOString(),
+    }, deviceId, 'http');
+    enrollment.find.mockImplementation(async () => enrollment.enroll.mock.calls.length
+      ? { ...identity, deviceId, status: 'enrolled', version: 1 } as any
+      : null);
+    enrollment.enroll.mockResolvedValue({ ...identity, deviceId, status: 'enrolled', version: 1 } as any);
+
+    await expect(service.approve(deviceId)).rejects.toThrow('temporary inventory write failure');
+    expect(enrollment.enroll).toHaveBeenCalledTimes(1);
+    expect(registry.persistInstallation).toHaveBeenCalledTimes(1);
+
+    await expect(service.approve(deviceId)).resolves.toMatchObject({
+      id: deviceId, trustStatus: 'approved',
+    });
+    await service.approve(deviceId);
+
+    expect(enrollment.enroll).toHaveBeenCalledTimes(1);
+    expect(registry.persistInstallation).toHaveBeenCalledTimes(1);
+    expect(physicalInventory.discover).toHaveBeenCalledTimes(3);
+    expect(physicalInventory.discover.mock.calls.every(call =>
+      call[0].identity.value === 'shellyplus1-00c0de000001')).toBe(true);
+    expect(physicalInventory.discover.mock.calls.map(call => call[0].physicalDeviceId))
+      .toEqual([undefined, undefined, physicalDeviceId]);
+    expect(physicalInventory.associateLanIdentity).toHaveBeenLastCalledWith(expect.objectContaining({
+      physicalDeviceId,
+      macAddress: '02C0DE000001',
+    }));
+    expect(physicalInventory.assignComponent).toHaveBeenLastCalledWith(expect.objectContaining({
+      physicalDeviceId, componentKey: 'switch:0',
+    }));
+    expect(registry.getDevices()[0].capabilities).toEqual([{ kind: 'switch', actions: ['read'] }]);
+    expect(registry.getDevices()[0].capabilities.flatMap(capability => capability.actions || []))
+      .not.toEqual(expect.arrayContaining(['turn_on', 'turn_off']));
+    expect(registry.getDevices()[0].metadata).not.toHaveProperty('measurementApproval');
+    expect(registry.getDevices()[0].metadata).not.toHaveProperty('controlBinding');
+  });
+
+  it('does not overwrite a conflicting physical identity during partial-enrollment retry', async () => {
+    const deviceId = 'shellyplus1-00c0de000001:switch:0';
+    const physicalInventory = {
+      forLogicalDevice: jest.fn().mockResolvedValue(null),
+      discover: jest.fn()
+        .mockResolvedValueOnce({ physicalDeviceId: '3e709572-76c5-4d5f-8c89-ec23a8d7c55b' })
+        .mockRejectedValue(new Error('Physical identity is already associated with another device')),
+      associateLanIdentity: jest.fn().mockRejectedValue(new Error('temporary inventory write failure')),
+      assignComponent: jest.fn(),
+    };
+    const { service, enrollment, registry } = createHarness(physicalInventory, {
+      physicalId: 'shellyplus1-00c0de000001', component: 'switch:0',
+      httpBaseUrl: 'http://172.30.250.11',
+      identityEvidenceSource: 'verified_shelly_http_rpc', identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo',
+      identityVerifiedAt: new Date().toISOString(),
+      componentEvidenceSource: 'verified_shelly_component_status_rpc',
+      componentVerificationMethod: 'Switch.GetStatus?id=0', componentVerifiedAt: new Date().toISOString(),
+      macAddress: '02C0DE000001', ipAddress: '172.30.250.11', networkScope: 'virtual-device-lab',
+      networkObservedAt: new Date().toISOString(),
+    }, deviceId, 'http');
+    enrollment.find.mockImplementation(async () => enrollment.enroll.mock.calls.length
+      ? { ...identity, deviceId, status: 'enrolled', version: 1 } as any
+      : null);
+    await expect(service.approve(deviceId)).rejects.toThrow('temporary inventory write failure');
+    await expect(service.approve(deviceId)).rejects.toThrow('Physical identity is already associated with another device');
+    expect(enrollment.enroll).toHaveBeenCalledTimes(1);
+    expect(registry.persistInstallation).toHaveBeenCalledTimes(1);
+    expect(physicalInventory.assignComponent).not.toHaveBeenCalled();
   });
 
   it('records Energrid firmware identity and the observed IP in existing physical inventory only after enrollment', async () => {
@@ -467,5 +584,170 @@ describe('DeviceOnboardingService', () => {
 
     expect(registry.persistInstallation)
       .toHaveBeenCalledTimes(1);
+  });
+
+  it('offers recovery only for the exact enrolled, same-site Shelly component with a unique unassigned physical record', async () => {
+    const physicalId = 'shellyplus1-00c0de000001';
+    const componentKey = 'switch:0';
+    const deviceId = `${physicalId}:${componentKey}`;
+    const verifiedAt = new Date().toISOString();
+    const device = {
+      id: deviceId, tenantId: 'tenant-demo', siteId: 'site-virtual-lab', kind: 'physical',
+      trustStatus: 'approved',
+      adapter: { driver: 'shelly-lan' },
+      metadata: {
+        approvedFromDiscovery: true, discoveryTenantId: 'tenant-demo', discoverySiteId: 'site-virtual-lab',
+        physicalId, component: componentKey, identityEvidenceSource: 'verified_shelly_http_rpc',
+        componentEvidenceSource: 'verified_shelly_component_status_rpc',
+        identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo', identityVerifiedAt: verifiedAt,
+        componentVerificationMethod: 'Switch.GetStatus?id=0', componentVerifiedAt: verifiedAt,
+      },
+    } as unknown as RegisteredDevice;
+    const physical = {
+      physicalDeviceId: '3e709572-76c5-4d5f-8c89-ec23a8d7c55b',
+      scope: { tenantId: 'tenant-demo', siteId: 'site-virtual-lab' },
+      identity: { namespace: 'mac', value: '02:c0:de:00:00:01' },
+      identities: [
+        { namespace: 'mac', value: '02:c0:de:00:00:01' },
+        { namespace: 'mqtt:shelly-protocol-id', value: physicalId },
+      ],
+      components: [{ key: componentKey, capabilities: ['switch'] }], assignments: [],
+    };
+    const registry = {
+      getSnapshot: jest.fn(() => ({ tenant: { id: 'tenant-demo' }, site: { id: 'site-virtual-lab' } })),
+      getDevices: jest.fn(() => [device]),
+    };
+    const enrollment = { find: jest.fn().mockResolvedValue({ status: 'enrolled' }) };
+    const inventory = {
+      forLogicalDevice: jest.fn().mockResolvedValue(null),
+      list: jest.fn().mockResolvedValue([physical]),
+    };
+    const service = new DeviceOnboardingService(
+      registry as unknown as DeviceRegistryService,
+      enrollment as unknown as DeviceEnrollmentService,
+      inventory as never,
+    );
+
+    await expect(service.getShellyIdentityRecovery(deviceId)).resolves.toEqual({
+      status: 'ready',
+      reason: 'Fresh identity and component evidence is available for the existing association.',
+      physicalDeviceId: physical.physicalDeviceId, physicalId, componentKey,
+    });
+    expect(enrollment.find).toHaveBeenCalledWith({ tenantId: 'tenant-demo', siteId: 'site-virtual-lab', deviceId });
+  });
+
+  it('requires selected-device verification after existing identity evidence expires', async () => {
+    const physicalId = 'shellyplus1-00c0de000001';
+    const componentKey = 'switch:0';
+    const deviceId = `${physicalId}:${componentKey}`;
+    const stale = '2026-10-30T00:00:00.000Z';
+    const device = {
+      id: deviceId, tenantId: 'tenant-demo', siteId: 'site-virtual-lab', kind: 'physical', trustStatus: 'approved',
+      adapter: { driver: 'shelly-lan' },
+      metadata: { approvedFromDiscovery: true, discoveryTenantId: 'tenant-demo', discoverySiteId: 'site-virtual-lab',
+        physicalId, component: componentKey, identityEvidenceSource: 'verified_shelly_http_rpc',
+        componentEvidenceSource: 'verified_shelly_component_status_rpc',
+        identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo', identityVerifiedAt: stale,
+        componentVerificationMethod: 'Switch.GetStatus?id=0', componentVerifiedAt: stale },
+    } as unknown as RegisteredDevice;
+    const physical = { physicalDeviceId: 'physical-plus1', scope: { tenantId: 'tenant-demo', siteId: 'site-virtual-lab' },
+      identity: { namespace: 'mqtt:shelly-protocol-id', value: physicalId }, components: [{ key: componentKey }], assignments: [] };
+    const service = new DeviceOnboardingService(
+      { getSnapshot: () => ({ tenant: { id: 'tenant-demo' }, site: { id: 'site-virtual-lab' } }), getDevices: () => [device] } as unknown as DeviceRegistryService,
+      { find: jest.fn().mockResolvedValue({ status: 'enrolled' }) } as unknown as DeviceEnrollmentService,
+      { forLogicalDevice: jest.fn().mockResolvedValue(null), list: jest.fn().mockResolvedValue([physical]) } as never,
+    );
+    await expect(service.getShellyIdentityRecovery(deviceId)).resolves.toMatchObject({
+      status: 'verification_required', physicalDeviceId: 'physical-plus1', physicalId, componentKey,
+    });
+  });
+
+  it('does not offer recovery for another site or an existing assignment', async () => {
+    const physicalId = 'shellyplus1-00c0de000001';
+    const componentKey = 'switch:0';
+    const deviceId = `${physicalId}:${componentKey}`;
+    const device = {
+      id: deviceId, tenantId: 'tenant-demo', siteId: 'site-virtual-lab', kind: 'physical', trustStatus: 'approved',
+      adapter: { driver: 'shelly-lan' }, metadata: { approvedFromDiscovery: true, discoveryTenantId: 'tenant-demo',
+        discoverySiteId: 'site-home', physicalId, component: componentKey },
+    } as unknown as RegisteredDevice;
+    const linked = { physicalDeviceId: 'physical-plus1', assignments: [{ deviceId, physicalDeviceId: 'physical-plus1', componentKey }] };
+    const service = new DeviceOnboardingService(
+      { getSnapshot: () => ({ tenant: { id: 'tenant-demo' }, site: { id: 'site-virtual-lab' } }), getDevices: () => [device] } as unknown as DeviceRegistryService,
+      { find: jest.fn().mockResolvedValue({ status: 'enrolled' }) } as unknown as DeviceEnrollmentService,
+      { forLogicalDevice: jest.fn().mockResolvedValue(linked), list: jest.fn() } as never,
+    );
+    await expect(service.getShellyIdentityRecovery(deviceId)).resolves.toMatchObject({ status: 'not_recoverable' });
+  });
+
+  it('offers idempotent recovery for a same-record assignment whose component key is missing', async () => {
+    const physicalId = 'shellyplus1-00c0de000001';
+    const componentKey = 'switch:0';
+    const deviceId = `${physicalId}:${componentKey}`;
+    const verifiedAt = new Date().toISOString();
+    const physical = {
+      physicalDeviceId: '3e709572-76c5-4d5f-8c89-ec23a8d7c55b',
+      scope: { tenantId: 'tenant-demo', siteId: 'site-virtual-lab' },
+      identity: { namespace: 'mqtt:shelly-protocol-id', value: physicalId },
+      identities: [
+        { namespace: 'mac', value: '02:c0:de:00:00:01' },
+        { namespace: 'mqtt:shelly-protocol-id', value: physicalId },
+      ],
+      components: [{ key: componentKey, capabilities: ['switch'] }],
+      assignments: [{ deviceId, physicalDeviceId: '3e709572-76c5-4d5f-8c89-ec23a8d7c55b' }],
+    };
+    const device = {
+      id: deviceId, tenantId: 'tenant-demo', siteId: 'site-virtual-lab', kind: 'physical', trustStatus: 'approved',
+      adapter: { driver: 'shelly-lan' },
+      metadata: { approvedFromDiscovery: true, discoveryTenantId: 'tenant-demo', discoverySiteId: 'site-virtual-lab',
+        physicalId, component: componentKey, identityEvidenceSource: 'verified_site_local_shelly_rpc',
+        componentEvidenceSource: 'verified_site_local_shelly_rpc', siteLocalObserverId: 'virtual-observer',
+        identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo', identityVerifiedAt: verifiedAt,
+        componentVerificationMethod: 'Switch.GetStatus?id=0', componentVerifiedAt: verifiedAt },
+    } as unknown as RegisteredDevice;
+    const service = new DeviceOnboardingService(
+      { getSnapshot: () => ({ tenant: { id: 'tenant-demo' }, site: { id: 'site-virtual-lab' } }), getDevices: () => [device] } as unknown as DeviceRegistryService,
+      { find: jest.fn().mockResolvedValue({ status: 'enrolled' }) } as unknown as DeviceEnrollmentService,
+      { forLogicalDevice: jest.fn().mockResolvedValue(physical), list: jest.fn().mockResolvedValue([physical]) } as never,
+    );
+    await expect(service.getShellyIdentityRecovery(deviceId)).resolves.toMatchObject({
+      status: 'ready', physicalDeviceId: physical.physicalDeviceId, physicalId, componentKey,
+    });
+  });
+
+  it('rejects a physical record that also contains a conflicting Shelly protocol identity', async () => {
+    const physicalId = 'shellyplus1-00c0de000001';
+    const componentKey = 'switch:0';
+    const deviceId = `${physicalId}:${componentKey}`;
+    const verifiedAt = new Date().toISOString();
+    const device = {
+      id: deviceId, tenantId: 'tenant-demo', siteId: 'site-virtual-lab', kind: 'physical', trustStatus: 'approved',
+      adapter: { driver: 'shelly-lan' }, metadata: {
+        approvedFromDiscovery: true, discoveryTenantId: 'tenant-demo', discoverySiteId: 'site-virtual-lab',
+        physicalId, component: componentKey, identityEvidenceSource: 'verified_shelly_http_rpc',
+        componentEvidenceSource: 'verified_shelly_component_status_rpc',
+        identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo', identityVerifiedAt: verifiedAt,
+        componentVerificationMethod: 'Switch.GetStatus?id=0', componentVerifiedAt: verifiedAt,
+      },
+    } as unknown as RegisteredDevice;
+    const physical = {
+      physicalDeviceId: '3e709572-76c5-4d5f-8c89-ec23a8d7c55b',
+      scope: { tenantId: 'tenant-demo', siteId: 'site-virtual-lab' },
+      identity: { namespace: 'mac', value: '02:c0:de:00:00:01' },
+      identities: [
+        { namespace: 'mac', value: '02:c0:de:00:00:01' },
+        { namespace: 'mqtt:shelly-protocol-id', value: physicalId },
+        { namespace: 'mqtt:shelly-protocol-id', value: 'shellyplus1-different-device' },
+      ],
+      components: [{ key: componentKey, capabilities: ['switch'] }], assignments: [],
+    };
+    const service = new DeviceOnboardingService(
+      { getSnapshot: () => ({ tenant: { id: 'tenant-demo' }, site: { id: 'site-virtual-lab' } }), getDevices: () => [device] } as unknown as DeviceRegistryService,
+      { find: jest.fn().mockResolvedValue({ status: 'enrolled' }) } as unknown as DeviceEnrollmentService,
+      { forLogicalDevice: jest.fn().mockResolvedValue(null), list: jest.fn().mockResolvedValue([physical]) } as never,
+    );
+    await expect(service.getShellyIdentityRecovery(deviceId)).resolves.toMatchObject({
+      status: 'not_recoverable', reason: 'The physical inventory record has conflicting Shelly protocol identities.',
+    });
   });
 });

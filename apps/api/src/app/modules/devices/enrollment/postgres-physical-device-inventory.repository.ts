@@ -231,7 +231,12 @@ export class PostgresPhysicalDeviceInventoryRepository implements PhysicalDevice
          (tenant_id,site_id,device_id,physical_device_id,component_key,logical_role,assigned_at,assigned_by)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
          ON CONFLICT (tenant_id,site_id,device_id) DO UPDATE SET
-           logical_role=EXCLUDED.logical_role,assigned_at=EXCLUDED.assigned_at,assigned_by=EXCLUDED.assigned_by
+           component_key=COALESCE(device_inventory.logical_component_assignments.component_key,EXCLUDED.component_key),
+           logical_role=COALESCE(device_inventory.logical_component_assignments.logical_role,EXCLUDED.logical_role),
+           assigned_at=CASE WHEN device_inventory.logical_component_assignments.component_key IS NULL
+             THEN EXCLUDED.assigned_at ELSE device_inventory.logical_component_assignments.assigned_at END,
+           assigned_by=CASE WHEN device_inventory.logical_component_assignments.component_key IS NULL
+             THEN EXCLUDED.assigned_by ELSE device_inventory.logical_component_assignments.assigned_by END
          WHERE device_inventory.logical_component_assignments.physical_device_id=EXCLUDED.physical_device_id
            AND (device_inventory.logical_component_assignments.component_key IS NOT DISTINCT FROM EXCLUDED.component_key
              OR device_inventory.logical_component_assignments.component_key IS NULL)
@@ -458,6 +463,7 @@ export class PostgresPhysicalDeviceInventoryRepository implements PhysicalDevice
       physicalDeviceId: row.physical_device_id,
       scope,
       ...(claim ? { identity: { namespace: claim.identity_namespace, value: claim.identity_value } } : {}),
+      identities: claims.rows.map(value => ({ namespace: value.identity_namespace, value: value.identity_value })),
       ...(claim ? { identityEvidenceSource: claim.evidence_source, identityLastObservedAt: iso(claim.last_seen_at) } : {}),
       ...(row.vendor ? { vendor: row.vendor } : {}),
       ...(row.hardware_model ? { hardwareModel: row.hardware_model } : {}),

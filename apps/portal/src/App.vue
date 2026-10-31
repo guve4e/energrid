@@ -5200,6 +5200,7 @@ onBeforeUnmount(() => {
                     :access-token="accessToken"
                     @retired="handleDeviceRetired"
                     @reenrolled="handleDeviceReenrolled"
+                    @recovered="handleDeviceReenrolled"
                   />
                   <DeviceFirmwareDiagnostics
                     v-if="selectedDevice.adapter.driver === 'energrid-esp8266' && selectedDevice.trustStatus === 'approved'"
