@@ -1961,6 +1961,8 @@ export class DeviceRegistryService implements OnModuleInit {
 
     const observedAt =
       raw.observedAt || raw.state?.observedAt || new Date().toISOString();
+    const currentState = this.liveStateByDeviceId.get(id);
+    if (isOlderObservation(observedAt, currentState?.observedAt)) return;
 
     this.liveStateByDeviceId.set(id, {
       values,
@@ -2020,10 +2022,11 @@ export class DeviceRegistryService implements OnModuleInit {
     if (!id) return;
 
     const current = this.liveStateByDeviceId.get(id);
+    const observedAt = raw.observedAt || current?.observedAt || new Date().toISOString();
+    if (isOlderObservation(observedAt, current?.observedAt)) return;
     this.liveStateByDeviceId.set(id, {
       values: current?.values || {},
-      observedAt:
-        raw.observedAt || current?.observedAt || new Date().toISOString(),
+      observedAt,
       source: current?.source || 'mqtt-status',
       status: normalizeOnlineStatus(raw.status),
       observerReachability: current?.observerReachability,
@@ -2967,6 +2970,13 @@ function numberFromEnv(name: string, fallback: number): number {
 function freshSiteEvidenceTime(value: string, now = Date.now()): boolean {
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) && timestamp <= now + 30_000 && now - timestamp <= 15 * 60_000;
+}
+
+function isOlderObservation(incoming: string, current?: string | null): boolean {
+  if (!current) return false;
+  const incomingTime = Date.parse(incoming);
+  const currentTime = Date.parse(current);
+  return Number.isFinite(incomingTime) && Number.isFinite(currentTime) && incomingTime < currentTime;
 }
 
 function validHistoricalEvidenceTime(value: string, completedAt: string, now = Date.now()): boolean {

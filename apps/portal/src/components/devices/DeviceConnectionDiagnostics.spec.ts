@@ -255,4 +255,35 @@ describe('connection diagnostic UI', () => {
     await flushPromises();
     expect(page.get('[role="alert"]').text()).toContain('timed out after 25 seconds');
   });
+
+  it('performs one authenticated read-only status request for an approved Shelly switch and displays its provenance', async () => {
+    const observedAt = '2026-10-31T20:00:00.000Z';
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({
+      deviceId: 'shellyplus1-00c0de000002:switch:0', component: 'switch:0', output: true,
+      observedAt, source: 'site-local-http-rpc:virtual-observer',
+      observer: { id: 'virtual-observer', host: '192.168.1.138' },
+    }) });
+    setup({ id: 'shellyplus1-00c0de000002:switch:0', kind: 'physical', metadata: { component: 'switch:0' } });
+
+    const statusButton = page.findAll('button').find(button => button.text().includes('Read status once'))!;
+    await statusButton.trigger('click');
+    await flushPromises();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/portal/devices/shellyplus1-00c0de000002%3Aswitch%3A0/observe-shelly-status');
+    expect(fetchMock.mock.calls[0][1].method).toBe('POST');
+    expect(page.text()).toContain('Switch:0 was On');
+    expect(page.text()).toContain('virtual-observer (192.168.1.138)');
+    expect(page.emitted('status-observed')).toHaveLength(1);
+  });
+
+  it.each([
+    { trustStatus: 'discovered', metadata: { component: 'switch:0' } },
+    { kind: 'logical', metadata: { component: 'switch:0' } },
+    { adapter: { protocol: 'http', driver: 'http-json-sensor' }, metadata: { component: 'switch:0' } },
+    { metadata: { component: 'switch:1' } },
+  ])('does not offer a Shelly status request when the enrolled switch:0 boundary is absent (%j)', overrides => {
+    setup(overrides);
+    expect(page.text()).not.toContain('Read status once');
+  });
 });

@@ -33,6 +33,7 @@ describe('portal control configuration authorization', () => {
     const setEnrollmentStatus = jest.fn();
     const getState = jest.fn().mockReturnValue({ site: { id: 'site-home' } });
     const listIdentityEvidence = jest.fn().mockResolvedValue([]);
+    const observeShellySwitchStatusOnce = jest.fn().mockResolvedValue({ deviceId: 'shelly:switch:0', output: false });
     const portalSites = { list: jest.fn().mockResolvedValue([]) };
     return {
       configure,
@@ -49,6 +50,7 @@ describe('portal control configuration authorization', () => {
       setEnrollmentStatus,
       getState,
       listIdentityEvidence,
+      observeShellySwitchStatusOnce,
       controller: new PortalController(
         { getState } as unknown as PortalStateService,
         { scanNow, getZones, getLastScan, verifyShellyCandidate } as unknown as DeviceLanDiscoveryService,
@@ -66,6 +68,7 @@ describe('portal control configuration authorization', () => {
         enrollment,
         undefined,
         undefined,
+        { observeShellySwitchStatusOnce } as never,
         undefined,
         undefined,
         undefined,
@@ -98,6 +101,17 @@ describe('portal control configuration authorization', () => {
     expect(check).toHaveBeenCalledWith('relay');
     expect(execute).not.toHaveBeenCalled();
     expect(configure).not.toHaveBeenCalled();
+  });
+  it('authorizes a one-shot Shelly status read and derives its site from the active Portal', async () => {
+    const { controller, observeShellySwitchStatusOnce } = setup();
+    const request = { method: 'POST', url: '/', headers: {}, user: {
+      userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0,
+    } };
+    await expect(controller.observeShellyStatusOnce('shelly:switch:0', request as never)).resolves.toMatchObject({ output: false });
+    expect(observeShellySwitchStatusOnce).toHaveBeenCalledWith('shelly:switch:0', { tenantId: 'tenant-demo', siteId: 'site-home' });
+    expect(() => controller.observeShellyStatusOnce('shelly:switch:0', { method: 'POST', url: '/', headers: {} } as never))
+      .toThrow(UnauthorizedException);
+    expect(observeShellySwitchStatusOnce).toHaveBeenCalledTimes(1);
   });
   it('requires authorization before scanning or registering channels', async () => {
     const { controller, scanNow, registerDiscoveredDevice } = setup();
@@ -208,7 +222,7 @@ describe('portal control configuration authorization', () => {
         { listIdentityEvidence: jest.fn(async (owner: { tenantId: string; siteId: string }) =>
           owner.tenantId === record.ownership.tenantId && owner.siteId === record.ownership.siteId ? [record] : [],
         ) } as never,
-        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
         { list: jest.fn().mockResolvedValue([]) } as never,
       );
       return { controller, registry };
@@ -280,7 +294,7 @@ describe('portal control configuration authorization', () => {
         { getState: () => ({ devices: [] }) } as never, { getLastScan: () => [] } as never, {} as never, {} as never, {} as never,
         registry as never, {} as never, {} as never, {} as never, {} as never,
         { listIdentityEvidence } as never,
-        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
         { list: jest.fn().mockResolvedValue([]) } as never,
       );
       return { controller, registerDiscoveredDevice, listIdentityEvidence };
@@ -350,7 +364,7 @@ describe('portal control configuration authorization', () => {
       { listIdentityEvidence: jest.fn().mockResolvedValue(history) } as never,
       undefined, undefined,
       { list: jest.fn().mockResolvedValue([]), listRecentMqttPublisherEvidence: jest.fn().mockResolvedValue([]) } as never,
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       { list: jest.fn().mockResolvedValue([]) } as never,
     );
 
@@ -399,7 +413,7 @@ describe('portal control configuration authorization', () => {
       {} as never, {} as never, {} as never, {} as never,
       { listIdentityEvidence: jest.fn().mockResolvedValue([]) } as never,
       undefined, undefined, { list: inventoryList } as never,
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       { list: jest.fn().mockResolvedValue([]) } as never,
     );
 

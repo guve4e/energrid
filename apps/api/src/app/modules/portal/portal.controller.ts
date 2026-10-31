@@ -54,6 +54,7 @@ import { DeviceInvestigationWorkflowService } from '../llm/device-investigation-
 import { MqttEvidenceCaptureService } from '../devices/mqtt/mqtt-evidence-capture.service'
 import { DeviceControlService } from '../devices/device-control.service'
 import { DeviceDiagnosticsService } from '../devices/device-diagnostics.service'
+import { DeviceHttpPollService } from '../devices/device-http-poll.service'
 import { DeviceDiscoveryMemoryStore } from '../devices/device-discovery-memory.store'
 import type { DiscoveryOwnership } from '../devices/device-discovery-memory.store'
 import { DeviceLanDiscoveryService } from '../devices/device-lan-discovery.service'
@@ -184,6 +185,8 @@ export class PortalController {
     @Optional()
     @Inject(PHYSICAL_DEVICE_INVENTORY_SERVICE)
     private readonly physicalInventory?: PhysicalDeviceInventoryService,
+    @Optional()
+    private readonly deviceHttpPoll?: DeviceHttpPollService,
     @Optional()
     private readonly networkEndpointInvestigator?: NetworkEndpointInvestigatorService,
     @Optional()
@@ -1850,6 +1853,17 @@ export class PortalController {
   ) {
     assertPortalAdministrator(request)
     return this.diagnostics.check(deviceId)
+  }
+
+  @Post('devices/:deviceId/observe-shelly-status')
+  observeShellyStatusOnce(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalAdministrator(request)
+    if (!this.deviceHttpPoll) throw new ServiceUnavailableException('Read-only Shelly status observation is unavailable.')
+    const { ownership } = this.discoveryOwner()
+    return this.deviceHttpPoll.observeShellySwitchStatusOnce(deviceId, ownership)
   }
 
   @Post('discovery/:deviceId/approve')

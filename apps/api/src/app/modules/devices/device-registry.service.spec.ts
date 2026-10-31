@@ -385,6 +385,18 @@ describe('DeviceRegistryService', () => {
     );
     await first.persistInstallation(named, true);
 
+    // Relay state is a live operational observation, held separately from the
+    // durable installation. A restart must restore enrollment and placement,
+    // but must not present the prior process's output as current.
+    first.ingestDeviceTelemetry({
+      deviceId: approved!.id, protocol: 'http', driver: 'shelly-lan',
+      values: { output: true }, observedAt: '2026-10-31T10:00:00.000Z',
+      state: { source: 'site-local-http-rpc:lab-observer', status: 'online', values: { output: true } },
+    });
+    expect(first.getDevices().find(device => device.id === approved!.id)?.state).toMatchObject({
+      values: { output: true }, observedAt: '2026-10-31T10:00:00.000Z', status: 'online',
+    });
+
     const restarted = new DeviceRegistryService(undefined, store as any);
     await restarted.onModuleInit();
     expect(restarted.getDevices()).toContainEqual(expect.objectContaining({
@@ -396,6 +408,9 @@ describe('DeviceRegistryService', () => {
       settingsUrl: 'http://192.168.1.21',
       commissioning: { physicalOutcome: 'not_confirmed', confirmedAt: null },
     }));
+    expect(restarted.getDevices().find(device => device.id === approved!.id)?.state).toMatchObject({
+      values: {}, observedAt: null, source: 'device-store', status: 'unknown',
+    });
     expect(store.append).toHaveBeenCalledWith(expect.objectContaining({ kind: 'approved' }));
   });
 
@@ -478,6 +493,26 @@ describe('DeviceRegistryService', () => {
     expect(service.getSnapshot().devices.find(device => device.id === deviceId)?.state).toMatchObject({
       values: { temperature: 22.5 }, observedAt, source: 'http-poll', status: 'online',
       observerReachability: { status: 'unreachable', targetIpAddress: '192.168.7.48', networkScopeId: 'eero-lan' },
+    });
+  });
+
+  it('does not let an older operational observation or failure overwrite newer live state', () => {
+    const deviceId = 'shelly-ordering-test:switch:0';
+    const service = new DeviceRegistryService();
+    service.ingestDeviceTelemetry({
+      deviceId, protocol: 'http', driver: 'shelly-lan', values: { output: true },
+      observedAt: '2026-10-31T10:00:02.000Z',
+      state: { source: 'site-local-http-rpc:lab-observer', status: 'online', values: { output: true } },
+    });
+    service.ingestDeviceStatus({ deviceId, status: 'offline', observedAt: '2026-10-31T10:00:01.000Z' });
+    service.ingestDeviceTelemetry({
+      deviceId, protocol: 'http', driver: 'shelly-lan', values: { output: false },
+      observedAt: '2026-10-31T10:00:00.000Z',
+      state: { source: 'http-poll', status: 'online', values: { output: false } },
+    });
+    expect(service.getSnapshot().devices.find(device => device.id === deviceId)?.state).toMatchObject({
+      values: { output: true }, observedAt: '2026-10-31T10:00:02.000Z',
+      source: 'site-local-http-rpc:lab-observer', status: 'online',
     });
   });
 

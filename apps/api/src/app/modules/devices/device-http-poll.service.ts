@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common'
+import { BadGatewayException, ConflictException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit, Optional, Inject } from '@nestjs/common'
 import { DeviceRegistryService } from './device-registry.service'
 import type { NetworkDiscoveryZone, NetworkDiscoveredDevice, RegisteredDevice } from './device-registry.types'
 import type { KnownNetworkDevice } from './device-discovery-memory.store'
@@ -22,7 +22,13 @@ import {
 } from './device-firmware-diagnostics'
 import { EnergridFirmwareDiagnosticsHttpAdapter, FirmwareDiagnosticsCollectionError } from './adapters/outbound/network/energrid-firmware-diagnostics-http.adapter'
 import { performance } from 'node:perf_hooks'
+import { randomUUID } from 'node:crypto'
 import { hostname, networkInterfaces } from 'node:os'
+import { isIP } from 'node:net'
+import { parseShellySwitchStatus } from './adapters/inbound/shelly/shelly-switch-status'
+import { PHYSICAL_DEVICE_INVENTORY_SERVICE } from './enrollment/physical-device-inventory.token'
+import type { PhysicalDeviceInventoryService } from './enrollment/physical-device-inventory.service'
+import { hasPhysicalDeviceIdentityClaim } from './enrollment/physical-device-inventory.repository'
 
 @Injectable()
 export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
@@ -38,6 +44,8 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     private readonly discovery?: DeviceDiscoveryMemoryStore,
     private readonly lanDiscovery?: DeviceLanDiscoveryService,
     private readonly firmwareDiagnostics?: DeviceFirmwareDiagnosticsService,
+    @Optional() @Inject(PHYSICAL_DEVICE_INVENTORY_SERVICE)
+    private readonly physicalInventory?: PhysicalDeviceInventoryService,
   ) {}
 
   onModuleInit(): void {
@@ -82,6 +90,12 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       return
     }
 
+    // A Shelly assigned to a Virtual Lab scope is reachable only from its
+    // configured remote observer. Do not repeatedly try its saved endpoint
+    // from the API host; selected-device RPC remains an explicit one-shot
+    // action until a suitable recurring observer transport exists.
+    if (device.adapter.driver === 'shelly-lan' && this.isVirtualLabShelly(device)) return
+
     const target = device.adapter.target
     if (!isHttpTarget(target)) return
 
@@ -90,6 +104,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
 
     try {
       const startedAt = Date.now()
+      const observedAt = new Date().toISOString()
       const response = await fetch(target, {
         signal: controller.signal,
         headers: {
@@ -98,7 +113,10 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       })
 
       if (!response.ok) {
-        this.registry.ingestDeviceStatus({
+        // A failed API-host request is an observer-relative failure, not a
+        // device-reported state. Preserve the last valid Shelly state; its
+        // timestamp will age naturally in the Portal.
+        if (device.adapter.driver !== 'shelly-lan') this.registry.ingestDeviceStatus({
           deviceId: device.id,
           status: 'offline',
           observedAt: new Date().toISOString(),
@@ -108,7 +126,13 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       }
 
       const json = await response.json()
-      const values = normalizeHttpValues(json)
+      const values = device.adapter.driver === 'shelly-lan'
+        ? parseShellySwitchStatus(json, String(device.metadata?.component || ''))
+        : normalizeHttpValues(json)
+      if (device.adapter.driver === 'shelly-lan' && !values) {
+        this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=invalid_shelly_switch_status`)
+        return
+      }
       this.registry.ingestDeviceTelemetry({
         deviceId: device.id,
         name: device.displayName,
@@ -124,11 +148,11 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
           source: 'http-poll',
           status: 'online',
         },
-        observedAt: new Date().toISOString(),
+        observedAt,
       })
       this.logger.log(`[DEVICE HTTP POLL] ${device.id} ${Date.now() - startedAt}ms`)
     } catch (error) {
-      this.registry.ingestDeviceStatus({
+      if (device.adapter.driver !== 'shelly-lan') this.registry.ingestDeviceStatus({
         deviceId: device.id,
         status: 'offline',
         observedAt: new Date().toISOString(),
@@ -137,6 +161,190 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     } finally {
       clearTimeout(timeout)
     }
+  }
+
+  private isVirtualLabShelly(device: RegisteredDevice): boolean {
+    const scope = String(device.metadata?.networkScope || '').trim()
+    if (!scope || !this.lanDiscovery?.getConfiguredZone) return false
+
+    // Shelly enrollment stores observer identity and zone as
+    // "<observer>:<zone-id>"; older local records may store only the zone id.
+    // Resolve against configured scopes, never the last Portal-selected scan.
+    const scopeId = scope.slice(scope.lastIndexOf(':') + 1)
+    return this.lanDiscovery.getConfiguredZone(scopeId)?.collectionSource === 'virtual-lab'
+  }
+
+  /** Perform one operator-triggered, read-only status read for an enrolled Shelly. */
+  async observeShellySwitchStatusOnce(
+    deviceId: string,
+    ownership: { tenantId: string; siteId: string },
+  ) {
+    const correlationId = randomUUID()
+    const startedAt = performance.now()
+    let stage = 'request_accepted_site_resolved'
+    let scopeId: string | undefined
+    let observerId: string | undefined
+    this.logShellyObservation(correlationId, stage, 'completed', startedAt, deviceId, ownership)
+    try {
+      stage = 'enrollment_and_inventory_validation'
+      await this.registry.ensureInstallationsLoaded()
+      const matches = this.registry.getDevices(true).filter(device => device.id === deviceId)
+      const device = matches.find(item => item.tenantId === ownership.tenantId && item.siteId === ownership.siteId)
+      if (!device) throw new NotFoundException('No Shelly installation exists in the selected site.')
+      if (matches.some(item => item.tenantId !== ownership.tenantId || item.siteId !== ownership.siteId)) {
+        throw new ConflictException('The Shelly identity is also registered outside the selected site.')
+      }
+      const physicalId = String(device.metadata?.physicalId || '')
+      const component = String(device.metadata?.component || '')
+      if (device.kind !== 'physical' || device.trustStatus !== 'approved' ||
+          device.adapter.driver !== 'shelly-lan' || device.adapter.protocol !== 'http' ||
+          !device.adapter.configured || !/^shelly[a-z0-9._-]{1,114}$/i.test(physicalId) ||
+          component !== 'switch:0' || device.id !== `${physicalId}:${component}`) {
+        throw new ConflictException('Only an approved, configured, enrolled Shelly switch:0 installation can be observed.')
+      }
+      if (!this.physicalInventory || !this.discovery || !this.lanDiscovery) {
+        throw new BadGatewayException('Site-owned Shelly identity and endpoint evidence is unavailable.')
+      }
+      const inventory = await this.physicalInventory.forLogicalDevice(ownership, deviceId)
+      if (!inventory || inventory.scope.tenantId !== ownership.tenantId || inventory.scope.siteId !== ownership.siteId ||
+          !hasPhysicalDeviceIdentityClaim(inventory, 'mqtt:shelly-protocol-id', physicalId) ||
+          !inventory.components.some(item => item.key === component) ||
+          !inventory.assignments.some(item => item.deviceId === deviceId &&
+            item.physicalDeviceId === inventory.physicalDeviceId && item.componentKey === component) ||
+          (device.metadata?.physicalInventoryId !== undefined &&
+            device.metadata.physicalInventoryId !== inventory.physicalDeviceId)) {
+        throw new ConflictException('The enrolled switch has no exact same-site physical inventory assignment.')
+      }
+      const decision = await this.registry.getShellyReconciliationTargetDecision(
+        ownership.tenantId, ownership.siteId, deviceId, physicalId, component, inventory.physicalDeviceId,
+      )
+      if (!decision.matched) throw new ConflictException(`Shelly status observation rejected (${decision.reasonCode}).`)
+      stage = 'enrollment_inventory_validated'
+      this.logShellyObservation(correlationId, stage, 'completed', startedAt, deviceId, ownership)
+
+      stage = 'saved_endpoint_observer_scope_validation'
+      const history = (await this.discovery.listIdentityEvidence(ownership)).filter(record =>
+        record.ownership?.tenantId === ownership.tenantId && record.ownership.siteId === ownership.siteId &&
+        record.device.vendor === 'Shelly' && record.device.id.toLowerCase() === physicalId.toLowerCase() &&
+        record.device.components?.some(item => item.component === component) &&
+        record.device.observations?.some(item =>
+          ['http_rpc', 'site_local_http_rpc'].includes(item.source) &&
+          ['shelly.device_id', 'identity.device_id'].includes(item.attribute) &&
+          typeof item.value === 'string' && item.value.toLowerCase() === physicalId.toLowerCase()) &&
+        record.device.observations?.some(item =>
+          ['http_rpc', 'site_local_http_rpc'].includes(item.source) &&
+          item.attribute === 'shelly.component_status' && item.value === component &&
+          item.method === 'Switch.GetStatus?id=0'))
+        .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt))
+      const endpoints = [...new Map(history.map(record =>
+        [`${record.device.networkZoneId}:${record.device.ipAddress}`, record])).values()]
+      if (endpoints.length !== 1) {
+        throw new ConflictException(endpoints.length
+          ? 'Saved site-owned Shelly evidence has conflicting endpoints; no status was requested.'
+          : 'No saved site-owned identity and switch:0 evidence supports this installation.')
+      }
+      const endpointRecord = endpoints[0]
+      const zoneId = endpointRecord.device.networkZoneId
+      scopeId = zoneId
+      const zone = this.lanDiscovery.getConfiguredZone(zoneId)
+      const ipAddress = endpointRecord.device.ipAddress
+      if (!zone || zone.collectionSource !== 'virtual-lab' || isIP(ipAddress) !== 4) {
+        throw new ConflictException('The saved Shelly endpoint is not in the configured authorized Virtual Lab scope.')
+      }
+      stage = 'saved_endpoint_observer_scope_validated'
+      this.logShellyObservation(correlationId, stage, 'completed', startedAt, deviceId, ownership, { scopeId })
+
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 18_000)
+      try {
+        stage = 'remote_execution'
+        this.logShellyObservation(correlationId, 'remote_execution_started', 'started', startedAt, deviceId, ownership, { scopeId })
+        const evidence = await this.lanDiscovery.readVirtualLabShellyStatusEvidence(
+          zoneId, ipAddress, physicalId, inventory.components.map(item => item.key), controller.signal,
+        )
+        observerId = evidence.observer.id
+        this.logShellyObservation(correlationId, 'remote_execution_completed', 'completed', startedAt, deviceId, ownership, { scopeId, observerId })
+        stage = 'rpc_response_validation'
+        if (typeof evidence.identity.id !== 'string' || evidence.identity.id.toLowerCase() !== physicalId.toLowerCase() ||
+            typeof evidence.identity.gen !== 'number' || evidence.identity.gen < 2) {
+          throw new ConflictException('The remote observer returned a Shelly identity that does not match the enrolled physical device.')
+        }
+        const expectedKeys = inventory.components.map(item => item.key).sort()
+        const actualKeys = [...evidence.componentKeys].sort()
+        if (expectedKeys.length !== actualKeys.length || expectedKeys.some((key, index) => key !== actualKeys[index])) {
+          throw new ConflictException('The remote observer component profile differs from the site-owned physical inventory.')
+        }
+        const status = evidence.componentStatuses.find(item => item.componentKey === component)
+        const values = status ? parseShellySwitchStatus(status.body, component) : null
+        if (!values) throw new BadGatewayException('Switch.GetStatus returned a malformed or mismatched switch:0 response.')
+
+        const observedAt = status!.observedAt
+        const observedTime = Date.parse(observedAt)
+        const now = Date.now()
+        if (!Number.isFinite(observedTime) || observedTime > now + 60_000 || now - observedTime > 15 * 60_000) {
+          throw new BadGatewayException('The remote observer returned stale or invalid collection time; no state was changed.')
+        }
+        this.logShellyObservation(correlationId, 'rpc_response_validated', 'completed', startedAt, deviceId, ownership, { scopeId, observerId })
+        const source = `site-local-http-rpc:${evidence.observer.id}`
+        stage = 'operational_state_ingestion'
+        this.registry.ingestDeviceTelemetry({
+          id: device.id, deviceId: device.id, tenantId: ownership.tenantId, siteId: ownership.siteId,
+          displayName: device.displayName, protocol: 'http', transport: 'http', driver: 'shelly-lan',
+          target: `http://${ipAddress}/rpc/Switch.GetStatus?id=0`, location: device.zoneName,
+          capabilities: device.capabilities.map(item => item.kind), values,
+          state: { values, source, status: 'online', observedAt }, observedAt,
+        })
+        this.registry.recordObserverReachability(device.id, {
+          status: 'reachable', checkedAt: observedAt,
+          endpoint: `http://${ipAddress}/rpc/Switch.GetStatus?id=0`, targetIpAddress: ipAddress,
+          networkScopeId: zoneId,
+          observer: { id: evidence.observer.id, host: evidence.observer.host, platform: 'docker', localScopes: [] },
+        })
+        stage = 'operational_state_ingestion_completed'
+        this.logShellyObservation(correlationId, stage, 'completed', startedAt, deviceId, ownership, { scopeId, observerId })
+        return {
+          deviceId: device.id, physicalId, component, physicalInventoryId: inventory.physicalDeviceId,
+          site: ownership, output: values.output, observedAt, source,
+          observer: evidence.observer, networkScopeId: zoneId,
+        }
+      } catch (error) {
+        if (controller.signal.aborted) {
+          throw new BadGatewayException(
+            'The bounded remote Shelly status observation exceeded its 18-second deadline; no state was changed.',
+            { cause: error },
+          )
+        }
+        throw error
+      } finally {
+        clearTimeout(timeout)
+      }
+    } catch (error) {
+      this.logShellyObservation(correlationId, stage, 'failed', startedAt, deviceId, ownership, {
+        ...(scopeId ? { scopeId } : {}), ...(observerId ? { observerId } : {}),
+        failureCategory: shellyObservationFailureCategory(stage, error),
+        error: safeShellyObservationError(error),
+      })
+      throw error
+    }
+  }
+
+  private logShellyObservation(
+    correlationId: string,
+    stage: string,
+    outcome: 'started' | 'completed' | 'failed',
+    startedAt: number,
+    deviceId: string,
+    ownership: { tenantId: string; siteId: string },
+    details: Record<string, unknown> = {},
+  ): void {
+    const record = {
+      event: 'shelly_status_observation', correlationId, stage, outcome,
+      durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      deviceId, tenantId: ownership.tenantId, siteId: ownership.siteId, ...details,
+    }
+    const message = JSON.stringify(record)
+    if (outcome === 'failed') this.logger.error(message)
+    else this.logger.log(message)
   }
 
   private async pollEnergridDevice(device: RegisteredDevice): Promise<void> {
@@ -418,6 +626,53 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`[DEVICE FIRMWARE DIAGNOSTICS] ${deviceId} failure_record_unavailable`);
     }
   }
+}
+
+function shellyObservationFailureCategory(stage: string, error: unknown): string {
+  const code = error && typeof error === 'object' && 'code' in error
+    ? String((error as { code?: unknown }).code || '')
+    : ''
+  if (code.startsWith('VIRTUAL_LAB_SHELLY_')) return code.toLowerCase()
+  if (stage === 'enrollment_and_inventory_validation' || stage === 'saved_endpoint_observer_scope_validation') {
+    return 'precondition_failed'
+  }
+  if (stage === 'remote_execution') return 'remote_execution_failed'
+  if (stage === 'rpc_response_validation') return 'rpc_response_rejected'
+  if (stage === 'operational_state_ingestion') return 'state_ingestion_failed'
+  return 'unexpected_failure'
+}
+
+function safeShellyObservationError(error: unknown): Array<Record<string, string | number>> {
+  const details: Array<Record<string, string | number>> = []
+  const visited = new Set<unknown>()
+  let current: unknown = error
+  while (current && typeof current === 'object' && !visited.has(current) && details.length < 4) {
+    visited.add(current)
+    const value = current as { name?: unknown; code?: unknown; message?: unknown; cause?: unknown }
+    const entry: Record<string, string | number> = {
+      type: safeDiagnosticToken(value.name, 'Error'),
+    }
+    if (typeof value.code === 'string' && /^[A-Za-z0-9_-]{1,48}$/.test(value.code)) entry.code = value.code
+    else if (typeof value.code === 'number' && Number.isInteger(value.code) && value.code >= 0 && value.code <= 255) entry.code = value.code
+    if (typeof value.message === 'string') {
+      const firstLine = value.message.split(/\r?\n/, 1)[0]
+      const safeMessage = firstLine
+        .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
+        .replace(/(https?:\/\/)[^/@\s]+@/gi, '$1[redacted]@')
+        .replace(/\b(password|passwd|secret|token|authorization|credential|api[_-]?key)(\s*(?:[=:]|\s)\s*)\S+/gi, '$1$2[redacted]')
+        .slice(0, 180)
+      if (safeMessage) entry.message = safeMessage
+    }
+    details.push(entry)
+    current = value.cause
+  }
+  return details
+}
+
+function safeDiagnosticToken(value: unknown, fallback: string): string {
+  return typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(value)
+    ? value
+    : fallback
 }
 
 export function buildFirmwareDiagnosticCollectionContext(
