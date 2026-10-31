@@ -547,6 +547,10 @@ const scanElapsedSeconds = ref(0);
 const scanFeedback = ref('');
 let scanTimer: ReturnType<typeof setInterval> | undefined;
 let scanDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
+const pendingEnrollmentNow = ref(Date.now());
+const pendingEnrollmentFreshnessTimer = window.setInterval(() => {
+  pendingEnrollmentNow.value = Date.now();
+}, 1_000);
 let scanTimedOut = false;
 let networkScanAbortController: AbortController | undefined;
 const discoveryMemory = ref<DiscoveryMemoryResponse | null>(null);
@@ -1113,6 +1117,7 @@ const discoveredDevices = computed(() =>
 const pendingEnrollmentCards = computed(() => buildPendingEnrollmentCards(
   discoveredDevices.value,
   state.value?.pendingDeviceIdentities ?? {},
+  pendingEnrollmentNow.value,
 ));
 const approvedOnboardingDevices = computed(() =>
   approvedDevices.value
@@ -4344,6 +4349,7 @@ syncNativeWakeStatus();
 onBeforeUnmount(() => {
   if (scanTimer) clearInterval(scanTimer);
   if (scanDeadlineTimer) clearTimeout(scanDeadlineTimer);
+  window.clearInterval(pendingEnrollmentFreshnessTimer);
   unsubscribeAuth();
   window.removeEventListener('popstate', handlePortalRouteChange);
   window.removeEventListener('energrid-wake-status', updateNativeWakeStatus);

@@ -108,6 +108,7 @@ export interface PendingEnrollmentCardModel {
 export function buildPendingEnrollmentCards(
   candidates: readonly PendingCandidateInput[],
   identities: Readonly<Record<string, PendingIdentityInput | undefined>>,
+  now = Date.now(),
 ): PendingEnrollmentCardModel[] {
   const groups = new Map<string, PendingCandidateInput[]>();
   for (const candidate of candidates) {
@@ -119,7 +120,7 @@ export function buildPendingEnrollmentCards(
   }
 
   return [...groups.entries()]
-    .map(([key, group]) => toCard(key, group, identities))
+    .map(([key, group]) => toCard(key, group, identities, now))
     .sort((left, right) => left.title.localeCompare(right.title));
 }
 
@@ -146,6 +147,7 @@ function toCard(
   key: string,
   group: readonly PendingCandidateInput[],
   identities: Readonly<Record<string, PendingIdentityInput | undefined>>,
+  now: number,
 ): PendingEnrollmentCardModel {
   const candidates = [...group].sort((left, right) =>
     (identities[left.id]?.componentId ?? left.id).localeCompare(identities[right.id]?.componentId ?? right.id),
@@ -177,7 +179,7 @@ function toCard(
     (typeof candidate.metadata?.component === 'string' ? candidate.metadata.component : ''),
   ).filter(isString));
   const capabilities = unique(candidates.flatMap(candidate => candidate.capabilities.map(capability => capability.kind)));
-  const details = candidates.map(candidate => detail(candidate, identities[candidate.id]));
+  const details = candidates.map(candidate => detail(candidate, identities[candidate.id], now));
 
   return {
     key,
@@ -226,9 +228,10 @@ function toCard(
 function detail(
   candidate: PendingCandidateInput,
   identity: PendingIdentityInput | undefined,
+  now: number,
 ): PendingCandidateDetails {
   const shelly = /^shelly[a-z0-9._-]{1,114}$/i.test(String(candidate.metadata?.physicalId || identity?.physicalHardwareId || ''));
-  const shellyLanVerificationReason = shelly ? getShellyLanVerificationReason(candidate) : null;
+  const shellyLanVerificationReason = shelly ? getShellyLanVerificationReason(candidate, now) : null;
   return {
     candidateId: candidate.id,
     logicalCandidateId: candidate.id,
@@ -269,7 +272,7 @@ function detail(
 }
 
 /** Keep the review UI aligned with DeviceOnboardingService's fail-closed evidence gate. */
-function getShellyLanVerificationReason(candidate: PendingCandidateInput): string | null {
+function getShellyLanVerificationReason(candidate: PendingCandidateInput, now: number): string | null {
   if (candidate.adapter.driver !== 'shelly-lan') {
     return 'this candidate is not backed by a Shelly LAN/RPC discovery record';
   }
@@ -299,7 +302,6 @@ function getShellyLanVerificationReason(candidate: PendingCandidateInput): strin
     return 'the component status RPC verification method does not match the selected component';
   }
 
-  const now = Date.now();
   for (const [label, value] of [
     ['device identity', candidate.metadata?.identityVerifiedAt],
     ['component status', candidate.metadata?.componentVerifiedAt],

@@ -28,6 +28,25 @@ function identity(candidateId: string, componentId: string, extra: Partial<Pendi
   };
 }
 
+function verifiedShellyCandidate(evidenceAt: string): PendingCandidateInput {
+  const component = 'switch:0';
+  return {
+    ...candidate(`${physicalId}:${component}`, component),
+    capabilities: [{ kind: 'switch', actions: ['read'] }],
+    adapter: { protocol: 'http', driver: 'shelly-lan', target: 'http://172.30.250.11/rpc/Switch.GetStatus?id=0' },
+    metadata: {
+      physicalId, component, ipAddress: '172.30.250.11', networkScope: 'virtual-lab:device-lab-vlan',
+      identityEvidenceSource: 'verified_site_local_shelly_rpc',
+      componentEvidenceSource: 'verified_site_local_shelly_rpc',
+      siteLocalObserverId: 'virtual-lab-docker/192.168.1.138/eth0',
+      identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo',
+      componentVerificationMethod: 'Switch.GetStatus?id=0',
+      identityVerifiedAt: evidenceAt, componentVerifiedAt: evidenceAt,
+      requiresEnrollmentPlacement: true,
+    },
+  };
+}
+
 describe('Pending Enrollment presentation', () => {
   it('marks an Energrid candidate for explicit room enrollment with separate measurement approval', () => {
     const device: PendingCandidateInput = {
@@ -213,29 +232,87 @@ describe('Pending Enrollment presentation', () => {
     expect(detail.shellyLanVerificationReason).toContain('older than 15 minutes');
   });
 
-  it('renders the selected-device action for stale saved LAN evidence and emits only that candidate', async () => {
-    const old = new Date(Date.now() - 16 * 60_000).toISOString();
-    const shelly: PendingCandidateInput = {
-      ...candidate(`${physicalId}:em1:0`, 'em1:0'),
-      adapter: { protocol: 'http', driver: 'shelly-lan', target: 'http://192.168.7.54/rpc/EM1.GetStatus?id=0' },
-      metadata: {
-        physicalId, component: 'em1:0', ipAddress: '192.168.7.54', networkScope: 'gateway-home:eero-lan',
-        identityEvidenceSource: 'verified_shelly_http_rpc', componentEvidenceSource: 'verified_shelly_component_status_rpc',
-        identityVerificationMethod: 'GET /rpc/Shelly.GetDeviceInfo', componentVerificationMethod: 'EM1.GetStatus?id=0',
-        identityVerifiedAt: old, componentVerifiedAt: old,
-      },
-    };
-    const card = buildPendingEnrollmentCards([shelly], {})[0];
+  it('keeps a fresh candidate eligible for enrollment without asking for another verification', async () => {
+    const evidenceAt = Date.parse('2026-10-31T09:00:00.000Z');
+    const shelly = verifiedShellyCandidate(new Date(evidenceAt).toISOString());
     const wrapper = mount(PendingEnrollmentList, { props: {
-      cards: [card], busyByCandidateId: {}, verificationMessageByCandidateId: {}, zones: [],
+      cards: buildPendingEnrollmentCards([shelly], {}, evidenceAt + 14 * 60_000),
+      busyByCandidateId: {}, verificationMessageByCandidateId: {},
+      zones: [{ id: 'virtual-lab-room', name: 'Virtual Device Lab' }],
     } });
     await wrapper.get('button.pending-review-button').trigger('click');
 
-    const verify = wrapper.findAll('button').find(button => button.text() === 'Verify selected device');
-    expect(verify).toBeDefined();
-    await verify!.trigger('click');
+    const enroll = wrapper.findAll('button').find(button => button.text() === 'Enroll device');
+    expect(enroll?.element.disabled).toBe(false);
+    expect(wrapper.text()).not.toContain('Enrollment is blocked because');
+    expect(wrapper.findAll('button').some(button => button.text() === 'Verify selected device')).toBe(false);
+  });
+
+  it('disables enrollment and exposes selected verification when evidence expires while the review stays open', async () => {
+    const evidenceAt = Date.parse('2026-10-31T09:00:00.000Z');
+    const shelly = verifiedShellyCandidate(new Date(evidenceAt).toISOString());
+    const wrapper = mount(PendingEnrollmentList, { props: {
+      cards: buildPendingEnrollmentCards([shelly], {}, evidenceAt + 14 * 60_000),
+      busyByCandidateId: {}, verificationMessageByCandidateId: {},
+      zones: [{ id: 'virtual-lab-room', name: 'Virtual Device Lab' }],
+    } });
+    await wrapper.get('button.pending-review-button').trigger('click');
+    expect(wrapper.findAll('button').find(button => button.text() === 'Enroll device')?.element.disabled).toBe(false);
+
+    await wrapper.setProps({ cards: buildPendingEnrollmentCards([shelly], {}, evidenceAt + 16 * 60_000) });
+
+    expect(wrapper.find('.pending-review-details').exists()).toBe(true);
+    expect(wrapper.text()).toContain('the device identity verification is older than 15 minutes');
+    expect(wrapper.findAll('button').find(button => button.text() === 'Enroll device')?.element.disabled).toBe(true);
+    expect(wrapper.findAll('button').some(button => button.text() === 'Verify selected device')).toBe(true);
+  });
+
+  it('makes a fresh server-refreshed candidate eligible after selected verification', async () => {
+    const evidenceAt = Date.parse('2026-10-31T09:00:00.000Z');
+    const oldEvidence = new Date(evidenceAt - 16 * 60_000).toISOString();
+    const shelly = verifiedShellyCandidate(oldEvidence);
+    const wrapper = mount(PendingEnrollmentList, { props: {
+      cards: buildPendingEnrollmentCards([shelly], {}, evidenceAt),
+      busyByCandidateId: {}, verificationMessageByCandidateId: {},
+      zones: [{ id: 'virtual-lab-room', name: 'Virtual Device Lab' }],
+    } });
+    await wrapper.get('button.pending-review-button').trigger('click');
+    await wrapper.findAll('button').find(button => button.text() === 'Verify selected device')!.trigger('click');
     expect(wrapper.emitted('verify')).toEqual([[shelly.id]]);
-    expect(wrapper.findAll('button').some(button => button.text() === 'Enroll device')).toBe(false);
+
+    const freshEvidence = new Date(evidenceAt).toISOString();
+    await wrapper.setProps({
+      cards: buildPendingEnrollmentCards([{ ...shelly, metadata: { ...shelly.metadata,
+        identityVerifiedAt: freshEvidence, componentVerifiedAt: freshEvidence } }], {}, evidenceAt),
+      verificationMessageByCandidateId: { [shelly.id]: `Fresh identity and component RPC evidence saved for ${physicalId}. Enrollment is still a separate operator action.` },
+    });
+
+    expect(wrapper.findAll('button').some(button => button.text() === 'Verify selected device')).toBe(false);
+    expect(wrapper.findAll('button').find(button => button.text() === 'Enroll device')?.element.disabled).toBe(false);
+    expect(wrapper.text()).toContain('Enrollment is still a separate operator action');
+  });
+
+  it('keeps the candidate blocked and pending when selected verification fails', async () => {
+    const evidenceAt = Date.parse('2026-10-31T09:00:00.000Z');
+    const oldEvidence = new Date(evidenceAt - 16 * 60_000).toISOString();
+    const shelly = verifiedShellyCandidate(oldEvidence);
+    const wrapper = mount(PendingEnrollmentList, { props: {
+      cards: buildPendingEnrollmentCards([shelly], {}, evidenceAt),
+      busyByCandidateId: {}, verificationMessageByCandidateId: {},
+      zones: [{ id: 'virtual-lab-room', name: 'Virtual Device Lab' }],
+    } });
+    await wrapper.get('button.pending-review-button').trigger('click');
+    await wrapper.findAll('button').find(button => button.text() === 'Verify selected device')!.trigger('click');
+
+    await wrapper.setProps({ verificationMessageByCandidateId: { [shelly.id]: 'Selected-device verification failed.' } });
+
+    expect(wrapper.find('.pending-channel-detail').exists()).toBe(true);
+    expect(wrapper.text()).toContain('Selected-device verification failed.');
+    expect(wrapper.text()).toContain('the device identity verification is older than 15 minutes');
+    expect(wrapper.findAll('button').find(button => button.text() === 'Enroll device')?.element.disabled).toBe(true);
+    expect(wrapper.emitted('decide')).toBeUndefined();
+    expect(shelly.trustStatus).toBe('discovered');
+    expect(shelly.capabilities).toEqual([{ kind: 'switch', actions: ['read'] }]);
   });
 
   it('shows broker peer evidence separately without treating it as a verified LAN address', () => {
