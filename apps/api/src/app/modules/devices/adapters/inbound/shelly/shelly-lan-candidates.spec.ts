@@ -126,6 +126,27 @@ describe('Shelly LAN onboarding candidates', () => {
       metadata: { identityEvidenceSource: 'verified_site_local_shelly_rpc', siteLocalObserverId: 'pi-housenet-observer' },
     }]);
   });
+  it('uses fresh site-local identity evidence instead of retaining an older scan timestamp', () => {
+    const oldAt = '2026-10-29T05:00:00.000Z';
+    const freshAt = '2026-10-29T05:05:00.000Z';
+    const verified: NetworkDiscoveredDevice = {
+      ...device,
+      observations: [
+        { source: 'http_rpc', attribute: 'shelly.device_id', value: device.id, observedAt: oldAt, method: 'GET /rpc/Shelly.GetDeviceInfo' },
+        { source: 'http_rpc', attribute: 'shelly.component_status', value: 'switch:0', observedAt: oldAt, method: 'Switch.GetStatus?id=0' },
+        { source: 'site_local_http_rpc', attribute: 'observer.identity', value: 'virtual-lab-docker/192.168.1.138/eth0', observedAt: freshAt },
+        { source: 'site_local_http_rpc', attribute: 'shelly.device_id', value: device.id, observedAt: freshAt, method: 'GET /rpc/Shelly.GetDeviceInfo' },
+        { source: 'site_local_http_rpc', attribute: 'shelly.component_status', value: 'switch:0', observedAt: freshAt, method: 'Switch.GetStatus?id=0' },
+      ],
+    };
+
+    expect(shellyLanCandidates(verified)[0].metadata).toMatchObject({
+      identityEvidenceSource: 'verified_site_local_shelly_rpc',
+      identityVerifiedAt: freshAt,
+      componentVerifiedAt: freshAt,
+      siteLocalObserverId: 'virtual-lab-docker/192.168.1.138/eth0',
+    });
+  });
   it('deduplicates channels and rejects invalid component/channel assignments', () => {
     expect(
       shellyLanCandidates({

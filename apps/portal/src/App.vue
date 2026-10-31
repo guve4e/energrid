@@ -2535,7 +2535,7 @@ async function verifyPendingShelly(candidateId: string) {
   discoveryDecisionBusy.value = { ...discoveryDecisionBusy.value, [candidateId]: 'verify' };
   shellyVerificationMessages.value = { ...shellyVerificationMessages.value, [candidateId]: '' };
   const controller = new AbortController();
-  const deadline = window.setTimeout(() => controller.abort(), 15_000);
+  const deadline = window.setTimeout(() => controller.abort(), 25_000);
   try {
     const response = await authFetch(`${apiBase}/portal/discovery/${encodeURIComponent(candidateId)}/verify-shelly`, {
       method: 'POST',
@@ -2553,7 +2553,7 @@ async function verifyPendingShelly(candidateId: string) {
     shellyVerificationMessages.value = {
       ...shellyVerificationMessages.value,
       [candidateId]: controller.signal.aborted
-        ? 'The Portal request exceeded 15 seconds. No enrollment or device control was performed; check API connectivity before retrying.'
+        ? 'The Portal request exceeded 25 seconds. No enrollment or device control was performed; check API and authorized observer connectivity before retrying.'
         : error instanceof Error ? error.message : 'Selected-device verification failed.',
     };
   } finally {

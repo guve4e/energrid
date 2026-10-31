@@ -164,6 +164,67 @@ describe('LAN discovery evidence persistence', () => {
     }
   }
 
+  function virtualShellyVerifier(componentStatus: Record<string, unknown> = { id: 0, source: 'init', output: false }) {
+    const physicalId = 'shellyplus1-00c0de000001'
+    const ipAddress = '172.30.250.11'
+    const component = 'switch:0'
+    const candidateId = `${physicalId}:${component}`
+    const zone = {
+      id: 'device-lab-vlan', name: 'Virtual Lab LAN', cidr: '172.30.250.0/28',
+      interfaceName: 'eth0', seedIps: ['172.30.250.10', ipAddress], collectionSource: 'virtual-lab' as const,
+    }
+    process.env.HOME_VIRTUAL_LAB_ENABLED = 'true'
+    process.env.HOME_VIRTUAL_LAB_SCOPE_JSON = JSON.stringify({ zones: [zone] })
+    process.env.HOME_NETWORK_ZONES_JSON = JSON.stringify({ zones: [] })
+    process.env.HOME_NETWORK_SCAN_ZONES_JSON = JSON.stringify({ zones: [] })
+    const old = new Date(Date.now() - 20 * 60_000).toISOString()
+    const prior: NetworkDiscoveredDevice = {
+      id: physicalId, ipAddress, networkZoneId: zone.id, networkZoneName: zone.name,
+      vendor: 'Shelly', model: 'SNSW-001X16EU', app: 'Plus1', firmwareVersion: '1.7.5',
+      protocol: 'http', confidence: 0.95, status: 'online', generation: 2, components: [{ component, channel: 0 }],
+      discoveredAt: old, reason: 'Read-only protocol identity was verified.',
+      observations: [
+        { source: 'http_rpc', attribute: 'shelly.device_id', value: physicalId, observedAt: old, scopeId: zone.id, method: 'GET /rpc/Shelly.GetDeviceInfo' },
+        { source: 'http_rpc', attribute: 'shelly.component_status', value: component, observedAt: old, scopeId: zone.id, method: 'Switch.GetStatus?id=0' },
+      ],
+    }
+    const candidate = {
+      id: candidateId, tenantId: TEST_OWNER.tenantId, siteId: TEST_OWNER.siteId,
+      displayName: `${physicalId} ${component}`, trustStatus: 'discovered', kind: 'physical',
+      adapter: { protocol: 'http', driver: 'shelly-lan', target: `http://${ipAddress}/rpc/Switch.GetStatus?id=0` },
+      metadata: { physicalId, component, ipAddress, networkScope: `virtual-lab-docker/192.168.1.138/eth0:${zone.id}` },
+      capabilities: [{ kind: 'switch', actions: ['read'] }],
+    }
+    const registry = {
+      getSnapshot: () => ({ tenant: { id: TEST_OWNER.tenantId }, site: { id: TEST_OWNER.siteId, name: 'Virtual Device Lab' }, devices: [] }),
+      getDevices: () => [candidate],
+      registerDiscoveredDevice: jest.fn(() => true),
+    }
+    const inventoryRecord = {
+      physicalDeviceId: 'physical-virtual-shelly', scope: TEST_OWNER,
+      identity: { namespace: 'mqtt:shelly-protocol-id', value: physicalId },
+      components: [{ key: component, capabilities: ['switch'], firstSeenAt: old, lastSeenAt: old }],
+      assignments: [], endpoints: [], networkObservations: [], verificationStatus: 'protocol_observed',
+      firstSeenAt: old, lastSeenAt: old,
+    }
+    const physicalInventory = {
+      list: jest.fn().mockResolvedValue([]),
+      discover: jest.fn().mockResolvedValue(inventoryRecord),
+      refreshNetworkObservations: jest.fn().mockResolvedValue(undefined),
+    }
+    const virtualLabEvidence = {
+      verifyShellyComponent: jest.fn().mockResolvedValue({
+        identity: { id: physicalId, mac: '02:C0:DE:00:00:01', model: 'SNSW-001X16EU', app: 'Plus1', gen: 2, fw_id: 'synthetic-plus1-1.7.5', ver: '1.7.5' },
+        componentKeys: [component],
+        componentStatuses: [{ componentKey: component, body: componentStatus }],
+        observer: { id: 'virtual-lab-docker/192.168.1.138/eth0', host: '192.168.1.138', interfaceName: 'eth0' },
+      }),
+    }
+    const service = new DeviceLanDiscoveryService(memory, registry as never,
+      new DeviceLanNetworkEvidenceCollector(), physicalInventory as never, virtualLabEvidence as never)
+    return { service, registry, physicalInventory, virtualLabEvidence, prior, candidateId, physicalId, ipAddress, zone, inventoryRecord }
+  }
+
   it('revalidates an expired saved Shelly endpoint and persists only fresh read-only evidence', async () => {
     const fixture = selectedShellyVerifier()
     await memory.recordScan(new Date(Date.now() - 16 * 60_000).toISOString(), [fixture.prior], TEST_OWNER)
@@ -198,6 +259,189 @@ describe('LAN discovery evidence persistence', () => {
     expect(fixture.registry.registerDiscoveredDevice).toHaveBeenCalledTimes(3)
   })
 
+  it('verifies the selected Virtual Lab Shelly through its configured observer and exposes fresh enrollment evidence', async () => {
+    const fixture = virtualShellyVerifier()
+    await memory.recordScan(fixture.prior.discoveredAt, [fixture.prior], TEST_OWNER)
+
+    const result = await fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER)
+
+    expect(fixture.virtualLabEvidence.verifyShellyComponent).toHaveBeenCalledWith(
+      expect.objectContaining({ id: fixture.zone.id, collectionSource: 'virtual-lab' }),
+      fixture.ipAddress, fixture.physicalId, ['switch:0'], expect.any(AbortSignal),
+    )
+    expect(result).toMatchObject({ status: 'verified', physicalId: fixture.physicalId,
+      physicalDeviceId: 'physical-virtual-shelly', componentKeys: ['switch:0'] })
+    expect(Date.parse(result.identityVerifiedAt)).toBeGreaterThan(Date.now() - 60_000)
+    expect(fixture.physicalInventory.discover).toHaveBeenCalledWith(expect.objectContaining({
+      scope: TEST_OWNER, identity: { namespace: 'mqtt:shelly-protocol-id', value: fixture.physicalId },
+      evidenceSource: 'selected_device_read_only_rpc_verification',
+      components: [{ key: 'switch:0', capabilities: ['switch'] }],
+    }))
+    expect(fixture.registry.registerDiscoveredDevice).toHaveBeenCalledTimes(1)
+    const candidate = fixture.registry.registerDiscoveredDevice.mock.calls[0][0]
+    expect(candidate).toMatchObject({
+      id: fixture.candidateId,
+      metadata: {
+        identityEvidenceSource: 'verified_site_local_shelly_rpc',
+        componentEvidenceSource: 'verified_site_local_shelly_rpc',
+        siteLocalObserverId: 'virtual-lab-docker/192.168.1.138/eth0',
+      },
+    })
+    expect(candidate.capabilities).toEqual(['switch'])
+    expect(candidate.metadata.verifiedMeasurementFields).toBeUndefined()
+    expect(candidate.metadata.shellyMqttObservationApprovalRequired).toBe(false)
+    const saved = await memory.getSnapshot(result.scanId, TEST_OWNER)
+    expect(saved).toMatchObject({
+      collector: { id: 'virtual-lab-docker/192.168.1.138/eth0', host: '192.168.1.138', interfaces: ['eth0'] },
+      scopes: [{ id: fixture.zone.id, collectionSource: 'virtual-lab' }],
+      endpoints: [expect.objectContaining({
+        observations: expect.arrayContaining([
+          expect.objectContaining({ source: 'site_local_http_rpc', attribute: 'observer.identity' }),
+          expect.objectContaining({ source: 'site_local_http_rpc', attribute: 'shelly.device_id', value: fixture.physicalId }),
+          expect.objectContaining({ source: 'site_local_http_rpc', attribute: 'shelly.component_status', value: 'switch:0' }),
+        ]),
+      })],
+    })
+  })
+
+  it('rejects a remote observer identity that differs from the server-resolved physical candidate', async () => {
+    const fixture = virtualShellyVerifier()
+    await memory.recordScan(fixture.prior.discoveredAt, [fixture.prior], TEST_OWNER)
+    const savedBefore = await memory.listIdentityEvidence(TEST_OWNER)
+    fixture.virtualLabEvidence.verifyShellyComponent.mockResolvedValueOnce({
+      identity: { id: 'shellyplus1-other000001', mac: '02:C0:DE:00:00:01', model: 'SNSW-001X16EU',
+        app: 'Plus1', gen: 2, fw_id: 'synthetic-plus1-1.7.5', ver: '1.7.5' },
+      componentKeys: ['switch:0'],
+      componentStatuses: [{ componentKey: 'switch:0', body: { id: 0, source: 'init', output: false } }],
+      observer: { id: 'virtual-lab-docker/192.168.1.138/eth0', host: '192.168.1.138', interfaceName: 'eth0' },
+    })
+
+    await expect(fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER))
+      .rejects.toThrow(/identity mismatch.*expected shellyplus1-00c0de000001/)
+    expect(fixture.physicalInventory.discover).not.toHaveBeenCalled()
+    expect(fixture.registry.registerDiscoveredDevice).not.toHaveBeenCalled()
+    expect(await memory.listIdentityEvidence(TEST_OWNER)).toEqual(savedBefore)
+  })
+
+  it('rejects malformed remote component status before persisting or projecting verification', async () => {
+    const fixture = virtualShellyVerifier({ id: 1, source: 'init', output: false })
+    await memory.recordScan(fixture.prior.discoveredAt, [fixture.prior], TEST_OWNER)
+    const savedBefore = await memory.listIdentityEvidence(TEST_OWNER)
+
+    await expect(fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER))
+      .rejects.toThrow(/did not confirm switch:0/)
+    expect(fixture.physicalInventory.discover).not.toHaveBeenCalled()
+    expect(fixture.registry.registerDiscoveredDevice).not.toHaveBeenCalled()
+    expect(await memory.listIdentityEvidence(TEST_OWNER)).toEqual(savedBefore)
+  })
+
+  it('rejects a candidate attributed to another site before remote execution', async () => {
+    const fixture = virtualShellyVerifier()
+    const candidate = fixture.registry.getDevices()[0]
+    fixture.registry.getDevices = () => [{ ...candidate, siteId: 'site-other' }]
+    await memory.recordScan(fixture.prior.discoveredAt, [fixture.prior], TEST_OWNER)
+
+    await expect(fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER))
+      .rejects.toThrow('registered under a different tenant or site')
+    expect(fixture.virtualLabEvidence.verifyShellyComponent).not.toHaveBeenCalled()
+    expect(fixture.physicalInventory.discover).not.toHaveBeenCalled()
+    expect(fixture.registry.registerDiscoveredDevice).not.toHaveBeenCalled()
+  })
+
+  it('rejects saved evidence whose network scope is no longer configured for the site', async () => {
+    const fixture = virtualShellyVerifier()
+    fixture.prior.networkZoneId = 'unapproved-lab-scope'
+    await memory.recordScan(fixture.prior.discoveredAt, [fixture.prior], TEST_OWNER)
+
+    await expect(fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER))
+      .rejects.toThrow('saved endpoint is no longer inside an authorized network scope')
+    expect(fixture.virtualLabEvidence.verifyShellyComponent).not.toHaveBeenCalled()
+    expect(fixture.physicalInventory.discover).not.toHaveBeenCalled()
+    expect(fixture.registry.registerDiscoveredDevice).not.toHaveBeenCalled()
+  })
+
+  it('recovers an inventory write failure on retry without enrollment, authority grants, or duplicate inventory', async () => {
+    const fixture = virtualShellyVerifier()
+    await memory.recordScan(fixture.prior.discoveredAt, [fixture.prior], TEST_OWNER)
+
+    const recordsByIdentity = new Map<string, typeof fixture.inventoryRecord>()
+    let failFirstInventoryWrite = true
+    fixture.physicalInventory.list.mockImplementation(async () => [...recordsByIdentity.values()])
+    fixture.physicalInventory.discover.mockImplementation(async input => {
+      if (failFirstInventoryWrite) {
+        failFirstInventoryWrite = false
+        throw new Error('Physical inventory persistence unavailable')
+      }
+      const key = `${input.scope.tenantId}/${input.scope.siteId}/${input.identity.namespace}/${input.identity.value}`
+      const existing = recordsByIdentity.get(key)
+      if (existing) return existing
+      recordsByIdentity.set(key, fixture.inventoryRecord)
+      return fixture.inventoryRecord
+    })
+
+    await expect(fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER))
+      .rejects.toThrow('Physical inventory persistence unavailable')
+
+    const afterFailure = await memory.listSnapshots(TEST_OWNER)
+    expect(afterFailure).toHaveLength(1)
+    expect(afterFailure[0].endpoints[0]).toMatchObject({ id: fixture.physicalId, components: [{ component: 'switch:0', channel: 0 }] })
+    expect(recordsByIdentity.size).toBe(0)
+    expect(fixture.registry.registerDiscoveredDevice).not.toHaveBeenCalled()
+    expect(fixture.registry.getDevices()[0].trustStatus).toBe('discovered')
+
+    const retry = await fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER)
+
+    expect(retry).toMatchObject({ status: 'verified', physicalId: fixture.physicalId, componentKeys: ['switch:0'] })
+    expect(fixture.physicalInventory.discover).toHaveBeenCalledTimes(2)
+    expect(recordsByIdentity.size).toBe(1)
+    expect([...recordsByIdentity.values()][0]).toBe(fixture.inventoryRecord)
+    expect(fixture.registry.registerDiscoveredDevice).toHaveBeenCalledTimes(1)
+    const candidate = fixture.registry.registerDiscoveredDevice.mock.calls[0][0]
+    expect(candidate).toMatchObject({ id: fixture.candidateId, capabilities: ['switch'] })
+    expect(candidate.metadata.verifiedMeasurementFields).toBeUndefined()
+    expect(candidate.metadata.shellyMqttObservationApprovalRequired).toBe(false)
+    expect(candidate).not.toHaveProperty('measurementAuthority')
+    expect(candidate).not.toHaveProperty('controlAuthority')
+    expect(candidate).not.toHaveProperty('control')
+    expect(fixture.inventoryRecord.assignments).toEqual([])
+    expect(fixture.registry.getDevices()[0].trustStatus).toBe('discovered')
+    expect(await memory.listSnapshots(TEST_OWNER)).toHaveLength(2)
+  })
+
+  it.each([
+    ['plain Shelly Plus 1', { id: 0, source: 'init', output: false }, []],
+    ['reported electrical measurements', {
+      id: 0, output: false, apower: 0, aenergy: { total: 120.5 }, ret_aenergy: { total: 2.25 },
+    }, ['switch:0:power', 'switch:0:energy_import_total', 'switch:0:energy_export_total']],
+  ])('projects identical %s status evidence through local and remote paths', async (_name, status, expectedCapabilities) => {
+    const componentStatus = status as Record<string, unknown>
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ components: [{ key: 'switch:0' }], total: 1 }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => componentStatus }) as unknown as typeof fetch
+    const local = await probeShellyComponentsWithEvidence('192.168.1.220', 'home-lan', 'en0')
+
+    const fixture = virtualShellyVerifier(componentStatus)
+    await memory.recordScan(fixture.prior.discoveredAt, [fixture.prior], TEST_OWNER)
+    const result = await fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER)
+    const remote = await memory.getSnapshot(result.scanId, TEST_OWNER)
+    const localProjection = {
+      components: local.components,
+      capabilities: local.observations.filter(item => item.attribute === 'shelly.measurement_capability').map(item => item.value).sort(),
+    }
+    const remoteDevice = remote?.endpoints[0]
+    const remoteProjection = {
+      components: remoteDevice?.components,
+      capabilities: remoteDevice?.observations
+        ?.filter(item => item.attribute === 'shelly.measurement_capability').map(item => item.value).sort(),
+    }
+
+    expect(localProjection).toEqual({
+      components: [{ component: 'switch:0', channel: 0 }],
+      capabilities: (expectedCapabilities as string[]).slice().sort(),
+    })
+    expect(remoteProjection).toEqual(localProjection)
+  })
+
   it('reports an unreachable saved endpoint without issuing RPC or persisting verification', async () => {
     const fixture = selectedShellyVerifier()
     await memory.recordScan(new Date(Date.now() - 16 * 60_000).toISOString(), [fixture.prior], TEST_OWNER)
@@ -214,7 +458,7 @@ describe('LAN discovery evidence persistence', () => {
     await memory.recordScan(new Date(Date.now() - 16 * 60_000).toISOString(), [fixture.prior], TEST_OWNER)
     mockReachableTcpPorts.add(80)
     global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => ({
-      id: 'shellyproem50-other', mac: '8C:4F:00:00:00:00', gen: 2,
+      id: 'shellyproem50-other', mac: '8C:4F:00:00:00:00', model: 'SPEM-50', gen: 2,
     }) }) as unknown as typeof fetch
 
     await expect(fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER))

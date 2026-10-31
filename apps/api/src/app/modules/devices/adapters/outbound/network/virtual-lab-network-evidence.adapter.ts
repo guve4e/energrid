@@ -12,6 +12,8 @@ const MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 const SCAN_TIMEOUT_MS = 150_000
 const HTTP_READ_TIMEOUT_MS = 10_000
 const HTTP_READ_MAX_OUTPUT_BYTES = 32 * 1024
+const SHELLY_VERIFY_TIMEOUT_MS = 15_000
+const SHELLY_VERIFY_MAX_OUTPUT_BYTES = 128 * 1024
 
 interface CommandOptions { timeout: number; maxBuffer: number; signal?: AbortSignal }
 interface CommandResult { stdout: string; stderr: string }
@@ -43,6 +45,13 @@ export interface VirtualLabHttpResponse {
 export interface VirtualLabEnergridHttpEvidence {
   identity: VirtualLabHttpResponse
   status: VirtualLabHttpResponse | null
+}
+
+export interface VirtualLabShellyRpcEvidence {
+  identity: Record<string, unknown>
+  componentKeys: string[]
+  componentStatuses: Array<{ componentKey: string; body: Record<string, unknown> }>
+  observer: { id: string; host: string; interfaceName: string }
 }
 
 type ScannerPayload = {
@@ -95,6 +104,42 @@ export class VirtualLabNetworkEvidenceAdapter {
     const result = await this.runFixedEnergridRead(context, targetIp, expectedPhysicalId, targets, signal)
     if (!validHttpEvidence(result)) throw new Error('Virtual Lab returned malformed bounded HTTP evidence.')
     return result
+  }
+
+  /** Verify one saved Shelly endpoint through the configured isolated Lab observer. */
+  async verifyShellyComponent(
+    zone: NetworkDiscoveryZone,
+    targetIp: string,
+    expectedPhysicalId: string,
+    expectedComponentKeys: string[],
+    signal?: AbortSignal,
+  ): Promise<VirtualLabShellyRpcEvidence> {
+    const { targets } = validateVirtualLabZone(zone)
+    const components = [...new Set(expectedComponentKeys)].sort()
+    if (!targets.includes(targetIp) || !/^shelly[a-z0-9._-]{1,114}$/i.test(expectedPhysicalId) ||
+        components.length === 0 || components.length > 32 ||
+        components.some(component => !/^(?:switch|em1):(?:[0-9]|[12][0-9]|3[01])$/.test(component))) {
+      throw new Error('Virtual Lab Shelly verification target is not an explicitly configured candidate endpoint and component set.')
+    }
+    const context = process.env[DOCKER_CONTEXT_ENV]
+    const expectedHost = process.env.HOME_VIRTUAL_LAB_DOCKER_HOST
+    if (context !== DOCKER_CONTEXT || !expectedHost || !isIpv4(expectedHost)) {
+      throw new Error(`Virtual Lab verification requires HOME_VIRTUAL_LAB_DOCKER_CONTEXT=${DOCKER_CONTEXT} and an explicitly configured Docker host.`)
+    }
+    const host = await this.remoteDockerHost(context, signal)
+    if (host !== expectedHost) throw new Error('Virtual Lab Docker context host does not match the explicitly configured Lab host.')
+    await this.assertInternalNetwork(context, signal)
+    const payload = await this.runFixedShellyRead(context, targetIp, expectedPhysicalId, components, targets, signal)
+    if (!validShellyRpcPayload(payload, components)) {
+      throw new Error('Virtual Lab returned malformed or incomplete bounded Shelly RPC evidence.')
+    }
+    return {
+      identity: payload.identity,
+      componentKeys: payload.componentKeys,
+      componentStatuses: payload.componentStatuses,
+      observer: { id: `virtual-lab-docker/${host}/${zone.interfaceName || 'eth0'}`, host,
+        interfaceName: zone.interfaceName || 'eth0' },
+    }
   }
 
   async scan(zone: NetworkDiscoveryZone, signal?: AbortSignal): Promise<VirtualLabScanResult> {
@@ -229,6 +274,45 @@ export class VirtualLabNetworkEvidenceAdapter {
       throw new Error('Virtual Lab bounded HTTP poll failed.')
     }
   }
+
+  private async runFixedShellyRead(
+    context: string,
+    targetIp: string,
+    expectedPhysicalId: string,
+    componentKeys: string[],
+    targets: string[],
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    const args = [
+      '--context', context, 'run', '--rm', '--pull=never',
+      '--name', `energrid-device-lab-shelly-verify-${randomUUID()}`,
+      '--network', DOCKER_NETWORK,
+      '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--read-only',
+      '--user', '65534:65534',
+      '--env', `M6_TARGET_IP=${targetIp}`,
+      '--env', `M6_EXPECTED_PHYSICAL_ID=${expectedPhysicalId}`,
+      '--env', `M6_ALLOWED_TARGETS_JSON=${JSON.stringify(targets)}`,
+      '--env', `M6_EXPECTED_COMPONENTS_JSON=${JSON.stringify(componentKeys)}`,
+      '--entrypoint', 'node', SCANNER_IMAGE,
+      '-e', FIXED_SHELLY_READ_SCRIPT,
+    ]
+    try {
+      const result = await this.run(args, {
+        timeout: SHELLY_VERIFY_TIMEOUT_MS,
+        maxBuffer: SHELLY_VERIFY_MAX_OUTPUT_BYTES,
+        ...(signal ? { signal } : {}),
+      })
+      if (Buffer.byteLength(result.stdout) > SHELLY_VERIFY_MAX_OUTPUT_BYTES) {
+        throw new Error('Virtual Lab Shelly RPC evidence exceeded its output limit.')
+      }
+      return JSON.parse(String(result.stdout || '')) as unknown
+    } catch (error) {
+      if (signal?.aborted) throw new Error('Virtual Lab Shelly verification was cancelled.')
+      if (isTimeout(error)) throw new Error('Virtual Lab Shelly verification exceeded its 15-second execution limit.')
+      if (error instanceof SyntaxError) throw new Error('Virtual Lab Shelly observer returned malformed RPC evidence.')
+      throw new Error('Virtual Lab bounded Shelly RPC verification failed.')
+    }
+  }
 }
 
 // This program is fixed in the API source and passed as one argv value (never a
@@ -269,6 +353,88 @@ async function get(path, maxBytes) {
   process.stdout.write(JSON.stringify({ identity, status }));
 })().catch(error => { process.stderr.write(error.name || 'read_failed'); process.exitCode = 1; });
 `;
+
+// Fixed selected-target RPC read. It cannot accept a command, image, network,
+// or target beyond the server-supplied configured Lab seed list.
+const FIXED_SHELLY_READ_SCRIPT = String.raw`
+const allowed = JSON.parse(process.env.M6_ALLOWED_TARGETS_JSON || 'null');
+const expectedComponents = JSON.parse(process.env.M6_EXPECTED_COMPONENTS_JSON || 'null');
+const ip = process.env.M6_TARGET_IP || '';
+const expectedId = (process.env.M6_EXPECTED_PHYSICAL_ID || '').toLowerCase();
+if (!Array.isArray(allowed) || allowed.length !== 2 || !allowed.includes(ip) ||
+    !/^shelly[a-z0-9._-]{1,114}$/.test(expectedId) || !Array.isArray(expectedComponents) ||
+    expectedComponents.length < 1 || expectedComponents.length > 32 ||
+    expectedComponents.some(key => !/^(switch|em1):(0|[1-9]|[12][0-9]|3[01])$/.test(key))) throw Error('target rejected');
+async function get(path, maxBytes = 16384) {
+  const response = await fetch('http://' + ip + path, {
+    method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(1500),
+    headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
+  });
+  if (response.status >= 300 && response.status < 400) throw Error('redirect rejected');
+  if (!response.ok) throw Error('RPC request failed');
+  const reader = response.body.getReader(); const chunks = []; let size = 0;
+  while (true) {
+    const item = await reader.read(); if (item.done) break;
+    size += item.value.byteLength; if (size > maxBytes) { await reader.cancel(); throw Error('response too large'); }
+    chunks.push(Buffer.from(item.value));
+  }
+  const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('invalid RPC response');
+  return value;
+}
+(async () => {
+  const identity = await get('/rpc/Shelly.GetDeviceInfo', 8192);
+  if (typeof identity.id !== 'string' || identity.id.toLowerCase() !== expectedId ||
+      typeof identity.gen !== 'number' || identity.gen < 2) throw Error('identity mismatch');
+  const keys = []; let offset = 0; let total = null;
+  while (offset < 32) {
+    const page = await get('/rpc/Shelly.GetComponents' + (offset ? '?offset=' + offset : ''), 16384);
+    if (!Array.isArray(page.components) || !Number.isInteger(page.total) || page.total < 0 || page.total > 32 ||
+        page.offset !== offset || (total !== null && page.total !== total)) throw Error('invalid component list');
+    total = page.total;
+    for (const item of page.components) if (item && typeof item.key === 'string' && /^(switch|em1):(0|[1-9]|[12][0-9]|3[01])$/.test(item.key)) keys.push(item.key);
+    if (page.components.length === 0 && offset < total) throw Error('incomplete component list');
+    offset += page.components.length;
+    if (offset >= total) break;
+    if (page.components.length === 0 || offset > total) throw Error('invalid component paging');
+  }
+  if (total === null || offset !== total || keys.length !== new Set(keys).size ||
+      expectedComponents.some(key => !keys.includes(key))) throw Error('component profile mismatch');
+  const statuses = [];
+  for (let start = 0; start < expectedComponents.length; start += 4) {
+    const batch = expectedComponents.slice(start, start + 4);
+    const results = await Promise.all(batch.map(async componentKey => {
+      const [kind, idText] = componentKey.split(':'); const id = Number(idText);
+      const body = await get('/rpc/' + (kind === 'switch' ? 'Switch' : 'EM1') + '.GetStatus?id=' + id);
+      if (body.id !== id || (kind === 'switch' ? typeof body.output !== 'boolean' : typeof body.act_power !== 'number'))
+        throw Error('component status mismatch');
+      return { componentKey, body };
+    }));
+    statuses.push(...results);
+  }
+  process.stdout.write(JSON.stringify({ identity, componentKeys: keys, componentStatuses: statuses }));
+})().catch(error => { process.stderr.write(error.name || 'read_failed'); process.exitCode = 1; });
+`;
+
+function validShellyRpcPayload(
+  value: unknown,
+  expectedComponents: string[],
+): value is { identity: Record<string, unknown>; componentKeys: string[]; componentStatuses: Array<{ componentKey: string; body: Record<string, unknown> }> } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (!record.identity || typeof record.identity !== 'object' || Array.isArray(record.identity) ||
+      !Array.isArray(record.componentKeys) || record.componentKeys.length > 32 ||
+      record.componentKeys.some(key => typeof key !== 'string' || !/^(?:switch|em1):(?:[0-9]|[12][0-9]|3[01])$/.test(key)) ||
+      new Set(record.componentKeys).size !== record.componentKeys.length ||
+      !Array.isArray(record.componentStatuses) || record.componentStatuses.length !== expectedComponents.length) return false
+  const componentKeys = record.componentKeys as string[]
+  const statuses = record.componentStatuses as unknown[]
+  return expectedComponents.every(key => componentKeys.includes(key)) && expectedComponents.every(key => statuses.some(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return false
+    const status = item as Record<string, unknown>
+    return status.componentKey === key && !!status.body && typeof status.body === 'object' && !Array.isArray(status.body)
+  }))
+}
 
 function validHttpEvidence(value: unknown): value is VirtualLabEnergridHttpEvidence {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false

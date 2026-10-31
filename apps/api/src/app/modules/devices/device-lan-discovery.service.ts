@@ -23,7 +23,7 @@ import type { PhysicalDeviceInventoryService } from './enrollment/physical-devic
 import type { PhysicalLanObservation } from './enrollment/physical-device-inventory.repository'
 import { shellyLanCandidates } from './adapters/inbound/shelly/shelly-lan-candidates'
 import { energridDiscoveryCandidate } from './adapters/inbound/energrid/energrid-discovery-candidate'
-import { readOnlyShellyDeviceInfo, readOnlyShellyRpcDeviceInfo } from './adapters/inbound/shelly/read-only-shelly-rpc'
+import { readOnlyShellyDeviceInfo, readOnlyShellyRpcDeviceInfo, readOnlyShellyRpcDeviceInfoFromBody } from './adapters/inbound/shelly/read-only-shelly-rpc'
 import { compareNetworkSnapshots, type NetworkDiscoverySnapshot, type NetworkDiscoverySnapshotDiff } from './network-discovery-snapshot'
 import { NmapNetworkEvidenceAdapter, type NmapCapability, type NmapScanResult } from './adapters/outbound/network/nmap-network-evidence.adapter'
 import {
@@ -252,8 +252,8 @@ export class DeviceLanDiscoveryService {
         new Promise<never>((_resolve, reject) => {
           deadlineTimer = setTimeout(() => {
             controller.abort()
-            reject(new GatewayTimeoutException('Selected-device verification exceeded 12 seconds. No subnet scan was run; check the observer route to this endpoint and retry.'))
-          }, 12_000)
+            reject(new GatewayTimeoutException('Selected-device verification exceeded 20 seconds. No subnet scan was run; check the authorized observer route to this endpoint and retry.'))
+          }, 20_000)
         }),
       ])
     } finally {
@@ -293,23 +293,10 @@ export class DeviceLanDiscoveryService {
       item.identity?.namespace === 'mqtt:shelly-protocol-id' && typeof item.identity.value === 'string' &&
       item.identity.value.toLowerCase() === physicalId.toLowerCase(),
     )
-    if (matchingInventory.length !== 1) {
-      throw new ConflictException('No unique site-owned physical inventory record matches this Shelly identity.')
+    if (matchingInventory.length > 1) {
+      throw new ConflictException('More than one site-owned physical inventory record matches this Shelly identity.')
     }
     const inventory = matchingInventory[0]
-    if (!inventory.components.some(item => item.key === component)) {
-      throw new ConflictException(`Physical inventory ${inventory.physicalDeviceId} has no expected ${component} component.`)
-    }
-    const componentAssignments = inventory.assignments.filter(item => item.componentKey === component)
-    if (componentAssignments.some(item => item.deviceId !== candidateId)) {
-      throw new ConflictException(`Physical inventory component ${component} is already assigned to another logical device.`)
-    }
-    const assignments = inventory.assignments.filter(item => item.deviceId === candidateId)
-    if (assignments.length > 1 || assignments.some(item =>
-      item.physicalDeviceId !== inventory.physicalDeviceId || item.componentKey !== component,
-    )) {
-      throw new ConflictException('The selected logical component has a conflicting physical inventory assignment.')
-    }
 
     const history = await this.discoveryMemory.listIdentityEvidence(ownership)
     const matchingHistory = history
@@ -340,25 +327,77 @@ export class DeviceLanDiscoveryService {
     }
     const prior = matchingHistory.record
     const zone = this.getConfiguredZone(prior.device.networkZoneId)
-    if (!zone || zone.collectionSource === 'virtual-lab' || !ipIsInZone(ipAddress, zone)) {
-      throw new BadRequestException('The saved endpoint is no longer inside an authorized physical network scope.')
+    if (!zone || !ipIsInZone(ipAddress, zone)) {
+      throw new BadRequestException('The saved endpoint is no longer inside an authorized network scope.')
+    }
+    const virtualLab = zone.collectionSource === 'virtual-lab'
+    if (virtualLab && process.env.HOME_VIRTUAL_LAB_ENABLED !== 'true') {
+      throw new BadGatewayException('Virtual Lab selected-device verification is disabled.')
+    }
+    if (virtualLab && !zone.seedIps.includes(ipAddress)) {
+      throw new BadRequestException('The saved endpoint is not one of the explicitly configured Virtual Lab targets.')
+    }
+    if (!inventory && !virtualLab) {
+      throw new ConflictException('No unique site-owned physical inventory record matches this Shelly identity.')
+    }
+    if (inventory && !inventory.components.some(item => item.key === component)) {
+      throw new ConflictException(`Physical inventory ${inventory.physicalDeviceId} has no expected ${component} component.`)
+    }
+    if (inventory) {
+      const componentAssignments = inventory.assignments.filter(item => item.componentKey === component)
+      if (componentAssignments.some(item => item.deviceId !== candidateId)) {
+        throw new ConflictException(`Physical inventory component ${component} is already assigned to another logical device.`)
+      }
+      const assignments = inventory.assignments.filter(item => item.deviceId === candidateId)
+      if (assignments.length > 1 || assignments.some(item =>
+        item.physicalDeviceId !== inventory.physicalDeviceId || item.componentKey !== component,
+      )) {
+        throw new ConflictException('The selected logical component has a conflicting physical inventory assignment.')
+      }
     }
 
-    const reachability = await probeTcpConnection(ipAddress, 80, 1_500, signal)
-    if (reachability.status !== 'connected') {
-      throw new BadGatewayException(reachability.message || `The observer could not connect to ${ipAddress}:80.`)
+    const expectedKeys = (inventory?.components.map(item => item.key) || prior.device.components?.map(item => item.component) || [])
+      .filter((key): key is string => /^(?:switch|em1):\d+$/.test(key))
+      .filter((key, index, values) => values.indexOf(key) === index)
+      .sort()
+    if (!expectedKeys.includes(component)) {
+      throw new ConflictException('The saved site-owned profile has no supported evidence for the selected component.')
     }
-    const identityRead = await readOnlyShellyRpcDeviceInfo(ipAddress, 1_500, signal)
-    if (identityRead.status === 'timeout') {
-      throw new GatewayTimeoutException(`Shelly.GetDeviceInfo timed out at ${ipAddress} after 1.5 seconds.`)
+
+    let identity: NonNullable<ReturnType<typeof readOnlyShellyRpcDeviceInfoFromBody>>
+    let componentEvidence: ShellyComponentProbeEvidence | undefined
+    let observerIdentity: { id: string; host: string; interfaceName: string } | undefined
+    const observationSource: 'http_rpc' | 'site_local_http_rpc' = virtualLab ? 'site_local_http_rpc' : 'http_rpc'
+    if (virtualLab) {
+      const remote = await this.virtualLabEvidence.verifyShellyComponent(zone, ipAddress, physicalId, expectedKeys, signal)
+      const parsedIdentity = readOnlyShellyRpcDeviceInfoFromBody(remote.identity)
+      if (!parsedIdentity) throw new ConflictException(`The Virtual Lab observer returned an invalid Shelly.GetDeviceInfo response for ${ipAddress}.`)
+      identity = parsedIdentity
+      observerIdentity = remote.observer
+      const observedKeys = remote.componentKeys.slice().sort()
+      if (observedKeys.length !== expectedKeys.length || observedKeys.some((key, index) => key !== expectedKeys[index])) {
+        throw new ConflictException(`RPC component profile mismatch: saved evidence expects [${expectedKeys.join(', ')}], device reports [${observedKeys.join(', ')}]. No evidence or inventory changes were saved.`)
+      }
+      const verifiedAt = new Date().toISOString()
+      componentEvidence = shellyComponentEvidenceFromRpcStatuses(expectedKeys, remote.componentStatuses, zone.id, zone.interfaceName || remote.observer.interfaceName, verifiedAt, 'site_local_http_rpc')
+      if (componentEvidence.failureReason) throw new BadGatewayException(componentEvidence.failureReason)
+    } else {
+      const reachability = await probeTcpConnection(ipAddress, 80, 1_500, signal)
+      if (reachability.status !== 'connected') {
+        throw new BadGatewayException(reachability.message || `The observer could not connect to ${ipAddress}:80.`)
+      }
+      const identityRead = await readOnlyShellyRpcDeviceInfo(ipAddress, 1_500, signal)
+      if (identityRead.status === 'timeout') {
+        throw new GatewayTimeoutException(`Shelly.GetDeviceInfo timed out at ${ipAddress} after 1.5 seconds.`)
+      }
+      if (identityRead.status === 'unavailable') {
+        throw new BadGatewayException(`The observer connected to ${ipAddress}:80, but could not complete the Shelly.GetDeviceInfo RPC.`)
+      }
+      if (identityRead.status !== 'verified') {
+        throw new ConflictException(`The endpoint at ${ipAddress} did not return a valid Shelly.GetDeviceInfo response.`)
+      }
+      identity = identityRead.info
     }
-    if (identityRead.status === 'unavailable') {
-      throw new BadGatewayException(`The observer connected to ${ipAddress}:80, but could not complete the Shelly.GetDeviceInfo RPC.`)
-    }
-    if (identityRead.status !== 'verified') {
-      throw new ConflictException(`The endpoint at ${ipAddress} did not return a valid Shelly.GetDeviceInfo response.`)
-    }
-    const identity = identityRead.info
     if (identity.id?.toLowerCase() !== physicalId.toLowerCase() || typeof identity.gen !== 'number' || identity.gen < 2) {
       throw new ConflictException(`Fresh RPC identity mismatch at ${ipAddress}: expected ${physicalId}; no evidence was saved.`)
     }
@@ -370,15 +409,16 @@ export class DeviceLanDiscoveryService {
     if (expectedMac && (!identity.mac || normalizeMacAddress(expectedMac) !== normalizeMacAddress(identity.mac))) {
       throw new ConflictException('The device-reported MAC differs from the known physical candidate; no evidence was saved.')
     }
-    const savedInterfaceName = prior.device.observations?.find(item =>
-      item.attribute === 'shelly.device_id' && item.interfaceName,
-    )?.interfaceName
-    const componentEvidence = await probeShellyComponentsWithEvidence(ipAddress, zone.id, savedInterfaceName, signal)
-    if (componentEvidence.failureReason) throw new BadGatewayException(componentEvidence.failureReason)
+    if (!componentEvidence) {
+      const savedInterfaceName = prior.device.observations?.find(item =>
+        item.attribute === 'shelly.device_id' && item.interfaceName,
+      )?.interfaceName
+      componentEvidence = await probeShellyComponentsWithEvidence(ipAddress, zone.id, savedInterfaceName, signal)
+      if (componentEvidence.failureReason) throw new BadGatewayException(componentEvidence.failureReason)
+    }
     const observedKeys = componentEvidence.components.map(item => item.component).sort()
-    const expectedKeys = inventory.components.map(item => item.key).filter(key => /^(?:switch|em1):\d+$/.test(key)).sort()
     if (expectedKeys.length === 0) {
-      throw new ConflictException('Physical inventory has no supported Shelly switch or EM1 components to verify.')
+      throw new ConflictException('Saved site-owned evidence has no supported Shelly switch or EM1 components to verify.')
     }
     if (!observedKeys.includes(component) || expectedKeys.some(key => !observedKeys.includes(key)) ||
         observedKeys.some(key => !expectedKeys.includes(key))) {
@@ -411,8 +451,9 @@ export class DeviceLanDiscoveryService {
       reason: 'Fresh read-only Shelly RPC identity and component status verified from the selected candidate endpoint.',
       observations: [
         ...(prior.device.observations || []),
-        { source: 'http_rpc', attribute: 'shelly.device_id', value: physicalId, observedAt: identityVerifiedAt, scopeId: zone.id, method: identity.method || 'GET /rpc/Shelly.GetDeviceInfo' },
-        ...(identity.mac ? [{ source: 'http_rpc' as const, attribute: 'shelly.device_reported_mac', value: identity.mac, observedAt: identityVerifiedAt, scopeId: zone.id, method: identity.method || 'GET /rpc/Shelly.GetDeviceInfo' }] : []),
+        ...(observerIdentity ? [{ source: 'site_local_http_rpc' as const, attribute: 'observer.identity', value: observerIdentity.id, observedAt: identityVerifiedAt, scopeId: zone.id }] : []),
+        { source: observationSource, attribute: 'shelly.device_id', value: physicalId, observedAt: identityVerifiedAt, scopeId: zone.id, method: identity.method || 'GET /rpc/Shelly.GetDeviceInfo' },
+        ...(identity.mac ? [{ source: observationSource, attribute: 'shelly.device_reported_mac', value: identity.mac, observedAt: identityVerifiedAt, scopeId: zone.id, method: identity.method || 'GET /rpc/Shelly.GetDeviceInfo' }] : []),
         ...componentEvidence.observations,
       ],
     }
@@ -422,12 +463,17 @@ export class DeviceLanDiscoveryService {
     }
     throwIfScanAborted(signal)
     const scanId = randomUUID()
+    const savedInterfaceName = prior.device.observations?.find(item =>
+      item.attribute === 'shelly.device_id' && item.interfaceName,
+    )?.interfaceName
     await this.discoveryMemory.recordScan(completedAt, [verifiedDevice], ownership)
     throwIfScanAborted(signal)
     await this.discoveryMemory.recordSnapshot({
       schemaVersion: 2, scanId, ownership, startedAt: completedAt, completedAt,
-      collector: { id: `${localHostname()}/${savedInterfaceName || 'interface-unknown'}`, host: localHostname(), interfaces: savedInterfaceName ? [savedInterfaceName] : [] },
-      scopes: [{ id: zone.id, name: zone.name, ...(zone.cidr ? { cidr: zone.cidr } : {}), complete: false, gatewayIpsObserved: [],
+      collector: observerIdentity
+        ? { id: observerIdentity.id, host: observerIdentity.host, interfaces: [observerIdentity.interfaceName] }
+        : { id: `${localHostname()}/${savedInterfaceName || 'interface-unknown'}`, host: localHostname(), interfaces: savedInterfaceName ? [savedInterfaceName] : [] },
+      scopes: [{ id: zone.id, name: zone.name, ...(zone.cidr ? { cidr: zone.cidr } : {}), ...(zone.collectionSource ? { collectionSource: zone.collectionSource } : {}), complete: false, gatewayIpsObserved: [],
         collectionStages: { hostDiscovery: { durationMs: 0, complete: false, targetCount: 0, hostsReported: 0 },
           serviceEnrichment: { durationMs: 0, complete: true, targetCount: 1, hostsReported: 1 } } }],
       methods: ['operator_selected_shelly_read_only_rpc'], successes: 1, failures: [],
@@ -435,25 +481,25 @@ export class DeviceLanDiscoveryService {
       rawEvidence: [], rawEvidenceOmitted: 0, endpoints: [verifiedDevice], topology: { relationships: [] },
     })
     throwIfScanAborted(signal)
-    await this.physicalInventory.discover({
-      scope: ownership, physicalDeviceId: inventory.physicalDeviceId,
+    const verifiedInventory = await this.physicalInventory.discover({
+      scope: ownership, ...(inventory ? { physicalDeviceId: inventory.physicalDeviceId } : {}),
       identity: { namespace: 'mqtt:shelly-protocol-id', value: physicalId }, vendor: 'Shelly',
-      hardwareModel: identity.model || inventory.hardwareModel, firmwareVersion: identity.firmware || inventory.firmwareVersion,
+      hardwareModel: identity.model || inventory?.hardwareModel, firmwareVersion: identity.firmware || inventory?.firmwareVersion,
       evidenceSource: 'selected_device_read_only_rpc_verification', observedAt: completedAt,
       components: candidates.map(item => ({ key: String(item.metadata?.component), capabilities: item.capabilities || [] })),
       endpoint: { protocol: 'http', kind: 'rpc', address: `http://${ipAddress}` },
     })
     throwIfScanAborted(signal)
     await this.physicalInventory.refreshNetworkObservations(ownership, [{
-      physicalDeviceId: inventory.physicalDeviceId, ipAddress, ...(identity.mac ? { macAddress: normalizeMacAddress(identity.mac) } : {}),
-      networkScope: `${prior.device.gatewayId || 'gateway-unknown'}:${zone.id}`, observedAt: completedAt, evidenceSource: 'selected_device_read_only_rpc_verification',
+      physicalDeviceId: verifiedInventory.physicalDeviceId, ipAddress, ...(identity.mac ? { macAddress: normalizeMacAddress(identity.mac) } : {}),
+      networkScope: `${prior.device.gatewayId || observerIdentity?.id || 'gateway-unknown'}:${zone.id}`, observedAt: completedAt, evidenceSource: 'selected_device_read_only_rpc_verification',
     }])
     throwIfScanAborted(signal)
     const activeSiteName = this.registry.getSnapshot().site.name
     for (const item of candidates) this.registry.registerDiscoveredDevice({
       ...item, tenantId: ownership.tenantId, siteId: ownership.siteId, siteName: activeSiteName,
     })
-    return { status: 'verified' as const, scanId, physicalId, physicalDeviceId: inventory.physicalDeviceId,
+    return { status: 'verified' as const, scanId, physicalId, physicalDeviceId: verifiedInventory.physicalDeviceId,
       componentKeys: observedKeys, identityVerifiedAt, componentsVerifiedAt }
   }
 
@@ -1743,21 +1789,12 @@ async function probeShellyComponentEvidence(
         const method = item.component.startsWith('switch:') ? 'Switch.GetStatus'
           : 'EM1.GetStatus'
         const body = await readShellyRpcJson(baseUrl, `${method}?id=${item.channel}`, controller.signal)
-        if (!isConfirmedShellyComponentStatus(item, body)) return null
-        const status = body as Record<string, unknown>
-        const measurements = [
-          ...(numberValue(status.apower) !== undefined || numberValue(status.act_power) !== undefined ? ['power'] : []),
-          ...(numberValue(status.aenergy && typeof status.aenergy === 'object' ? (status.aenergy as Record<string, unknown>).total : undefined) !== undefined ? ['energy_import_total'] : []),
-          ...(numberValue(status.ret_aenergy && typeof status.ret_aenergy === 'object' ? (status.ret_aenergy as Record<string, unknown>).total : undefined) !== undefined ? ['energy_export_total'] : []),
-          ...(numberValue(status.total_act_energy) !== undefined ? ['energy_import_total'] : []),
-          ...(numberValue(status.total_act_ret_energy) !== undefined ? ['energy_export_total'] : []),
-        ]
+        const projection = projectShellyComponentStatus(item, body)
+        if (!projection) return null
         return {
-          component: item.component,
-          channel: item.channel,
+          ...projection,
           observedAt: new Date().toISOString(),
           method: `${method}?id=${item.channel}`,
-          measurements: [...new Set(measurements)],
         }
       }))
       for (const result of results) {
@@ -1772,7 +1809,7 @@ async function probeShellyComponentEvidence(
           ...(interfaceName ? { interfaceName } : {}),
           method: result.method,
         })
-        for (const metric of result.measurements) confirmed.observations.push({
+        for (const metric of result.measurementCapabilities) confirmed.observations.push({
             source: 'http_rpc',
             attribute: 'shelly.measurement_capability',
             value: `${result.component}:${metric}`,
@@ -1864,6 +1901,59 @@ function isConfirmedShellyComponentStatus(
   if (status.id !== component.channel) return false
   if (component.component.startsWith('switch:')) return typeof status.output === 'boolean'
   return typeof status.act_power === 'number' && Number.isFinite(status.act_power)
+}
+
+type ShellyComponentStatusProjection = {
+  component: string
+  channel: number
+  measurementCapabilities: ShellyMeasurementCapability[]
+}
+
+type ShellyMeasurementCapability = 'power' | 'energy_import_total' | 'energy_export_total'
+
+/** Pure interpretation shared by direct and remote read-only Shelly RPC responses. */
+function projectShellyComponentStatus(
+  component: { component: string; channel: number },
+  value: unknown,
+): ShellyComponentStatusProjection | undefined {
+  if (!isConfirmedShellyComponentStatus(component, value)) return undefined
+  const status = value as Record<string, unknown>
+  const measurementCapabilities: ShellyMeasurementCapability[] = []
+  if (numberValue(status.apower) !== undefined || numberValue(status.act_power) !== undefined) measurementCapabilities.push('power')
+  if (numberValue(status.aenergy && typeof status.aenergy === 'object' ? (status.aenergy as Record<string, unknown>).total : undefined) !== undefined ||
+      numberValue(status.total_act_energy) !== undefined) measurementCapabilities.push('energy_import_total')
+  if (numberValue(status.ret_aenergy && typeof status.ret_aenergy === 'object' ? (status.ret_aenergy as Record<string, unknown>).total : undefined) !== undefined ||
+      numberValue(status.total_act_ret_energy) !== undefined) measurementCapabilities.push('energy_export_total')
+  return { ...component, measurementCapabilities }
+}
+
+function shellyComponentEvidenceFromRpcStatuses(
+  componentKeys: string[],
+  statuses: Array<{ componentKey: string; body: Record<string, unknown> }>,
+  scopeId: string,
+  interfaceName: string,
+  observedAt: string,
+  source: 'http_rpc' | 'site_local_http_rpc',
+): ShellyComponentProbeEvidence {
+  const components = componentKeys.flatMap(parsedShellyComponentKey)
+  const observations: NonNullable<NetworkDiscoveredDevice['observations']> = []
+  const statusByKey = new Map(statuses.map(item => [item.componentKey, item.body]))
+  for (const component of components) {
+    const body = statusByKey.get(component.component)
+    const projection = projectShellyComponentStatus(component, body)
+    if (!projection) {
+      return { components: [], observations: [], failureReason: `Read-only status RPC did not confirm ${component.component}.` }
+    }
+    const methodName = component.component.startsWith('switch:') ? 'Switch' : 'EM1'
+    const method = `${methodName}.GetStatus?id=${component.channel}`
+    observations.push({ source, attribute: 'shelly.component_status', value: component.component, observedAt,
+      scopeId, interfaceName, method })
+    for (const metric of projection.measurementCapabilities) observations.push({
+      source, attribute: 'shelly.measurement_capability', value: `${component.component}:${metric}`,
+      observedAt, scopeId, interfaceName, method,
+    })
+  }
+  return { components: components.map(item => ({ component: item.component, channel: item.channel })), observations }
 }
 
 function vendorFromCandidate(candidate: { macAddress?: string; hostname?: string }): string | undefined {

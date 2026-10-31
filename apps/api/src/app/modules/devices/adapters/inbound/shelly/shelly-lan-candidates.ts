@@ -6,7 +6,7 @@ export function shellyLanCandidates(
   device: NetworkDiscoveredDevice,
 ): DiscoveredDeviceConfig[] {
   const identityObservation = latestObservation(device.observations?.filter(observation =>
-    ((observation.source === 'http_rpc' && observation.attribute === 'shelly.device_id') ||
+    ((['http_rpc', 'site_local_http_rpc'].includes(observation.source) && observation.attribute === 'shelly.device_id') ||
       (observation.source === 'http_identity' && observation.attribute === 'identity.device_id')) &&
     observation.value === device.id,
   ));

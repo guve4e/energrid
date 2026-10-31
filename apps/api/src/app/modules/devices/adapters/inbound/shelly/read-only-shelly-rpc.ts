@@ -39,14 +39,24 @@ export async function readOnlyShellyRpcDeviceInfo(
     });
     if (!response.ok) return { status: 'invalid_response' };
     const body = await response.json() as Record<string, unknown>;
-    if (!looksLikeShelly(body)) return { status: 'invalid_response' };
-    return { status: 'verified', info: deviceInfo(body, 'GET /rpc/Shelly.GetDeviceInfo') };
+    const info = readOnlyShellyRpcDeviceInfoFromBody(body, 'GET /rpc/Shelly.GetDeviceInfo');
+    return info ? { status: 'verified', info } : { status: 'invalid_response' };
   } catch {
     return controller.signal.aborted ? { status: 'timeout' } : { status: 'unavailable' };
   } finally {
     clearTimeout(timeout);
     externalSignal?.removeEventListener('abort', abort);
   }
+}
+
+/** Apply the same typed identity validation to an authenticated observer response. */
+export function readOnlyShellyRpcDeviceInfoFromBody(
+  value: unknown,
+  method = 'GET /rpc/Shelly.GetDeviceInfo',
+): ShellyRpcDeviceInfo | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const body = value as Record<string, unknown>;
+  return looksLikeShelly(body) ? deviceInfo(body, method) : null;
 }
 
 export async function readOnlyShellyDeviceInfo(

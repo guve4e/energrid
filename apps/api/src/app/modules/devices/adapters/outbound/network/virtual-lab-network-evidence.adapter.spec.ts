@@ -123,6 +123,77 @@ describe('VirtualLabNetworkEvidenceAdapter', () => {
     expect(script).toContain('id === expected')
   })
 
+  it('runs selected Shelly identity, component and status RPC through the fixed isolated observer', async () => {
+    const calls: Array<{ args: string[]; options: { timeout: number; maxBuffer: number } }> = []
+    const run = jest.fn(async (args: string[], options: { timeout: number; maxBuffer: number }) => {
+      calls.push({ args, options })
+      const stdout = args[0] === 'context'
+        ? 'ssh://lab@192.168.1.138\n'
+        : args.includes('network')
+          ? 'energrid-device-lab-vlan bridge true\n'
+          : JSON.stringify({
+            identity: { id: 'shellyplus1-00c0de000001', gen: 2 },
+            componentKeys: ['switch:0'],
+            componentStatuses: [{ componentKey: 'switch:0', body: { id: 0, output: false } }],
+          })
+      return { stdout, stderr: '' }
+    })
+
+    const result = await new VirtualLabNetworkEvidenceAdapter(run).verifyShellyComponent(
+      zone, '172.30.250.11', 'shellyplus1-00c0de000001', ['switch:0'],
+    )
+
+    expect(result).toMatchObject({
+      identity: { id: 'shellyplus1-00c0de000001', gen: 2 },
+      componentKeys: ['switch:0'],
+      componentStatuses: [{ componentKey: 'switch:0', body: { id: 0, output: false } }],
+      observer: { id: 'virtual-lab-docker/192.168.1.138/eth0', host: '192.168.1.138', interfaceName: 'eth0' },
+    })
+    expect(calls).toHaveLength(3)
+    expect(calls[1].args).toEqual(['--context', 'energrid-lab-ssh', 'network', 'inspect', 'energrid-device-lab-vlan', '--format', '{{.Name}} {{.Driver}} {{.Internal}}'])
+    expect(calls[2].args).toContain('--network')
+    expect(calls[2].args).toContain('energrid-device-lab-vlan')
+    expect(calls[2].args).toContain('--cap-drop')
+    expect(calls[2].args).toContain('--read-only')
+    expect(calls[2].args).toContain('--user')
+    expect(calls[2].args).toContain('M6_TARGET_IP=172.30.250.11')
+    expect(calls[2].args).toContain('M6_EXPECTED_COMPONENTS_JSON=["switch:0"]')
+    expect(calls[2].args).not.toContain('--publish')
+    expect(calls[2].args).not.toContain('sh')
+    expect(calls[2].options.timeout).toBe(15_000)
+    const script = calls[2].args[calls[2].args.indexOf('-e') + 1]
+    expect(script).toContain('/rpc/Shelly.GetDeviceInfo')
+    expect(script).toContain('/rpc/Shelly.GetComponents')
+    expect(script).toContain("(kind === 'switch' ? 'Switch' : 'EM1') + '.GetStatus?id='")
+    expect(script).not.toContain('Switch.Set')
+  })
+
+  it('rejects malformed selected Shelly RPC output before returning observer evidence', async () => {
+    const run = jest.fn()
+      .mockResolvedValueOnce({ stdout: 'ssh://lab@192.168.1.138\n', stderr: '' })
+      .mockResolvedValueOnce({ stdout: 'energrid-device-lab-vlan bridge true\n', stderr: '' })
+      .mockResolvedValueOnce({ stdout: JSON.stringify({
+        identity: { id: 'shellyplus1-00c0de000001', gen: 2 },
+        componentKeys: ['switch:0'],
+        componentStatuses: [],
+      }), stderr: '' })
+
+    await expect(new VirtualLabNetworkEvidenceAdapter(run).verifyShellyComponent(
+      zone, '172.30.250.11', 'shellyplus1-00c0de000001', ['switch:0'],
+    )).rejects.toThrow('malformed or incomplete bounded Shelly RPC evidence')
+    expect(run).toHaveBeenCalledTimes(3)
+  })
+
+  it('rejects a selected target or component outside the configured candidate before remote execution', async () => {
+    const run = jest.fn()
+    const adapter = new VirtualLabNetworkEvidenceAdapter(run)
+    await expect(adapter.verifyShellyComponent(zone, '172.30.250.12', 'shellyplus1-00c0de000001', ['switch:0']))
+      .rejects.toThrow('not an explicitly configured candidate endpoint')
+    await expect(adapter.verifyShellyComponent(zone, '172.30.250.11', 'shellyplus1-00c0de000001', ['cover:0']))
+      .rejects.toThrow('not an explicitly configured candidate endpoint')
+    expect(run).not.toHaveBeenCalled()
+  })
+
   it('rejects any poll address outside the configured two-device allowlist before remote execution', async () => {
     const run = jest.fn()
     await expect(new VirtualLabNetworkEvidenceAdapter(run).readEnergridHttpEvidence(
