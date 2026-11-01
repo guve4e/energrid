@@ -72,8 +72,11 @@ export class DeviceDiagnosticsService {
     const evidence: DeviceConnectionEvidence = {
       deviceId: device.id,
       checkedAt: new Date().toISOString(),
-      transport:
-        binding?.kind === 'shelly-http' ? 'http' : binding ? 'mqtt' : 'none',
+      transport: !binding
+        ? 'none'
+        : binding.kind === 'generic-mqtt' || binding.kind === 'shelly-mqtt'
+          ? 'mqtt'
+          : 'http',
       controlEnabled: device.control?.status === 'ready',
       readingsSource: device.adapter.protocol.toUpperCase(),
       lastTelemetryAt: device.state.observedAt,
