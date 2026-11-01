@@ -6,10 +6,11 @@ const props = defineProps<{
   values: Record<string, number | boolean | string | null>;
   status: string;
   observedAt: string | null;
+  now?: number;
   command?: { status: string };
 }>();
 const state = computed(() => relayStateValue(props.values));
-const freshness = computed(() => relayStateFreshness(props.status, props.observedAt));
+const freshness = computed(() => relayStateFreshness(props.status, props.observedAt, props.now ?? Date.now()));
 const stateLabel = computed(() => {
   if (freshness.value === 'offline') return state.value === null ? 'Device offline' : `Last reported ${state.value ? 'On' : 'Off'} · offline`;
   if (freshness.value === 'stale') return state.value === null ? 'Relay state is stale' : `Last reported ${state.value ? 'On' : 'Off'} · stale`;

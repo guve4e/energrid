@@ -516,6 +516,76 @@ describe('DeviceRegistryService', () => {
     });
   });
 
+  it('ignores duplicate operational observation IDs while accepting false as a real relay value', () => {
+    const deviceId = 'shellyplus1-duplicate-test:switch:0';
+    process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({ devices: [{
+      deviceId, protocol: 'http', driver: 'shelly-lan', capabilities: ['switch'], configured: true,
+    }] });
+    const service = new DeviceRegistryService();
+    const observedAt = '2026-11-01T09:00:00.000Z';
+    const message = {
+      deviceId, protocol: 'http', driver: 'shelly-lan', observationId: 'observer-session:12',
+      values: { on: false }, observedAt,
+      state: { source: 'site-local-http-rpc:lab-observer', status: 'online', values: { on: false }, observedAt },
+    };
+    service.ingestDeviceTelemetry(message);
+    service.ingestDeviceTelemetry({ ...message, values: { on: true }, state: { ...message.state, values: { on: true } } });
+
+    expect(service.getSnapshot().devices.find(device => device.id === deviceId)?.state).toMatchObject({
+      values: { on: false }, observedAt, source: 'site-local-http-rpc:lab-observer', status: 'online',
+    });
+  });
+
+  it('publishes a device-state event only after an approved observation is accepted', () => {
+    const deviceId = 'shellyplus1-event-test:switch:0';
+    process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({ devices: [{
+      deviceId, protocol: 'http', driver: 'shelly-lan', capabilities: ['switch'], configured: true,
+    }] });
+    const service = new DeviceRegistryService();
+    const events: any[] = [];
+    service.streamOperationalStateChanges().subscribe(event => events.push(event));
+    const message = {
+      deviceId, tenantId: 'tenant-demo', siteId: 'site-home', protocol: 'http', driver: 'shelly-lan',
+      observationId: 'observer-session:1', values: { output: false }, observedAt: '2026-11-01T10:00:00.000Z',
+      state: { source: 'remote-http', status: 'online', values: { output: false }, observedAt: '2026-11-01T10:00:00.000Z' },
+    };
+    service.ingestDeviceTelemetry(message);
+    service.ingestDeviceTelemetry({ ...message, observationId: 'observer-session:1', values: { output: true }, state: { ...message.state, values: { output: true } } });
+    service.ingestDeviceTelemetry({ ...message, observationId: 'observer-session:2', observedAt: '2026-11-01T09:59:59.000Z' });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      tenantId: 'tenant-demo', siteId: 'site-home', deviceId,
+      state: { values: { output: false }, observedAt: '2026-11-01T10:00:00.000Z', source: 'remote-http', status: 'online' },
+    });
+  });
+
+  it('does not publish operational state for a device without enrollment approval', () => {
+    delete process.env.HOME_APPROVED_DEVICES_JSON;
+    const service = new DeviceRegistryService();
+    const events: any[] = [];
+    service.streamOperationalStateChanges().subscribe(event => events.push(event));
+    service.ingestDeviceTelemetry({
+      deviceId: 'unapproved-state-source', tenantId: 'tenant-demo', siteId: 'site-home',
+      values: { output: true }, observedAt: '2026-11-01T10:00:00.000Z',
+    });
+    expect(events).toEqual([]);
+  });
+
+  it('publishes accepted approved-observation projections but not restore-only state', () => {
+    const deviceId = 'sensor-event-test';
+    process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({ devices: [{
+      deviceId, protocol: 'http', driver: 'energrid-esp8266', capabilities: ['temperature'],
+    }] });
+    const service = new DeviceRegistryService();
+    const events: any[] = [];
+    service.streamOperationalStateChanges().subscribe(event => events.push(event));
+    service.restoreApprovedObservation({ deviceId, values: { temperature: 20 }, observedAt: '2026-11-01T10:00:00.000Z' });
+    expect(events).toHaveLength(0);
+    service.projectApprovedObservation({ deviceId, values: { temperature: 21 }, observedAt: '2026-11-01T10:00:01.000Z' });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ siteId: 'site-home', deviceId, state: { values: { temperature: 21 }, observedAt: '2026-11-01T10:00:01.000Z' } });
+  });
+
   it('stores a running diagnosis when an execution is created', () => {
     const service = new DeviceRegistryService();
 

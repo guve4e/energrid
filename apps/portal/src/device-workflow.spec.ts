@@ -705,4 +705,64 @@ describe('device onboarding page workflow with mocked services', () => {
     expect(page!.findAll('tbody tr')).toHaveLength(1);
     expect(page!.get('tbody').text()).toContain('Lab example');
   });
+
+  it('reconciles after stream connect and applies accepted device events without state polling', async () => {
+    const initial = { ...relay, trustStatus: 'approved', state: { values: { output: true }, observedAt: '2026-11-01T10:00:00.000Z', source: 'remote-http', status: 'online' } };
+    const state = data([initial]);
+    const encoder = new TextEncoder();
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const fetch = vi.fn(async (url: string) => {
+      if (url === '/portal/devices/state/events') {
+        return {
+          ok: true,
+          status: 200,
+          body: new ReadableStream<Uint8Array>({
+            start(controller) {
+              streamController = controller;
+              controller.enqueue(encoder.encode('event: ready\ndata: {"tenantId":"tenant-demo","siteId":"site-home"}\n\n'));
+            },
+          }),
+        };
+      }
+      if (url === '/portal/state') return { ok: true, json: async () => structuredClone(state) };
+      if (url.includes('/devices/enrollments')) return { ok: true, json: async () => ({ enrollments: enrollmentsFor(state) }) };
+      return { ok: true, json: async () => ({ runs: [] }) };
+    });
+    await render('/devices/', fetch);
+    await flushPromises();
+    expect(page!.text()).toContain('Portal event connection: connected');
+    const stateCallsAfterConnect = fetch.mock.calls.filter(([url]) => url === '/portal/state').length;
+    expect(stateCallsAfterConnect).toBeGreaterThan(0);
+
+    streamController!.enqueue(encoder.encode(`event: device-state-changed\ndata: ${JSON.stringify({
+      sequence: 1, tenantId: 'tenant-demo', siteId: 'site-home', deviceId: id,
+      state: { values: { output: false }, observedAt: '2026-11-01T10:00:01.000Z', source: 'remote-http', status: 'online' },
+    })}\n\n`));
+    await flushPromises();
+    expect(page!.text()).toContain('Off');
+    expect(fetch.mock.calls.filter(([url]) => url === '/portal/state')).toHaveLength(stateCallsAfterConnect);
+
+    streamController!.enqueue(encoder.encode(`event: device-state-changed\ndata: ${JSON.stringify({
+      sequence: 2, tenantId: 'tenant-demo', siteId: 'site-home', deviceId: id,
+      state: { values: { output: true }, observedAt: '2026-11-01T10:00:01.000Z', source: 'remote-http', status: 'online' },
+    })}\n\n`));
+    await flushPromises();
+    expect(page!.text()).toContain('On');
+
+    streamController!.enqueue(encoder.encode(`event: device-state-changed\ndata: ${JSON.stringify({
+      sequence: 1, tenantId: 'tenant-demo', siteId: 'site-home', deviceId: id,
+      state: { values: { output: false }, observedAt: '2026-11-01T10:00:02.000Z', source: 'remote-http', status: 'online' },
+    })}\n\n`));
+    await flushPromises();
+    expect(page!.text()).toContain('On');
+
+    streamController!.enqueue(encoder.encode(`event: device-state-changed\ndata: ${JSON.stringify({
+      sequence: 3, tenantId: 'tenant-demo', siteId: 'site-device-lab', deviceId: id,
+      state: { values: { output: false }, observedAt: '2026-11-01T10:00:03.000Z', source: 'remote-http', status: 'online' },
+    })}\n\n`));
+    await flushPromises();
+    expect(page!.text()).toContain('On');
+    await new Promise(resolve => window.setTimeout(resolve, 3_100));
+    expect(fetch.mock.calls.filter(([url]) => url === '/portal/state')).toHaveLength(stateCallsAfterConnect);
+  });
 });

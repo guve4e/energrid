@@ -2,7 +2,7 @@ import { parseShellySwitchStatus } from './shelly-switch-status'
 
 describe('parseShellySwitchStatus', () => {
   it.each([true, false])('preserves output=%s', output => {
-    expect(parseShellySwitchStatus({ id: 0, output }, 'switch:0')).toEqual({ output })
+    expect(parseShellySwitchStatus({ id: 0, output }, 'switch:0')).toEqual({ on: output })
   })
 
   it.each([

@@ -4579,6 +4579,15 @@ pre {
   line-height: 1.2;
 }
 
+.devices-workspace .device-state-stream-status {
+  grid-column: 1 / -1;
+  max-width: none;
+  color: #667085;
+  font-size: 12px;
+}
+.devices-workspace .device-state-stream-status[data-status="connected"] { color: #138a59; }
+.devices-workspace .device-state-stream-status[data-status="reconnecting"] { color: #a45b08; }
+
 .inventory-views {
   display: flex;
   flex-wrap: wrap;

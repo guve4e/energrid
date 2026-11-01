@@ -25,10 +25,11 @@ export interface InventoryFilters {
   status: string;
 }
 
-export function inventoryConnectionStatus(device: Pick<InventoryDevice, 'state'>): string {
+export function inventoryConnectionStatus(device: Pick<InventoryDevice, 'state'>, now = Date.now()): string {
   const freshness = relayStateFreshness(
     device.state.status,
     device.state.observedAt ?? null,
+    now,
   );
   return freshness === 'fresh' ? 'online' : freshness;
 }

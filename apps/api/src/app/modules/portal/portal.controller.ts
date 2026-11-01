@@ -43,7 +43,7 @@ import {
   UseGuards,
 } from '@nestjs/common'
 import { ApiExcludeController } from '@nestjs/swagger'
-import { map } from 'rxjs'
+import { filter, interval, map, merge, of } from 'rxjs'
 import { DeviceAiInvestigationService } from '../llm/device-ai-investigation.service'
 import { NetworkEndpointInvestigatorService } from '../llm/network-endpoint-investigator.service'
 import { LlmGatewayService } from '../llm/llm-gateway.service'
@@ -1705,6 +1705,25 @@ export class PortalController {
       { tenantId: tenant.id, siteId: site.id },
       deviceId,
     )
+  }
+
+  @Sse('devices/state/events')
+  @Header('Cache-Control', 'no-cache, no-transform')
+  @Header('X-Accel-Buffering', 'no')
+  async streamDeviceOperationalState(@Req() request: DeviceProxyRequest) {
+    assertPortalAdministrator(request)
+    const principal = request.user
+    if (!principal || !this.portalSites) throw new UnauthorizedException('Portal site authorization is unavailable.')
+    const owner = await this.portalSites.forPrincipal(principal)
+    const scopedChanges = this.deviceRegistry.streamOperationalStateChanges().pipe(
+      filter(event => event.tenantId === owner.tenantId && event.siteId === owner.siteId),
+      map(event => ({ type: 'device-state-changed', data: event })),
+    )
+    const ready = of({ type: 'ready', data: { tenantId: owner.tenantId, siteId: owner.siteId } })
+    const heartbeat = interval(15_000).pipe(
+      map(() => ({ type: 'heartbeat', data: { tenantId: owner.tenantId, siteId: owner.siteId } })),
+    )
+    return merge(scopedChanges, ready, heartbeat)
   }
 
   @Get('bus/mqtt')

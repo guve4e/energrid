@@ -26,6 +26,21 @@ import type { DeviceEnrollmentStatus } from '@energrid/domain-devices';
 import { DEVICE_ENROLLMENT_SERVICE } from './enrollment/device-enrollment.module';
 import type { DeviceEnrollmentService } from './enrollment/device-enrollment.service';
 import { configuredPortalSite } from '../portal/portal-site-context';
+import { Observable, Subject } from 'rxjs';
+
+export interface DeviceOperationalStateChangedEvent {
+  sequence: number;
+  tenantId: string;
+  siteId: string;
+  deviceId: string;
+  state: {
+    values: Record<string, number | boolean | string | null>;
+    observedAt: string | null;
+    source: string;
+    status: string;
+    observerReachability?: RegisteredDeviceState['observerReachability'];
+  };
+}
 
 export interface DiscoveredDeviceConfig {
   id?: string;
@@ -161,6 +176,9 @@ export class DeviceRegistryService implements OnModuleInit {
     string,
     RegisteredDeviceState
   >();
+  private readonly recentOperationalObservationIds = new Set<string>();
+  private readonly operationalStateChanged = new Subject<DeviceOperationalStateChangedEvent>();
+  private operationalStateEventSequence = 0;
   private commandTracker!: DeviceCommandTracker;
   private readonly persistedInstallations = new Map<string, DeviceInstallationRecord>();
   private readonly enrollmentStatusByDeviceId = new Map<string, DeviceEnrollmentStatus>();
@@ -1897,6 +1915,8 @@ export class DeviceRegistryService implements OnModuleInit {
       observerReachability: live?.observerReachability,
     });
 
+    this.publishCurrentOperationalStateChanged(id);
+
     this.observeCommandTelemetry(
       id,
       payload.values,
@@ -1911,6 +1931,7 @@ export class DeviceRegistryService implements OnModuleInit {
     const raw = payload as ApprovedDeviceConfig & {
       deviceId?: string;
       observedAt?: string;
+      observationId?: string;
       evidence?: {
         commandId?: string | null;
         action?: string | null;
@@ -1963,6 +1984,16 @@ export class DeviceRegistryService implements OnModuleInit {
       raw.observedAt || raw.state?.observedAt || new Date().toISOString();
     const currentState = this.liveStateByDeviceId.get(id);
     if (isOlderObservation(observedAt, currentState?.observedAt)) return;
+    const observationId = typeof raw.observationId === 'string' &&
+      /^[A-Za-z0-9:._-]{1,160}$/.test(raw.observationId)
+      ? raw.observationId
+      : undefined;
+    if (observationId && this.recentOperationalObservationIds.has(observationId)) return;
+    if (observationId) {
+      this.recentOperationalObservationIds.add(observationId);
+      if (this.recentOperationalObservationIds.size > 8192)
+        this.recentOperationalObservationIds.delete(this.recentOperationalObservationIds.values().next().value!);
+    }
 
     this.liveStateByDeviceId.set(id, {
       values,
@@ -1975,6 +2006,7 @@ export class DeviceRegistryService implements OnModuleInit {
       ),
       observerReachability: this.liveStateByDeviceId.get(id)?.observerReachability,
     });
+    this.publishOperationalStateChanged(id, tenantId, siteId);
     this.observeCommandTelemetry(
       id,
       unownedValues,
@@ -2008,6 +2040,44 @@ export class DeviceRegistryService implements OnModuleInit {
           'Telemetry arrived on the Energrid site bus before this device was approved.',
       });
     }
+  }
+
+  streamOperationalStateChanges(): Observable<DeviceOperationalStateChangedEvent> {
+    return this.operationalStateChanged.asObservable();
+  }
+
+  private publishOperationalStateChanged(id: string, tenantId: string, siteId: string): void {
+    const deviceKey = scopedDeviceKey(id, tenantId, siteId);
+    const approved = this.liveApprovedDeviceConfigs.has(deviceKey) ||
+      this.getApprovedDevicesFromConfig(true).some(device =>
+        device.id === id && device.tenantId === tenantId && device.siteId === siteId);
+    if (!approved) return;
+    const state = this.liveStateByDeviceId.get(id);
+    if (!state) return;
+    this.operationalStateChanged.next({
+      sequence: ++this.operationalStateEventSequence,
+      tenantId,
+      siteId,
+      deviceId: id,
+      state: {
+        values: { ...state.values },
+        observedAt: state.observedAt,
+        source: state.source,
+        status: state.status,
+        observerReachability: state.observerReachability,
+      },
+    });
+  }
+
+  private publishCurrentOperationalStateChanged(id: string): void {
+    const owners = new Map(this.getApprovedDevicesFromConfig(true)
+      .filter(device => device.id === id)
+      .map(device => [scopedDeviceKey(id, device.tenantId, device.siteId), {
+        tenantId: device.tenantId, siteId: device.siteId,
+      }]));
+    if (owners.size !== 1) return;
+    const owner = owners.values().next().value;
+    if (owner) this.publishOperationalStateChanged(id, owner.tenantId, owner.siteId);
   }
 
   ingestDeviceStatus(payload: unknown): void {

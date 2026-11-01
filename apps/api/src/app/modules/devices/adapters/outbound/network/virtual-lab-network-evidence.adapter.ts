@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { Logger } from '@nestjs/common'
 import type { NetworkDiscoveredDevice, NetworkDiscoveryZone } from '../../../device-registry.types'
@@ -68,6 +68,20 @@ export interface VirtualLabShellyControlResult {
   observer: { id: string; host: string; interfaceName: string }
 }
 
+export interface RemoteShellyStatusAssignment {
+  key: string
+  physicalId: string
+  ipAddress: string
+  expectedComponentKeys: string[]
+  components: Array<{ assignmentKey: string; componentKey: string }>
+}
+
+export interface RemoteShellyStatusObserverHandle {
+  update(assignments: RemoteShellyStatusAssignment[]): boolean
+  close(): void
+  isAlive(): boolean
+}
+
 type ScannerPayload = {
   schemaVersion: number
   scope: { id: string; name: string; configuredNetworkCidr: string; interfaceName: string; explicitTargets: string[] }
@@ -96,6 +110,89 @@ export class VirtualLabNetworkEvidenceAdapter {
   private readonly logger = new Logger(VirtualLabNetworkEvidenceAdapter.name)
 
   constructor(private readonly run: CommandRunner = runDocker) {}
+
+  /** Keep one restricted collector attached to the authorized remote scope. */
+  async startShellyOperationalObserver(
+    zone: NetworkDiscoveryZone,
+    observerSessionId: string,
+    assignments: RemoteShellyStatusAssignment[],
+    onMessage: (message: unknown) => void,
+    onExit: (reason: 'spawn_failed' | 'runner_exited') => void,
+  ): Promise<{ handle: RemoteShellyStatusObserverHandle; observer: { id: string; host: string; interfaceName: string } }> {
+    const targets = authorizedVirtualLabScanTargets(zone)
+    validateRemoteStatusAssignments(assignments, targets)
+    if (!/^[a-f0-9-]{36}$/i.test(observerSessionId)) throw new Error('Remote observer session identity is invalid.')
+    const context = process.env[DOCKER_CONTEXT_ENV]
+    const expectedHost = process.env.HOME_VIRTUAL_LAB_DOCKER_HOST
+    if (context !== DOCKER_CONTEXT || !expectedHost || !isIpv4(expectedHost))
+      throw new Error('Remote status collection requires the configured authenticated Docker observer.')
+    const host = await this.remoteDockerHost(context)
+    if (host !== expectedHost) throw new Error('Docker context host does not match the authorized remote observer.')
+    await this.assertInternalNetwork(context)
+
+    const args = [
+      '--context', context, 'run', '--rm', '--pull=never', '--interactive', '--init',
+      '--name', `energrid-device-lab-status-${observerSessionId}`,
+      '--network', DOCKER_NETWORK,
+      '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--read-only',
+      '--user', '65534:65534', '--tmpfs', '/tmp:size=8m,noexec,nosuid,nodev',
+      '--env', `M9_SCOPE_ID=${zone.id}`,
+      '--entrypoint', 'node', SCANNER_IMAGE, '-e', FIXED_SHELLY_STATUS_OBSERVER_SCRIPT,
+    ]
+    const child = spawn('docker', args, { stdio: 'pipe' })
+    let alive = true
+    let pending = ''
+    let exitNotified = false
+    const notifyExit = (reason: 'spawn_failed' | 'runner_exited') => {
+      alive = false
+      if (exitNotified) return
+      exitNotified = true
+      onExit(reason)
+    }
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      pending += chunk
+      if (pending.length > 64 * 1024) {
+        child.kill('SIGTERM')
+        pending = ''
+        onMessage({ schemaVersion: -1, kind: 'invalid_output' })
+        return
+      }
+      let newline = pending.indexOf('\n')
+      while (newline >= 0) {
+        const line = pending.slice(0, newline)
+        pending = pending.slice(newline + 1)
+        if (line.trim()) {
+          try { onMessage(JSON.parse(line) as unknown) }
+          catch { onMessage({ schemaVersion: -1, kind: 'invalid_output' }) }
+        }
+        newline = pending.indexOf('\n')
+      }
+    })
+    // Stderr is consumed to avoid blocking the process, but never forwarded to logs.
+    child.stderr.resume()
+    child.on('error', () => notifyExit('spawn_failed'))
+    child.on('close', () => notifyExit('runner_exited'))
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Remote observer did not start within 8 seconds.')), 8_000)
+      child.once('spawn', () => { clearTimeout(timer); resolve() })
+      child.once('error', () => { clearTimeout(timer); reject(new Error('Remote observer process could not be started.')) })
+    })
+    const handle: RemoteShellyStatusObserverHandle = {
+      update: next => {
+        if (!alive || !child.stdin.writable) return false
+        try {
+          validateRemoteStatusAssignments(next, targets)
+          child.stdin.write(`${JSON.stringify({ schemaVersion: 1, kind: 'assignments', observerSessionId, assignments: next })}\n`)
+          return true
+        } catch { return false }
+      },
+      close: () => { if (alive) child.kill('SIGTERM') },
+      isAlive: () => alive,
+    }
+    const interfaceName = zone.interfaceName || 'eth0'
+    return { handle, observer: { id: `remote-docker/${host}/${interfaceName}`, host, interfaceName } }
+  }
 
   /** Read the two fixed firmware GET endpoints from the isolated observer network. */
   async readEnergridHttpEvidence(
@@ -442,6 +539,30 @@ export class VirtualLabNetworkEvidenceAdapter {
   }
 }
 
+function validateRemoteStatusAssignments(assignments: RemoteShellyStatusAssignment[], targets: string[]): void {
+  if (!Array.isArray(assignments) || assignments.length > 14) throw new Error('Remote status assignment limit exceeded.')
+  const keys = new Set<string>()
+  const assignmentKeys = new Set<string>()
+  for (const target of assignments) {
+    if (!target || !/^[a-f0-9]{32}$/.test(target.key) || keys.has(target.key) ||
+        !/^shelly[a-z0-9._-]{1,114}$/i.test(target.physicalId) || !targets.includes(target.ipAddress) ||
+        !Array.isArray(target.expectedComponentKeys) || target.expectedComponentKeys.length < 1 || target.expectedComponentKeys.length > 32 ||
+        new Set(target.expectedComponentKeys).size !== target.expectedComponentKeys.length ||
+        target.expectedComponentKeys.some(key => !/^switch:(?:0|[1-9]|[12][0-9]|3[01])$/.test(key)) ||
+        !Array.isArray(target.components) || target.components.length < 1 || target.components.length > 32) {
+      throw new Error('Remote status assignment is invalid or outside the authorized network scope.')
+    }
+    for (const component of target.components) {
+      if (!component || !/^[a-f0-9]{32}$/.test(component.assignmentKey) || assignmentKeys.has(component.assignmentKey) ||
+          !target.expectedComponentKeys.includes(component.componentKey)) {
+        throw new Error('Remote status component assignment is invalid.')
+      }
+      assignmentKeys.add(component.assignmentKey)
+    }
+    keys.add(target.key)
+  }
+}
+
 function shellyAdapterError(message: string, code: string, cause: unknown): Error {
   const error = new Error(message, { cause }) as Error & { code: string }
   error.code = code
@@ -562,6 +683,128 @@ async function get(path, maxBytes = 16384) {
   }
   process.stdout.write(JSON.stringify({ identity, componentKeys: keys, componentStatuses: statuses }));
 })().catch(error => { process.stderr.write(error.name || 'read_failed'); process.exitCode = 1; });
+`;
+
+// Read-only remote collector. Its only accepted input is an API-generated set
+// of enrolled component assignments; RPC method names are fixed in this code.
+const FIXED_SHELLY_STATUS_OBSERVER_SCRIPT = String.raw`
+const readline = require('node:readline');
+const { randomUUID } = require('node:crypto');
+const scopeId = process.env.M9_SCOPE_ID || '';
+const cache = new Map();
+let config = null; let sequence = 0; let running = false; let timer = null;
+const emit = value => process.stdout.write(JSON.stringify(value) + '\n');
+function validTargets(value) {
+  const net = require('node:net');
+  if (!Array.isArray(value) || value.length > 14) return false;
+  const targetKeys = new Set(), assignmentKeys = new Set();
+  return value.every(target => {
+    if (!target || typeof target !== 'object' || typeof target.key !== 'string' || targetKeys.has(target.key) ||
+        !/^shelly[a-z0-9._-]{1,114}$/i.test(target.physicalId || '') ||
+        net.isIP(target.ipAddress || '') !== 4 ||
+        !Array.isArray(target.expectedComponentKeys) || target.expectedComponentKeys.length < 1 || target.expectedComponentKeys.length > 32 ||
+        target.expectedComponentKeys.some(key => !/^switch:(?:0|[1-9]|[12][0-9]|3[01])$/.test(key)) ||
+        !Array.isArray(target.components) || target.components.length < 1 || target.components.length > 32 ||
+        target.components.some(item => !item || typeof item.assignmentKey !== 'string' || !/^[a-f0-9]{32}$/.test(item.assignmentKey) ||
+          assignmentKeys.has(item.assignmentKey) || !target.expectedComponentKeys.includes(item.componentKey))) return false;
+    targetKeys.add(target.key); target.components.forEach(item => assignmentKeys.add(item.assignmentKey)); return true;
+  });
+}
+async function get(ip, method, query = '') {
+  const response = await fetch('http://' + ip + '/rpc/' + method + query, {
+    method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(2200),
+    headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
+  });
+  if (response.status >= 300 && response.status < 400) throw Error('redirect');
+  if (!response.ok) throw Error('http');
+  const reader = response.body.getReader(); const chunks = []; let size = 0;
+  while (true) {
+    const item = await reader.read(); if (item.done) break;
+    size += item.value.byteLength; if (size > 16384) { await reader.cancel(); throw Error('size'); }
+    chunks.push(Buffer.from(item.value));
+  }
+  const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  if (!value || typeof value !== 'object' || Array.isArray(value) || 'error' in value) throw Error('shape');
+  return value;
+}
+async function componentKeys(target) {
+  const cached = cache.get(target.key);
+  if (cached && Date.now() - cached.checkedAt < 60000) return cached.keys;
+  const keys = []; let offset = 0; let total = null;
+  while (offset < 32) {
+    const page = await get(target.ipAddress, 'Shelly.GetComponents', offset ? '?offset=' + offset : '');
+    if (!Array.isArray(page.components) || !Number.isInteger(page.total) || page.total < 1 || page.total > 32 ||
+        page.offset !== offset || (total !== null && page.total !== total)) throw Object.assign(Error('components'), { code: 'component_mismatch' });
+    total = page.total;
+    for (const item of page.components) if (item && typeof item.key === 'string' && /^switch:(?:0|[1-9]|[12][0-9]|3[01])$/.test(item.key)) keys.push(item.key);
+    offset += page.components.length;
+    if (offset >= total) break;
+    if (!page.components.length || offset > total) throw Object.assign(Error('components'), { code: 'component_mismatch' });
+  }
+  if (total === null || offset !== total || keys.length !== new Set(keys).size ||
+      target.expectedComponentKeys.some(key => !keys.includes(key))) throw Object.assign(Error('components'), { code: 'component_mismatch' });
+  cache.set(target.key, { keys, checkedAt: Date.now() });
+  return keys;
+}
+async function collect(target, activeConfig) {
+  try {
+    const identity = await get(target.ipAddress, 'Shelly.GetDeviceInfo');
+    if (typeof identity.id !== 'string' || identity.id.toLowerCase() !== target.physicalId.toLowerCase() ||
+        typeof identity.gen !== 'number' || identity.gen < 2) throw Object.assign(Error('identity'), { code: 'identity_mismatch' });
+    const cached = cache.get(target.key);
+    const keys = cached && Date.now() - cached.checkedAt < 60000 ? cached.keys : await componentKeys(target);
+    const statuses = await Promise.all(target.components.map(async item => {
+      const match = /^switch:(\d+)$/.exec(item.componentKey); if (!match) throw Object.assign(Error('component'), { code: 'component_mismatch' });
+      const id = Number(match[1]); const body = await get(target.ipAddress, 'Switch.GetStatus', '?id=' + id);
+      if (body.id !== id || typeof body.output !== 'boolean') throw Object.assign(Error('status'), { code: 'invalid_status' });
+      return { assignmentKey: item.assignmentKey, componentKey: item.componentKey, body };
+    }));
+    const observedAt = new Date().toISOString();
+    for (const status of statuses) {
+      const eventSequence = ++sequence;
+      emit({ schemaVersion: 1, kind: 'observation', scopeId, observerSessionId: activeConfig.observerSessionId,
+        sequence: eventSequence, observationId: activeConfig.observerSessionId + ':' + eventSequence,
+        assignmentKey: status.assignmentKey, targetKey: target.key, physicalId: identity.id,
+        ipAddress: target.ipAddress, componentKeys: keys, componentKey: status.componentKey,
+        identity: { id: identity.id, gen: identity.gen }, body: status.body, observedAt });
+    }
+  } catch (error) {
+    for (const item of target.components) {
+      const eventSequence = ++sequence;
+      emit({ schemaVersion: 1, kind: 'failure', scopeId, observerSessionId: activeConfig.observerSessionId,
+        sequence: eventSequence, observationId: activeConfig.observerSessionId + ':' + eventSequence,
+        assignmentKey: item.assignmentKey, targetKey: target.key, physicalId: target.physicalId,
+        ipAddress: target.ipAddress, componentKey: item.componentKey,
+        reasonCode: ['identity_mismatch', 'component_mismatch', 'invalid_status'].includes(error.code) ? error.code : 'rpc_unavailable',
+        checkedAt: new Date().toISOString() });
+    }
+  }
+}
+async function cycle() {
+  if (running || !config) return;
+  running = true;
+  const activeConfig = config;
+  try {
+    for (let i = 0; i < activeConfig.assignments.length; i += 4) {
+      await Promise.all(activeConfig.assignments.slice(i, i + 4).map(target => collect(target, activeConfig)));
+    }
+  } finally {
+    running = false;
+    if (config) timer = setTimeout(cycle, 5000);
+  }
+}
+const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+input.on('line', line => {
+  if (line.length > 65536) { process.exitCode = 2; input.close(); return; }
+  try {
+    const update = JSON.parse(line);
+    if (update.schemaVersion !== 1 || update.kind !== 'assignments' || !/^[a-f0-9-]{36}$/i.test(update.observerSessionId || '') || !validTargets(update.assignments)) return;
+    config = update;
+    if (timer) clearTimeout(timer);
+    if (!running) timer = setTimeout(cycle, 0);
+  } catch {}
+});
+input.on('close', () => { if (timer) clearTimeout(timer); process.exit(0); });
 `;
 
 // The only write exposed by this observer path is Switch.Set for switch:0.

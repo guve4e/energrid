@@ -10,7 +10,7 @@ const device = {
   id: deviceId, tenantId: ownership.tenantId, siteId: ownership.siteId,
   trustStatus: 'approved', kind: 'physical', displayName: 'Lab Shelly', zoneName: 'Lab',
   adapter: { driver: 'shelly-lan', protocol: 'http', configured: true, target: 'http://172.30.250.13/rpc/Switch.GetStatus?id=0' },
-  metadata: { physicalId, component: 'switch:0', physicalInventoryId: '70a41259-3e04-4559-a490-a41afc7a3193' },
+  metadata: { physicalId, component: 'switch:0', channel: 0, networkScope: 'virtual-lab-observer:device-lab-vlan', physicalInventoryId: '70a41259-3e04-4559-a490-a41afc7a3193' },
   capabilities: [{ kind: 'switch', actions: ['read'] }],
   control: { status: 'unavailable' }, assistantEnabled: false,
 }
@@ -68,16 +68,42 @@ function loggerSpies(poller: DeviceHttpPollService) {
 }
 
 describe('one-shot authorized Shelly status observation', () => {
+  it('resolves the enrolled switch from one saved endpoint inside its configured scope', async () => {
+    const fixture = setup()
+    const target = await fixture.poller.resolveShellyControlTarget(deviceId, ownership)
+    expect(target).toMatchObject({
+      physicalId,
+      component: 'switch:0',
+      channel: 0,
+      ipAddress: '172.30.250.13',
+      zone: { id: zone.id, collectionSource: 'virtual-lab' },
+    })
+  })
+
+  it('rejects a saved IP that is associated with the scope ID but outside its configured CIDR', async () => {
+    const outsideEvidence = {
+      ...identityEvidence,
+      device: { ...identityEvidence.device, ipAddress: '192.168.1.21' },
+    }
+    const fixture = setup({ identity: outsideEvidence })
+    await expect(fixture.poller.resolveShellyControlTarget(deviceId, ownership))
+      .rejects.toThrow('outside the configured network scope')
+  })
+
   it('uses the same canonical status projection for the direct local HTTP poll path', async () => {
     const fixture = setup()
+    const localDevice = { ...device, metadata: { ...device.metadata, networkScope: 'home-observer:home-iot' } }
+    const localZone = { ...zone, id: 'home-iot', collectionSource: 'local' as const }
+    fixture.registry.getDevices.mockReturnValue([localDevice])
+    fixture.lan.getConfiguredZone.mockImplementation((id: string) => id === localZone.id ? localZone : undefined)
     const fetch = jest.spyOn(global, 'fetch').mockResolvedValue({
       ok: true, json: async () => ({ id: 0, output: true }),
     } as Response)
     try {
       await fixture.poller.pollOnce()
-      expect(fetch).toHaveBeenCalledWith(device.adapter.target, expect.objectContaining({ headers: { Accept: 'application/json' } }))
+      expect(fetch).toHaveBeenCalledWith(localDevice.adapter.target, expect.objectContaining({ headers: { Accept: 'application/json' } }))
       expect(fixture.registry.ingestDeviceTelemetry).toHaveBeenCalledWith(expect.objectContaining({
-        deviceId, values: { output: true }, state: expect.objectContaining({ values: { output: true }, source: 'http-poll', status: 'online' }),
+        deviceId, values: { on: true }, state: expect.objectContaining({ values: { on: true }, source: 'http-poll', status: 'online' }),
       }))
     } finally {
       fetch.mockRestore()
@@ -135,11 +161,90 @@ describe('one-shot authorized Shelly status observation', () => {
       expect(fixture.lan.getConfiguredZone).toHaveBeenCalledWith('home-iot')
       expect(fetch).toHaveBeenCalledWith(localDevice.adapter.target, expect.any(Object))
       expect(fixture.registry.ingestDeviceTelemetry).toHaveBeenCalledWith(expect.objectContaining({
-        deviceId, values: { output: true },
+        deviceId, values: { on: true },
       }))
     } finally {
       fetch.mockRestore()
     }
+  })
+
+  it('keeps one remote read-only observer and sends accepted status through the shared writer', async () => {
+    const fixture = setup()
+    let onMessage: ((message: unknown) => void) | undefined
+    let observerSessionId = ''
+    const lan = fixture.lan as typeof fixture.lan & { startRemoteShellyOperationalObserver: jest.Mock }
+    const handle = { update: jest.fn(() => true), close: jest.fn(), isAlive: jest.fn(() => true) }
+    lan.startRemoteShellyOperationalObserver = jest.fn(async (
+      _scopeId: string, sessionId: string, _assignments: unknown[], receive: (message: unknown) => void,
+    ) => {
+      observerSessionId = sessionId
+      onMessage = receive
+      return { handle, observer: { id: 'remote-observer', host: '192.0.2.20', interfaceName: 'eth0' } }
+    })
+    const fetch = jest.spyOn(global, 'fetch')
+    await fixture.poller.pollOnce()
+    expect(lan.startRemoteShellyOperationalObserver).toHaveBeenCalledTimes(1)
+    expect(handle.update).toHaveBeenCalledTimes(1)
+    expect(fetch).not.toHaveBeenCalled()
+
+    const assignments = lan.startRemoteShellyOperationalObserver.mock.calls[0][2] as any[]
+    const assignedComponent = assignments[0].components[0]
+    const assignedTarget = assignments[0]
+    const observedAt = new Date(Date.now() - 1_000).toISOString()
+    const event = {
+      schemaVersion: 1, kind: 'observation', scopeId: zone.id, observerSessionId,
+      sequence: 1, observationId: `${observerSessionId}:1`,
+      assignmentKey: assignedComponent.assignmentKey, targetKey: assignedTarget.key,
+      physicalId, ipAddress: '172.30.250.13', componentKey: 'switch:0',
+      componentKeys: ['switch:0'], identity: { id: physicalId, gen: 2 },
+      body: { id: 0, output: false }, observedAt,
+    }
+    onMessage!(event)
+    onMessage!(event)
+    onMessage!({ ...event, sequence: 2, observationId: `${observerSessionId}:2`, body: { id: 0, output: true }, observedAt: new Date(Date.now() - 2_000).toISOString() })
+    const laterObservedAt = new Date().toISOString()
+    onMessage!({ ...event, sequence: 3, observationId: `${observerSessionId}:3`, body: { id: 0, output: true }, observedAt: laterObservedAt })
+
+    expect(fixture.registry.ingestDeviceTelemetry).toHaveBeenCalledTimes(2)
+    expect(fixture.registry.ingestDeviceTelemetry).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      values: { on: false }, observationId: `${observerSessionId}:1`, observedAt,
+      state: expect.objectContaining({ values: { on: false }, source: 'site-local-http-rpc:remote-observer', status: 'online' }),
+    }))
+    expect(fixture.registry.ingestDeviceTelemetry).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      values: { on: true }, observationId: `${observerSessionId}:3`, observedAt: laterObservedAt,
+    }))
+    expect(fixture.registry.ingestDeviceTelemetry.mock.calls.every(([payload]) =>
+      !('control' in (payload as Record<string, unknown>)) && !('measurementApproval' in (payload as Record<string, unknown>)),
+    )).toBe(true)
+    expect(fixture.registry.recordObserverReachability).toHaveBeenCalledTimes(2)
+    fetch.mockRestore()
+  })
+
+  it('does not let a remote failure replace last-known output and rejects wrong-scope events', async () => {
+    const fixture = setup()
+    let onMessage: ((message: unknown) => void) | undefined
+    let observerSessionId = ''
+    const lan = fixture.lan as typeof fixture.lan & { startRemoteShellyOperationalObserver: jest.Mock }
+    const handle = { update: jest.fn(() => true), close: jest.fn(), isAlive: jest.fn(() => true) }
+    lan.startRemoteShellyOperationalObserver = jest.fn(async (_scopeId: string, sessionId: string, _targets: unknown[], receive: (message: unknown) => void) => {
+      observerSessionId = sessionId; onMessage = receive
+      return { handle, observer: { id: 'remote-observer', host: '192.0.2.20', interfaceName: 'eth0' } }
+    })
+    await fixture.poller.pollOnce()
+    const target = (lan.startRemoteShellyOperationalObserver.mock.calls[0][2] as any[])[0]
+    const component = target.components[0]
+    const base = {
+      schemaVersion: 1, kind: 'failure', scopeId: zone.id, observerSessionId,
+      sequence: 1, observationId: `${observerSessionId}:1`, assignmentKey: component.assignmentKey,
+      targetKey: target.key, physicalId, ipAddress: '172.30.250.13', componentKey: 'switch:0',
+      reasonCode: 'rpc_unavailable', checkedAt: new Date().toISOString(),
+    }
+    onMessage!({ ...base, scopeId: 'home-iot' })
+    onMessage!(base)
+    expect(fixture.registry.ingestDeviceTelemetry).not.toHaveBeenCalled()
+    expect(fixture.registry.ingestDeviceStatus).not.toHaveBeenCalled()
+    expect(fixture.registry.recordObserverReachability).toHaveBeenCalledTimes(1)
+    expect(fixture.registry.recordObserverReachability).toHaveBeenCalledWith(deviceId, expect.objectContaining({ status: 'unreachable' }))
   })
 
   it.each([true, false])('writes only the canonical output=%s through the shared registry writer', async output => {
@@ -153,7 +258,7 @@ describe('one-shot authorized Shelly status observation', () => {
     expect(result.output).toBe(output)
     expect(fixture.registry.ingestDeviceTelemetry).toHaveBeenCalledWith(expect.objectContaining({
       deviceId, tenantId: ownership.tenantId, siteId: ownership.siteId,
-      values: { output }, state: expect.objectContaining({ values: { output }, source: 'site-local-http-rpc:virtual-lab-observer', status: 'online', observedAt }),
+      values: { on: output }, state: expect.objectContaining({ values: { on: output }, source: 'site-local-http-rpc:virtual-lab-observer', status: 'online', observedAt }),
     }))
     expect(fixture.registry.recordObserverReachability).toHaveBeenCalledWith(deviceId, expect.objectContaining({
       status: 'reachable', targetIpAddress: '172.30.250.13', networkScopeId: zone.id,
@@ -198,7 +303,7 @@ describe('one-shot authorized Shelly status observation', () => {
 
   it('fails closed for wrong-scope or missing saved evidence and observer errors', async () => {
     const wrongScope = setup({ identity: { ...identityEvidence, device: { ...identityEvidence.device, networkZoneId: 'home-lan' } } })
-    await expect(wrongScope.poller.observeShellySwitchStatusOnce(deviceId, ownership)).rejects.toThrow(/not in the configured authorized Virtual Lab scope/)
+    await expect(wrongScope.poller.observeShellySwitchStatusOnce(deviceId, ownership)).rejects.toThrow(/does not belong to the installation network scope/)
     const noEvidence = setup({ identity: {} })
     await expect(noEvidence.poller.observeShellySwitchStatusOnce(deviceId, ownership)).rejects.toThrow(/No saved site-owned identity/)
     const failure = setup({ remoteError: new Error('observer failure') })
