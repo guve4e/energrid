@@ -536,6 +536,28 @@ describe('DeviceRegistryService', () => {
     });
   });
 
+  it('keeps relay freshness independent from a later approved power observation', () => {
+    const deviceId = 'shellypro2pm-field-freshness:switch:0';
+    process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({ devices: [{
+      deviceId, protocol: 'http', driver: 'shelly-lan', capabilities: ['switch', 'power'], configured: true,
+    }] });
+    const service = new DeviceRegistryService();
+    service.ingestDeviceTelemetry({
+      deviceId, protocol: 'http', driver: 'shelly-lan', values: { on: true },
+      observedAt: '2026-11-01T10:00:00.000Z',
+      state: { source: 'site-local-http-rpc:mac-eero-en0', status: 'online', values: { on: true } },
+    });
+    service.projectApprovedObservation({
+      deviceId, values: { power: 4.2 }, observedAt: '2026-11-01T10:00:05.000Z',
+    });
+    expect(service.getDevices().find(device => device.id === deviceId)?.state).toMatchObject({
+      values: { on: true, power: 4.2 },
+      observedAt: '2026-11-01T10:00:05.000Z',
+      source: 'approved-observation',
+      fieldObservedAt: { on: '2026-11-01T10:00:00.000Z', power: '2026-11-01T10:00:05.000Z' },
+    });
+  });
+
   it('publishes a device-state event only after an approved observation is accepted', () => {
     const deviceId = 'shellyplus1-event-test:switch:0';
     process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({ devices: [{

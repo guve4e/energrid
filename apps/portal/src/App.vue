@@ -178,6 +178,7 @@ type PortalState = {
     state: {
       values: Record<string, number | boolean | string | null>;
       observedAt: string | null;
+      fieldObservedAt?: Record<string, string>;
       source: string;
       status: string;
       observerReachability?: string;

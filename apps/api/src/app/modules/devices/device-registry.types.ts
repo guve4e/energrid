@@ -87,6 +87,8 @@ export interface RegisteredDeviceAdapter {
 export interface RegisteredDeviceState {
   values: Record<string, number | boolean | string | null>;
   observedAt: string | null;
+  /** Per-field observation times keep relay freshness independent from measurement updates. */
+  fieldObservedAt?: Record<string, string>;
   source: string;
   status: DeviceOnlineStatus;
   /** Reachability from this Energrid observer; distinct from device-reported Wi-Fi and sample freshness. */

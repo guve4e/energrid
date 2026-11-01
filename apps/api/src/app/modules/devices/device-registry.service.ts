@@ -36,6 +36,7 @@ export interface DeviceOperationalStateChangedEvent {
   state: {
     values: Record<string, number | boolean | string | null>;
     observedAt: string | null;
+    fieldObservedAt?: Record<string, string>;
     source: string;
     status: string;
     observerReachability?: RegisteredDeviceState['observerReachability'];
@@ -1874,13 +1875,18 @@ export class DeviceRegistryService implements OnModuleInit {
     });
 
     const live = this.liveStateByDeviceId.get(id);
+    const latestObservedAt = laterObservationTime(live?.observedAt, observedAt);
 
     this.liveStateByDeviceId.set(id, {
       values: {
         ...(live?.values || {}),
         ...values,
       },
-      observedAt,
+      observedAt: latestObservedAt,
+      fieldObservedAt: {
+        ...(live?.fieldObservedAt || {}),
+        ...Object.fromEntries(Object.keys(payload.values).map(field => [field, payload.observedAt])),
+      },
       source: 'approved-observation',
       status: live?.status || 'unknown',
       observerReachability: live?.observerReachability,
@@ -1901,6 +1907,8 @@ export class DeviceRegistryService implements OnModuleInit {
     );
 
     const previous = this.authoritativeObservationByDeviceId.get(id);
+    const live = this.liveStateByDeviceId.get(id);
+    const observedAt = laterObservationTime(previous?.observedAt, payload.observedAt);
     const values = {
       ...(previous?.values || {}),
       ...payload.values,
@@ -1908,17 +1916,20 @@ export class DeviceRegistryService implements OnModuleInit {
 
     this.authoritativeObservationByDeviceId.set(id, {
       values,
-      observedAt: payload.observedAt,
+      observedAt,
     });
-
-    const live = this.liveStateByDeviceId.get(id);
 
     this.liveStateByDeviceId.set(id, {
       values: {
         ...(live?.values || {}),
         ...values,
       },
-      observedAt: payload.observedAt,
+      observedAt: laterObservationTime(live?.observedAt, observedAt),
+      fieldObservedAt: {
+        ...(live?.fieldObservedAt || {}),
+        ...Object.fromEntries(Object.keys(payload.values).map(field => [field,
+          laterObservationTime(live?.fieldObservedAt?.[field], payload.observedAt)])),
+      },
       source: 'approved-observation',
       status: live?.status || 'unknown',
       observerReachability: live?.observerReachability,
@@ -2006,10 +2017,14 @@ export class DeviceRegistryService implements OnModuleInit {
 
     this.liveStateByDeviceId.set(id, {
       values,
-      observedAt: authoritative?.observedAt || observedAt,
-      source: authoritative
-        ? 'approved-observation'
-        : raw.state?.source || raw.origin || raw.protocol || 'mqtt-telemetry',
+      observedAt: laterObservationTime(observedAt, authoritative?.observedAt),
+      fieldObservedAt: {
+        ...(currentState?.fieldObservedAt || {}),
+        ...Object.fromEntries(Object.keys(unownedValues).map(field => [field, observedAt])),
+        ...Object.fromEntries(Object.keys(authoritative?.values || {}).map(field => [field,
+          currentState?.fieldObservedAt?.[field] || authoritative?.observedAt || observedAt])),
+      },
+      source: raw.state?.source || raw.origin || raw.protocol || (authoritative ? 'approved-observation' : 'mqtt-telemetry'),
       status: normalizeOnlineStatus(
         raw.state?.status || raw.status || 'online',
       ),
@@ -2071,6 +2086,7 @@ export class DeviceRegistryService implements OnModuleInit {
       state: {
         values: { ...state.values },
         observedAt: state.observedAt,
+        ...(state.fieldObservedAt ? { fieldObservedAt: { ...state.fieldObservedAt } } : {}),
         source: state.source,
         status: state.status,
         observerReachability: state.observerReachability,
@@ -2106,6 +2122,7 @@ export class DeviceRegistryService implements OnModuleInit {
     this.liveStateByDeviceId.set(id, {
       values: current?.values || {},
       observedAt,
+      fieldObservedAt: current?.fieldObservedAt,
       source: current?.source || 'mqtt-status',
       status: normalizeOnlineStatus(raw.status),
       observerReachability: current?.observerReachability,
@@ -2122,6 +2139,7 @@ export class DeviceRegistryService implements OnModuleInit {
     this.liveStateByDeviceId.set(id, {
       values: current?.values || {},
       observedAt: current?.observedAt || null,
+      fieldObservedAt: current?.fieldObservedAt,
       source: current?.source || 'unknown',
       status: current?.status || 'unknown',
       command: current?.command,
@@ -2174,7 +2192,10 @@ export class DeviceRegistryService implements OnModuleInit {
           ...keepUnowned(liveState?.values || {}),
           ...(authoritative?.values || {}),
         },
-        ...(authoritative ? { observedAt: authoritative.observedAt, source: 'approved-observation' } : {}),
+        ...(authoritative ? {
+          observedAt: laterObservationTime(liveState?.observedAt, authoritative.observedAt),
+          source: liveState?.source || 'approved-observation',
+        } : {}),
         ...(command ? { command } : {}),
       },
     };
@@ -2202,6 +2223,16 @@ function metadataString(
 ): string | undefined {
   const value = metadata?.[key];
   return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function laterObservationTime(a: string | null | undefined, b: string | null | undefined): string {
+  if (!a) return b || new Date().toISOString();
+  if (!b) return a;
+  const aTime = Date.parse(a)
+  const bTime = Date.parse(b)
+  if (!Number.isFinite(aTime)) return b
+  if (!Number.isFinite(bTime)) return a
+  return bTime > aTime ? b : a
 }
 
 function metadataNumber(

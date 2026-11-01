@@ -15,7 +15,7 @@ const props = defineProps<{
     displayName: string;
     capabilities: Array<{ kind: string; actions: string[]; unit?: string }>;
     supportedCapabilities?: Array<{ kind: string; actions: string[]; unit?: string }>;
-    state: { values: Record<string, number | boolean | string | null>; status: string; observedAt: string | null; command?: { status: string; message?: string } };
+    state: { values: Record<string, number | boolean | string | null>; status: string; observedAt: string | null; fieldObservedAt?: Record<string, string>; command?: { status: string; message?: string } };
   };
   apiBase: string;
   accessToken: string;
@@ -88,7 +88,7 @@ onBeforeUnmount(() => authorityController?.abort());
 
 <template>
   <section v-if="presentation.showRelayState" class="device-observation-overview" aria-label="Switch status and control">
-    <DeviceRelayStatus :values="device.state.values" :status="device.state.status" :observed-at="device.state.observedAt" :command="device.state.command" :now="now" />
+    <DeviceRelayStatus :values="device.state.values" :status="device.state.status" :observed-at="device.state.fieldObservedAt?.on || device.state.observedAt" :command="device.state.command" :now="now" />
     <DeviceSwitchControl v-if="controlReady" :device="device" :identity-verified="controlIdentityVerified" :busy="busy" :error="error" @action="emit('action', $event)" />
     <p v-if="device.adapter.protocol === 'mqtt'" class="device-observation-route">MQTT endpoint <code>{{ device.adapter.target }}</code></p>
   </section>

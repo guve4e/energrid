@@ -13,7 +13,9 @@ export interface AuthorizedSiteLocalObserver {
   siteId: string;
   scopeId: string;
   cidr: string;
+  interfaceName?: string;
   expectedDeviceIds: string[];
+  expectedComponentKeys?: string[];
 }
 
 export interface SiteLocalShellyEvidenceInput {
@@ -44,6 +46,11 @@ export function configuredSiteLocalObservers(raw = process.env.HOME_SITE_LOCAL_O
     if (!Array.isArray(value.expectedDeviceIds) || !value.expectedDeviceIds.length || value.expectedDeviceIds.length > 32 ||
         value.expectedDeviceIds.some(id => typeof id !== 'string' || !/^shelly[a-z0-9._-]{1,114}$/i.test(id))) {
       throw new Error('Site-local observer authorization requires a bounded allowlist of Shelly physical identities.');
+    }
+    if (value.expectedComponentKeys !== undefined && (!Array.isArray(value.expectedComponentKeys) ||
+        value.expectedComponentKeys.length === 0 || value.expectedComponentKeys.length > 32 ||
+        value.expectedComponentKeys.some(key => typeof key !== 'string' || !/^(?:switch|em1):(?:[0-9]|[12][0-9]|3[01])$/.test(key)))) {
+      throw new Error('Site-local observer component authorization must be a bounded list of Shelly components.');
     }
     return value as unknown as AuthorizedSiteLocalObserver;
   });
@@ -105,6 +112,9 @@ export function validateSiteLocalShellyEvidence(input: unknown, options: {
     if (!match || !supportedComponents.has(match[1]) || item.method !== `${match[1] === 'switch' ? 'Switch' : 'EM1'}.GetStatus?id=${Number(match[2])}` ||
         components.has(item.key) || !confirmedComponent(match[1], Number(match[2]), item.response)) {
       throw new Error(`Unsupported or mismatched Shelly component evidence: ${String(item.key)}.`);
+    }
+    if (observer.expectedComponentKeys && !observer.expectedComponentKeys.includes(item.key)) {
+      throw new Error(`Shelly component is outside the observer authorization: ${item.key}.`);
     }
     components.add(item.key);
     verifiedComponents.push({ component: item.key, channel: Number(match[2]) });

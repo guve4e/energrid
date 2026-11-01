@@ -30,6 +30,7 @@ import { PHYSICAL_DEVICE_INVENTORY_SERVICE } from './enrollment/physical-device-
 import type { PhysicalDeviceInventoryService } from './enrollment/physical-device-inventory.service'
 import { hasPhysicalDeviceIdentityClaim } from './enrollment/physical-device-inventory.repository'
 import type { RemoteShellyStatusAssignment, RemoteShellyStatusObserverHandle } from './adapters/outbound/network/virtual-lab-network-evidence.adapter'
+import { configuredSiteLocalObservers, type AuthorizedSiteLocalObserver } from './site-local-shelly-evidence-intake'
 
 interface AuthorizedRemoteShellyStatusTarget {
   assignmentKey: string
@@ -60,6 +61,17 @@ interface RemoteShellyObserverState {
   retryAt: number
 }
 
+interface AuthorizedLocalShellyStatusTarget {
+  device: RegisteredDevice
+  observer: AuthorizedSiteLocalObserver
+  physicalId: string
+  component: string
+  channel: number
+  ipAddress: string
+  zone: NetworkDiscoveryZone
+  interfaceAddress: string
+}
+
 @Injectable()
 export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(DeviceHttpPollService.name)
@@ -70,6 +82,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
   private remoteAssignmentRefreshAt = 0
   private refreshingRemoteAssignments = false
   private readonly remoteShellyObservers = new Map<string, RemoteShellyObserverState>()
+  private readonly localShellyResolutionWarnings = new Set<string>()
 
   constructor(
     private readonly registry: DeviceRegistryService,
@@ -113,7 +126,14 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         .filter((device) => device.adapter.protocol === 'http')
         .filter((device) => device.adapter.driver === 'shelly-lan' || isHttpTarget(device.adapter.target))
 
+      const localShellyDevices = this.registry.getDevices(true).filter(device =>
+        device.trustStatus === 'approved' && device.kind === 'physical' &&
+        ['shelly-lan', 'shelly-discovered'].includes(device.adapter.driver) &&
+        /^shelly[a-z0-9._-]{1,114}:(?:switch|em1):(?:[0-9]|[12][0-9]|3[01])$/i.test(device.id),
+      )
+
       await Promise.all(devices.map((device) => this.pollDevice(device)))
+      await Promise.all(localShellyDevices.map(device => this.pollAuthorizedLocalShellyStatus(device)))
       await this.refreshRemoteShellyObservers(devices)
     } finally {
       this.polling = false
@@ -197,6 +217,201 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`[DEVICE HTTP POLL] ${device.id} ${error instanceof Error ? error.message : 'failed'}`)
     } finally {
       clearTimeout(timeout)
+    }
+  }
+
+  private async pollAuthorizedLocalShellyStatus(device: RegisteredDevice): Promise<void> {
+    let target: AuthorizedLocalShellyStatusTarget | null
+    try {
+      target = await this.resolveAuthorizedLocalShellyStatusTarget(device)
+    } catch (error) {
+      this.logger.warn(JSON.stringify({
+        event: 'shelly_operational_status_poll', outcome: 'rejected', deviceId: device.id,
+        failureCategory: 'authorization_resolution_failed',
+        error: safeRemoteObserverError(error),
+      }))
+      return
+    }
+    if (!target) return
+    const { observer, physicalId, component, channel, ipAddress, zone } = target
+    const correlationId = randomUUID()
+    const startedAt = performance.now()
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), Math.min(httpPollTimeoutMs(), 2_500))
+    const identityUrl = `http://${ipAddress}/rpc/Shelly.GetDeviceInfo`
+    const statusUrl = `http://${ipAddress}/rpc/Switch.GetStatus?id=${channel}`
+    try {
+      const identityResponse = await fetch(identityUrl, {
+        signal: controller.signal, redirect: 'manual', cache: 'no-store',
+        headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
+      })
+      if (identityResponse.status !== 200) throw new Error(`identity_http_${identityResponse.status}`)
+      const identity = asJsonObject(await readJsonResponse(identityResponse, 4 * 1024))
+      if (String(identity?.id || '').toLowerCase() !== physicalId.toLowerCase() ||
+          typeof identity?.gen !== 'number' || identity.gen < 2) {
+        throw new Error('identity_mismatch')
+      }
+      const statusResponse = await fetch(statusUrl, {
+        signal: controller.signal, redirect: 'manual', cache: 'no-store',
+        headers: { Accept: 'application/json', 'Cache-Control': 'no-cache' },
+      })
+      if (statusResponse.status !== 200) throw new Error(`status_http_${statusResponse.status}`)
+      const observedAt = new Date().toISOString()
+      const values = parseShellySwitchStatus(await readJsonResponse(statusResponse, 4 * 1024), component)
+      if (!values) throw new Error('invalid_switch_status')
+      const endpoint = statusUrl
+      const localScopes = [{
+        interfaceName: observer.interfaceName!, cidr: zone.cidr!, address: target.interfaceAddress,
+      }]
+      this.registry.recordObserverReachability(device.id, {
+        status: 'reachable', checkedAt: observedAt, endpoint, targetIpAddress: ipAddress,
+        networkScopeId: zone.id,
+        observer: { id: observer.id, host: observer.host, platform: process.platform, localScopes },
+      })
+      this.registry.ingestDeviceTelemetry({
+        id: device.id, deviceId: device.id, tenantId: device.tenantId, siteId: device.siteId,
+        displayName: device.displayName, protocol: 'http', transport: 'http', driver: 'shelly-lan',
+        target: statusUrl, location: device.zoneName,
+        capabilities: device.capabilities.map(capability => capability.kind), values,
+        state: { values, source: `site-local-http-rpc:${observer.id}`, status: 'online', observedAt },
+        observedAt,
+        observationId: `shelly-local:${createHash('sha256').update(`${observer.id}\u0000${device.id}\u0000${observedAt}\u0000${values.on}`).digest('hex')}`,
+      })
+      this.logger.log(JSON.stringify({
+        event: 'shelly_operational_status_poll', correlationId, outcome: 'accepted',
+        deviceId: device.id, observerId: observer.id, scopeId: zone.id,
+        observedAt, observerDurationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      }))
+    } catch (error) {
+      this.registry.recordObserverReachability(device.id, {
+        status: 'unreachable', checkedAt: new Date().toISOString(), endpoint: statusUrl,
+        targetIpAddress: ipAddress, networkScopeId: zone.id,
+        observer: { id: observer.id, host: observer.host, platform: process.platform, localScopes: [{
+          interfaceName: observer.interfaceName!, cidr: zone.cidr!, address: target.interfaceAddress,
+        }] },
+        reason: error instanceof Error ? safeRemoteObserverError(error) : 'observer_error',
+      })
+      this.logger.warn(JSON.stringify({
+        event: 'shelly_operational_status_poll', correlationId, outcome: 'rejected',
+        deviceId: device.id, observerId: observer.id, scopeId: zone.id,
+        failureCategory: controller.signal.aborted ? 'timeout' : 'observation_failed',
+        error: safeRemoteObserverError(error),
+        observerDurationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      }))
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+
+  private async resolveAuthorizedLocalShellyStatusTarget(
+    device: RegisteredDevice,
+  ): Promise<AuthorizedLocalShellyStatusTarget | null> {
+    const reject = (reason: string, context: Record<string, string | number | boolean> = {}): null => {
+      const key = `${device.id}:${reason}`
+      if (!this.localShellyResolutionWarnings.has(key)) {
+        this.localShellyResolutionWarnings.add(key)
+        this.logger.warn(JSON.stringify({
+          event: 'shelly_operational_status_poll', outcome: 'skipped', deviceId: device.id,
+          failureCategory: reason, ...context,
+        }))
+      }
+      return null
+    }
+    if (!this.discovery || !this.lanDiscovery || !this.physicalInventory ||
+        device.kind !== 'physical' || device.trustStatus !== 'approved' ||
+        !device.tenantId || !device.siteId) return reject('observation_dependencies_or_enrollment_missing')
+    const physicalId = String(device.metadata?.physicalId || '')
+    const component = String(device.metadata?.component || '')
+    const match = /^(switch):(0|[1-9]|[12][0-9]|3[01])$/.exec(component)
+    if (!/^shelly[a-z0-9._-]{1,114}$/i.test(physicalId) || !match ||
+        device.id !== `${physicalId}:${component}`) return reject('identity_or_component_binding_invalid')
+    const installationScope = String(device.metadata?.networkScope || '').trim()
+    const installationScopeId = installationScope.includes(':')
+      ? installationScope.slice(installationScope.lastIndexOf(':') + 1)
+      : installationScope
+    let observers: AuthorizedSiteLocalObserver[]
+    try { observers = configuredSiteLocalObservers() } catch { return reject('observer_configuration_invalid') }
+    const matchesConfiguredScope = (observer: AuthorizedSiteLocalObserver) =>
+      observer.scopeId === installationScopeId || observer.cidr === installationScope ||
+      installationScope.endsWith(`:${observer.cidr}`)
+    const scopedObservers = observers.filter(item => item.tenantId === device.tenantId &&
+      item.siteId === device.siteId && matchesConfiguredScope(item))
+    if (scopedObservers.length !== 1) return reject('no_unique_authorized_site_scope_observer', {
+      tenantScopeMatchCount: observers.filter(item => item.tenantId === device.tenantId).length,
+      tenantSiteMatchCount: observers.filter(item => item.tenantId === device.tenantId && item.siteId === device.siteId).length,
+      tenantSiteScopeMatchCount: scopedObservers.length,
+      installationTenantId: device.tenantId,
+      installationSiteId: device.siteId,
+      installationScopeId: installationScopeId === installationScope ? 'cidr' : installationScopeId,
+    })
+    const observer = scopedObservers[0]
+    const scopeId = observer.scopeId
+    if (!observer.expectedDeviceIds.some(id => id.toLowerCase() === physicalId.toLowerCase())) {
+      return reject('physical_identity_not_explicitly_authorized')
+    }
+    if (!observer.interfaceName || !observer.expectedComponentKeys?.includes(component)) {
+      return reject('component_or_interface_not_explicitly_authorized')
+    }
+    const zone = this.lanDiscovery.getConfiguredZone(scopeId)
+    if (!zone || zone.collectionSource === 'virtual-lab' || zone.cidr !== observer.cidr || !zone.cidr ||
+        (installationScopeId !== observer.scopeId && installationScope !== observer.cidr &&
+          !installationScope.endsWith(`:${observer.cidr}`))) {
+      return reject('scope_not_authorized_for_local_observation')
+    }
+    const runtimeHost = normalizedObserverHost(hostname())
+    if (runtimeHost !== normalizedObserverHost(observer.host)) return reject('observer_host_mismatch')
+    const addresses = networkInterfaces()[observer.interfaceName!] || []
+    const matchingAddresses = addresses.filter(address => !address.internal && address.family === 'IPv4' &&
+      networkInterfaceMatchesCidr(address.address, address.netmask, observer.cidr))
+    if (matchingAddresses.length !== 1) return reject('observer_interface_scope_mismatch')
+    const inventory = await this.physicalInventory.forLogicalDevice(
+      { tenantId: device.tenantId, siteId: device.siteId }, device.id,
+    )
+    const inventoryId = String(device.metadata?.physicalInventoryId || '')
+    const inventoryChecks = {
+      inventoryFound: !!inventory,
+      // The site-owned inventory lookup and its logical assignment are
+      // authoritative. Some imported installation rows omit this optional
+      // metadata mirror; if present, it must still match exactly.
+      inventoryIdMatches: !!inventory && (!inventoryId || inventory.physicalDeviceId === inventoryId),
+      siteOwnerMatches: !!inventory && inventory.scope.tenantId === device.tenantId && inventory.scope.siteId === device.siteId,
+      physicalIdentityClaimMatches: !!inventory && hasPhysicalDeviceIdentityClaim(inventory, 'mqtt:shelly-protocol-id', physicalId),
+      componentExists: !!inventory && inventory.components.some(item => item.key === component),
+      logicalAssignmentMatches: !!inventory && inventory.assignments.some(item => item.deviceId === device.id &&
+        item.physicalDeviceId === inventory.physicalDeviceId && item.componentKey === component),
+    }
+    if (Object.values(inventoryChecks).some(check => !check)) {
+      return reject('physical_inventory_assignment_mismatch', {
+        ...inventoryChecks,
+        expectedPhysicalInventoryId: inventoryId || 'missing',
+        resolvedPhysicalInventoryId: inventory?.physicalDeviceId || 'missing',
+      })
+    }
+    const records = await this.discovery.listIdentityEvidence({ tenantId: device.tenantId, siteId: device.siteId })
+    const endpoints = [...new Map(records.filter(record => {
+      const observations = record.device.observations || []
+      const identityAt = new Set(observations.filter(item => item.source === 'http_identity' &&
+        item.attribute === 'identity.device_id' && typeof item.value === 'string' &&
+        item.value.toLowerCase() === physicalId.toLowerCase() &&
+        item.scopeId === scopeId && item.method === 'GET /rpc/Shelly.GetDeviceInfo').map(item => item.observedAt))
+      return record.ownership?.tenantId === device.tenantId && record.ownership.siteId === device.siteId &&
+        record.device.vendor === 'Shelly' && record.device.id.toLowerCase() === physicalId.toLowerCase() &&
+        record.device.networkZoneId === scopeId && record.device.protocol === 'http' &&
+        ipInCidr(record.device.ipAddress, observer.cidr) &&
+        observations.some(item => item.source === 'http_identity' && item.attribute === 'identity.verified' &&
+          item.value === true && identityAt.has(item.observedAt)) &&
+        observations.some(item => item.source === 'site_local_http_rpc' && item.attribute === 'observer.identity' &&
+          item.value === observer.id && item.scopeId === scopeId && item.interfaceName === observer.interfaceName) &&
+        observations.some(item => item.source === 'site_local_http_rpc' && item.attribute === 'shelly.component_status' &&
+          item.value === component && item.scopeId === scopeId && item.interfaceName === observer.interfaceName &&
+          item.method === `Switch.GetStatus?id=${match[2]}`)
+    }).map(record => [`${record.device.networkZoneId}:${record.device.ipAddress}`, record])).values()]
+    if (endpoints.length !== 1) return reject(endpoints.length === 0
+      ? 'saved_identity_or_component_evidence_missing'
+      : 'saved_endpoint_ambiguous')
+    return {
+      device, observer, physicalId, component, channel: Number(match[2]),
+      ipAddress: endpoints[0].device.ipAddress, zone, interfaceAddress: matchingAddresses[0].address,
     }
   }
 
@@ -1057,6 +1272,30 @@ function normalizeHttpValues(payload: unknown): Record<string, number | boolean 
   }
 
   return values
+}
+
+function asJsonObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function normalizedObserverHost(value: string): string {
+  return value.trim().toLowerCase().replace(/\.local$/, '')
+}
+
+function networkInterfaceMatchesCidr(address: string, netmask: string, cidr: string): boolean {
+  const prefix = ipv4NetmaskPrefix(netmask)
+  const [network, prefixText] = cidr.split('/')
+  const authorizedPrefix = Number(prefixText)
+  if (prefix === null || prefix !== authorizedPrefix || isIP(address) !== 4 || isIP(network) !== 4) return false
+  return ipv4Network(address, prefix) === ipv4Network(network, prefix)
+}
+
+function ipv4Network(address: string, prefix: number): number {
+  const value = address.split('.').map(Number).reduce((current, octet) => current * 256 + octet, 0)
+  const blockSize = 2 ** (32 - prefix)
+  return Math.floor(value / blockSize) * blockSize
 }
 
 function isHttpTarget(value: string | undefined): value is string {

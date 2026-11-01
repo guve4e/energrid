@@ -11,6 +11,7 @@ export interface DeviceOperationalStateChangedEvent {
   state: {
     values: Record<string, number | boolean | string | null>;
     observedAt: string | null;
+    fieldObservedAt?: Record<string, string>;
     source: string;
     status: string;
     observerReachability?: string;
@@ -58,6 +59,7 @@ export function applyDeviceOperationalStateEvent<
       !event.deviceId || !event.state || typeof event.state.status !== 'string' ||
       typeof event.state.source !== 'string' || !event.state.values ||
       (event.state.observedAt !== null && !Number.isFinite(Date.parse(event.state.observedAt)))) return false;
+  if (event.state.fieldObservedAt && Object.values(event.state.fieldObservedAt).some(value => !Number.isFinite(Date.parse(value)))) return false;
   const devices = snapshot.devices || [];
   const index = devices.findIndex(device => device.id === event.deviceId &&
     device.tenantId === event.tenantId && device.siteId === event.siteId);
