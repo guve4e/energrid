@@ -26,14 +26,15 @@ const device: RegisteredDevice = {
 function setup(remoteResult: Record<string, unknown> = {
   writeAttempted: true, acknowledged: true, output: true, observedAt: new Date().toISOString(),
   observer: { id: 'virtual-lab-docker/192.168.1.138/eth0', host: '192.168.1.138', interfaceName: 'eth0' },
-}) {
+}, controlBinding: typeof binding | { kind: 'shelly-switch'; enabled: boolean; physicalId: string; channel: number } = binding) {
+  const configuredDevice = { ...device, control: { ...device.control, binding: controlBinding } };
   const registry = {
-    getDevices: jest.fn(() => [device]),
+    getDevices: jest.fn(() => [configuredDevice]),
     markDeviceCommandPending: jest.fn(() => ({ id: 'command-1', status: 'pending', requestedAt: new Date().toISOString(), expectedValues: { on: true } })),
     markDeviceCommandPublished: jest.fn(), ingestDeviceTelemetry: jest.fn(), recordObserverReachability: jest.fn(),
   };
-  const target = { device, inventory: { physicalDeviceId: inventoryId }, physicalId, component: 'switch:0', ipAddress: '172.30.250.11', zone: { id: 'device-lab-vlan' } };
-  const poll = { resolveVirtualLabShellyControlTarget: jest.fn().mockResolvedValue(target) };
+  const target = { device: configuredDevice, inventory: { physicalDeviceId: inventoryId }, physicalId, component: 'switch:0', channel: 0, ipAddress: '172.30.250.11', zone: { id: 'device-lab-vlan', collectionSource: 'virtual-lab' } };
+  const poll = { resolveShellyControlTarget: jest.fn().mockResolvedValue(target) };
   const lab = { executeVirtualLabSwitchControl: jest.fn().mockResolvedValue(remoteResult) };
   const enrollment = { find: jest.fn().mockResolvedValue({ status: 'enrolled' }) };
   const service = new DeviceControlService(registry as never, enrollment as never, poll as never, lab as never);
@@ -48,7 +49,7 @@ describe('Virtual Lab Shelly control authorization and confirmation', () => {
     });
     const result = await runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, output ? 'turn_on' : 'turn_off'));
     expect(result).toMatchObject({ status: 'success', adapter: 'virtual-lab' });
-    expect(fixture.poll.resolveVirtualLabShellyControlTarget).toHaveBeenCalledWith(deviceId, site);
+    expect(fixture.poll.resolveShellyControlTarget).toHaveBeenCalledWith(deviceId, site);
     expect(fixture.lab.executeVirtualLabSwitchControl).toHaveBeenCalledWith('device-lab-vlan', '172.30.250.11', physicalId, 0, output, expect.any(AbortSignal));
     expect(fixture.registry.ingestDeviceTelemetry).toHaveBeenCalledWith(expect.objectContaining({
       deviceId, tenantId: site.tenantId, siteId: site.siteId, values: { on: output },
@@ -62,12 +63,35 @@ describe('Virtual Lab Shelly control authorization and confirmation', () => {
     expect(device.assistantEnabled).toBe(false);
   });
 
+  it('uses the same production resolver for a transport-independent component permission', async () => {
+    const permission = { kind: 'shelly-switch' as const, enabled: true, physicalId, channel: 0 };
+    const fixture = setup({
+      writeAttempted: true, acknowledged: true, output: true, observedAt: new Date().toISOString(),
+      observer: { id: 'virtual-lab-docker/192.168.1.138/eth0', host: '192.168.1.138', interfaceName: 'eth0' },
+    }, permission);
+    const result = await runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, 'turn_on'));
+    expect(result).toMatchObject({ status: 'success', adapter: 'virtual-lab' });
+    expect(fixture.poll.resolveShellyControlTarget).toHaveBeenCalledWith(deviceId, site);
+    expect(fixture.lab.executeVirtualLabSwitchControl).toHaveBeenCalledWith(
+      'device-lab-vlan', '172.30.250.11', physicalId, 0, true, expect.any(AbortSignal),
+    );
+  });
+
+  it('rejects a mismatched permission before any route executes', async () => {
+    const permission = { kind: 'shelly-switch' as const, enabled: true, physicalId: 'another-shelly', channel: 0 };
+    const fixture = setup(undefined, permission);
+    await expect(runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, 'turn_on')))
+      .resolves.toMatchObject({ status: 'failed', adapter: 'none' });
+    expect(fixture.lab.executeVirtualLabSwitchControl).not.toHaveBeenCalled();
+    expect(fixture.registry.markDeviceCommandPending).not.toHaveBeenCalled();
+  });
+
   it('does not execute an unconfigured route or an unapproved installation', async () => {
     const noRoute = { ...device, control: { status: 'needs-setup' as const, reason: 'No route.', binding: null } };
     const registry = { getDevices: jest.fn(() => [noRoute]) };
     const lab = { executeVirtualLabSwitchControl: jest.fn() };
     const service = new DeviceControlService(registry as never, { find: async () => ({ status: 'enrolled' }) } as never,
-      { resolveVirtualLabShellyControlTarget: jest.fn() } as never, lab as never);
+      { resolveShellyControlTarget: jest.fn() } as never, lab as never);
     const denied = await runWithAuthorizedPortalSite(site, () => service.execute(deviceId, 'turn_on'));
     expect(denied.status).toBe('failed');
     expect(lab.executeVirtualLabSwitchControl).not.toHaveBeenCalled();

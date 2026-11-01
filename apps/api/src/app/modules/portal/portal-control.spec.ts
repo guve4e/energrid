@@ -1,4 +1,5 @@
 import { UnauthorizedException } from '@nestjs/common';
+import { Subject, filter, firstValueFrom } from 'rxjs';
 import { PortalController } from './portal.controller';
 import type { PortalStateService } from './portal-state.service';
 import type { DeviceLanDiscoveryService } from '../devices/device-lan-discovery.service';
@@ -34,7 +35,13 @@ describe('portal control configuration authorization', () => {
     const getState = jest.fn().mockReturnValue({ site: { id: 'site-home' } });
     const listIdentityEvidence = jest.fn().mockResolvedValue([]);
     const observeShellySwitchStatusOnce = jest.fn().mockResolvedValue({ deviceId: 'shelly:switch:0', output: false });
-    const portalSites = { list: jest.fn().mockResolvedValue([]) };
+    const resolveShellyControlTarget = jest.fn().mockResolvedValue({ physicalId: 'shelly-test', channel: 0, zone: { collectionSource: 'local' } });
+    const deviceHttpPoll = { resolveShellyControlTarget, observeShellySwitchStatusOnce };
+    const stateEvents = new Subject<any>();
+    const portalSites = {
+      list: jest.fn().mockResolvedValue([]),
+      forPrincipal: jest.fn().mockResolvedValue({ tenantId: 'tenant-demo', siteId: 'site-home' }),
+    };
     return {
       configure,
       execute,
@@ -50,7 +57,11 @@ describe('portal control configuration authorization', () => {
       setEnrollmentStatus,
       getState,
       listIdentityEvidence,
+      stateEvents,
+      portalSites,
       observeShellySwitchStatusOnce,
+      resolveShellyControlTarget,
+      deviceHttpPoll,
       controller: new PortalController(
         { getState } as unknown as PortalStateService,
         { scanNow, getZones, getLastScan, verifyShellyCandidate } as unknown as DeviceLanDiscoveryService,
@@ -59,6 +70,7 @@ describe('portal control configuration authorization', () => {
         {} as DeviceMqttIngestService,
         { registerDiscoveredDevice, persistInstallation, persistInstallationEvent, getDevices,
           setEnrollmentStatus,
+          streamOperationalStateChanges: () => stateEvents.asObservable(),
           getSnapshot: () => ({ tenant: { id: 'tenant-demo' }, site: { id: 'site-home' } }) } as unknown as DeviceRegistryService,
         { check } as unknown as DeviceDiagnosticsService,
         { investigate: jest.fn() } as never,
@@ -68,7 +80,7 @@ describe('portal control configuration authorization', () => {
         enrollment,
         undefined,
         undefined,
-        { observeShellySwitchStatusOnce } as never,
+        deviceHttpPoll as never,
         undefined,
         undefined,
         undefined,
@@ -92,6 +104,22 @@ describe('portal control configuration authorization', () => {
     });
     await expect(controller.verifyShellyDiscoveryCandidate('candidate', { method: 'POST', url: '/', headers: {} }))
       .rejects.toThrow(UnauthorizedException);
+  });
+  it('subscribes to state changes only for the authenticated principal site', async () => {
+    const { controller, stateEvents, portalSites } = setup();
+    const user = { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 };
+    const stream = await controller.streamDeviceOperationalState({ method: 'GET', url: '/', headers: {}, user } as never);
+    const changed = firstValueFrom(stream.pipe(filter((event: any) => event.type === 'device-state-changed')));
+    stateEvents.next({ sequence: 1, tenantId: 'tenant-demo', siteId: 'site-device-lab', deviceId: 'lab-relay', state: { values: { output: true }, observedAt: '2026-11-01T10:00:00.000Z', source: 'remote-http', status: 'online' } });
+    stateEvents.next({ sequence: 2, tenantId: 'tenant-demo', siteId: 'site-home', deviceId: 'home-relay', state: { values: { output: false }, observedAt: '2026-11-01T10:00:01.000Z', source: 'mqtt', status: 'online' } });
+    await expect(changed).resolves.toMatchObject({ type: 'device-state-changed', data: { siteId: 'site-home', deviceId: 'home-relay' } });
+    expect(portalSites.forPrincipal).toHaveBeenCalledWith(user);
+  });
+  it('requires an authenticated administrator before opening the device state stream', async () => {
+    const { controller, portalSites } = setup();
+    await expect(controller.streamDeviceOperationalState({ method: 'GET', url: '/', headers: {} } as never))
+      .rejects.toThrow(UnauthorizedException);
+    expect(portalSites.forPrincipal).not.toHaveBeenCalled();
   });
   it('authorizes read-only diagnostics without executing or configuring a switch', () => {
     const { controller, check, configure, execute } = setup();
@@ -681,6 +709,22 @@ describe('portal control configuration authorization', () => {
     expect(persistInstallation).toHaveBeenCalled();
     expect(persistInstallationEvent).toHaveBeenCalledWith('relay', 'control_configured', expect.any(Object));
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('validates an enabled Shelly permission against resolved identity and scope before persistence', async () => {
+    const { controller, resolveShellyControlTarget, persistInstallation } = setup();
+    const permission = { kind: 'shelly-switch', enabled: true, physicalId: 'shelly-test', channel: 0 };
+    const request = {
+      method: 'POST', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 },
+    };
+    await expect(controller.configureDeviceControl('shelly-test:switch:0', { binding: permission }, request as never))
+      .resolves.toMatchObject({ persistence: 'local' });
+    expect(resolveShellyControlTarget).toHaveBeenCalledWith('shelly-test:switch:0', { tenantId: 'tenant-demo', siteId: 'site-home' });
+    expect(persistInstallation).toHaveBeenCalled();
+
+    resolveShellyControlTarget.mockResolvedValueOnce({ physicalId: 'different-device', channel: 0, zone: { collectionSource: 'local' } });
+    await expect(controller.configureDeviceControl('shelly-test:switch:0', { binding: permission }, request as never))
+      .rejects.toThrow(/does not match the verified physical component/);
   });
 
   it('records command evidence after the control service returns', async () => {

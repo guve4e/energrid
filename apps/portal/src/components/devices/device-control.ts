@@ -29,12 +29,13 @@ export function canSwitchDevice(
 
 export function controlRouteLabel(device: ControlSetupDevice): string {
   const binding = device.control?.binding;
-  if (binding?.kind === 'shelly-mqtt')
-    return `MQTT · relay ${binding.channel} · ${binding.topic}`;
-  if (binding?.kind === 'shelly-http')
-    return `HTTP · relay ${binding.channel} · ${binding.baseUrl}`;
-  if (binding?.kind === 'shelly-virtual-lab')
-    return `Virtual Lab observer · relay ${binding.channel}`;
+  if (!binding && device.adapter.driver.includes('shelly'))
+    return 'Execution is resolved from the authorized network scope after permission is enabled';
+  if (binding?.kind === 'shelly-switch')
+    return 'Resolved automatically from the authorized network scope';
+  if (binding?.kind === 'shelly-mqtt') return 'Existing authorized MQTT route';
+  if (binding?.kind === 'shelly-http') return 'Existing local RPC route · endpoint revalidated';
+  if (binding?.kind === 'shelly-virtual-lab') return 'Existing remote RPC route · scope revalidated';
   if (binding?.kind === 'generic-mqtt') return `MQTT · ${binding.topic}`;
   if (device.memberDeviceIds?.length) return 'Member control routes';
   if (device.adapter.protocol === 'simulated') return 'Simulation';

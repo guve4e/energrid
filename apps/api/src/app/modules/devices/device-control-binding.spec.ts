@@ -4,8 +4,21 @@ import { DeviceRegistryService } from './device-registry.service';
 import { DeviceControlService } from './device-control.service';
 
 const activeEnrollment = { find: async () => ({ status: 'enrolled' }) } as any;
-const controlService = (registry: DeviceRegistryService) =>
-  new DeviceControlService(registry, activeEnrollment);
+const controlService = (registry: DeviceRegistryService) => {
+  const enrolled = registry.getDevices().find(device => device.id === id)!;
+  const httpPoll = {
+    resolveShellyControlTarget: jest.fn().mockResolvedValue({
+      device: enrolled,
+      inventory: { physicalDeviceId: 'inventory-test' },
+      physicalId,
+      component: 'switch:1',
+      channel: 1,
+      ipAddress: '192.168.1.220',
+      zone: { id: 'home-lan', collectionSource: 'local' },
+    }),
+  };
+  return new DeviceControlService(registry, activeEnrollment, httpPoll as any);
+};
 
 jest.mock('node:child_process', () => ({
   execFile: jest.fn((_c, _a, _o, cb) => {
@@ -87,7 +100,7 @@ describe('discovery, approval and control are separate', () => {
       registry.findApprovedDeviceIdByPhysicalChannel(physicalId, 'switch:0', 0),
     ).toBeNull();
   });
-  it('publishes only to the explicit route and exact relay, ignoring the old global fallback', async () => {
+  it('revalidates a legacy MQTT permission and resolves local execution from the saved physical identity', async () => {
     process.env.HOME_SHELLY_RPC_TOPIC = 'wrong/global/rpc';
     const registry = await discover();
     registry.approveDiscoveredDevice(id);
@@ -99,16 +112,23 @@ describe('discovery, approval and control are separate', () => {
     expect(execFile).not.toHaveBeenCalled();
     service.configure(id, binding);
     expect(execFile).not.toHaveBeenCalled();
-    expect((await service.execute(id, 'turn_off')).status).toBe('pending');
-    const args = jest.mocked(execFile).mock.calls[0][1] as string[];
-    expect(args[args.indexOf('-t') + 1]).toBe(binding.topic);
-    expect(JSON.parse(args[args.indexOf('-m') + 1])).toEqual(
-      expect.objectContaining({
-        dst: physicalId,
-        method: 'Switch.Set',
-        params: { id: 1, on: false },
-      }),
-    );
+    const queue = [
+      `${JSON.stringify({ id: physicalId })}\n200`,
+      '{"was_on":true}\n200',
+      '{"id":1,"output":false}\n200',
+    ];
+    jest.mocked(execFile).mockImplementation((_c, _a, _o, cb) => {
+      cb(null, queue.shift()!, '');
+      return {} as ReturnType<typeof execFile>;
+    });
+    expect((await service.execute(id, 'turn_off')).status).toBe('success');
+    const calls = jest.mocked(execFile).mock.calls.map(call => call[1] as string[]);
+    expect(calls).toHaveLength(3);
+    expect(calls[0]).toContain('http://192.168.1.220/rpc/Shelly.GetDeviceInfo');
+    expect(calls[1]).toContain('http://192.168.1.220/rpc/Switch.Set');
+    expect(calls[2]).toContain('http://192.168.1.220/rpc/Switch.GetStatus');
+    expect(calls[2]).toContain(JSON.stringify({ id: 1 }));
+    expect(calls.some(args => args.includes('-t') || args.includes(binding.topic))).toBe(false);
   });
   it('rejects approval bypass, wrong channels and wrong hardware without any I/O', async () => {
     const registry = await discover();
@@ -192,7 +212,7 @@ describe('discovery, approval and control are separate', () => {
       controlService(registry).configure(id, {
         ...binding,
         kind: 'shelly-http',
-        baseUrl: 'http://192.168.7.15',
+        baseUrl: 'http://192.168.1.220',
         credentialRef: 'missing',
       }),
     ).toThrow('credential');
@@ -207,7 +227,7 @@ describe('discovery, approval and control are separate', () => {
       service.configure(id, {
         ...binding,
         kind: 'shelly-http',
-        baseUrl: 'http://192.168.7.15',
+        baseUrl: 'http://192.168.1.220',
       });
       const queue = [
         `${JSON.stringify({ id: physicalId })}\n200`,
@@ -273,7 +293,7 @@ describe('discovery, approval and control are separate', () => {
     });
     const result = await service.execute(id, 'turn_on');
     expect(result.status).toBe('failed');
-    expect(result.message).toBe('MQTT command publication failed.');
+    expect(result.message).toBe('Shelly HTTP request failed or timed out.');
     expect(execFile).toHaveBeenCalledTimes(1);
   });
 

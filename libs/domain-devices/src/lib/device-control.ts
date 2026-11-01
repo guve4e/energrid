@@ -1,5 +1,12 @@
 export type DeviceControlBinding =
   | {
+      /** Explicit component permission; execution transport is resolved server-side. */
+      kind: 'shelly-switch';
+      enabled: boolean;
+      physicalId: string;
+      channel: number;
+    }
+  | {
       kind: 'shelly-mqtt';
       enabled: boolean;
       physicalId: string;
@@ -53,7 +60,7 @@ export function parseDeviceControlBinding(
   };
   if (raw['kind'] === 'generic-mqtt')
     return { kind: 'generic-mqtt', enabled, topic: topic() };
-  if (raw['kind'] !== 'shelly-mqtt' && raw['kind'] !== 'shelly-http' && raw['kind'] !== 'shelly-virtual-lab')
+  if (raw['kind'] !== 'shelly-switch' && raw['kind'] !== 'shelly-mqtt' && raw['kind'] !== 'shelly-http' && raw['kind'] !== 'shelly-virtual-lab')
     throw new Error('Unsupported control transport.');
   const physicalId = raw['physicalId'];
   if (
@@ -69,6 +76,8 @@ export function parseDeviceControlBinding(
     channel > 31
   )
     throw new Error('Specify a relay channel between 0 and 31.');
+  if (raw['kind'] === 'shelly-switch')
+    return { kind: 'shelly-switch', enabled, physicalId, channel };
   if (raw['kind'] === 'shelly-mqtt') {
     const commandTopic = topic();
     if (!commandTopic.endsWith('/rpc'))
@@ -158,7 +167,7 @@ export function deviceControlState(
     )
   )
     return result('read-only', 'No relay switching capability.');
-  if (!binding) return result('needs-setup', 'No explicit control route.');
+  if (!binding) return result('needs-setup', 'No explicit switch permission.');
   const shelly = device.adapter.driver.includes('shelly');
   if (binding.kind === 'generic-mqtt') {
     if (shelly)
@@ -182,6 +191,6 @@ export function deviceControlState(
       );
   }
   return binding.enabled
-    ? result('ready', 'Explicit control route configured.')
+    ? result('ready', 'Explicit component switching permission is enabled.')
     : result('disabled', 'Switching is disabled.');
 }

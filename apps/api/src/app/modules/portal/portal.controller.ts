@@ -1850,13 +1850,27 @@ export class PortalController {
   ) {
     assertPortalAdministrator(request)
     const binding = body?.binding ?? null
-    if (binding && typeof binding === 'object' &&
-        (binding as Record<string, unknown>)['kind'] === 'shelly-virtual-lab') {
-      if (!this.deviceHttpPoll)
-        throw new ServiceUnavailableException('Virtual Lab control route validation is unavailable.')
-      await this.deviceHttpPoll.resolveVirtualLabShellyControlTarget(
-        deviceId, this.discoveryOwner().ownership,
-      )
+    if (binding && typeof binding === 'object') {
+      const candidate = binding as Record<string, unknown>
+      const isShellyPermission = ['shelly-switch', 'shelly-http', 'shelly-virtual-lab', 'shelly-mqtt'].includes(String(candidate['kind']))
+      if (isShellyPermission && candidate['enabled'] === true) {
+        if (!this.deviceHttpPoll)
+          throw new ServiceUnavailableException('Authorized Shelly route validation is unavailable.')
+        const target = await this.deviceHttpPoll.resolveShellyControlTarget(
+          deviceId, this.discoveryOwner().ownership,
+        )
+        if (candidate['physicalId'] !== target.physicalId || candidate['channel'] !== target.channel)
+          throw new ConflictException('The switch permission does not match the verified physical component.')
+        if (candidate['kind'] === 'shelly-virtual-lab' && target.zone.collectionSource !== 'virtual-lab')
+          throw new ConflictException('The saved Virtual Lab route does not match this device’s authorized scope.')
+        if (candidate['kind'] === 'shelly-http') {
+          let saved: URL
+          try { saved = new URL(String(candidate['baseUrl'] || '')) }
+          catch { throw new BadRequestException('The saved HTTP address is invalid.') }
+          if (target.zone.collectionSource !== 'local' || saved.hostname !== target.ipAddress || (saved.port && saved.port !== '80'))
+            throw new ConflictException('The saved HTTP route does not match the verified endpoint and scope.')
+        }
+      }
     }
     const previousBinding = this.deviceRegistry.getDevices()
       .find((item) => item.id === deviceId)?.control?.binding || null

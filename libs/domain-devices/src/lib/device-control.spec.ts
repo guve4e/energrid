@@ -19,6 +19,20 @@ const device = {
 };
 
 describe('explicit device control contract', () => {
+  it('stores a Shelly component permission without storing a transport route', () => {
+    const permission = {
+      kind: 'shelly-switch',
+      enabled: true,
+      physicalId: mqtt.physicalId,
+      channel: 1,
+    } as const;
+    expect(parseDeviceControlBinding(permission)).toEqual(permission);
+    expect(deviceControlState(device, permission).status).toBe('ready');
+    expect(deviceControlState(device, { ...permission, enabled: false }).status).toBe('disabled');
+    expect(deviceControlState({ ...device, trustStatus: 'discovered' }, permission).status).toBe('unapproved');
+    expect(deviceControlState({ ...device, metadata: { ...device.metadata, channel: 0 } }, permission).status).toBe('needs-setup');
+  });
+
   it('keeps an exact MQTT route and never supplies a missing channel or topic', () => {
     expect(parseDeviceControlBinding(mqtt)).toEqual(mqtt);
     expect(parseDeviceControlBinding(null)).toBeNull();

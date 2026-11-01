@@ -5394,10 +5394,6 @@ onBeforeUnmount(() => {
                 :api-base="apiBase"
                 :access-token="accessToken"
                 :network-devices="networkDevices"
-                :finding-address="scanningNetwork"
-                :address-search-error="stateError"
-                :http-identity-verified="routeIdentityVerified(selectedDevice)"
-                @find-address="scanNetwork"
                 @saved="loadState"
               />
 

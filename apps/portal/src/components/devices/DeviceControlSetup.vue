@@ -1,10 +1,7 @@
 <script setup lang="ts">
 import { authFetch } from '../../auth/auth-client';
 import { computed, ref, watch } from 'vue';
-import {
-  privateShellyBaseUrl,
-  type DeviceControlBinding,
-} from '@energrid/domain-devices';
+import type { DeviceControlBinding } from '@energrid/domain-devices';
 import { controlRouteLabel, type ControlSetupDevice } from './device-control';
 import {
   discoveredShellyAddress,
@@ -16,44 +13,39 @@ const props = defineProps<{
   apiBase: string;
   accessToken: string;
   networkDevices?: NetworkIdentity[];
-  findingAddress?: boolean;
-  addressSearchError?: string;
-  httpIdentityVerified?: boolean;
 }>();
-const emit = defineEmits<{ saved: []; 'find-address': [] }>();
-const mode = ref<'none' | 'mqtt' | 'http' | 'virtual-lab'>('none');
+const emit = defineEmits<{ saved: [] }>();
+const mode = ref<'none' | 'mqtt'>('none');
 const enabled = ref(false);
 const topic = ref('');
-const address = ref('');
-const addressEdited = ref(false);
-const addressSearchRequested = ref(false);
-const addressSearchPending = ref(false);
 const discoveredAddress = computed(() =>
   discoveredShellyAddress(props.device, props.networkDevices || []),
 );
-const knownAddress = computed(() =>
-  props.device.control?.binding?.kind === 'shelly-http'
-    ? props.device.control.binding.baseUrl
-    : discoveredAddress.value,
-);
-const credentialRef = ref('');
+const knownAddress = discoveredAddress;
 const busy = ref(false);
 const error = ref('');
 const saved = ref(false);
 const shelly = computed(() => props.device.adapter.driver.includes('shelly'));
+const scopeResolvedShelly = computed(() =>
+  ['shelly-lan', 'shelly-discovered'].includes(props.device.adapter.driver) &&
+  typeof props.device.metadata?.networkScope === 'string' &&
+  props.device.metadata.networkScope.trim().length > 0,
+);
+const savedShellyRoute = computed(() => {
+  const binding = props.device.control?.binding;
+  return binding && ['shelly-mqtt', 'shelly-http', 'shelly-virtual-lab'].includes(binding.kind)
+    ? binding
+    : null;
+});
+const canConfigureShellyPermission = computed(() =>
+  scopeResolvedShelly.value || savedShellyRoute.value !== null,
+);
 const physicalId = computed(() =>
   String(
     props.device.metadata?.physicalId || props.device.adapter.target || '',
   ),
 );
 const channel = computed(() => props.device.metadata?.channel);
-const virtualLabRouteAvailable = computed(() => {
-  const scope = String(props.device.metadata?.networkScope || '');
-  const scopeId = scope.slice(scope.lastIndexOf(':') + 1);
-  return props.device.adapter.driver === 'shelly-lan' &&
-    props.device.metadata?.component === 'switch:0' &&
-    scopeId === 'device-lab-vlan';
-});
 const editable = computed(
   () =>
     props.device.trustStatus === 'approved' &&
@@ -71,12 +63,8 @@ const identityComplete = computed(
       !!physicalId.value),
 );
 const statusLabel = computed(() => {
-  if (props.device.control?.binding?.kind === 'shelly-http')
-    return props.httpIdentityVerified
-      ? 'Identity verified · route configured'
-      : 'Route configured · identity not verified';
-  if (props.device.control?.binding?.kind === 'shelly-virtual-lab')
-    return 'Explicit Virtual Lab route · assistant control remains separate';
+  if (props.device.control?.binding?.kind === 'shelly-switch')
+    return enabled.value ? 'Switching permission enabled' : 'Switching permission disabled';
   return (
     ({
       ready: 'Switching configured',
@@ -96,113 +84,46 @@ watch(
   ],
   () => {
     const binding = props.device.control?.binding;
-    mode.value = binding?.kind === 'shelly-http' ? 'http'
-      : binding?.kind === 'shelly-virtual-lab' ? 'virtual-lab'
-      : binding ? 'mqtt' : 'none';
+    mode.value = binding?.kind === 'generic-mqtt' ? 'mqtt' : 'none';
     enabled.value = binding?.enabled || false;
     topic.value =
       binding && 'topic' in binding
         ? binding.topic
         : String(props.device.metadata?.mqttCommandTopic || '');
-    address.value =
-      binding?.kind === 'shelly-http'
-        ? binding.baseUrl
-        : discoveredAddress.value || '';
-    addressEdited.value = false;
-    addressSearchRequested.value = false;
-    addressSearchPending.value = false;
-    credentialRef.value =
-      binding?.kind === 'shelly-http' ? binding.credentialRef || '' : '';
     error.value = '';
     saved.value = false;
   },
   { immediate: true },
 );
 
-watch(discoveredAddress, (value) => {
-  if (
-    !addressEdited.value &&
-    props.device.control?.binding?.kind !== 'shelly-http'
-  )
-    address.value = value || '';
-});
-
-watch(
-  () => props.findingAddress,
-  (finding, previous) => {
-    if (!finding && previous && addressSearchPending.value) {
-      addressSearchPending.value = false;
-      if (discoveredAddress.value) {
-        address.value = discoveredAddress.value;
-        addressEdited.value = false;
-      }
-    }
-  },
-);
-
-function findAddress() {
-  if (busy.value || props.findingAddress) return;
-  addressSearchRequested.value = true;
-  addressSearchPending.value = true;
-  emit('find-address');
-}
-
 async function save() {
-  if (!editable.value || busy.value || props.findingAddress) return;
+  if (!editable.value || busy.value) return;
   error.value = '';
   saved.value = false;
   let binding: DeviceControlBinding | null = null;
-  if (mode.value !== 'none') {
+  if (shelly.value) {
     if (!identityComplete.value) {
       error.value = 'Relay identity is incomplete.';
       return;
     }
-    if (mode.value === 'virtual-lab') {
-      if (!virtualLabRouteAvailable.value || channel.value !== 0) {
-        error.value = 'A verified switch:0 assignment in the configured Virtual Lab scope is required.';
-        return;
-      }
+    if (scopeResolvedShelly.value) {
       binding = {
-        kind: 'shelly-virtual-lab',
-        enabled: enabled.value,
-        physicalId: physicalId.value,
-        channel: 0,
-      };
-    } else if (mode.value === 'http') {
-      let baseUrl: string;
-      try {
-        baseUrl = privateShellyBaseUrl(address.value.trim());
-      } catch (cause) {
-        error.value =
-          cause instanceof Error
-            ? cause.message
-            : 'A local Shelly address is required.';
-        return;
-      }
-      binding = {
-        kind: 'shelly-http',
+        kind: 'shelly-switch',
         enabled: enabled.value,
         physicalId: physicalId.value,
         channel: channel.value as number,
-        baseUrl,
-        ...(credentialRef.value.trim()
-          ? { credentialRef: credentialRef.value.trim() }
-          : {}),
       };
-    } else
-      binding = shelly.value
-        ? {
-            kind: 'shelly-mqtt',
-            enabled: enabled.value,
-            physicalId: physicalId.value,
-            channel: channel.value as number,
-            topic: topic.value.trim(),
-          }
-        : {
-            kind: 'generic-mqtt',
-            enabled: enabled.value,
-            topic: topic.value.trim(),
-          };
+    } else if (savedShellyRoute.value) {
+      // Preserve an existing, explicitly authorized route for legacy Shelly
+      // profiles. The installer can change permission, but cannot select or
+      // replace its transport here.
+      binding = { ...savedShellyRoute.value, enabled: enabled.value };
+    } else {
+      error.value = 'No authorized execution route is configured for this Shelly.';
+      return;
+    }
+  } else if (mode.value === 'mqtt') {
+    binding = { kind: 'generic-mqtt', enabled: enabled.value, topic: topic.value.trim() };
   }
   busy.value = true;
   const deviceId = props.device.id;
@@ -264,8 +185,16 @@ async function save() {
         <dd>{{ channel ?? 'Unknown' }}</dd>
       </div>
       <div v-if="shelly">
-        <dt>Known address</dt>
-        <dd>{{ knownAddress || 'Not discovered' }}</dd>
+        <dt>Last observed address</dt>
+        <dd>{{ knownAddress || 'Uses saved site-owned evidence' }}</dd>
+      </div>
+      <div v-if="shelly && device.metadata?.networkScope">
+        <dt>Authorized scope</dt>
+        <dd>{{ device.metadata.networkScope }}</dd>
+      </div>
+      <div v-if="shelly">
+        <dt>Assistant control</dt>
+        <dd>Separate permission</dd>
       </div>
       <div v-if="editable">
         <dt>Settings storage</dt>
@@ -273,19 +202,23 @@ async function save() {
       </div>
     </dl>
     <form v-if="editable" @submit.prevent="save">
-      <label
+      <label v-if="!shelly"
         >Control through
         <select v-model="mode" :disabled="busy">
           <option value="none">Not configured</option>
           <option value="mqtt">MQTT</option>
-          <option v-if="shelly" value="http">HTTP</option>
-          <option v-if="virtualLabRouteAvailable" value="virtual-lab">Authorized Virtual Lab observer</option>
         </select>
       </label>
-      <p v-if="mode === 'virtual-lab'" class="muted">
-        Energrid resolves this enrolled switch:0 from saved site-owned identity evidence and sends only a bounded Switch.Set followed by fresh Switch.GetStatus through the configured isolated observer. No topic or URL is entered. This permission does not grant assistant control or measurement authority.
+      <p v-if="scopeResolvedShelly" class="muted">
+        The API resolves the execution route from this component’s verified identity, saved site-owned endpoint, and authorized network scope. This permission does not grant measurement or assistant-control authority.
       </p>
-      <label v-if="mode === 'mqtt'"
+      <p v-else-if="shelly && savedShellyRoute" class="muted">
+        The existing authorized Shelly route is retained. This setting only changes switching permission; route selection, measurements, and assistant control are separate.
+      </p>
+      <p v-else-if="shelly" class="muted">
+        No authorized execution route is available for this Shelly profile. Switching remains unavailable until a supported route is configured.
+      </p>
+      <label v-if="!shelly && mode === 'mqtt'"
         >MQTT command topic<input
           v-model="topic"
           required
@@ -293,63 +226,14 @@ async function save() {
           autocomplete="off"
           placeholder="device-prefix/rpc"
       /></label>
-      <template v-if="mode === 'http'">
-        <label
-          >Shelly address<input
-            v-model="address"
-            required
-            type="url"
-            :disabled="busy || findingAddress"
-            @input="addressEdited = true"
-            autocomplete="off"
-            autocapitalize="none"
-            :spellcheck="false"
-        /></label>
-        <div class="address-discovery">
-          <p class="muted">This refreshes discovery for the selected configured scope; it is not a device-only probe.</p>
-          <p v-if="!knownAddress && !addressSearchRequested">
-            No local address is known for this device.
-          </p>
-          <p
-            v-if="
-              addressSearchRequested && !findingAddress && addressSearchError
-            "
-            role="alert"
-          >
-            {{ addressSearchError }}
-          </p>
-          <p
-            v-else-if="
-              addressSearchRequested && !findingAddress && !discoveredAddress
-            "
-            role="status"
-          >
-            No matching device was found on this gateway's local network.
-          </p>
-          <button
-            type="button"
-            :disabled="busy || findingAddress"
-            @click="findAddress"
-          >
-            {{ findingAddress ? 'Refreshing network evidence...' : 'Refresh network evidence' }}
-          </button>
-        </div>
-        <label
-          >Server credential reference<input
-            v-model="credentialRef"
-            :disabled="busy"
-            autocomplete="off"
-            placeholder="Optional"
-        /></label>
-      </template>
-      <label v-if="mode !== 'none'" class="control-permission"
+      <label v-if="shelly || mode !== 'none'" class="control-permission"
         ><input
           v-model="enabled"
           type="checkbox"
-          :disabled="busy || !identityComplete"
+          :disabled="busy || !identityComplete || (shelly && !canConfigureShellyPermission)"
         />Allow switching</label
       >
-      <p v-if="mode !== 'none' && !identityComplete" role="alert">
+      <p v-if="shelly && !identityComplete" role="alert">
         Relay identity is incomplete.
       </p>
       <p v-if="error" role="alert">{{ error }}</p>
@@ -358,10 +242,9 @@ async function save() {
         type="submit"
         :disabled="
           busy ||
-          findingAddress ||
-          (mode !== 'none' && !identityComplete) ||
-          (mode === 'http' && !address.trim()) ||
-          (mode === 'virtual-lab' && (!virtualLabRouteAvailable || channel !== 0))
+          (shelly && !identityComplete) ||
+          (shelly && !canConfigureShellyPermission) ||
+          (!shelly && mode === 'mqtt' && !topic.trim())
         "
       >
         {{ busy ? 'Saving...' : 'Save control settings' }}

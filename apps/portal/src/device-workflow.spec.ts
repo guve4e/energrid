@@ -26,6 +26,7 @@ const relay = {
     component: 'switch:0',
     channel: 0,
     httpBaseUrl: 'http://192.168.7.21',
+    networkScope: 'lan:192.168.7.0/24',
   },
   state: { status: 'unknown', values: {}, source: 'http', observedAt: null },
   control: {
@@ -62,6 +63,7 @@ beforeEach(() => {
 afterEach(() => {
   page?.unmount();
   page = undefined;
+  vi.useRealTimers();
   clearAuthenticatedSession(false);
   localStorage.clear();
   history.replaceState({}, '', '/');
@@ -494,7 +496,7 @@ describe('device onboarding page workflow with mocked services', () => {
     expect(button('Clear filters').attributes('disabled')).toBeDefined();
     expect(fetch.mock.calls.length).toBe(initialRequests);
   });
-  it('keeps search and an edited setup draft when state is refreshed', async () => {
+  it('keeps search and an unsaved switch-permission draft when state is refreshed', async () => {
     const approved = { ...relay, trustStatus: 'approved', control: { status: 'needs-setup', binding: null, reason: '' } };
     const state = data([approved]);
     const fetch = vi.fn(async (url: string) => ({ ok: true, json: async () => url.endsWith('/portal/state') ? structuredClone(state) : url.includes('/devices/enrollments') ? { enrollments: enrollmentsFor(state) } : { runs: [] } }));
@@ -502,17 +504,46 @@ describe('device onboarding page workflow with mocked services', () => {
     await page!.get('[aria-label="Search devices"]').setValue('Kitchen');
     await button('Kitchen Shelly').trigger('click');
     const setup = page!.get('.control-setup');
-    await setup.get('select').setValue('http');
-    await setup.get('input[type="url"]').setValue('http://192.168.7.99');
+    await setup.get('input[type="checkbox"]').setValue(true);
     await button('Refresh').trigger('click');
     await flushPromises();
     expect((page!.get('[aria-label="Search devices"]').element as HTMLInputElement).value).toBe('Kitchen');
-    expect(setup.get('select').element.value).toBe('http');
-    expect((setup.get('input[type="url"]').element as HTMLInputElement).value).toBe('http://192.168.7.99');
+    expect((setup.get('input[type="checkbox"]').element as HTMLInputElement).checked).toBe(true);
     expect(page!.get('.inventory-filter-summary [role="status"]').text()).toBe('1 shown');
     expect(fetch.mock.calls.some(([url]) => /\/(actions|control|approve)$/.test(url))).toBe(false);
   });
-  it('finds and fills the local address for an MQTT-discovered device without saving or switching', async () => {
+  it('does not poll the full Portal state on a timer when no event is available', async () => {
+    vi.useFakeTimers();
+    const observedAt = new Date().toISOString();
+    const approvedRelay = {
+      ...relay,
+      trustStatus: 'approved',
+      state: { status: 'online', values: { on: true }, source: 'site-local-http-rpc:lab-observer', observedAt },
+      control: { status: 'needs-setup', binding: null, reason: '' },
+    };
+    const state = data([approvedRelay]);
+    let stateReads = 0;
+    const fetch = vi.fn(async (url: string) => {
+      if (url.endsWith('/portal/state')) {
+        stateReads += 1;
+        const current = structuredClone(state);
+        if (stateReads > 1) current.devices[0] = {
+          ...approvedRelay,
+          state: { status: 'online', values: { on: false }, source: 'site-local-http-rpc:lab-observer', observedAt: new Date().toISOString() },
+        };
+        return { ok: true, json: async () => current };
+      }
+      if (url.includes('/devices/enrollments')) return { ok: true, json: async () => ({ enrollments: enrollmentsFor(state) }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    await render('/devices/', fetch);
+    expect(page!.get('tbody').text()).toContain('On');
+    await vi.advanceTimersByTimeAsync(3_000);
+    await flushPromises();
+    expect(stateReads).toBe(1);
+    expect(page!.get('tbody').text()).toContain('On');
+  });
+  it('shows fresh address evidence without offering a control route for an unscoped MQTT candidate', async () => {
     const mqttRelay = {
       ...relay,
       trustStatus: 'approved',
@@ -520,26 +551,18 @@ describe('device onboarding page workflow with mocked services', () => {
       metadata: { physicalId: network.id, channel: 0, component: 'switch:0' },
       control: { status: 'needs-setup', binding: null, reason: 'No route' },
     };
-    const state = { ...data([mqttRelay]), networkZones: [{ id: 'lan', name: 'LAN', cidr: '192.168.7.0/24', seedIps: [] }] };
-    const fetch = vi.fn(async (url: string) => {
-      if (url === '/portal/network/scan') {
-        state.networkDevices = [network];
-        return { ok: true, json: async () => scanResult([network], state.networkZones) };
-      }
-      return { ok: true, json: async () => url.endsWith('/portal/state') ? structuredClone(state) : url.includes('/devices/enrollments') ? { enrollments: enrollmentsFor(state) } : { runs: [] } };
-    });
+    const state = { ...data([mqttRelay]), networkDevices: [network], networkZones: [{ id: 'lan', name: 'LAN', cidr: '192.168.7.0/24', seedIps: [] }] };
+    const fetch = vi.fn(async (url: string) => ({ ok: true, json: async () => url.endsWith('/portal/state') ? structuredClone(state) : url.includes('/devices/enrollments') ? { enrollments: enrollmentsFor(state) } : { runs: [] } }));
     await render('/devices/', fetch);
     await button('Kitchen Shelly').trigger('click');
     const setup = page!.get('.control-setup');
-    await setup.get('select').setValue('http');
-    expect((setup.get('input[type="url"]').element as HTMLInputElement).value).toBe('');
-    expect(fetch.mock.calls.filter(([url]) => url === '/portal/network/scan')).toHaveLength(0);
-    await button('Refresh network evidence').trigger('click');
-    await flushPromises();
-    expect((setup.get('input[type="url"]').element as HTMLInputElement).value).toBe('http://192.168.7.21');
-    expect(setup.get('select').element.value).toBe('http');
+    expect(setup.text()).toContain('No authorized execution route is available');
+    expect(setup.find('select').exists()).toBe(false);
+    expect((setup.get('input[type="checkbox"]').element as HTMLInputElement).disabled).toBe(true);
+    expect(setup.text()).toContain('192.168.7.21');
+    expect(setup.text()).toContain('No authorized execution route is available');
+    expect((setup.get('input[type="checkbox"]').element as HTMLInputElement).disabled).toBe(true);
     expect((setup.get('input[type="checkbox"]').element as HTMLInputElement).checked).toBe(false);
-    expect(fetch.mock.calls.filter(([url]) => url === '/portal/network/scan')).toHaveLength(1);
     expect(fetch.mock.calls.some(([url]) => /\/(control|actions|approve)$/.test(url))).toBe(false);
   });
   it('shows all detected devices, reviews a channel, then keeps approval and switching separate', async () => {
@@ -621,13 +644,16 @@ describe('device onboarding page workflow with mocked services', () => {
     await flushPromises();
     expect(page!.find('.device-switch-control').exists()).toBe(false);
     const form = page!.get('.control-setup');
-    await form.get('select').setValue('http');
-    expect(
-      (form.get('input[type="url"]').element as HTMLInputElement).value,
-    ).toBe('http://192.168.7.21');
+    expect(form.find('select').exists()).toBe(false);
+    expect(form.text()).toContain('Execution is resolved from the authorized network scope');
+    expect((form.get('input[type="checkbox"]').element as HTMLInputElement).checked).toBe(false);
     await form.get('input[type="checkbox"]').setValue(true);
     await form.get('form').trigger('submit');
     await flushPromises();
+    const controlCall = fetch.mock.calls.find(([url]) => url.endsWith('/control'));
+    expect(JSON.parse(String(controlCall?.[1]?.body)).binding).toEqual({
+      kind: 'shelly-switch', enabled: true, physicalId: relay.metadata.physicalId, channel: 0,
+    });
     await button('Check connection').trigger('click');
     await flushPromises();
     expect(page!.find('.device-switch-control').exists()).toBe(true);

@@ -45,7 +45,7 @@ export interface DeviceActionResult {
 
 @Injectable()
 export class DeviceControlService {
-  private readonly activeVirtualLabCommands = new Set<string>();
+  private readonly activeShellyCommands = new Set<string>();
 
   private readonly http = new ShellyHttpControl();
 
@@ -212,50 +212,80 @@ export class DeviceControlService {
     }
 
     const binding = device.control!.binding!;
-    if (binding.kind === 'shelly-virtual-lab') {
-      if (this.activeVirtualLabCommands.has(device.id)) {
-        throw new ConflictException('A switch command is already running for this Virtual Lab device; wait for its result before retrying.');
+    if (['shelly-lan', 'shelly-discovered'].includes(device.adapter.driver) &&
+      (binding.kind === 'shelly-switch' || binding.kind === 'shelly-virtual-lab' || binding.kind === 'shelly-http' || binding.kind === 'shelly-mqtt')) {
+      if (this.activeShellyCommands.has(device.id)) {
+        throw new ConflictException('A switch command is already running for this Shelly; wait for its result before retrying.');
       }
-      this.activeVirtualLabCommands.add(device.id);
+      this.activeShellyCommands.add(device.id);
       try {
-        return await this.executeVirtualLabSwitch(device, on, action, binding);
+        return await this.executeResolvedShellySwitch(device, on, action, binding);
       } finally {
-        this.activeVirtualLabCommands.delete(device.id);
+        this.activeShellyCommands.delete(device.id);
       }
     }
+    // Preserve already-authorized MQTT profiles that do not expose verified
+    // site-owned LAN identity. The new scope resolver applies to Shelly-LAN
+    // installations; it must not invent a LAN route for MQTT-native devices.
     if (binding.kind === 'generic-mqtt')
       return this.executeGenericMqttSwitch(device, on, action, binding.topic);
-    return this.executeShellyRpc(device, on, action, binding);
+    if (binding.kind === 'shelly-mqtt' || binding.kind === 'shelly-http')
+      return this.executeShellyRpc(device, on, action, binding);
+    throw new ForbiddenException('This Shelly switch permission has no eligible authorized execution scope.');
   }
 
-  private async executeVirtualLabSwitch(
+  /** Select HTTP or the remote observer from persisted site-owned identity and scope evidence. */
+  private async executeResolvedShellySwitch(
     device: RegisteredDevice,
     on: boolean,
     action: DeviceCapabilityAction,
-    binding: Extract<DeviceControlBinding, { kind: 'shelly-virtual-lab' }>,
+    binding: Extract<DeviceControlBinding, { kind: 'shelly-switch' | 'shelly-virtual-lab' | 'shelly-http' | 'shelly-mqtt' }>,
   ): Promise<DeviceActionResult> {
-    if (!this.httpPoll || !this.lanDiscovery)
-      throw new ServiceUnavailableException('Authorized Virtual Lab control is unavailable.')
+    if (!this.httpPoll)
+      throw new ServiceUnavailableException('Scope-authorized Shelly control is unavailable.')
     const site = configuredPortalSite()
-    const target = await this.httpPoll.resolveVirtualLabShellyControlTarget(device.id, site)
-    // The resolver has already matched the authoritative inventory assignment
-    // and rejects conflicting metadata when present. The Portal device projection
-    // may omit physicalInventoryId, so do not require this derived copy again.
-    if (target.physicalId !== binding.physicalId || target.component !== 'switch:0' || binding.channel !== 0) {
-      throw new ForbiddenException('The configured Virtual Lab route no longer matches the enrolled physical assignment.')
+    const target = await this.httpPoll.resolveShellyControlTarget(device.id, site)
+    if (target.physicalId !== binding.physicalId || target.component !== `switch:${binding.channel}`) {
+      throw new ForbiddenException('The switch permission no longer matches the enrolled physical component.')
     }
+    if (binding.kind === 'shelly-virtual-lab' && target.zone.collectionSource !== 'virtual-lab') {
+      throw new ForbiddenException('The saved legacy route does not match this device’s authorized network scope.')
+    }
+    if (binding.kind === 'shelly-http') {
+      const configured = new URL(binding.baseUrl)
+      if (target.zone.collectionSource !== 'local' || configured.hostname !== target.ipAddress || (configured.port && configured.port !== '80')) {
+        throw new ForbiddenException('The saved legacy HTTP route differs from the verified endpoint and scope.')
+      }
+    }
+
+    if (target.zone.collectionSource === 'local') {
+      const route = {
+        kind: 'shelly-http' as const,
+        enabled: true,
+        physicalId: target.physicalId,
+        channel: target.channel,
+        baseUrl: `http://${target.ipAddress}`,
+        ...(binding.kind === 'shelly-http' && binding.credentialRef ? { credentialRef: binding.credentialRef } : {}),
+      }
+      return this.executeShellyRpc(device, on, action, route)
+    }
+    if (target.zone.collectionSource !== 'virtual-lab') {
+      throw new ForbiddenException('No authorized Shelly execution transport is configured for this network scope.')
+    }
+    if (!this.lanDiscovery)
+      throw new ServiceUnavailableException('The authorized remote Shelly execution adapter is unavailable.')
 
     const command = this.registry.markDeviceCommandPending(device.id, {
       action, expectedValues: { on },
       ttlMs: virtualLabCommandAckTtlMs,
-      message: `Requesting ${action} through the explicitly authorized Virtual Lab switch route.`,
+      message: `Requesting ${action} through the resolved site-authorized Shelly route.`,
       actor: { type: 'user', id: 'portal-installer', name: 'Portal installer' },
     })
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 22_000)
     try {
       const result = await this.lanDiscovery.executeVirtualLabSwitchControl(
-        target.zone.id, target.ipAddress, target.physicalId, 0, on, controller.signal,
+        target.zone.id, target.ipAddress, target.physicalId, target.channel, on, controller.signal,
       )
       this.registry.markDeviceCommandPublished(device.id, command.id, { adapter: 'virtual-lab-http-rpc' })
       const observedAt = result.observedAt
@@ -267,13 +297,13 @@ export class DeviceControlService {
         this.registry.ingestDeviceTelemetry({
           id: device.id, deviceId: device.id, tenantId: site.tenantId, siteId: site.siteId,
           displayName: device.displayName, protocol: 'http', transport: 'http', driver: 'shelly-lan',
-          target: `http://${target.ipAddress}/rpc/Switch.GetStatus?id=0`, location: device.zoneName,
+          target: `http://${target.ipAddress}/rpc/Switch.GetStatus?id=${target.channel}`, location: device.zoneName,
           capabilities: device.capabilities.map(item => item.kind), values,
           state: { values, source, status: 'online', observedAt }, observedAt,
         })
         this.registry.recordObserverReachability(device.id, {
           status: 'reachable', checkedAt: observedAt!,
-          endpoint: `http://${target.ipAddress}/rpc/Switch.GetStatus?id=0`, targetIpAddress: target.ipAddress,
+          endpoint: `http://${target.ipAddress}/rpc/Switch.GetStatus?id=${target.channel}`, targetIpAddress: target.ipAddress,
           networkScopeId: target.zone.id,
           observer: { id: result.observer.id, host: result.observer.host, platform: 'docker', localScopes: [] },
         })
@@ -281,7 +311,7 @@ export class DeviceControlService {
         return {
           deviceId: device.id, action, status: confirmed ? 'success' : 'failed', adapter: 'virtual-lab',
           message: confirmed
-            ? `Switch:0 ${on ? 'ON' : 'OFF'} confirmed by a fresh Shelly status read.`
+            ? `Switch:${target.channel} ${on ? 'ON' : 'OFF'} confirmed by a fresh Shelly status read.`
             : `The Shelly reported ${result.output ? 'ON' : 'OFF'} after the ${on ? 'ON' : 'OFF'} request.`,
           affectedDeviceIds: [device.id], command: this.findDevice(device.id)?.state.command || command,
         }

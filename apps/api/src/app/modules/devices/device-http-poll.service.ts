@@ -663,7 +663,8 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     const component = String(device.metadata?.component || '')
     const channel = device.metadata?.channel
     if (device.kind !== 'physical' || device.trustStatus !== 'approved' ||
-        device.adapter.driver !== 'shelly-lan' || device.adapter.protocol !== 'http' ||
+        !['shelly-lan', 'shelly-discovered'].includes(device.adapter.driver) ||
+        !['http', 'mqtt'].includes(device.adapter.protocol) ||
         !device.adapter.configured || !/^shelly[a-z0-9._-]{1,114}$/i.test(physicalId) ||
         !/^switch:\d+$/.test(component) || !Number.isInteger(channel) ||
         component !== `switch:${channel}` || device.id !== `${physicalId}:${component}`) {
@@ -689,18 +690,22 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     onStage?.('enrollment_inventory_validated')
 
     onStage?.('saved_endpoint_observer_scope_validation')
-    const history = (await this.discovery.listIdentityEvidence(ownership)).filter(record =>
-      record.ownership?.tenantId === ownership.tenantId && record.ownership.siteId === ownership.siteId &&
-      record.device.vendor === 'Shelly' && record.device.id.toLowerCase() === physicalId.toLowerCase() &&
-      record.device.components?.some(item => item.component === component) &&
-      record.device.observations?.some(item =>
-        ['http_rpc', 'site_local_http_rpc'].includes(item.source) &&
+    const history = (await this.discovery.listIdentityEvidence(ownership)).filter(record => {
+      const observations = record.device.observations || []
+      const independentlyVerifiedAt = new Set(observations.filter(item => item.source === 'http_identity' &&
+        item.attribute === 'identity.verified' && item.value === true).map(item => item.observedAt))
+      const identityMatches = observations.some(item =>
+        ['http_identity', 'http_rpc', 'site_local_http_rpc'].includes(item.source) &&
         ['shelly.device_id', 'identity.device_id'].includes(item.attribute) &&
-        typeof item.value === 'string' && item.value.toLowerCase() === physicalId.toLowerCase()) &&
-      record.device.observations?.some(item =>
-        ['http_rpc', 'site_local_http_rpc'].includes(item.source) &&
-        item.attribute === 'shelly.component_status' && item.value === component &&
-        item.method === `Switch.GetStatus?id=${channel}`))
+        typeof item.value === 'string' && item.value.toLowerCase() === physicalId.toLowerCase() &&
+        (item.source !== 'http_identity' || independentlyVerifiedAt.has(item.observedAt)))
+      return record.ownership?.tenantId === ownership.tenantId && record.ownership.siteId === ownership.siteId &&
+        record.device.vendor === 'Shelly' && record.device.id.toLowerCase() === physicalId.toLowerCase() &&
+        record.device.components?.some(item => item.component === component) && identityMatches &&
+        observations.some(item => ['http_rpc', 'site_local_http_rpc'].includes(item.source) &&
+          item.attribute === 'shelly.component_status' && item.value === component &&
+          item.method === `Switch.GetStatus?id=${channel}`)
+    })
       .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt))
     const endpoints = [...new Map(history.map(record =>
       [`${record.device.networkZoneId}:${record.device.ipAddress}`, record])).values()]
@@ -710,24 +715,36 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         : `No saved site-owned identity and ${component} component-status evidence supports this installation.`)
     }
     const endpointRecord = endpoints[0]
-    const savedScope = String(device.metadata?.networkScope || '')
-    const savedScopeId = savedScope.slice(savedScope.lastIndexOf(':') + 1)
-    if (!savedScope || savedScopeId !== endpointRecord.device.networkZoneId) {
-      throw new ConflictException('The saved endpoint does not belong to the installation network scope.')
-    }
     const zone = this.lanDiscovery.getConfiguredZone(endpointRecord.device.networkZoneId)
     const ipAddress = endpointRecord.device.ipAddress
-    if (!zone || !['local', 'virtual-lab'].includes(zone.collectionSource || '') || isIP(ipAddress) !== 4) {
+    if (!zone || isIP(ipAddress) !== 4) {
       throw new ConflictException('The saved Shelly endpoint is not in a configured authorized execution scope.')
     }
+    const savedScope = String(device.metadata?.networkScope || '').trim()
+    const savedScopeMatches = savedScope === zone.id || savedScope === zone.cidr ||
+      savedScope.endsWith(`:${zone.id}`) ||
+      (!!zone.cidr && savedScope.endsWith(`:${zone.cidr}`))
+    if (!savedScopeMatches) {
+      throw new ConflictException('The saved endpoint does not belong to the installation network scope.')
+    }
+    // Existing Home zone configuration predates collectionSource and means
+    // API-local execution. Only an explicit Virtual Lab source is remote.
     const endpointInScope = zone.cidr
       ? ipInCidr(ipAddress, zone.cidr)
       : zone.seedIps.includes(ipAddress)
     if (!endpointInScope) {
       throw new ConflictException('The saved Shelly endpoint is outside the configured network scope.')
     }
+    const collectionSource = zone.collectionSource ?? 'local'
+    if (collectionSource === 'local') {
+      const localTarget = await this.resolveAuthorizedLocalShellyStatusTarget(device)
+      if (!localTarget || localTarget.ipAddress !== ipAddress || localTarget.zone.id !== zone.id) {
+        throw new ConflictException('The configured local observer cannot verify this Shelly endpoint in its authorized interface and scope.')
+      }
+    }
     onStage?.('saved_endpoint_observer_scope_validated')
-    return { device, inventory, physicalId, component, channel: channel as number, ipAddress, zone }
+    return { device, inventory, physicalId, component, channel: channel as number, ipAddress,
+      zone: { ...zone, collectionSource } }
   }
 
   /** Perform one operator-triggered, read-only status read for an enrolled Shelly. */
