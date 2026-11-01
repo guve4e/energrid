@@ -264,6 +264,28 @@ describe('site-scoped Shelly enrollment reconciliation', () => {
     expect(h.device.control).toBeUndefined();
   });
 
+  it('restores the verified switch capability on a legacy power-only component without authorizing control', async () => {
+    const h = setup();
+    h.device.capabilities = [{ kind: 'power', actions: ['read'] }];
+    h.device.supportedCapabilities = [{ kind: 'power', actions: ['read'] }];
+    await h.registry.onModuleInit();
+    expect(h.registry.getDevices(true).find(item => item.id === deviceId)?.control).toMatchObject({
+      status: 'read-only', binding: null,
+    });
+
+    await h.registry.reconcileShellyIdentityEvidence(evidence());
+    const reconciled = h.registry.getDevices(true).find(item => item.id === deviceId)!;
+    expect(reconciled.capabilities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'switch', actions: expect.arrayContaining(['turn_on', 'turn_off']) }),
+    ]));
+    expect(reconciled.supportedCapabilities.map(item => item.kind)).toEqual(expect.arrayContaining(['power', 'switch']));
+    expect(reconciled.control).toMatchObject({ status: 'needs-setup', binding: null });
+    expect(reconciled.assistantEnabled).toBe(false);
+    expect(h.record.observationAuthority).toBeUndefined();
+    expect(await h.registry.getShellyObservationApproval('tenant-demo', 'site-home', deviceId))
+      .toMatchObject({ approved: false, approvalStatus: 'missing' });
+  });
+
   it('keeps verified power as supported-only until explicit MQTT measurement approval, then enables read-only history capability', async () => {
     const h = setup();
     await h.registry.onModuleInit();

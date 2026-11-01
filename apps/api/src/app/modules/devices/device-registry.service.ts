@@ -805,14 +805,21 @@ export class DeviceRegistryService implements OnModuleInit {
     const hasVerifiedElectricalMeasurements = input.verifiedMeasurementFields.some(field =>
       ['power', 'energy_import_total', 'energy_export_total'].includes(field),
     );
+    const hasVerifiedSwitchComponent = component.startsWith('switch:');
     if (device.metadata?.siteLocalEvidenceScanId === input.evidenceScanId &&
         device.metadata?.identityEvidenceSource === 'verified_site_local_shelly_rpc' &&
         device.metadata?.componentEvidenceSource === 'verified_site_local_shelly_rpc' &&
+        (!hasVerifiedSwitchComponent || device.supportedCapabilities?.some(capability => capability.kind === 'switch')) &&
         (!hasVerifiedElectricalMeasurements || device.supportedCapabilities?.some(capability => capability.kind === 'power'))) return device;
     const previous = config;
     const supportedCapabilities = [...new Set([
       ...(config.supportedCapabilities || config.capabilities || []),
+      ...(hasVerifiedSwitchComponent ? ['switch' as const] : []),
       ...(hasVerifiedElectricalMeasurements ? ['power' as const] : []),
+    ])];
+    const capabilities = [...new Set([
+      ...(config.capabilities || []),
+      ...(hasVerifiedSwitchComponent ? ['switch' as const] : []),
     ])];
     const metadata = cleanMetadata({
       ...config.metadata,
@@ -837,7 +844,9 @@ export class DeviceRegistryService implements OnModuleInit {
     });
     this.liveApprovedDeviceConfigs.set(key, {
       ...config,
-      ...(hasVerifiedElectricalMeasurements ? { supportedCapabilities } : {}),
+      ...(hasVerifiedSwitchComponent || hasVerifiedElectricalMeasurements
+        ? { capabilities, supportedCapabilities }
+        : {}),
       metadata,
     });
     try {
