@@ -34,7 +34,7 @@ import {
   type LocalNetworkRuntimeReport,
 } from './adapters/outbound/network/local-network-runtime.adapter'
 import { EnergridHttpIdentityAdapter } from './adapters/outbound/network/energrid-http-identity.adapter'
-import { VirtualLabNetworkEvidenceAdapter, type VirtualLabEnergridHttpEvidence, type VirtualLabScanResult } from './adapters/outbound/network/virtual-lab-network-evidence.adapter'
+import { VirtualLabNetworkEvidenceAdapter, type VirtualLabEnergridHttpEvidence, type VirtualLabScanResult, type VirtualLabShellyControlResult } from './adapters/outbound/network/virtual-lab-network-evidence.adapter'
 
 const execFileAsync = promisify(execFile)
 const activeScanConcurrency = 24
@@ -564,6 +564,24 @@ export class DeviceLanDiscoveryService {
     return this.virtualLabEvidence.verifyShellyComponent(
       zone, targetIp, physicalId, expectedComponentKeys, signal,
     )
+  }
+
+  executeVirtualLabSwitchControl(
+    scopeId: string,
+    targetIp: string,
+    physicalId: string,
+    channel: number,
+    on: boolean,
+    signal?: AbortSignal,
+  ): Promise<VirtualLabShellyControlResult> {
+    if (process.env.HOME_VIRTUAL_LAB_ENABLED !== 'true') {
+      throw new Error('Virtual Lab switch control is disabled.')
+    }
+    const zone = this.getConfiguredZone(scopeId)
+    if (!zone || zone.collectionSource !== 'virtual-lab') {
+      throw new Error('Switch control requires the configured Virtual Lab scope.')
+    }
+    return this.virtualLabEvidence.setShellySwitch(zone, targetIp, physicalId, channel, on, signal)
   }
 
   getNmapCapability(): Promise<NmapCapability & { enabled: boolean }> {

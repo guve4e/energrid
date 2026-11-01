@@ -18,6 +18,8 @@ const HTTP_READ_TIMEOUT_MS = 10_000
 const HTTP_READ_MAX_OUTPUT_BYTES = 32 * 1024
 const SHELLY_VERIFY_TIMEOUT_MS = 15_000
 const SHELLY_VERIFY_MAX_OUTPUT_BYTES = 128 * 1024
+const SHELLY_CONTROL_TIMEOUT_MS = 18_000
+const SHELLY_CONTROL_MAX_OUTPUT_BYTES = 32 * 1024
 
 interface CommandOptions { timeout: number; maxBuffer: number; signal?: AbortSignal }
 interface CommandResult { stdout: string; stderr: string }
@@ -55,6 +57,14 @@ export interface VirtualLabShellyRpcEvidence {
   identity: Record<string, unknown>
   componentKeys: string[]
   componentStatuses: Array<{ componentKey: string; body: Record<string, unknown>; observedAt: string }>
+  observer: { id: string; host: string; interfaceName: string }
+}
+
+export interface VirtualLabShellyControlResult {
+  writeAttempted: boolean
+  acknowledged: boolean
+  output: boolean | null
+  observedAt: string | null
   observer: { id: string; host: string; interfaceName: string }
 }
 
@@ -145,6 +155,48 @@ export class VirtualLabNetworkEvidenceAdapter {
       componentStatuses: payload.componentStatuses,
       observer: { id: `virtual-lab-docker/${host}/${zone.interfaceName || 'eth0'}`, host,
         interfaceName: zone.interfaceName || 'eth0' },
+    }
+  }
+
+  /** Fixed, one-device Switch.Set boundary. All identity, scope and permission checks happen server-side first. */
+  async setShellySwitch(
+    zone: NetworkDiscoveryZone,
+    targetIp: string,
+    expectedPhysicalId: string,
+    channel: number,
+    on: boolean,
+    signal?: AbortSignal,
+  ): Promise<VirtualLabShellyControlResult> {
+    const targets = authorizedVirtualLabScanTargets(zone)
+    if (!targets.includes(targetIp) || !/^shelly[a-z0-9._-]{1,114}$/i.test(expectedPhysicalId) ||
+        channel !== 0 || typeof on !== 'boolean') {
+      throw shellyAdapterError('Virtual Lab switch command was outside the authorized switch:0 route.', 'VIRTUAL_LAB_CONTROL_SCOPE_REJECTED', undefined)
+    }
+    const context = process.env[DOCKER_CONTEXT_ENV]
+    const expectedHost = process.env.HOME_VIRTUAL_LAB_DOCKER_HOST
+    if (context !== DOCKER_CONTEXT || !expectedHost || !isIpv4(expectedHost)) {
+      throw shellyAdapterError('Virtual Lab control requires the configured isolated Docker observer.', 'VIRTUAL_LAB_CONTROL_OBSERVER_UNAVAILABLE', undefined)
+    }
+    const host = await this.remoteDockerHost(context, signal)
+    if (host !== expectedHost) throw shellyAdapterError('Virtual Lab Docker context host does not match the configured observer.', 'VIRTUAL_LAB_CONTROL_OBSERVER_MISMATCH', undefined)
+    await this.assertInternalNetwork(context, signal)
+    try {
+      const result = await this.runFixedShellyControl(context, targetIp, expectedPhysicalId, targets, on, signal)
+      if (!validShellyControlPayload(result, expectedPhysicalId)) {
+        throw shellyAdapterError('Virtual Lab returned invalid identity or command confirmation.', 'VIRTUAL_LAB_CONTROL_INVALID_OUTPUT', undefined)
+      }
+      return {
+        writeAttempted: result.writeAttempted,
+        acknowledged: result.acknowledged,
+        output: result.status?.output ?? null,
+        observedAt: result.observedAt,
+        observer: { id: `virtual-lab-docker/${host}/${zone.interfaceName || 'eth0'}`, host,
+          interfaceName: zone.interfaceName || 'eth0' },
+      }
+    } catch (error) {
+      if (signal?.aborted) throw shellyAdapterError('Virtual Lab switch command was cancelled.', 'VIRTUAL_LAB_CONTROL_CANCELLED', error)
+      if (isTimeout(error)) throw shellyAdapterError('Virtual Lab switch command exceeded its 18-second deadline.', 'VIRTUAL_LAB_CONTROL_TIMEOUT', error)
+      throw error
     }
   }
 
@@ -340,6 +392,42 @@ export class VirtualLabNetworkEvidenceAdapter {
     }
   }
 
+  private async runFixedShellyControl(
+    context: string,
+    targetIp: string,
+    expectedPhysicalId: string,
+    targets: string[],
+    on: boolean,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    const args = [
+      '--context', context, 'run', '--rm', '--pull=never',
+      '--name', `energrid-device-lab-control-${randomUUID()}`,
+      '--network', DOCKER_NETWORK,
+      '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--read-only',
+      '--user', '65534:65534',
+      '--env', `M8_TARGET_IP=${targetIp}`,
+      '--env', `M8_EXPECTED_PHYSICAL_ID=${expectedPhysicalId}`,
+      '--env', `M8_ALLOWED_TARGETS_JSON=${JSON.stringify(targets)}`,
+      '--env', `M8_SWITCH_ON=${String(on)}`,
+      '--entrypoint', 'node', SCANNER_IMAGE,
+      '-e', FIXED_SHELLY_CONTROL_SCRIPT,
+    ]
+    const result = await this.run(args, {
+      timeout: SHELLY_CONTROL_TIMEOUT_MS,
+      maxBuffer: SHELLY_CONTROL_MAX_OUTPUT_BYTES,
+      ...(signal ? { signal } : {}),
+    })
+    if (Buffer.byteLength(result.stdout) > SHELLY_CONTROL_MAX_OUTPUT_BYTES) {
+      throw new Error('Virtual Lab command evidence exceeded its output limit.')
+    }
+    try {
+      return JSON.parse(String(result.stdout || '')) as unknown
+    } catch {
+      throw new Error('Virtual Lab command returned malformed confirmation.')
+    }
+  }
+
   private logScanFailure(
     category: 'ssh_docker_failure' | 'runner_failure' | 'invalid_output',
     stage: string,
@@ -475,6 +563,88 @@ async function get(path, maxBytes = 16384) {
   process.stdout.write(JSON.stringify({ identity, componentKeys: keys, componentStatuses: statuses }));
 })().catch(error => { process.stderr.write(error.name || 'read_failed'); process.exitCode = 1; });
 `;
+
+// The only write exposed by this observer path is Switch.Set for switch:0.
+// The address, physical ID and requested state are validated server inputs;
+// no RPC method, component, image, network or command text comes from a client.
+const FIXED_SHELLY_CONTROL_SCRIPT = String.raw`
+const allowed = JSON.parse(process.env.M8_ALLOWED_TARGETS_JSON || 'null');
+const ip = process.env.M8_TARGET_IP || '';
+const expectedId = (process.env.M8_EXPECTED_PHYSICAL_ID || '').toLowerCase();
+const onText = process.env.M8_SWITCH_ON;
+if (!Array.isArray(allowed) || allowed.length !== ${VIRTUAL_LAB_MAX_HOSTS} || !allowed.includes(ip) ||
+    !/^shelly[a-z0-9._-]{1,114}$/.test(expectedId) || !['true', 'false'].includes(onText)) throw Error('target rejected');
+async function rpc(method, params = {}) {
+  const response = await fetch('http://' + ip + '/rpc/' + method, {
+    method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(1800),
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
+    body: JSON.stringify(params),
+  });
+  if (response.status >= 300 && response.status < 400) throw Error('redirect rejected');
+  if (!response.ok) throw Error('RPC request failed');
+  const reader = response.body.getReader(); const chunks = []; let size = 0;
+  while (true) {
+    const item = await reader.read(); if (item.done) break;
+    size += item.value.byteLength; if (size > 8192) { await reader.cancel(); throw Error('response too large'); }
+    chunks.push(Buffer.from(item.value));
+  }
+  const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  if (!value || typeof value !== 'object' || Array.isArray(value) || 'error' in value || 'code' in value) throw Error('invalid RPC response');
+  return value;
+}
+(async () => {
+  const identity = await rpc('Shelly.GetDeviceInfo');
+  if (typeof identity.id !== 'string' || identity.id.toLowerCase() !== expectedId || typeof identity.gen !== 'number' || identity.gen < 2)
+    throw Error('identity mismatch');
+  const page = await rpc('Shelly.GetComponents');
+  if (!Array.isArray(page.components) || !page.components.some(item => item && item.key === 'switch:0'))
+    throw Error('component mismatch');
+  const before = await rpc('Switch.GetStatus', { id: 0 });
+  if (before.id !== 0 || typeof before.output !== 'boolean') throw Error('invalid switch status');
+  let acknowledged = false; let writeAttempted = true; let status = null; let observedAt = null;
+  let ack = null;
+  try {
+    ack = await rpc('Switch.Set', { id: 0, on: onText === 'true' });
+    acknowledged = typeof ack.was_on === 'boolean';
+  } catch (_) {}
+  let identityAfter = null;
+  try {
+    identityAfter = await rpc('Shelly.GetDeviceInfo');
+    if (typeof identityAfter.id !== 'string' || identityAfter.id.toLowerCase() !== expectedId) identityAfter = null;
+  } catch (_) {}
+  if (acknowledged && identityAfter) {
+    try {
+      const after = await rpc('Switch.GetStatus', { id: 0 });
+      if (after.id === 0 && typeof after.output === 'boolean') { status = after; observedAt = new Date().toISOString(); }
+    } catch (_) {}
+  }
+  process.stdout.write(JSON.stringify({ identity, identityAfter, componentKey: 'switch:0', writeAttempted,
+    acknowledged, status, observedAt }));
+})().catch(error => { process.stderr.write(error.name || 'control_failed'); process.exitCode = 1; });
+`;
+
+function validShellyControlPayload(
+  value: unknown,
+  expectedPhysicalId: string,
+): value is { identity: Record<string, unknown>; identityAfter: Record<string, unknown> | null; componentKey: 'switch:0'; writeAttempted: boolean; acknowledged: boolean; status: { id: 0; output: boolean } | null; observedAt: string | null } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const result = value as Record<string, unknown>
+  const validIdentity = (candidate: unknown) => !!candidate && typeof candidate === 'object' && !Array.isArray(candidate) &&
+    typeof (candidate as Record<string, unknown>).id === 'string' &&
+    ((candidate as Record<string, unknown>).id as string).toLowerCase() === expectedPhysicalId.toLowerCase() &&
+    typeof (candidate as Record<string, unknown>).gen === 'number' && ((candidate as Record<string, unknown>).gen as number) >= 2
+  const status = result.status
+  const validStatus = status === null || (!!status && typeof status === 'object' && !Array.isArray(status) &&
+    (status as Record<string, unknown>).id === 0 && typeof (status as Record<string, unknown>).output === 'boolean')
+  const validTimestamp = result.observedAt === null || (typeof result.observedAt === 'string' && Number.isFinite(Date.parse(result.observedAt)))
+  const confirmedReadback = result.acknowledged === true && validIdentity(result.identityAfter) && validStatus && status !== null &&
+    typeof result.observedAt === 'string' && Number.isFinite(Date.parse(result.observedAt))
+  const withoutReadback = status === null && result.observedAt === null
+  return validIdentity(result.identity) &&
+    (result.identityAfter === null || validIdentity(result.identityAfter)) && result.componentKey === 'switch:0' &&
+    result.writeAttempted === true && typeof result.acknowledged === 'boolean' && validStatus && validTimestamp &&
+    (confirmedReadback || withoutReadback)
+}
 
 function validShellyRpcPayload(
   value: unknown,

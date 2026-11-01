@@ -371,4 +371,62 @@ describe('VirtualLabNetworkEvidenceAdapter', () => {
       .mockResolvedValueOnce({ stdout: JSON.stringify(payload({ networkDevices: [badDevice, device('172.30.250.11', 'shellyplus1-00c0de000001', 'http')] })), stderr: '' })
     await expect(new VirtualLabNetworkEvidenceAdapter(run).scan(zone)).rejects.toThrow('without matching protocol evidence')
   })
+
+  it.each([true, false])('confirms only the requested switch:0 output=%s using fresh readback', async (on) => {
+    const calls: Array<{ args: string[]; options: { timeout: number; maxBuffer: number } }> = []
+    const observedAt = new Date().toISOString()
+    const run = jest.fn(async (args: string[], options: { timeout: number; maxBuffer: number }) => {
+      calls.push({ args, options })
+      const stdout = args[0] === 'context' ? 'ssh://lab@192.168.1.138\n'
+        : args.includes('network') ? 'energrid-device-lab-vlan bridge true\n'
+          : JSON.stringify({
+            identity: { id: 'shellyplus1-00c0de000001', gen: 2 },
+            identityAfter: { id: 'shellyplus1-00c0de000001', gen: 2 },
+            componentKey: 'switch:0', writeAttempted: true, acknowledged: true,
+            status: { id: 0, output: on }, observedAt,
+          })
+      return { stdout, stderr: '' }
+    })
+    const result = await new VirtualLabNetworkEvidenceAdapter(run).setShellySwitch(
+      zone, '172.30.250.11', 'shellyplus1-00c0de000001', 0, on,
+    )
+    expect(result).toMatchObject({ writeAttempted: true, acknowledged: true, output: on, observedAt,
+      observer: { id: 'virtual-lab-docker/192.168.1.138/eth0' } })
+    expect(calls).toHaveLength(3)
+    expect(calls[2].options.timeout).toBe(18_000)
+    expect(calls[2].args).toContain('M8_TARGET_IP=172.30.250.11')
+    expect(calls[2].args).toContain('M8_EXPECTED_PHYSICAL_ID=shellyplus1-00c0de000001')
+    expect(calls[2].args).toContain(`M8_SWITCH_ON=${String(on)}`)
+    expect(calls[2].args).toContain('--read-only')
+    const script = calls[2].args[calls[2].args.indexOf('-e') + 1]
+    expect(script).toContain("rpc('Switch.Set', { id: 0, on: onText === 'true' })")
+    expect(script).toContain("rpc('Switch.GetStatus', { id: 0 })")
+    expect(script).not.toContain('Switch.Set?id=1')
+    expect(script).not.toContain('Shelly.SetConfig')
+  })
+
+  it('rejects a remote command result with mismatched identity before accepting state', async () => {
+    const run = jest.fn()
+      .mockResolvedValueOnce({ stdout: 'ssh://lab@192.168.1.138\n', stderr: '' })
+      .mockResolvedValueOnce({ stdout: 'energrid-device-lab-vlan bridge true\n', stderr: '' })
+      .mockResolvedValueOnce({ stdout: JSON.stringify({
+        identity: { id: 'shellyplus1-00c0de000002', gen: 2 },
+        identityAfter: { id: 'shellyplus1-00c0de000002', gen: 2 },
+        componentKey: 'switch:0', writeAttempted: true, acknowledged: true,
+        status: { id: 0, output: true }, observedAt: new Date().toISOString(),
+      }), stderr: '' })
+    await expect(new VirtualLabNetworkEvidenceAdapter(run).setShellySwitch(
+      zone, '172.30.250.11', 'shellyplus1-00c0de000001', 0, true,
+    )).rejects.toThrow('invalid identity or command confirmation')
+  })
+
+  it('rejects unconfigured endpoints and nonzero channels before Docker execution', async () => {
+    const run = jest.fn()
+    const adapter = new VirtualLabNetworkEvidenceAdapter(run)
+    await expect(adapter.setShellySwitch(zone, '172.30.250.16', 'shellyplus1-00c0de000001', 0, true))
+      .rejects.toThrow('outside the authorized switch:0 route')
+    await expect(adapter.setShellySwitch(zone, '172.30.250.11', 'shellyplus1-00c0de000001', 1, true))
+      .rejects.toThrow('outside the authorized switch:0 route')
+    expect(run).not.toHaveBeenCalled()
+  })
 })

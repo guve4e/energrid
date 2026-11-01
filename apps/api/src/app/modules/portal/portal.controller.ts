@@ -1830,9 +1830,18 @@ export class PortalController {
     @Req() request: DeviceProxyRequest,
   ) {
     assertPortalAdministrator(request)
+    const binding = body?.binding ?? null
+    if (binding && typeof binding === 'object' &&
+        (binding as Record<string, unknown>)['kind'] === 'shelly-virtual-lab') {
+      if (!this.deviceHttpPoll)
+        throw new ServiceUnavailableException('Virtual Lab control route validation is unavailable.')
+      await this.deviceHttpPoll.resolveVirtualLabShellyControlTarget(
+        deviceId, this.discoveryOwner().ownership,
+      )
+    }
     const previousBinding = this.deviceRegistry.getDevices()
       .find((item) => item.id === deviceId)?.control?.binding || null
-    const device = this.deviceControl.configure(deviceId, body?.binding ?? null)
+    const device = this.deviceControl.configure(deviceId, binding)
     try {
       await this.deviceRegistry.persistInstallation(device)
     } catch (error) {

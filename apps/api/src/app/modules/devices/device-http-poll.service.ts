@@ -174,6 +174,78 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     return this.lanDiscovery.getConfiguredZone(scopeId)?.collectionSource === 'virtual-lab'
   }
 
+  /** Resolve a command target only from the enrolled installation and saved site-owned RPC evidence. */
+  async resolveVirtualLabShellyControlTarget(
+    deviceId: string,
+    ownership: { tenantId: string; siteId: string },
+    onStage?: (stage: 'enrollment_and_inventory_validation' | 'enrollment_inventory_validated' | 'saved_endpoint_observer_scope_validation' | 'saved_endpoint_observer_scope_validated') => void,
+  ) {
+    onStage?.('enrollment_and_inventory_validation')
+    await this.registry.ensureInstallationsLoaded()
+    const matches = this.registry.getDevices(true).filter(device => device.id === deviceId)
+    const device = matches.find(item => item.tenantId === ownership.tenantId && item.siteId === ownership.siteId)
+    if (!device) throw new NotFoundException('No Shelly installation exists in the selected site.')
+    if (matches.some(item => item.tenantId !== ownership.tenantId || item.siteId !== ownership.siteId)) {
+      throw new ConflictException('The Shelly identity is also registered outside the selected site.')
+    }
+    const physicalId = String(device.metadata?.physicalId || '')
+    const component = String(device.metadata?.component || '')
+    if (device.kind !== 'physical' || device.trustStatus !== 'approved' ||
+        device.adapter.driver !== 'shelly-lan' || device.adapter.protocol !== 'http' ||
+        !device.adapter.configured || !/^shelly[a-z0-9._-]{1,114}$/i.test(physicalId) ||
+        component !== 'switch:0' || device.id !== `${physicalId}:${component}`) {
+      throw new ConflictException('Only an approved, configured, enrolled Shelly switch:0 installation is supported.')
+    }
+    if (!this.physicalInventory || !this.discovery || !this.lanDiscovery) {
+      throw new BadGatewayException('Site-owned Shelly identity and endpoint evidence is unavailable.')
+    }
+    const inventory = await this.physicalInventory.forLogicalDevice(ownership, deviceId)
+    if (!inventory || inventory.scope.tenantId !== ownership.tenantId || inventory.scope.siteId !== ownership.siteId ||
+        !hasPhysicalDeviceIdentityClaim(inventory, 'mqtt:shelly-protocol-id', physicalId) ||
+        !inventory.components.some(item => item.key === component) ||
+        !inventory.assignments.some(item => item.deviceId === deviceId &&
+          item.physicalDeviceId === inventory.physicalDeviceId && item.componentKey === component) ||
+        (device.metadata?.physicalInventoryId !== undefined &&
+          device.metadata.physicalInventoryId !== inventory.physicalDeviceId)) {
+      throw new ConflictException('The switch has no exact same-site physical inventory assignment.')
+    }
+    const decision = await this.registry.getShellyReconciliationTargetDecision(
+      ownership.tenantId, ownership.siteId, deviceId, physicalId, component, inventory.physicalDeviceId,
+    )
+    if (!decision.matched) throw new ConflictException(`Shelly route rejected (${decision.reasonCode}).`)
+    onStage?.('enrollment_inventory_validated')
+
+    onStage?.('saved_endpoint_observer_scope_validation')
+    const history = (await this.discovery.listIdentityEvidence(ownership)).filter(record =>
+      record.ownership?.tenantId === ownership.tenantId && record.ownership.siteId === ownership.siteId &&
+      record.device.vendor === 'Shelly' && record.device.id.toLowerCase() === physicalId.toLowerCase() &&
+      record.device.components?.some(item => item.component === component) &&
+      record.device.observations?.some(item =>
+        ['http_rpc', 'site_local_http_rpc'].includes(item.source) &&
+        ['shelly.device_id', 'identity.device_id'].includes(item.attribute) &&
+        typeof item.value === 'string' && item.value.toLowerCase() === physicalId.toLowerCase()) &&
+      record.device.observations?.some(item =>
+        ['http_rpc', 'site_local_http_rpc'].includes(item.source) &&
+        item.attribute === 'shelly.component_status' && item.value === component &&
+        item.method === 'Switch.GetStatus?id=0'))
+      .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt))
+    const endpoints = [...new Map(history.map(record =>
+      [`${record.device.networkZoneId}:${record.device.ipAddress}`, record])).values()]
+    if (endpoints.length !== 1) {
+      throw new ConflictException(endpoints.length
+        ? 'Saved site-owned Shelly evidence has conflicting endpoints; no command was sent.'
+        : 'No saved site-owned identity and switch:0 evidence supports this installation.')
+    }
+    const endpointRecord = endpoints[0]
+    const zone = this.lanDiscovery.getConfiguredZone(endpointRecord.device.networkZoneId)
+    const ipAddress = endpointRecord.device.ipAddress
+    if (!zone || zone.collectionSource !== 'virtual-lab' || isIP(ipAddress) !== 4) {
+      throw new ConflictException('The saved Shelly endpoint is not in the configured authorized Virtual Lab scope.')
+    }
+    onStage?.('saved_endpoint_observer_scope_validated')
+    return { device, inventory, physicalId, component, ipAddress, zone }
+  }
+
   /** Perform one operator-triggered, read-only status read for an enrolled Shelly. */
   async observeShellySwitchStatusOnce(
     deviceId: string,
@@ -187,79 +259,24 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     this.logShellyObservation(correlationId, stage, 'completed', startedAt, deviceId, ownership)
     try {
       stage = 'enrollment_and_inventory_validation'
-      await this.registry.ensureInstallationsLoaded()
-      const matches = this.registry.getDevices(true).filter(device => device.id === deviceId)
-      const device = matches.find(item => item.tenantId === ownership.tenantId && item.siteId === ownership.siteId)
-      if (!device) throw new NotFoundException('No Shelly installation exists in the selected site.')
-      if (matches.some(item => item.tenantId !== ownership.tenantId || item.siteId !== ownership.siteId)) {
-        throw new ConflictException('The Shelly identity is also registered outside the selected site.')
-      }
-      const physicalId = String(device.metadata?.physicalId || '')
-      const component = String(device.metadata?.component || '')
-      if (device.kind !== 'physical' || device.trustStatus !== 'approved' ||
-          device.adapter.driver !== 'shelly-lan' || device.adapter.protocol !== 'http' ||
-          !device.adapter.configured || !/^shelly[a-z0-9._-]{1,114}$/i.test(physicalId) ||
-          component !== 'switch:0' || device.id !== `${physicalId}:${component}`) {
-        throw new ConflictException('Only an approved, configured, enrolled Shelly switch:0 installation can be observed.')
-      }
-      if (!this.physicalInventory || !this.discovery || !this.lanDiscovery) {
-        throw new BadGatewayException('Site-owned Shelly identity and endpoint evidence is unavailable.')
-      }
-      const inventory = await this.physicalInventory.forLogicalDevice(ownership, deviceId)
-      if (!inventory || inventory.scope.tenantId !== ownership.tenantId || inventory.scope.siteId !== ownership.siteId ||
-          !hasPhysicalDeviceIdentityClaim(inventory, 'mqtt:shelly-protocol-id', physicalId) ||
-          !inventory.components.some(item => item.key === component) ||
-          !inventory.assignments.some(item => item.deviceId === deviceId &&
-            item.physicalDeviceId === inventory.physicalDeviceId && item.componentKey === component) ||
-          (device.metadata?.physicalInventoryId !== undefined &&
-            device.metadata.physicalInventoryId !== inventory.physicalDeviceId)) {
-        throw new ConflictException('The enrolled switch has no exact same-site physical inventory assignment.')
-      }
-      const decision = await this.registry.getShellyReconciliationTargetDecision(
-        ownership.tenantId, ownership.siteId, deviceId, physicalId, component, inventory.physicalDeviceId,
-      )
-      if (!decision.matched) throw new ConflictException(`Shelly status observation rejected (${decision.reasonCode}).`)
-      stage = 'enrollment_inventory_validated'
-      this.logShellyObservation(correlationId, stage, 'completed', startedAt, deviceId, ownership)
+      const target = await this.resolveVirtualLabShellyControlTarget(deviceId, ownership, nextStage => {
+        stage = nextStage
+        if (nextStage === 'enrollment_inventory_validated' || nextStage === 'saved_endpoint_observer_scope_validated')
+          this.logShellyObservation(correlationId, nextStage, 'completed', startedAt, deviceId, ownership, scopeId ? { scopeId } : {})
+      })
+      const { device, inventory, physicalId, component, ipAddress, zone } = target
+      const lanDiscovery = this.lanDiscovery
+      if (!lanDiscovery) throw new BadGatewayException('The configured Lab observer is unavailable.')
 
-      stage = 'saved_endpoint_observer_scope_validation'
-      const history = (await this.discovery.listIdentityEvidence(ownership)).filter(record =>
-        record.ownership?.tenantId === ownership.tenantId && record.ownership.siteId === ownership.siteId &&
-        record.device.vendor === 'Shelly' && record.device.id.toLowerCase() === physicalId.toLowerCase() &&
-        record.device.components?.some(item => item.component === component) &&
-        record.device.observations?.some(item =>
-          ['http_rpc', 'site_local_http_rpc'].includes(item.source) &&
-          ['shelly.device_id', 'identity.device_id'].includes(item.attribute) &&
-          typeof item.value === 'string' && item.value.toLowerCase() === physicalId.toLowerCase()) &&
-        record.device.observations?.some(item =>
-          ['http_rpc', 'site_local_http_rpc'].includes(item.source) &&
-          item.attribute === 'shelly.component_status' && item.value === component &&
-          item.method === 'Switch.GetStatus?id=0'))
-        .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt))
-      const endpoints = [...new Map(history.map(record =>
-        [`${record.device.networkZoneId}:${record.device.ipAddress}`, record])).values()]
-      if (endpoints.length !== 1) {
-        throw new ConflictException(endpoints.length
-          ? 'Saved site-owned Shelly evidence has conflicting endpoints; no status was requested.'
-          : 'No saved site-owned identity and switch:0 evidence supports this installation.')
-      }
-      const endpointRecord = endpoints[0]
-      const zoneId = endpointRecord.device.networkZoneId
+      const zoneId = zone.id
       scopeId = zoneId
-      const zone = this.lanDiscovery.getConfiguredZone(zoneId)
-      const ipAddress = endpointRecord.device.ipAddress
-      if (!zone || zone.collectionSource !== 'virtual-lab' || isIP(ipAddress) !== 4) {
-        throw new ConflictException('The saved Shelly endpoint is not in the configured authorized Virtual Lab scope.')
-      }
-      stage = 'saved_endpoint_observer_scope_validated'
-      this.logShellyObservation(correlationId, stage, 'completed', startedAt, deviceId, ownership, { scopeId })
 
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), 18_000)
       try {
         stage = 'remote_execution'
         this.logShellyObservation(correlationId, 'remote_execution_started', 'started', startedAt, deviceId, ownership, { scopeId })
-        const evidence = await this.lanDiscovery.readVirtualLabShellyStatusEvidence(
+        const evidence = await lanDiscovery.readVirtualLabShellyStatusEvidence(
           zoneId, ipAddress, physicalId, inventory.components.map(item => item.key), controller.signal,
         )
         observerId = evidence.observer.id

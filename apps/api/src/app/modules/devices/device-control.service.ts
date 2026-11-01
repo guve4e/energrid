@@ -1,9 +1,12 @@
 import {
   BadRequestException,
+  ConflictException,
+  ServiceUnavailableException,
   Injectable,
   ForbiddenException,
   NotFoundException,
   Inject,
+  Optional,
 } from '@nestjs/common';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -24,14 +27,17 @@ import type {
 } from './device-registry.types';
 import { DEVICE_ENROLLMENT_SERVICE } from './enrollment/device-enrollment.module';
 import type { DeviceEnrollmentService } from './enrollment/device-enrollment.service';
+import { DeviceHttpPollService } from './device-http-poll.service';
+import { DeviceLanDiscoveryService } from './device-lan-discovery.service';
 
 const execFileAsync = promisify(execFile);
+const virtualLabCommandAckTtlMs = 25_000;
 
 export interface DeviceActionResult {
   deviceId: string;
   action: DeviceCapabilityAction;
   status: 'success' | 'pending' | 'failed';
-  adapter: 'mqtt' | 'http' | 'simulated' | 'none';
+  adapter: 'mqtt' | 'http' | 'virtual-lab' | 'simulated' | 'none';
   message: string;
   affectedDeviceIds: string[];
   command?: RegisteredDevice['state']['command'];
@@ -39,12 +45,16 @@ export interface DeviceActionResult {
 
 @Injectable()
 export class DeviceControlService {
+  private readonly activeVirtualLabCommands = new Set<string>();
+
   private readonly http = new ShellyHttpControl();
 
   constructor(
     private readonly registry: DeviceRegistryService,
     @Inject(DEVICE_ENROLLMENT_SERVICE)
     private readonly enrollment: DeviceEnrollmentService,
+    @Optional() private readonly httpPoll?: DeviceHttpPollService,
+    @Optional() private readonly lanDiscovery?: DeviceLanDiscoveryService,
   ) {}
 
   configure(deviceId: string, value: unknown): RegisteredDevice {
@@ -202,9 +212,98 @@ export class DeviceControlService {
     }
 
     const binding = device.control!.binding!;
+    if (binding.kind === 'shelly-virtual-lab') {
+      if (this.activeVirtualLabCommands.has(device.id)) {
+        throw new ConflictException('A switch command is already running for this Virtual Lab device; wait for its result before retrying.');
+      }
+      this.activeVirtualLabCommands.add(device.id);
+      try {
+        return await this.executeVirtualLabSwitch(device, on, action, binding);
+      } finally {
+        this.activeVirtualLabCommands.delete(device.id);
+      }
+    }
     if (binding.kind === 'generic-mqtt')
       return this.executeGenericMqttSwitch(device, on, action, binding.topic);
     return this.executeShellyRpc(device, on, action, binding);
+  }
+
+  private async executeVirtualLabSwitch(
+    device: RegisteredDevice,
+    on: boolean,
+    action: DeviceCapabilityAction,
+    binding: Extract<DeviceControlBinding, { kind: 'shelly-virtual-lab' }>,
+  ): Promise<DeviceActionResult> {
+    if (!this.httpPoll || !this.lanDiscovery)
+      throw new ServiceUnavailableException('Authorized Virtual Lab control is unavailable.')
+    const site = configuredPortalSite()
+    const target = await this.httpPoll.resolveVirtualLabShellyControlTarget(device.id, site)
+    // The resolver has already matched the authoritative inventory assignment
+    // and rejects conflicting metadata when present. The Portal device projection
+    // may omit physicalInventoryId, so do not require this derived copy again.
+    if (target.physicalId !== binding.physicalId || target.component !== 'switch:0' || binding.channel !== 0) {
+      throw new ForbiddenException('The configured Virtual Lab route no longer matches the enrolled physical assignment.')
+    }
+
+    const command = this.registry.markDeviceCommandPending(device.id, {
+      action, expectedValues: { on },
+      ttlMs: virtualLabCommandAckTtlMs,
+      message: `Requesting ${action} through the explicitly authorized Virtual Lab switch route.`,
+      actor: { type: 'user', id: 'portal-installer', name: 'Portal installer' },
+    })
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 22_000)
+    try {
+      const result = await this.lanDiscovery.executeVirtualLabSwitchControl(
+        target.zone.id, target.ipAddress, target.physicalId, 0, on, controller.signal,
+      )
+      this.registry.markDeviceCommandPublished(device.id, command.id, { adapter: 'virtual-lab-http-rpc' })
+      const observedAt = result.observedAt
+      const observedTime = observedAt ? Date.parse(observedAt) : Number.NaN
+      const fresh = Number.isFinite(observedTime) && observedTime <= Date.now() + 60_000 && Date.now() - observedTime <= 15 * 60_000
+      if (result.acknowledged && typeof result.output === 'boolean' && fresh) {
+        const values = { on: result.output }
+        const source = `site-local-http-rpc:${result.observer.id}`
+        this.registry.ingestDeviceTelemetry({
+          id: device.id, deviceId: device.id, tenantId: site.tenantId, siteId: site.siteId,
+          displayName: device.displayName, protocol: 'http', transport: 'http', driver: 'shelly-lan',
+          target: `http://${target.ipAddress}/rpc/Switch.GetStatus?id=0`, location: device.zoneName,
+          capabilities: device.capabilities.map(item => item.kind), values,
+          state: { values, source, status: 'online', observedAt }, observedAt,
+        })
+        this.registry.recordObserverReachability(device.id, {
+          status: 'reachable', checkedAt: observedAt!,
+          endpoint: `http://${target.ipAddress}/rpc/Switch.GetStatus?id=0`, targetIpAddress: target.ipAddress,
+          networkScopeId: target.zone.id,
+          observer: { id: result.observer.id, host: result.observer.host, platform: 'docker', localScopes: [] },
+        })
+        const confirmed = result.output === on
+        return {
+          deviceId: device.id, action, status: confirmed ? 'success' : 'failed', adapter: 'virtual-lab',
+          message: confirmed
+            ? `Switch:0 ${on ? 'ON' : 'OFF'} confirmed by a fresh Shelly status read.`
+            : `The Shelly reported ${result.output ? 'ON' : 'OFF'} after the ${on ? 'ON' : 'OFF'} request.`,
+          affectedDeviceIds: [device.id], command: this.findDevice(device.id)?.state.command || command,
+        }
+      }
+      return {
+        deviceId: device.id, action, status: 'pending', adapter: 'virtual-lab',
+        message: result.acknowledged
+          ? 'The command was acknowledged, but a fresh Shelly state read was unavailable. Check the displayed state before retrying.'
+          : 'The remote command outcome is unconfirmed. Check the displayed state before retrying.',
+        affectedDeviceIds: [device.id], command: this.findDevice(device.id)?.state.command || command,
+      }
+    } catch {
+      // A Docker/SSH timeout can happen after Switch.Set reached the device.
+      // Keep the result pending and never claim failure or success without read-back.
+      return {
+        deviceId: device.id, action, status: 'pending', adapter: 'virtual-lab',
+        message: 'The Virtual Lab result could not be confirmed. Check the Shelly state before retrying.',
+        affectedDeviceIds: [device.id], command: this.findDevice(device.id)?.state.command || command,
+      }
+    } finally {
+      clearTimeout(timeout)
+    }
   }
 
   private async executeMemberSwitches(

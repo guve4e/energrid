@@ -21,7 +21,7 @@ const props = defineProps<{
   httpIdentityVerified?: boolean;
 }>();
 const emit = defineEmits<{ saved: []; 'find-address': [] }>();
-const mode = ref<'none' | 'mqtt' | 'http'>('none');
+const mode = ref<'none' | 'mqtt' | 'http' | 'virtual-lab'>('none');
 const enabled = ref(false);
 const topic = ref('');
 const address = ref('');
@@ -47,6 +47,13 @@ const physicalId = computed(() =>
   ),
 );
 const channel = computed(() => props.device.metadata?.channel);
+const virtualLabRouteAvailable = computed(() => {
+  const scope = String(props.device.metadata?.networkScope || '');
+  const scopeId = scope.slice(scope.lastIndexOf(':') + 1);
+  return props.device.adapter.driver === 'shelly-lan' &&
+    props.device.metadata?.component === 'switch:0' &&
+    scopeId === 'device-lab-vlan';
+});
 const editable = computed(
   () =>
     props.device.trustStatus === 'approved' &&
@@ -68,6 +75,8 @@ const statusLabel = computed(() => {
     return props.httpIdentityVerified
       ? 'Identity verified · route configured'
       : 'Route configured · identity not verified';
+  if (props.device.control?.binding?.kind === 'shelly-virtual-lab')
+    return 'Explicit Virtual Lab route · assistant control remains separate';
   return (
     ({
       ready: 'Switching configured',
@@ -87,8 +96,9 @@ watch(
   ],
   () => {
     const binding = props.device.control?.binding;
-    mode.value =
-      binding?.kind === 'shelly-http' ? 'http' : binding ? 'mqtt' : 'none';
+    mode.value = binding?.kind === 'shelly-http' ? 'http'
+      : binding?.kind === 'shelly-virtual-lab' ? 'virtual-lab'
+      : binding ? 'mqtt' : 'none';
     enabled.value = binding?.enabled || false;
     topic.value =
       binding && 'topic' in binding
@@ -147,7 +157,18 @@ async function save() {
       error.value = 'Relay identity is incomplete.';
       return;
     }
-    if (mode.value === 'http') {
+    if (mode.value === 'virtual-lab') {
+      if (!virtualLabRouteAvailable.value || channel.value !== 0) {
+        error.value = 'A verified switch:0 assignment in the configured Virtual Lab scope is required.';
+        return;
+      }
+      binding = {
+        kind: 'shelly-virtual-lab',
+        enabled: enabled.value,
+        physicalId: physicalId.value,
+        channel: 0,
+      };
+    } else if (mode.value === 'http') {
       let baseUrl: string;
       try {
         baseUrl = privateShellyBaseUrl(address.value.trim());
@@ -258,8 +279,12 @@ async function save() {
           <option value="none">Not configured</option>
           <option value="mqtt">MQTT</option>
           <option v-if="shelly" value="http">HTTP</option>
+          <option v-if="virtualLabRouteAvailable" value="virtual-lab">Authorized Virtual Lab observer</option>
         </select>
       </label>
+      <p v-if="mode === 'virtual-lab'" class="muted">
+        Energrid resolves this enrolled switch:0 from saved site-owned identity evidence and sends only a bounded Switch.Set followed by fresh Switch.GetStatus through the configured isolated observer. No topic or URL is entered. This permission does not grant assistant control or measurement authority.
+      </p>
       <label v-if="mode === 'mqtt'"
         >MQTT command topic<input
           v-model="topic"
@@ -335,7 +360,8 @@ async function save() {
           busy ||
           findingAddress ||
           (mode !== 'none' && !identityComplete) ||
-          (mode === 'http' && !address.trim())
+          (mode === 'http' && !address.trim()) ||
+          (mode === 'virtual-lab' && (!virtualLabRouteAvailable || channel !== 0))
         "
       >
         {{ busy ? 'Saving...' : 'Save control settings' }}

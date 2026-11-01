@@ -5224,9 +5224,21 @@ onBeforeUnmount(() => {
                     :access-token="accessToken"
                   />
                   <DeviceConnectionDiagnostics v-if="canToggleDevice(selectedDevice) || (selectedDevice.trustStatus === 'approved' && selectedDevice.adapter.driver === 'shelly-lan' && selectedDevice.metadata?.component === 'switch:0')" :key="selectedDevice.id" :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" @identity-verification="updateHttpIdentityVerification" @status-observed="loadState" />
-                  <DeviceControlSetup v-if="canToggleDevice(selectedDevice)" :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" :network-devices="networkDevices" :finding-address="scanningNetwork" :address-search-error="stateError" :http-identity-verified="routeIdentityVerified(selectedDevice)" @find-address="scanNetwork" @saved="loadState" />
                 </div>
               </details>
+
+              <DeviceControlSetup
+                v-if="canToggleDevice(selectedDevice)"
+                :device="selectedDevice"
+                :api-base="apiBase"
+                :access-token="accessToken"
+                :network-devices="networkDevices"
+                :finding-address="scanningNetwork"
+                :address-search-error="stateError"
+                :http-identity-verified="routeIdentityVerified(selectedDevice)"
+                @find-address="scanNetwork"
+                @saved="loadState"
+              />
 
               <details class="device-detail-disclosure">
                 <summary>Installation, settings & history</summary>

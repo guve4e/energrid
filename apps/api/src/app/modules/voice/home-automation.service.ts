@@ -14,7 +14,7 @@ const execFileAsync = promisify(execFile);
 export interface HomeActionExecutionResult {
   action: PlannedHomeAction;
   status: 'success' | 'pending' | 'skipped' | 'failed';
-  adapter: 'http' | 'mqtt' | 'simulated' | 'none';
+  adapter: 'http' | 'mqtt' | 'simulated' | 'virtual-lab' | 'none';
   message: string;
   affected?: string[];
 }

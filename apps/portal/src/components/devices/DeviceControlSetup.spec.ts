@@ -54,6 +54,51 @@ function render(value = device, fetch = fetchMock()) {
   return { page, fetch };
 }
 describe('explicit device control UI', () => {
+  it('offers the fixed Virtual Lab observer route only for an assigned switch:0 and saves no endpoint or topic', async () => {
+    const labPhysicalId = 'shellyplus1-00c0de000001';
+    const labDevice: ControlSetupDevice = {
+      ...device,
+      id: `${labPhysicalId}:switch:0`,
+      adapter: { protocol: 'http', driver: 'shelly-lan', target: labPhysicalId },
+      metadata: {
+        physicalId: labPhysicalId,
+        component: 'switch:0',
+        channel: 0,
+        networkScope: 'virtual-lab-observer:device-lab-vlan',
+      },
+      control: { status: 'needs-setup', binding: null, reason: 'No explicit control route.' },
+    };
+    const fetch = fetchMock();
+    const { page } = render(labDevice, fetch);
+    expect(page.text()).toContain('Authorized Virtual Lab observer');
+    await page.get('select').setValue('virtual-lab');
+    expect(page.text()).toContain('No topic or URL is entered');
+    expect(page.find('input[type="url"]').exists()).toBe(false);
+    expect(page.find('input[type="text"]').exists()).toBe(false);
+    await page.get('input[type="checkbox"]').setValue(true);
+    await page.get('form').trigger('submit');
+    await flushPromises();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(String(fetch.mock.calls[0][1]?.body));
+    expect(body.binding).toEqual({
+      kind: 'shelly-virtual-lab', enabled: true, physicalId: labPhysicalId, channel: 0,
+    });
+    expect(body.binding).not.toHaveProperty('topic');
+    expect(body.binding).not.toHaveProperty('baseUrl');
+  });
+
+  it('does not offer the Virtual Lab observer route to another component or scope', async () => {
+    const base = {
+      ...device,
+      adapter: { protocol: 'http' as const, driver: 'shelly-lan', target: physicalId },
+      metadata: { physicalId, component: 'switch:0', channel: 0, physicalInventoryId: 'inventory', networkScope: 'lab:device-lab-vlan' },
+    };
+    const { page } = render({ ...base, metadata: { ...base.metadata, component: 'switch:1', channel: 1 } });
+    expect(page.text()).not.toContain('Authorized Virtual Lab observer');
+    await page.setProps({ device: { ...base, metadata: { ...base.metadata, networkScope: 'home-observer:home-iot' } } });
+    expect(page.text()).not.toContain('Authorized Virtual Lab observer');
+  });
+
   it('leaves an unknown address truly empty, with no sample IP, and keeps its known-address status while typing', async () => {
     const { page, fetch } = render();
     await page.get('select').setValue('http');

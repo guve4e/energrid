@@ -14,6 +14,13 @@ export type DeviceControlBinding =
       baseUrl: string;
       credentialRef?: string;
     }
+  | {
+      /** Explicitly authorized fixed Switch.Set/Status path in the isolated Virtual Lab. */
+      kind: 'shelly-virtual-lab';
+      enabled: boolean;
+      physicalId: string;
+      channel: number;
+    }
   | { kind: 'generic-mqtt'; enabled: boolean; topic: string };
 
 export interface DeviceControlState {
@@ -46,7 +53,7 @@ export function parseDeviceControlBinding(
   };
   if (raw['kind'] === 'generic-mqtt')
     return { kind: 'generic-mqtt', enabled, topic: topic() };
-  if (raw['kind'] !== 'shelly-mqtt' && raw['kind'] !== 'shelly-http')
+  if (raw['kind'] !== 'shelly-mqtt' && raw['kind'] !== 'shelly-http' && raw['kind'] !== 'shelly-virtual-lab')
     throw new Error('Unsupported control transport.');
   const physicalId = raw['physicalId'];
   if (
@@ -73,6 +80,10 @@ export function parseDeviceControlBinding(
       channel,
       topic: commandTopic,
     };
+  }
+  if (raw['kind'] === 'shelly-virtual-lab') {
+    if (channel !== 0) throw new Error('Virtual Lab control is limited to switch:0.');
+    return { kind: 'shelly-virtual-lab', enabled, physicalId, channel };
   }
   const baseUrl = privateShellyBaseUrl(raw['baseUrl']);
   const credentialRef = raw['credentialRef'];
