@@ -1994,6 +1994,14 @@ const historicalNetworkDevices = computed(() => {
   }));
 });
 
+const latestMemoryMarkerVerification = computed(() => {
+  const marker = discoveryMemory.value?.summary.lastScanId;
+  if (!marker) return null;
+  return networkSnapshots.value.find(snapshot =>
+    snapshot.methods.includes('operator_selected_shelly_read_only_rpc') && snapshot.completedAt === marker,
+  ) || null;
+});
+
 function discoveryMemoryDate(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime())
@@ -2117,8 +2125,9 @@ const networkDeviceSummary = computed(() => ({
 }));
 const networkStats = computed(() => {
   const devices = networkDevices.value;
+  const currentResponses = liveNetworkDevices.value.filter(device => device.status === 'online').length;
+  const rememberedCount = discoveryMemory.value?.summary.known ?? 0;
   const vendors = new Set(devices.map((device) => device.vendor || 'Unknown'));
-  const online = devices.filter((device) => device.status === 'online').length;
   const shelly = devices.filter(
     (device) => device.vendor?.toLowerCase() === 'shelly',
   ).length;
@@ -2126,19 +2135,24 @@ const networkStats = computed(() => {
 
   return [
     {
-      label: 'Live reachable',
-      value: `${devices.length}`,
-      detail: 'from site brain',
+      label: 'Online in last API scan',
+      value: `${currentResponses}`,
+      detail: 'from process-local scan results',
+    },
+    {
+      label: 'Remembered endpoints',
+      value: `${rememberedCount}`,
+      detail: 'retained in Discovery Memory',
     },
     {
       label: 'Energrid capable',
       value: `${capable}`,
-      detail: `${formatPercent(capable, devices.length)} of scan`,
+      detail: `${formatPercent(capable, devices.length)} of current and remembered endpoints`,
     },
     {
       label: 'Shelly devices',
       value: `${shelly}`,
-      detail: `${online} online responses`,
+      detail: `${currentResponses} online in the last API scan`,
     },
     {
       label: 'Zones',
@@ -5565,7 +5579,7 @@ onBeforeUnmount(() => {
               class="discovery-empty compact"
               v-if="networkDevices.length === 0"
             >
-              <strong>No scan yet</strong>
+              <strong>No current or remembered endpoints</strong>
               <span
                 >Run a scan to list devices visible from the local brain,
                 including Shelly settings pages when they respond.</span
@@ -5645,12 +5659,13 @@ onBeforeUnmount(() => {
                   <small>Remembered across scans</small>
                 </div>
                 <div>
-                  <span>Observed this scan</span>
+                  <span>{{ latestMemoryMarkerVerification ? 'Updated in latest selected-device check' : 'Observed in latest scan' }}</span>
                   <strong>{{ discoveryMemory.summary.observedInLatestScan }}</strong>
-                  <small>Latest completed scan</small>
+                  <small v-if="latestMemoryMarkerVerification">One endpoint was checked; no subnet scan was run.</small>
+                  <small v-else>Latest completed scan</small>
                 </div>
                 <div>
-                  <span>Not observed</span>
+                  <span>{{ latestMemoryMarkerVerification ? 'Other remembered endpoints' : 'Not observed' }}</span>
                   <strong>{{ discoveryMemory.summary.notObservedInLatestScan }}</strong>
                   <small>Not necessarily offline</small>
                 </div>
@@ -5715,9 +5730,9 @@ onBeforeUnmount(() => {
                       <td data-label="Observation">
                         <span>
                           {{
-                            record.observedInLatestScan
-                              ? 'Observed in latest scan'
-                              : 'Not observed in latest scan'
+                            latestMemoryMarkerVerification
+                              ? record.observedInLatestScan ? 'Updated in latest selected-device check' : 'Not touched by latest selected-device check'
+                              : record.observedInLatestScan ? 'Observed in latest scan' : 'Not observed in latest scan'
                           }}
                         </span>
                       </td>

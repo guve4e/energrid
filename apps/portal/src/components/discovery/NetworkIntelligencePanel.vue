@@ -14,7 +14,7 @@ type Endpoint = {
   identityConflict?: { reason: string; macAddresses: string[] };
   observations?: Observation[];
 };
-type ScopeSnapshot = { id: string; name: string; cidr?: string; interfaceName?: string; complete: boolean; gatewayIpsObserved: string[] };
+type ScopeSnapshot = { id: string; name: string; cidr?: string; interfaceName?: string; complete: boolean; gatewayIpsObserved: string[]; collectionStages?: { hostDiscovery?: { targetCount: number; hostsReported: number }; serviceEnrichment?: { targetCount: number; hostsReported: number } } };
 type NetworkRole = { id: string; role: 'default_gateway'; label: 'Observed default gateway'; scopeId: string; scopeName: string; ipAddress: string; observedAt: string; observer: { id: string; host: string; interfaceName: string }; routeDestination: string; routeEvidence: string };
 type Snapshot = {
   scanId: string; schemaVersion: number; startedAt: string; completedAt: string;
@@ -191,6 +191,15 @@ function verifiedIdentity(endpoint: Endpoint): boolean {
   ) === true;
 }
 
+function hasNetworkResponseEvidence(endpoint: Endpoint): boolean {
+  return (endpoint.observations || []).some(observation =>
+    (observation.source === 'nmap' && observation.attribute === 'host.discovered' && observation.value === true) ||
+    (observation.source === 'tcp' && /^port\.\d+\.(open|closed)$/.test(observation.attribute)) ||
+    (['http_rpc', 'http_identity', 'site_local_http_rpc'].includes(observation.source) &&
+      ['shelly.device_id', 'identity.device_id', 'identity.verified', 'shelly.component_status'].includes(observation.attribute)),
+  );
+}
+
 function endpointServices(endpoint: Endpoint): string[] {
   return [...new Set((endpoint.observations || []).flatMap(observation => {
     const service = /^port\.(\d+)\.service$/.exec(observation.attribute);
@@ -331,14 +340,19 @@ const visibleEndpoints = computed(() => {
   });
 });
 const coverageLabel = computed(() => {
-  if (!selectedSnapshot.value) return 'No scan yet';
-  if (!scopeSnapshot.value) return 'No observation for this scope';
+  if (!selectedSnapshot.value) return 'No saved scan for this site';
+  if (!scopeSnapshot.value) return 'No saved scan for this network';
+  if (selectedSnapshot.value.methods.includes('operator_selected_shelly_read_only_rpc')) return 'Selected-device verification';
   const incomplete = !scopeSnapshot.value.complete
     || selectedSnapshot.value.failures.length > 0
     || (props.comparison?.toScanId === selectedSnapshot.value.scanId && props.comparison.incompleteScopes.includes(selectedScopeId.value));
   return incomplete ? 'Partial coverage' : 'Scan complete';
 });
-const lastScanLabel = computed(() => selectedSnapshot.value ? new Date(selectedSnapshot.value.completedAt).toLocaleString() : 'Awaiting first scan');
+const lastScanLabel = computed(() => !selectedSnapshot.value
+  ? 'No saved evidence for this site'
+  : !scopeSnapshot.value
+    ? 'Latest saved evidence belongs to a different network'
+    : new Date(selectedSnapshot.value.completedAt).toLocaleString());
 const identityName = (endpoint: Endpoint) => endpoint.hostname || [endpoint.vendor, endpoint.model || endpoint.app].filter(Boolean).join(' ') || endpointNetworkRole(endpoint)?.label || 'Unidentified endpoint';
 
 watch(() => selectedSnapshot.value?.scanId, () => {
@@ -489,10 +503,10 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
           </select>
         </label>
         <label v-if="snapshots.length > 1" class="ni-scope-select ni-snapshot-select">
-          <span>Saved scan</span>
+          <span>Saved evidence</span>
           <select v-model="selectedScanId" aria-label="Select saved network snapshot">
             <option v-for="snapshot in snapshots" :key="snapshot.scanId" :value="snapshot.scanId">
-              {{ snapshot.scopes.map(scope => scope.name).join(', ') || 'Network scan' }} · {{ date(snapshot.completedAt) }}{{ snapshot.scanId === latest?.scanId ? ' · Latest' : '' }}{{ snapshot.ownership ? '' : ' · Legacy, unscoped' }}
+              {{ snapshot.methods.includes('operator_selected_shelly_read_only_rpc') ? 'Selected-device verification' : snapshot.scopes.map(scope => scope.name).join(', ') || 'Network scan' }} · {{ date(snapshot.completedAt) }}{{ snapshot.scanId === latest?.scanId ? ' · Latest evidence' : '' }}{{ snapshot.ownership ? '' : ' · Legacy, unscoped' }}
             </option>
           </select>
         </label>
@@ -505,7 +519,7 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
       <span :class="['ni-status-pill', coverageLabel === 'Scan complete' ? 'is-complete' : coverageLabel === 'Partial coverage' ? 'is-partial' : 'is-neutral']">
         <span aria-hidden="true">{{ coverageLabel === 'Scan complete' ? '✓' : coverageLabel === 'Partial coverage' ? '!' : '•' }}</span>{{ busy ? 'Scan in progress' : coverageLabel }}
       </span>
-      <span class="ni-last-scan">{{ busy ? 'Collecting bounded network evidence…' : `Last scan · ${lastScanLabel}` }}</span>
+      <span class="ni-last-scan">{{ busy ? 'Collecting bounded network evidence…' : `${selectedSnapshot?.methods.includes('operator_selected_shelly_read_only_rpc') ? 'Last selected-device verification' : 'Last scan'} · ${lastScanLabel}` }}</span>
       <p v-if="error" class="ni-error" role="alert">{{ error }}</p>
     </div>
     <div v-if="selectedSnapshotIsUnscoped" class="ni-legacy-snapshot" role="status">
@@ -548,7 +562,7 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
     </nav>
 
     <section v-if="selectedSnapshot" class="ni-metrics" aria-label="Selected network summary">
-      <article><strong>{{ endpoints.length }}</strong><span>Observed endpoints</span></article>
+      <article><strong>{{ endpoints.length }}</strong><span>Endpoint records</span></article>
       <article><strong>{{ verifiedCount }}</strong><span>Verified identities</span></article>
       <article><strong>{{ unidentifiedCount }}</strong><span>Unidentified</span></article>
       <article><strong>{{ recentChangeCount }}</strong><span>Recent changes</span></article>
@@ -810,9 +824,9 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
         <section><h3>Routes</h3><ul><li v-for="route in observer.routes" :key="`${route.destination}:${route.interfaceName}:${route.gateway}`"><strong>{{ route.destination }}</strong><span>{{ route.gateway ? `via ${route.gateway}` : 'gateway not reported' }} · {{ route.interfaceName || 'interface unknown' }}</span><small>{{ route.evidence }}</small></li></ul></section>
         <section><h3>Configured scopes</h3><ul><li v-for="scope in observer.configuredScopes" :key="scope.id"><strong>{{ scope.name }} · {{ scope.cidr || 'unscoped' }}</strong><span>{{ scope.reachability.replace('_', ' ') }} · {{ scope.boundedScanEligible ? 'eligible for approved bounded scan' : 'not eligible' }}</span><small>{{ scope.reason }}</small></li></ul></section>
         <section><h3>Collector capabilities</h3><ul><li v-for="capability in observer.capabilities" :key="capability.id"><strong>{{ capability.id }} · {{ capability.available ? 'available' : 'unavailable' }}</strong><span>{{ capability.detail }}</span></li></ul><p v-if="nmapCapability">Nmap {{ nmapCapability.available ? `${nmapCapability.version || 'version unknown'} available` : `unavailable · ${nmapCapability.reason || 'not detected'}` }} · {{ nmapCapability.enabled ? 'scanning enabled' : 'scanning disabled' }}</p></section>
-        <section v-if="selectedSnapshot"><h3>Snapshot collection</h3><p>Schema v{{ selectedSnapshot.schemaVersion }} · {{ selectedSnapshot.scanId }} · {{ selectedSnapshot.methods.join(', ') }}</p><p>{{ selectedSnapshot.successes }} successful collection result(s) · {{ selectedSnapshot.failures.length }} failure(s)</p><ul v-if="selectedSnapshot.failures.length"><li v-for="failure in selectedSnapshot.failures" :key="failure">{{ failure }}</li></ul></section>
+        <section v-if="selectedSnapshot"><h3>Saved evidence details</h3><p>Schema v{{ selectedSnapshot.schemaVersion }} · Evidence ID {{ selectedSnapshot.scanId }} · {{ selectedSnapshot.methods.join(', ') }}</p><p>{{ selectedSnapshot.successes }} successful collection result(s) · {{ selectedSnapshot.failures.length }} failure(s)</p><ul v-if="selectedSnapshot.failures.length"><li v-for="failure in selectedSnapshot.failures" :key="failure">{{ failure }}</li></ul><template v-for="scope in selectedSnapshot.scopes" :key="scope.id"><p>{{ scope.name }}: {{ scope.collectionStages?.hostDiscovery?.targetCount ?? 'Not recorded' }} attempted host target(s); {{ scope.collectionStages?.hostDiscovery?.hostsReported ?? 'Not recorded' }} host-discovery responses; {{ scope.collectionStages?.serviceEnrichment?.targetCount ?? 'Not recorded' }} service-enrichment targets, {{ scope.collectionStages?.serviceEnrichment?.hostsReported ?? 'Not recorded' }} service-enrichment responses; {{ selectedSnapshot.endpoints.filter(endpoint => endpoint.networkZoneId === scope.id && hasNetworkResponseEvidence(endpoint)).length }} endpoints with network-response evidence; {{ selectedSnapshot.endpoints.filter(endpoint => endpoint.networkZoneId === scope.id && verifiedIdentity(endpoint)).length }} verified protocol identities. Endpoint records without direct response evidence remain remembered observations, not confirmed responders.</p></template></section>
         <section v-if="selectedSnapshot?.limitations.length"><h3>Coverage limitations</h3><ul><li v-for="limitation in selectedSnapshot.limitations" :key="limitation">{{ limitation }}</li></ul></section>
-        <section v-if="selectedSnapshot"><h3>Snapshot history</h3><p>{{ snapshots.length }} immutable scan{{ snapshots.length === 1 ? '' : 's' }} preserved</p><p>Topology links: {{ selectedSnapshot.topology.relationships.length ? `${selectedSnapshot.topology.relationships.length} evidence-backed relationship(s)` : 'none established' }}</p></section>
+        <section v-if="selectedSnapshot"><h3>Saved history</h3><p>{{ snapshots.length }} immutable evidence record{{ snapshots.length === 1 ? '' : 's' }} preserved</p><p>Topology links: {{ selectedSnapshot.topology.relationships.length ? `${selectedSnapshot.topology.relationships.length} evidence-backed relationship(s)` : 'none established' }}</p></section>
       </div>
       <p v-else class="ni-diagnostics-empty">Observer diagnostics have not been loaded.</p>
     </details>

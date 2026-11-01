@@ -106,7 +106,7 @@ function enrollmentsFor(state: ReturnType<typeof data>) {
 function button(text: string) {
   return page!.findAll('button').find((b) => b.text() === text)!;
 }
-async function render(path: string, fetch: unknown, authenticated = true) {
+async function render(path: string, fetch: unknown, authenticated = true, snapshots: unknown[] = []) {
   history.replaceState({}, '', path);
   if (authenticated) setAuthenticatedSession({ accessToken: 'unit-token', expiresIn: 900,
     user: { id: 'admin', email: 'unit@test', name: 'Admin', role: 'admin' } });
@@ -114,13 +114,61 @@ async function render(path: string, fetch: unknown, authenticated = true) {
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url.endsWith('/auth/me')) return { ok: true, json: async () => ({ user: { id: 'admin', email: 'unit@test', name: 'Admin', role: 'admin' } }) };
-    if (url.endsWith('/portal/network/snapshots')) return { ok: true, json: async () => ({ snapshots: [] }) };
+    if (url.endsWith('/portal/network/snapshots')) return { ok: true, json: async () => ({ snapshots }) };
     return mockedFetch(input, init);
   });
   page = mount(App, { global: { stubs: { ExecutionSimulator: true } } });
   await flushPromises();
 }
 describe('device onboarding page workflow with mocked services', () => {
+  it('labels remembered Discovery Memory entries separately from current network responses', async () => {
+    const remembered = {
+      identity: 'shelly:shellyplus1-aabbccddeeff',
+      device: { ...network, status: 'online' },
+      firstSeenAt: '2026-10-20T08:00:00.000Z', lastSeenAt: '2026-10-20T08:00:00.000Z', lastScanId: 'prior-scan',
+    };
+    const fetch = vi.fn(async (url: string) => {
+      if (url === '/portal/state') return { ok: true, json: async () => ({ ...data(), networkDevices: [] }) };
+      if (url === '/portal/network/memory') return { ok: true, json: async () => ({
+        devices: [remembered], summary: { known: 1, observedInLatestScan: 0, notObservedInLatestScan: 1, lastScanId: 'later-scan' },
+      }) };
+      if (url.includes('/devices/enrollments')) return { ok: true, json: async () => ({ enrollments: [] }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    await render('/discovery/', fetch);
+
+    expect(page!.text()).toContain('Online in last API scan');
+    expect(page!.text()).toContain('Remembered endpoints');
+    expect(page!.text()).toContain('retained in Discovery Memory');
+    const stats = page!.findAll('.network-stat-grid > div');
+    expect(stats[0].text()).toContain('Online in last API scan0');
+    expect(stats[1].text()).toContain('Remembered endpoints1');
+    expect(stats).not.toContain('Live reachable');
+  });
+
+  it('does not label a persisted selected-device verification as the latest completed scan', async () => {
+    const verifiedAt = '2026-10-31T21:15:43.000Z';
+    const fetch = vi.fn(async (url: string) => {
+      if (url === '/portal/state') return { ok: true, json: async () => ({ ...data(), networkDevices: [] }) };
+      if (url === '/portal/network/memory') return { ok: true, json: async () => ({
+        devices: [{ identity: 'shelly:shellyplus1-aabbccddeeff', device: network, firstSeenAt: verifiedAt, lastSeenAt: verifiedAt, lastScanId: verifiedAt }],
+        summary: { known: 1, observedInLatestScan: 1, notObservedInLatestScan: 0, lastScanId: verifiedAt },
+      }) };
+      if (url.includes('/devices/enrollments')) return { ok: true, json: async () => ({ enrollments: [] }) };
+      if (url === '/portal/network/capabilities') return { ok: true, json: async () => ({ nmap: { available: false }, observer: null }) };
+      return { ok: true, json: async () => ({}) };
+    });
+    await render('/discovery/', fetch, true, [{
+      scanId: 'selected-verification', completedAt: verifiedAt,
+      methods: ['operator_selected_shelly_read_only_rpc'], scopes: [],
+    }]);
+
+    expect(page!.text()).toContain('Updated in latest selected-device check');
+    expect(page!.text()).toContain('One endpoint was checked; no subnet scan was run.');
+    expect(page!.text()).toContain('Other remembered endpoints');
+    expect(page!.text()).not.toContain('Latest completed scan');
+  });
+
   it('offers the authorized sites and submits only the selected site ID', async () => {
     const state = {
       ...data(),

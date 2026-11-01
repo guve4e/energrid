@@ -513,12 +513,16 @@ function normalizeHost(
     ipAddress,
     ...(options.onLink && source.observedMacAddress ? { macAddress: source.observedMacAddress } : {}),
     ...(source.hostname ? { hostname: source.hostname.slice(0, 253) } : {}),
-    status: openPorts.length ? 'online' : 'unknown',
+    // An open port proves a responding endpoint, and so does a TCP reset for
+    // a closed port. Unknown is reserved for neighbor-only evidence below.
+    status: hasResponsivePort ? 'online' : 'unknown',
     observedAt,
     ...(options.interfaceName ? { interfaceName: options.interfaceName } : {}),
     reason: openPorts.length
       ? `Nmap observed ${openPorts.length} open TCP/UDP service port(s).`
-      : 'Nmap did not observe an open service; endpoint reachability remains unknown.',
+      : hasResponsivePort
+        ? 'Nmap received a TCP response, but no open service was identified.'
+        : 'Neighbor-table evidence only; direct endpoint reachability is unconfirmed.',
     observations,
   };
 }

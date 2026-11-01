@@ -90,6 +90,39 @@ describe('Nmap XML evidence adapter', () => {
     expect(parsed.complete).toBe(true);
   });
 
+  it('counts a closed TCP response as a responding endpoint without inventing an open service', () => {
+    const closedOnly = xml
+      .replace('<port protocol="tcp" portid="80"><state state="open" reason="syn-ack" /><service name="http" product="Example" version="1.2" /></port>', '')
+      .replace('<address addr="78:ee:4c:cf:42:68" addrtype="mac" vendor="Untrusted label" />', '');
+    const parsed = parseNmapXml(closedOnly, {
+      scopeId: 'eero', scopeCidr: '192.168.7.0/24', observedAt: '2026-10-21T00:00:00.000Z', onLink: false,
+    });
+
+    expect(parsed.hosts).toHaveLength(1);
+    expect(parsed.hosts[0]).toMatchObject({
+      status: 'online',
+      reason: 'Nmap received a TCP response, but no open service was identified.',
+      observations: [expect.objectContaining({ source: 'tcp', attribute: 'port.22.closed', value: false })],
+    });
+    expect(parsed.hosts[0].observations).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ attribute: 'port.80.open', value: true }),
+    ]));
+  });
+
+  it('keeps neighbor-only evidence unconfirmed when no host or TCP response was observed', () => {
+    const neighborOnly = xml.replace(/<ports>[\s\S]*?<\/ports>/, '');
+    const parsed = parseNmapXml(neighborOnly, {
+      scopeId: 'eero', scopeCidr: '192.168.7.0/24', observedAt: '2026-10-21T00:00:00.000Z', onLink: true,
+    });
+
+    expect(parsed.hosts).toHaveLength(1);
+    expect(parsed.hosts[0]).toMatchObject({
+      status: 'unknown',
+      reason: 'Neighbor-table evidence only; direct endpoint reachability is unconfirmed.',
+      observations: [],
+    });
+  });
+
   it('rejects malformed XML and ignores out-of-scope endpoint records', () => {
     expect(() => parseNmapXml('<nmaprun><host>', {
       scopeId: 'eero', scopeCidr: '192.168.7.0/24', observedAt: '2026-10-21T00:00:00.000Z', onLink: true,

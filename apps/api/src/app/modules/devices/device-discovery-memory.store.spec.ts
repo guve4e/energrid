@@ -175,7 +175,7 @@ describe('DeviceDiscoveryMemoryStore', () => {
     const record = (await store.listIdentityEvidence(TEST_OWNER)).find(item => item.identity === 'device:upstream-lan:esp8266:324864');
     expect(record).toMatchObject({
       lastSeenAt: refreshedAt,
-      lastScanId: `identity:${refreshedAt}`,
+      lastScanId: `identity:${initialAt}`,
       device: {
         id: 'esp8266:324864', ipAddress: '192.168.1.198', networkZoneId: 'upstream-lan',
         observations: expect.arrayContaining([
@@ -420,6 +420,44 @@ describe('DeviceDiscoveryMemoryStore', () => {
     expect(record.device.status).toBe('online');
     expect(isNetworkObservationFresh(record.device.discoveredAt, Date.parse('2026-10-23T12:05:00.000Z'))).toBe(false);
     expect(await store.summary(TEST_OWNER)).toMatchObject({ known: 1, observedInLatestScan: 0, notObservedInLatestScan: 1 });
+  });
+
+  it('keeps full-scan membership when a remembered endpoint receives a later identity observation', async () => {
+    const scanId = 'scan-full-network-1';
+    const scannedAt = '2026-10-23T12:00:00.000Z';
+    const verifiedAt = '2026-10-23T12:05:00.000Z';
+    const scanned = verifiedEnergridDevice('192.168.1.198', scannedAt);
+    await store.recordScan(scanId, [scanned], TEST_OWNER, scannedAt);
+    const historicalSnapshot: NetworkDiscoverySnapshot = {
+      schemaVersion: 1, ownership: TEST_OWNER, scanId, startedAt: scannedAt, completedAt: scannedAt,
+      collector: { id: 'observer/eth0', host: 'observer', interfaces: ['eth0'] },
+      scopes: [{ id: 'upstream-lan', name: 'Upstream LAN', cidr: '192.168.1.0/24', complete: true, gatewayIpsObserved: [] }],
+      methods: ['http_identity'], successes: 1, failures: [], limitations: [], rawEvidenceOmitted: 0,
+      rawEvidence: [], endpoints: [scanned], topology: { relationships: [] },
+    };
+    await recordSnapshot(historicalSnapshot);
+    await recordIdentityObservation(verifiedAt, {
+      ...scanned,
+      discoveredAt: verifiedAt,
+      observations: scanned.observations?.map(observation => ({ ...observation, observedAt: verifiedAt })),
+    }, TEST_OWNER);
+
+    const [record] = await store.list(TEST_OWNER);
+    expect(record.lastSeenAt).toBe(verifiedAt);
+    expect(record.lastScanId).toBe(scanId);
+    expect(record.firstSeenAt).toBe(scannedAt);
+    expect(await store.summary(TEST_OWNER)).toEqual({
+      lastScanId: scanId, known: 1, observedInLatestScan: 1, notObservedInLatestScan: 0,
+    });
+    expect(await store.getSnapshot(scanId, TEST_OWNER)).toEqual(historicalSnapshot);
+
+    await store.onModuleDestroy();
+    store = new DeviceDiscoveryMemoryStore(directory);
+    expect(await store.summary(TEST_OWNER)).toEqual({
+      lastScanId: scanId, known: 1, observedInLatestScan: 1, notObservedInLatestScan: 0,
+    });
+    expect((await store.list(TEST_OWNER))[0].lastScanId).toBe(scanId);
+    expect(await store.getSnapshot(scanId, TEST_OWNER)).toEqual(historicalSnapshot);
   });
 
   it('retains all same-scan endpoint addresses under one scoped observed identity', async () => {

@@ -483,7 +483,7 @@ export class DeviceLanDiscoveryService {
     const savedInterfaceName = prior.device.observations?.find(item =>
       item.attribute === 'shelly.device_id' && item.interfaceName,
     )?.interfaceName
-    await this.discoveryMemory.recordScan(completedAt, [verifiedDevice], ownership)
+    await this.discoveryMemory.recordIdentityObservation(completedAt, verifiedDevice, ownership)
     throwIfScanAborted(signal)
     await this.discoveryMemory.recordSnapshot({
       schemaVersion: 2, scanId, ownership, startedAt: completedAt, completedAt,
@@ -640,10 +640,10 @@ export class DeviceLanDiscoveryService {
     throwIfScanAborted(options.signal)
     const completedAt = new Date().toISOString()
     try {
-      await this.discoveryMemory.recordScan(completedAt, devices.map(device => {
+      await this.discoveryMemory.recordScan(scanId, devices.map(device => {
         const observations = (device.observations || []).filter(item => item.method !== 'nmap_tcp_connect_service_scan')
         return { ...device, ...(observations.length ? { observations } : { observations: undefined }) }
-      }), ownership)
+      }), ownership, completedAt)
     } catch (error) {
       this.logger.error(JSON.stringify({
         event: 'network_discovery_persistence_failure',

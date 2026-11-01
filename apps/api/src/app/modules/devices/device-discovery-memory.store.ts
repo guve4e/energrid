@@ -45,7 +45,7 @@ export interface DiscoveryMemorySummary {
   notObservedInLatestScan: number;
 }
 
-function dedupeKnownRecords(records: KnownNetworkDevice[]): KnownNetworkDevice[] {
+function dedupeKnownRecords(records: KnownNetworkDevice[], latestScanId: string | null = null): KnownNetworkDevice[] {
   const groups = new Map<string, KnownNetworkDevice[]>();
   for (const record of records) {
     const identity = networkEndpointIdentity(record.device);
@@ -74,6 +74,12 @@ function dedupeKnownRecords(records: KnownNetworkDevice[]): KnownNetworkDevice[]
       : newest.device;
     return {
       ...newest,
+      // A later single-endpoint identity refresh may create a second identity
+      // record for the same endpoint. Preserve the full-scan membership in the
+      // deduplicated endpoint projection when any alias belongs to that scan.
+      lastScanId: latestScanId && group.some(record => record.lastScanId === latestScanId)
+        ? latestScanId
+        : newest.lastScanId,
       identity: hasCurrentMacConflict ? networkEndpointIdentity(device) : newest.identity,
       device,
     };
@@ -186,6 +192,7 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
     scanId: string,
     devices: NetworkDiscoveredDevice[],
     ownership: DiscoveryOwnership,
+    observedAt = scanId,
   ): Promise<void> {
     if (!validOwnership(ownership)) throw new Error('Discovery evidence requires server-authorized tenant/site ownership');
     const recordsByKey = new Map<string, KnownNetworkDevice>();
@@ -203,8 +210,8 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
         schemaVersion: 2,
         ownership: structuredClone(ownership),
         identity,
-        firstSeenAt: previous?.firstSeenAt || scanId,
-        lastSeenAt: scanId,
+        firstSeenAt: previous?.firstSeenAt || observedAt,
+        lastSeenAt: observedAt,
         lastScanId: scanId,
         device: structuredClone(previous
           ? mergeNetworkHistory(previous.device, device)
@@ -351,7 +358,10 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
       identity,
       firstSeenAt: previous?.firstSeenAt || observedAt,
       lastSeenAt: observedAt,
-      lastScanId: `identity:${observedAt}`,
+      // An identity refresh updates the remembered observation, but it is not
+      // a network scan and must not erase whether this endpoint appeared in
+      // the most recent completed scan.
+      lastScanId: previous?.lastScanId || `identity:${observedAt}`,
       device: structuredClone(previous
         ? mergeNetworkHistory(previous.device, device)
         : device),
@@ -360,7 +370,11 @@ export class DeviceDiscoveryMemoryStore implements OnModuleDestroy {
   }
 
   async list(ownership: DiscoveryOwnership): Promise<KnownNetworkDevice[]> {
-    return dedupeKnownRecords(await this.listIdentityEvidence(ownership));
+    const [records, summaryValue] = await Promise.all([
+      this.listIdentityEvidence(ownership),
+      this.getOptional(summaryKey(ownership)),
+    ]);
+    return dedupeKnownRecords(records, typeof summaryValue === 'string' ? summaryValue : null);
   }
 
   async listIdentityEvidence(ownership: DiscoveryOwnership): Promise<KnownNetworkDevice[]> {

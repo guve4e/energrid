@@ -231,7 +231,8 @@ describe('LAN discovery evidence persistence', () => {
 
   it('revalidates an expired saved Shelly endpoint and persists only fresh read-only evidence', async () => {
     const fixture = selectedShellyVerifier()
-    await memory.recordScan(new Date(Date.now() - 16 * 60_000).toISOString(), [fixture.prior], TEST_OWNER)
+    const fullScanId = new Date(Date.now() - 16 * 60_000).toISOString()
+    await memory.recordScan(fullScanId, [fixture.prior], TEST_OWNER)
     mockReachableTcpPorts.add(80)
     mockFreshShellyRpc()
 
@@ -244,6 +245,9 @@ describe('LAN discovery evidence persistence', () => {
       physicalDeviceId: 'physical-eero-inventory', scope: TEST_OWNER, evidenceSource: 'selected_device_read_only_rpc_verification',
     }))
     expect(fixture.registry.registerDiscoveredDevice).toHaveBeenCalledTimes(3)
+    expect(await memory.summary(TEST_OWNER)).toMatchObject({
+      lastScanId: fullScanId, known: 1, observedInLatestScan: 1, notObservedInLatestScan: 0,
+    })
     const saved = await memory.listIdentityEvidence(TEST_OWNER)
     expect(saved.find(item => item.device.id === fixture.physicalId)?.device.observations).toEqual(expect.arrayContaining([
       expect.objectContaining({ source: 'http_rpc', attribute: 'shelly.device_id', observedAt: result.identityVerifiedAt }),
@@ -330,6 +334,29 @@ describe('LAN discovery evidence persistence', () => {
     expect(fixture.registry.getDevices()[0].trustStatus).toBe('discovered')
     expect(fixture.registry.getDevices()[0].metadata.verifiedMeasurementFields).toBeUndefined()
     expect(fixture.registry.getDevices()[0].capabilities).toEqual([{ kind: 'switch', actions: ['read'] }])
+    expect(await memory.summary(TEST_OWNER)).toMatchObject({
+      lastScanId: fixture.prior.discoveredAt, known: 1, observedInLatestScan: 1, notObservedInLatestScan: 0,
+    })
+  })
+
+  it('keeps repeated selected-device verification as one remembered physical endpoint', async () => {
+    const fixture = virtualShellyVerifier()
+    const fullScanId = 'lab-full-scan-before-verification'
+    await memory.recordScan(fullScanId, [fixture.prior], TEST_OWNER)
+
+    await fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER)
+    await fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER)
+
+    expect(fixture.registry.registerDiscoveredDevice).toHaveBeenCalledTimes(2)
+    expect(fixture.registry.registerDiscoveredDevice.mock.calls.map(([candidate]) => candidate.id))
+      .toEqual([fixture.candidateId, fixture.candidateId])
+    expect(await memory.list(TEST_OWNER)).toHaveLength(1)
+    expect(await memory.summary(TEST_OWNER)).toEqual({
+      lastScanId: fullScanId, known: 1, observedInLatestScan: 1, notObservedInLatestScan: 0,
+    })
+    expect(fixture.physicalInventory.discover).toHaveBeenCalledTimes(2)
+    expect(fixture.physicalInventory.discover.mock.calls.map(([input]) => input.identity.value))
+      .toEqual(['shellyplus1-00c0de000001', 'shellyplus1-00c0de000001'])
   })
 
   it('rejects an endpoint changed to an unsaved address before selected-device RPC', async () => {

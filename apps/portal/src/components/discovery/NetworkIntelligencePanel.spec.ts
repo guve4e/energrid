@@ -41,6 +41,67 @@ const observer = {
 };
 
 describe('NetworkIntelligencePanel', () => {
+  it('reports 14 attempted targets separately from the six endpoints with response evidence', async () => {
+    const fullScan = {
+      ...snapshot,
+      scopes: [{ id: 'eero', name: 'Eero', cidr: '192.168.7.0/24', complete: true, gatewayIpsObserved: [],
+        collectionStages: { hostDiscovery: { targetCount: 14, hostsReported: 5 }, serviceEnrichment: { targetCount: 14, hostsReported: 6 } } }],
+      endpoints: Array.from({ length: 14 }, (_, index) => ({
+        id: `192.168.7.${index + 2}`, ipAddress: `192.168.7.${index + 2}`, networkZoneId: 'eero', networkZoneName: 'Eero',
+        protocol: index < 3 ? 'http' : 'unknown', status: index < 6 ? 'online' : 'unknown',
+        discoveredAt: '2026-10-21T10:00:04Z', reason: index < 6 ? 'Response evidence recorded' : 'Neighbor evidence only',
+        observations: index < 6 ? [{ source: 'tcp', attribute: `port.${80 + index}.closed`, value: false, observedAt: '2026-10-21T10:00:04Z' },
+          ...(index === 0 ? [{ source: 'http_rpc', attribute: 'shelly.device_id', value: `192.168.7.${index + 2}`, observedAt: '2026-10-21T10:00:04Z' },
+            { source: 'http_rpc', attribute: 'identity.verified', value: true, observedAt: '2026-10-21T10:00:04Z' }] : [])] : [],
+      })),
+    };
+    const panel = mount(NetworkIntelligencePanel, {
+      props: { scopes, snapshots: [fullScan], latest: fullScan, comparison: null, observer },
+    });
+    await panel.get('details.ni-diagnostics summary').trigger('click');
+    expect(panel.text()).toContain('14 attempted host target(s); 5 host-discovery responses; 14 service-enrichment targets, 6 service-enrichment responses; 6 endpoints with network-response evidence; 1 verified protocol identities.');
+    expect(panel.text()).toContain('Endpoint records without direct response evidence remain remembered observations, not confirmed responders.');
+    panel.unmount();
+  });
+
+  it('distinguishes a selected-device verification from a subnet scan and exposes counts by evidence type', async () => {
+    const verification = {
+      ...snapshot,
+      scanId: 'verification-1',
+      methods: ['operator_selected_shelly_read_only_rpc'],
+      successes: 1,
+      scopes: [{ id: 'eero', name: 'Eero', cidr: '192.168.7.0/24', complete: false, gatewayIpsObserved: [],
+        collectionStages: { hostDiscovery: { targetCount: 0, hostsReported: 0 }, serviceEnrichment: { targetCount: 1, hostsReported: 1 } } }],
+      endpoints: [{ ...snapshot.endpoints[0], networkZoneId: 'eero' }, {
+        id: '192.168.7.9', ipAddress: '192.168.7.9', networkZoneId: 'eero', networkZoneName: 'Eero',
+        protocol: 'unknown', status: 'unknown', discoveredAt: '2026-10-21T10:00:04Z', reason: 'Attempted target only', observations: [],
+      }],
+    };
+    const panel = mount(NetworkIntelligencePanel, {
+      props: { scopes, snapshots: [verification], latest: verification, comparison: null, observer },
+    });
+    expect(panel.text()).toContain('Selected-device verification');
+    expect(panel.text()).toContain('Last selected-device verification');
+    await panel.get('details.ni-diagnostics summary').trigger('click');
+    expect(panel.text()).toContain('0 attempted host target(s); 0 host-discovery responses; 1 service-enrichment targets, 1 service-enrichment responses; 1 endpoints with network-response evidence; 1 verified protocol identities.');
+    expect(panel.text()).toContain('Endpoint records without direct response evidence remain remembered observations, not confirmed responders.');
+    panel.unmount();
+
+    const noScan = mount(NetworkIntelligencePanel, { props: { scopes, snapshots: [], latest: null, comparison: null } });
+    expect(noScan.text()).toContain('No saved scan for this site');
+    expect(noScan.text()).not.toContain('No scan yet');
+    noScan.unmount();
+
+    const labOnly = { ...snapshot, scopes: [{ id: 'lab', name: 'Virtual Lab', cidr: '172.30.250.0/28', complete: true, gatewayIpsObserved: [] }] };
+    const otherNetwork = mount(NetworkIntelligencePanel, {
+      props: { scopes: [...scopes, { id: 'lab', name: 'Virtual Lab', cidr: '172.30.250.0/28', seedIps: [] }], snapshots: [labOnly], latest: labOnly, comparison: null },
+    });
+    await otherNetwork.get('select[aria-label="Select network scope"]').setValue('eero');
+    expect(otherNetwork.text()).toContain('No saved scan for this network');
+    expect(otherNetwork.text()).toContain('Latest saved evidence belongs to a different network');
+    otherNetwork.unmount();
+  });
+
   it('shows exact enrolled Shelly components as reconciliation proposals without treating MQTT as identity', async () => {
     const proposal = {
       deviceId: 'shellypro2pm-ec6260888084:switch:0', displayName: 'Washer / bathroom fan', room: 'Bathroom',
