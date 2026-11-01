@@ -305,6 +305,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
 
   private async resolveAuthorizedLocalShellyStatusTarget(
     device: RegisteredDevice,
+    expectedIpAddress?: string,
   ): Promise<AuthorizedLocalShellyStatusTarget | null> {
     const reject = (reason: string, context: Record<string, string | number | boolean> = {}): null => {
       const key = `${device.id}:${reason}`
@@ -397,6 +398,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       return record.ownership?.tenantId === device.tenantId && record.ownership.siteId === device.siteId &&
         record.device.vendor === 'Shelly' && record.device.id.toLowerCase() === physicalId.toLowerCase() &&
         record.device.networkZoneId === scopeId && record.device.protocol === 'http' &&
+        (!expectedIpAddress || record.device.ipAddress === expectedIpAddress) &&
         ipInCidr(record.device.ipAddress, observer.cidr) &&
         observations.some(item => item.source === 'http_identity' && item.attribute === 'identity.verified' &&
           item.value === true && identityAt.has(item.observedAt)) &&
@@ -690,6 +692,39 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     onStage?.('enrollment_inventory_validated')
 
     onStage?.('saved_endpoint_observer_scope_validation')
+    const savedScope = String(device.metadata?.networkScope || '').trim()
+    const scopeParts = savedScope.split(':').reverse()
+    const zone = scopeParts
+      .map(part => this.lanDiscovery?.getConfiguredZone(part))
+      .find((candidate): candidate is NetworkDiscoveryZone => Boolean(candidate))
+    if (!zone || !scopeMatchesConfiguredZone(savedScope, zone)) {
+      throw new ConflictException('The saved endpoint does not belong to a configured installation network scope.')
+    }
+
+    // Discovery Memory is an audit history. Select only the endpoint already
+    // reconciled onto this enrolled installation and still marked current in
+    // its site-owned Physical Inventory record. A scan at a new address must
+    // not silently move the command route.
+    const ipAddress = String(device.metadata?.ipAddress || '')
+    if (isIP(ipAddress) !== 4) {
+      throw new ConflictException('No reconciled active Shelly endpoint is saved for this installation; review its network identity before enabling switching.')
+    }
+    const activeObservations = inventory.networkObservations.filter(item =>
+      item.isCurrent && scopeMatchesConfiguredZone(item.networkScope, zone),
+    )
+    const activeEndpoints = [...new Set(activeObservations.map(item => item.ipAddress))]
+    if (activeEndpoints.length !== 1 || activeEndpoints[0] !== ipAddress) {
+      throw new ConflictException(activeEndpoints.length > 1
+        ? `Physical Inventory has conflicting active endpoints in ${zone.id}; review network identity reconciliation before enabling switching.`
+        : `The saved ${zone.id} endpoint differs from the active Physical Inventory association; explicitly reconcile the endpoint before enabling switching.`)
+    }
+    if (device.metadata?.identityEvidenceSource !== 'verified_site_local_shelly_rpc' ||
+        device.metadata?.componentEvidenceSource !== 'verified_site_local_shelly_rpc' ||
+        !String(device.metadata?.siteLocalEvidenceScanId || '').startsWith('site-observer-') ||
+        !String(device.metadata?.siteLocalObserverId || '')) {
+      throw new ConflictException('The active endpoint lacks operator-reconciled site-local Shelly identity and component evidence.')
+    }
+
     const history = (await this.discovery.listIdentityEvidence(ownership)).filter(record => {
       const observations = record.device.observations || []
       const independentlyVerifiedAt = new Set(observations.filter(item => item.source === 'http_identity' &&
@@ -701,34 +736,19 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         (item.source !== 'http_identity' || independentlyVerifiedAt.has(item.observedAt)))
       return record.ownership?.tenantId === ownership.tenantId && record.ownership.siteId === ownership.siteId &&
         record.device.vendor === 'Shelly' && record.device.id.toLowerCase() === physicalId.toLowerCase() &&
+        record.device.networkZoneId === zone.id && record.device.ipAddress === ipAddress &&
         record.device.components?.some(item => item.component === component) && identityMatches &&
         observations.some(item => ['http_rpc', 'site_local_http_rpc'].includes(item.source) &&
           item.attribute === 'shelly.component_status' && item.value === component &&
           item.method === `Switch.GetStatus?id=${channel}`)
     })
       .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt))
-    const endpoints = [...new Map(history.map(record =>
-      [`${record.device.networkZoneId}:${record.device.ipAddress}`, record])).values()]
-    if (endpoints.length !== 1) {
-      throw new ConflictException(endpoints.length
-        ? 'Saved site-owned Shelly evidence has conflicting endpoints; no command was sent.'
-        : `No saved site-owned identity and ${component} component-status evidence supports this installation.`)
+    if (!history.length) {
+      throw new ConflictException(`No saved site-owned identity and ${component} component-status evidence supports the reconciled ${zone.id} endpoint.`)
     }
-    const endpointRecord = endpoints[0]
-    const zone = this.lanDiscovery.getConfiguredZone(endpointRecord.device.networkZoneId)
-    const ipAddress = endpointRecord.device.ipAddress
-    if (!zone || isIP(ipAddress) !== 4) {
+    if (isIP(ipAddress) !== 4) {
       throw new ConflictException('The saved Shelly endpoint is not in a configured authorized execution scope.')
     }
-    const savedScope = String(device.metadata?.networkScope || '').trim()
-    const savedScopeMatches = savedScope === zone.id || savedScope === zone.cidr ||
-      savedScope.endsWith(`:${zone.id}`) ||
-      (!!zone.cidr && savedScope.endsWith(`:${zone.cidr}`))
-    if (!savedScopeMatches) {
-      throw new ConflictException('The saved endpoint does not belong to the installation network scope.')
-    }
-    // Existing Home zone configuration predates collectionSource and means
-    // API-local execution. Only an explicit Virtual Lab source is remote.
     const endpointInScope = zone.cidr
       ? ipInCidr(ipAddress, zone.cidr)
       : zone.seedIps.includes(ipAddress)
@@ -737,9 +757,12 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     }
     const collectionSource = zone.collectionSource ?? 'local'
     if (collectionSource === 'local') {
-      const localTarget = await this.resolveAuthorizedLocalShellyStatusTarget(device)
+      const localTarget = await this.resolveAuthorizedLocalShellyStatusTarget(device, ipAddress)
       if (!localTarget || localTarget.ipAddress !== ipAddress || localTarget.zone.id !== zone.id) {
         throw new ConflictException('The configured local observer cannot verify this Shelly endpoint in its authorized interface and scope.')
+      }
+      if (device.metadata?.siteLocalObserverId !== localTarget.observer.id) {
+        throw new ConflictException('The reconciled endpoint evidence belongs to a different observer; review network identity before enabling switching.')
       }
     }
     onStage?.('saved_endpoint_observer_scope_validated')
@@ -1346,6 +1369,12 @@ function safeRemoteObserverError(error: unknown): string {
   if (typeof code === 'string' && /^[A-Z0-9_]{1,80}$/.test(code)) return code
   const name = (error as { name?: unknown }).name
   return typeof name === 'string' && /^[A-Za-z0-9_]{1,80}$/.test(name) ? name : 'observer_error'
+}
+
+function scopeMatchesConfiguredZone(scopeValue: string, zone: NetworkDiscoveryZone): boolean {
+  const scope = scopeValue.trim()
+  return scope === zone.id || (!!zone.cidr && scope === zone.cidr) ||
+    scope.endsWith(`:${zone.id}`) || (!!zone.cidr && scope.endsWith(`:${zone.cidr}`))
 }
 
 function httpPollingEnabled(): boolean {
