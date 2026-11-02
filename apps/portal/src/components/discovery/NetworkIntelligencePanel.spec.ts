@@ -41,6 +41,26 @@ const observer = {
 };
 
 describe('NetworkIntelligencePanel', () => {
+  it('shows exact enrolled endpoint matches as proposals and explains missing observer authorization', () => {
+    const proposal = {
+      deviceId: 'shellyplus1-8813bfcdc8bc:switch:0', displayName: 'Bathroom Shelly',
+      physicalId: 'shellyplus1-8813bfcdc8bc', component: 'switch:0', physicalInventoryId: 'inventory-bathroom',
+      endpoint: '192.168.7.219', scopeId: 'eero', scopeCidr: '192.168.7.0/24',
+      identityObservedAt: '2026-10-21T10:00:03Z', componentObservedAt: '2026-10-21T10:00:04Z', evidenceFresh: false,
+      currentEndpoint: null, currentScope: null, observerStatus: 'missing' as const, observerId: null,
+      conflictEndpoints: ['eero:192.168.7.219'], status: 'observer_required' as const,
+    };
+    const saved = { ...snapshot, endpointRecoveryProposals: [proposal] };
+    const panel = mount(NetworkIntelligencePanel, { props: { scopes, snapshots: [saved], latest: saved, comparison: null } });
+    expect(panel.text()).toContain('Enrolled Shelly endpoint review');
+    expect(panel.text()).toContain('192.168.7.219 · eero (192.168.7.0/24)');
+    expect(panel.text()).toContain('No saved endpoint');
+    expect(panel.text()).toContain('No observer authorized for eero, this identity, and switch:0');
+    expect(panel.text()).toContain('Historical or routed scan evidence is not enough');
+    expect(panel.findAll('button').some(button => button.text().includes('Reconcile'))).toBe(false);
+    panel.unmount();
+  });
+
   it('reports 14 attempted targets separately from the six endpoints with response evidence', async () => {
     const fullScan = {
       ...snapshot,

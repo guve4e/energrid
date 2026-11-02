@@ -63,6 +63,7 @@ import { compareNetworkSnapshots } from '../devices/network-discovery-snapshot'
 import { projectNetworkRoles } from '../devices/network-role-evidence'
 import { configuredShellyMqttBroker, isSafeShellyMqttEventTopic } from '../devices/adapters/inbound/shelly/shelly-mqtt-observation-approval'
 import { configuredSiteLocalObservers, validateSiteLocalShellyEvidence } from '../devices/site-local-shelly-evidence-intake'
+import type { AuthorizedSiteLocalObserver } from '../devices/site-local-shelly-evidence-intake'
 import type { SiteLocalShellyEvidenceInput } from '../devices/site-local-shelly-evidence-intake'
 import type { NetworkDiscoverySnapshot } from '../devices/network-discovery-snapshot'
 import { DeviceMqttIngestService } from '../devices/device-mqtt-ingest.service'
@@ -84,6 +85,7 @@ import { projectPendingDeviceIdentity } from './pending-device-identity.projecti
 import { projectDeviceSummaryObservation } from './portal-device-summary-observation'
 import { projectEnrollmentIdentityLinks } from './enrollment-identity-projection'
 import { findExactShellyInventoryAssignment } from './site-local-shelly-inventory-match'
+import { projectShellyEndpointRecoveryProposals } from './shelly-endpoint-recovery-projection'
 import { isNetworkObservationFresh } from '../devices/network-observation-freshness'
 import { shellyLanCandidates } from '../devices/adapters/inbound/shelly/shelly-lan-candidates'
 import { energridDiscoveryCandidate } from '../devices/adapters/inbound/energrid/energrid-discovery-candidate'
@@ -1410,8 +1412,17 @@ export class PortalController {
     assertPortalAdministrator(request)
     const { ownership } = this.discoveryOwner()
     const snapshots = await this.discoveryMemory.listHistoricalSnapshots(ownership, 50)
+    const devices = this.deviceRegistry.getDevices(true)
+    let inventories: PhysicalDeviceInventoryRecord[] = []
+    let inventoryAvailable = !!this.physicalInventory
+    try { inventories = await this.physicalInventory?.list(ownership) || [] } catch { inventoryAvailable = false }
+    let observers: AuthorizedSiteLocalObserver[] | null = []
+    try { observers = configuredSiteLocalObservers() } catch { observers = null }
     return { snapshots: snapshots.map(snapshot => ({
       ...snapshot,
+      endpointRecoveryProposals: projectShellyEndpointRecoveryProposals({
+        snapshot, owner: ownership, devices, inventories, inventoryAvailable, observers,
+      }),
       networkRoles: projectNetworkRoles(snapshot),
       endpoints: snapshot.endpoints.map(endpoint => {
         const vendor = lookupMacVendor(endpoint.macAddress)

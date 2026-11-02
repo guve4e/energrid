@@ -375,6 +375,13 @@ type NetworkSnapshot = {
   collector: { id: string; host: string; interfaces: string[] };
   scopes: Array<{ id: string; name: string; cidr?: string; interfaceName?: string; complete: boolean; gatewayIpsObserved: string[] }>;
   methods: string[]; successes: number; failures: string[]; limitations: string[]; endpoints: NetworkDevice[];
+  endpointRecoveryProposals?: Array<{
+    deviceId: string; displayName: string; physicalId: string; component: string; physicalInventoryId: string;
+    endpoint: string; scopeId: string; scopeCidr: string; identityObservedAt: string | null; componentObservedAt: string | null;
+    evidenceFresh: boolean; currentEndpoint: string | null; currentScope: string | null;
+    observerStatus: 'authorized' | 'missing' | 'ambiguous' | 'invalid'; observerId: string | null;
+    conflictEndpoints: string[]; status: 'verification_required' | 'observer_required' | 'observer_configuration_invalid' | 'conflict' | 'already_current' | 'inventory_conflict' | 'inventory_unavailable';
+  }>;
   topology: { relationships: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }> };
   networkRoles?: Array<{ id: string; role: 'default_gateway'; label: 'Observed default gateway'; scopeId: string; scopeName: string; ipAddress: string; observedAt: string; observer: { id: string; host: string; interfaceName: string }; routeDestination: string; routeEvidence: string }>;
   runtime?: NetworkRuntime;
@@ -2678,6 +2685,10 @@ async function scanNetwork(scopeIds?: string[]) {
     appendLog(`[discovery] snapshot ${result.snapshot.scanId} saved; ${result.devices.length} endpoints visible`);
     await loadState();
     await loadDiscoveryMemory();
+    // The scan response is the collection result; the saved-snapshot endpoint
+    // adds read-only enrollment/endpoint-review projections. Reload it so a
+    // newly discovered enrolled Shelly appears in review immediately.
+    await loadNetworkSnapshots();
   } catch (error) {
     stateError.value = scanTimedOut
       ? 'The scan timed out after 185 seconds. The Mac may not have a route to the selected network; check the observer network or use an on-site observer. This does not prove that any device is offline.'

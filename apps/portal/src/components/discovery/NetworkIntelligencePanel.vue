@@ -23,6 +23,13 @@ type Snapshot = {
   collector: { id: string; host: string; interfaces: string[] };
   scopes: ScopeSnapshot[]; methods: string[]; successes: number; failures: string[]; limitations: string[];
   endpoints: Endpoint[];
+  endpointRecoveryProposals?: Array<{
+    deviceId: string; displayName: string; physicalId: string; component: string; physicalInventoryId: string;
+    endpoint: string; scopeId: string; scopeCidr: string; identityObservedAt: string | null; componentObservedAt: string | null;
+    evidenceFresh: boolean; currentEndpoint: string | null; currentScope: string | null;
+    observerStatus: 'authorized' | 'missing' | 'ambiguous' | 'invalid'; observerId: string | null;
+    conflictEndpoints: string[]; status: 'verification_required' | 'observer_required' | 'observer_configuration_invalid' | 'conflict' | 'already_current' | 'inventory_conflict' | 'inventory_unavailable';
+  }>;
   networkRoles?: NetworkRole[];
   topology: { relationships: Array<{ from: string; to: string; relation: string; verification: string; evidence: string[] }> };
   runtime?: Observer;
@@ -549,6 +556,30 @@ function isFreshIdentityTimestamp(value: string, nowMs: number): boolean {
         <p v-if="siteLocalEvidenceImport.historicalComponentConflicts.length" class="ni-review-note">Historical component evidence preserved: {{ siteLocalEvidenceImport.historicalComponentConflicts.join(', ') }}</p>
         <p v-if="!siteLocalEvidenceImport.reconciliationProposals.length" role="status">No exact enrolled component matched this report. No existing record was changed.</p>
       </template>
+    </section>
+
+    <section v-if="selectedSnapshot?.endpointRecoveryProposals?.length" class="ni-reconciliation" aria-label="Enrolled Shelly endpoint review">
+      <h2>Enrolled Shelly endpoint review</h2>
+      <p>Exact protocol-identity matches from this site-owned scan are proposals only. A scan cannot change an installed route; fresh RPC evidence from an explicitly authorized observer is required.</p>
+      <article v-for="proposal in selectedSnapshot.endpointRecoveryProposals" :key="`${proposal.deviceId}:${proposal.endpoint}:${proposal.scopeId}`" class="ni-reconciliation-item">
+        <div><strong>{{ proposal.displayName }}</strong><span>{{ proposal.component }} · inventory {{ proposal.physicalInventoryId || 'assignment unresolved' }}</span></div>
+        <dl>
+          <div><dt>Proposed endpoint</dt><dd>{{ proposal.endpoint }} · {{ proposal.scopeId }}<template v-if="proposal.scopeCidr"> ({{ proposal.scopeCidr }})</template></dd></div>
+          <div><dt>Current installation</dt><dd>{{ proposal.currentEndpoint || 'No saved endpoint' }} · {{ proposal.currentScope || 'No saved scope' }}</dd></div>
+          <div><dt>Identity evidence</dt><dd>{{ proposal.physicalId }} · {{ date(proposal.identityObservedAt || undefined) }}</dd></div>
+          <div><dt>Component evidence</dt><dd>{{ proposal.component }} · {{ date(proposal.componentObservedAt || undefined) }}{{ proposal.evidenceFresh ? ' · fresh' : ' · refresh required' }}</dd></div>
+          <div><dt>Observer authorization</dt><dd>{{ proposal.observerStatus === 'authorized' ? `Configured: ${proposal.observerId}` : proposal.observerStatus === 'ambiguous' ? 'Multiple matching observers; operator review required' : proposal.observerStatus === 'invalid' ? 'Observer authorization configuration is invalid' : `No observer authorized for ${proposal.scopeId}, this identity, and ${proposal.component}` }}</dd></div>
+          <div v-if="proposal.conflictEndpoints.length > 1"><dt>Conflicting observations</dt><dd>{{ proposal.conflictEndpoints.join(', ') }} · no endpoint selected</dd></div>
+        </dl>
+        <p v-if="proposal.status === 'observer_required'" class="ni-review-note">Blocked: configure an explicitly authorized observer for this site and scope, with this physical identity and component allowlisted. Historical or routed scan evidence is not enough.</p>
+        <p v-else-if="proposal.status === 'observer_configuration_invalid'" class="ni-review-note">Blocked: correct the server-side observer authorization configuration before verifying this endpoint.</p>
+        <p v-else-if="proposal.status === 'conflict'" class="ni-review-note">Blocked: multiple endpoint or observer matches remain unresolved. No route was selected.</p>
+        <p v-else-if="proposal.status === 'inventory_conflict'" class="ni-review-note">Blocked: the exact enrolled component does not have one matching site-owned Physical Inventory assignment.</p>
+        <p v-else-if="proposal.status === 'inventory_unavailable'" class="ni-review-note">Blocked: site-owned Physical Inventory could not be read; no endpoint review is actionable.</p>
+        <p v-else-if="proposal.status === 'already_current'" class="ni-review-note">The proposed endpoint and scope already match the installed route; no reconciliation is needed.</p>
+        <p v-else class="ni-review-note">Pending: verify this exact endpoint through the authorized observer, then import and review its operator-attested RPC report above. Reconciliation still requires an explicit operator action.</p>
+        <button type="button" @click="emit('openDevice', proposal.deviceId)">Open enrolled device ›</button>
+      </article>
     </section>
 
     <nav class="ni-lifecycle-links" aria-label="Device lifecycle">
