@@ -336,6 +336,28 @@ describe('authorized Home Shelly operational observation', () => {
       expect.objectContaining({ status: 'unreachable', reason: 'Error' }))
   })
 
+  it('uses the resolved Home route for one read-only identity and switch status observation', async () => {
+    const fixture = setup()
+
+    await expect(fixture.poller.observeShellySwitchStatusOnce(deviceId, owner)).resolves.toMatchObject({
+      deviceId, physicalId, component: 'switch:0', physicalInventoryId: inventory.physicalDeviceId,
+      site: owner, output: false, source: 'site-local-http-rpc:mac-eero-en0', networkScopeId: zone.id,
+      observer: { id: 'mac-eero-en0' },
+    })
+    expect(fixture.discovery.listIdentityEvidence).toHaveBeenCalledWith(owner)
+    expect(global.fetch).toHaveBeenCalledTimes(2)
+    expect(global.fetch).toHaveBeenNthCalledWith(1, 'http://192.168.7.39/rpc/Shelly.GetDeviceInfo', expect.objectContaining({
+      headers: expect.objectContaining({ Accept: 'application/json' }),
+    }))
+    expect(global.fetch).toHaveBeenNthCalledWith(2, 'http://192.168.7.39/rpc/Switch.GetStatus?id=0', expect.objectContaining({
+      headers: expect.objectContaining({ Accept: 'application/json' }),
+    }))
+    expect(fixture.registry.ingestDeviceTelemetry).toHaveBeenCalledWith(expect.objectContaining({
+      deviceId, values: { on: false }, siteId: owner.siteId,
+      state: expect.objectContaining({ values: { on: false }, source: 'site-local-http-rpc:mac-eero-en0', status: 'online' }),
+    }))
+  })
+
   it('keeps the last observation on a failed poll and accepts state again after reconnect', async () => {
     const fixture = setup()
     global.fetch = jest.fn().mockRejectedValue(new Error('connection refused')) as unknown as typeof fetch

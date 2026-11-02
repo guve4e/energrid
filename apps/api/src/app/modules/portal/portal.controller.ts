@@ -433,6 +433,24 @@ export class PortalController {
       throw new NotFoundException('Enrolled device was not found')
     }
     const physicalDevice = await this.physicalInventory.forLogicalDevice(scope, deviceId)
+    const enrolledDevice = this.deviceRegistry.getDevices(true).find(item =>
+      item.id === deviceId && item.tenantId === scope.tenantId && item.siteId === scope.siteId,
+    )
+    const metadata = enrolledDevice?.metadata
+    const rpcVerified = metadata?.identityEvidenceSource === 'verified_site_local_shelly_rpc' &&
+      metadata?.componentEvidenceSource === 'verified_site_local_shelly_rpc' &&
+      typeof metadata?.siteLocalObserverId === 'string' && !!metadata.siteLocalObserverId &&
+      typeof metadata?.identityVerifiedAt === 'string' && typeof metadata?.componentVerifiedAt === 'string'
+    const rpcVerification = {
+      status: rpcVerified ? 'verified' : 'not_verified',
+      identityVerifiedAt: rpcVerified ? metadata!.identityVerifiedAt : null,
+      componentVerifiedAt: rpcVerified ? metadata!.componentVerifiedAt : null,
+      observerId: rpcVerified ? metadata!.siteLocalObserverId : null,
+      networkScope: rpcVerified ? metadata!.networkScope || null : null,
+      endpoint: rpcVerified ? metadata!.ipAddress || null : null,
+      physicalId: rpcVerified ? metadata!.physicalId || null : null,
+      component: rpcVerified ? metadata!.component || null : null,
+    }
     const history = physicalDevice?.networkObservations ?? []
     const current = history.find(item => item.isCurrent) ?? null
     const logicalAssignment = physicalDevice?.assignments.find(
@@ -455,6 +473,7 @@ export class PortalController {
       association,
       history,
       physicalDevice,
+      rpcVerification,
       recovery,
     }
   }

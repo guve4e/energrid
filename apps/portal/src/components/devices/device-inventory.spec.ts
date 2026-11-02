@@ -5,6 +5,10 @@ import {
   needsControlSetup,
   inventoryConnectionStatus,
   formatDeviceObservationTime,
+  groupInventoryDevices,
+  applyEnrollmentPhysicalAssignment,
+  inventoryComponentDisplayName,
+  physicalComponentLabel,
   type InventoryDevice,
   type InventoryFilters,
 } from './device-inventory';
@@ -41,6 +45,102 @@ const ready = {
   id: 'ready',
   control: { status: 'ready' as const, binding: null, reason: 'Configured' },
 };
+
+describe('physical inventory grouping', () => {
+  it('uses an exact enrollment assignment to enrich a logical row for grouping', () => {
+    const channel0: InventoryDevice = {
+      ...relay,
+      tenantId: 'tenant-home',
+      siteId: 'site-home',
+      metadata: { physicalId: 'shellypro2pm-ec6260888084', component: 'switch:0' },
+    };
+    const channel1: InventoryDevice = {
+      ...channel0,
+      id: 'shellypro2pm-ec6260888084:switch:1',
+      metadata: { physicalId: 'shellypro2pm-ec6260888084', component: 'switch:1' },
+    };
+    const physicalInventoryId = 'physical-pro2';
+    const first: InventoryDevice = applyEnrollmentPhysicalAssignment(channel0, [
+      { physicalDeviceId: physicalInventoryId, componentKey: 'switch:0' },
+      { physicalDeviceId: physicalInventoryId, componentKey: 'switch:1' },
+    ]);
+    const second: InventoryDevice = applyEnrollmentPhysicalAssignment(channel1, [
+      { physicalDeviceId: physicalInventoryId, componentKey: 'switch:0' },
+      { physicalDeviceId: physicalInventoryId, componentKey: 'switch:1' },
+    ]);
+
+    expect(first.metadata?.physicalInventoryId).toBe(physicalInventoryId);
+    expect(second.metadata?.physicalInventoryId).toBe(physicalInventoryId);
+    expect(groupInventoryDevices([first, second])).toHaveLength(1);
+  });
+
+  it('does not enrich from a wrong component or conflicting inventory assignment', () => {
+    const device = {
+      ...relay,
+      tenantId: 'tenant-home',
+      siteId: 'site-home',
+      metadata: { physicalId: 'shellypro2pm-ec6260888084', component: 'switch:1' },
+    };
+    expect(applyEnrollmentPhysicalAssignment(device, [
+      { physicalDeviceId: 'physical-pro2', componentKey: 'switch:0' },
+    ])).toBe(device);
+    expect(applyEnrollmentPhysicalAssignment({
+      ...device,
+      metadata: { ...device.metadata, physicalInventoryId: 'conflicting-id' },
+    }, [{ physicalDeviceId: 'physical-pro2', componentKey: 'switch:1' }])
+      .metadata?.physicalInventoryId).toBeUndefined();
+    expect(applyEnrollmentPhysicalAssignment({
+      ...device,
+      metadata: { ...device.metadata, physicalInventoryId: 'stale-id' },
+    }, []).metadata?.physicalInventoryId).toBeUndefined();
+  });
+
+  it('groups logical components only by the same site-owned inventory assignment', () => {
+    const channel0 = {
+      ...relay,
+      id: 'shellypro2pm-ec6260888084:switch:0',
+      displayName: 'Washer/Fan',
+      tenantId: 'tenant-home',
+      siteId: 'site-home',
+      metadata: { physicalId: 'shellypro2pm-ec6260888084', physicalInventoryId: 'physical-pro2', component: 'switch:0' },
+    };
+    const channel1 = {
+      ...relay,
+      id: 'shellypro2pm-ec6260888084:switch:1',
+      displayName: 'shellypro2pm-ec6260888084 switch:1',
+      tenantId: 'tenant-home',
+      siteId: 'site-home',
+      metadata: { physicalId: 'shellypro2pm-ec6260888084', physicalInventoryId: 'physical-pro2', component: 'switch:1' },
+    };
+    const otherSite = {
+      ...channel1,
+      id: 'other-site:switch:1',
+      tenantId: 'tenant-other',
+      siteId: 'site-other',
+    };
+    const groups = groupInventoryDevices([channel0, channel1, otherSite]);
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toMatchObject({
+      physicalInventoryId: 'physical-pro2',
+      physicalId: 'shellypro2pm-ec6260888084',
+      label: 'Shelly Pro 2PM',
+      components: [channel0, channel1],
+    });
+    expect(groups[1].components).toEqual([otherSite]);
+    expect(physicalComponentLabel(channel0)).toBe('Switch 1');
+    expect(physicalComponentLabel(channel1)).toBe('Switch 2');
+    expect(inventoryComponentDisplayName(channel0)).toBe('Washer/Fan');
+    expect(inventoryComponentDisplayName(channel1)).toBe('Switch 2');
+  });
+
+  it('does not merge protocol claims when the physical inventory association is absent', () => {
+    const first = { ...relay, metadata: { physicalId: 'shellypro2pm-same', component: 'switch:0' } };
+    const second = { ...relay, id: 'shellypro2pm-same:switch:1', metadata: { physicalId: 'shellypro2pm-same', component: 'switch:1' } };
+    expect(groupInventoryDevices([first, second])).toHaveLength(2);
+    expect(groupInventoryDevices([first, second]).every(group => !group.physicalInventoryId)).toBe(true);
+  });
+});
+
 describe('inventory filtering', () => {
   it('formats the persisted observation timestamp for stale device summaries', () => {
     const timestamp = '2026-10-28T19:09:00.000Z';

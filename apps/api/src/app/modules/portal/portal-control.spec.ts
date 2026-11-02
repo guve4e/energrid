@@ -483,6 +483,16 @@ describe('portal control configuration authorization', () => {
     expect(setEnrollmentStatus).toHaveBeenCalledWith('temp-kitchen', 'retired');
   });
   it('returns persisted identity without requiring a live Discovery scan', async () => {
+    const enrolledDevice = {
+      id: 'temp-kitchen', tenantId: 'tenant-a', siteId: 'site-a',
+      metadata: {
+        identityEvidenceSource: 'verified_site_local_shelly_rpc',
+        componentEvidenceSource: 'verified_site_local_shelly_rpc',
+        siteLocalObserverId: 'mac-eero-en0', identityVerifiedAt: '2026-10-19T12:00:00.000Z',
+        componentVerifiedAt: '2026-10-19T12:00:01.000Z', networkScope: 'eero-lan:192.168.7.0/24',
+        ipAddress: '192.168.7.39', physicalId: 'shellypro2pm-ec6260888084', component: 'switch:0',
+      },
+    };
     const physicalDevice = {
       physicalDeviceId: 'physical-proem',
       assignments: [],
@@ -499,7 +509,8 @@ describe('portal control configuration authorization', () => {
       {} as PortalDeviceProxyService,
       {} as DeviceControlService,
       {} as DeviceMqttIngestService,
-      { getSnapshot: () => ({ tenant: { id: 'tenant-a' }, site: { id: 'site-a' } }) } as unknown as DeviceRegistryService,
+      { getSnapshot: () => ({ tenant: { id: 'tenant-a' }, site: { id: 'site-a' } }),
+        getDevices: jest.fn().mockReturnValue([enrolledDevice]) } as unknown as DeviceRegistryService,
       {} as DeviceDiagnosticsService,
       {} as never,
       {} as never,
@@ -521,6 +532,10 @@ describe('portal control configuration authorization', () => {
     })).resolves.toMatchObject({
       association: expect.objectContaining({ ipAddress: '192.168.1.204' }),
       physicalDevice,
+      rpcVerification: {
+        status: 'verified', observerId: 'mac-eero-en0', endpoint: '192.168.7.39',
+        networkScope: 'eero-lan:192.168.7.0/24', physicalId: 'shellypro2pm-ec6260888084', component: 'switch:0',
+      },
       recovery: { status: 'verification_required', physicalDeviceId: 'physical-proem', componentKey: 'em1:0' },
     });
   });
@@ -554,7 +569,8 @@ describe('portal control configuration authorization', () => {
       {} as PortalDeviceProxyService,
       {} as DeviceControlService,
       {} as DeviceMqttIngestService,
-      { getSnapshot: () => ({ tenant: { id: 'tenant-a' }, site: { id: 'site-a' } }) } as unknown as DeviceRegistryService,
+      { getSnapshot: () => ({ tenant: { id: 'tenant-a' }, site: { id: 'site-a' } }),
+        getDevices: jest.fn().mockReturnValue([]) } as unknown as DeviceRegistryService,
       {} as DeviceDiagnosticsService,
       {} as never,
       {} as never,

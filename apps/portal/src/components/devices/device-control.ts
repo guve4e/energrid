@@ -34,8 +34,8 @@ export function controlRouteLabel(device: ControlSetupDevice): string {
   if (binding?.kind === 'shelly-switch')
     return 'Resolved automatically from the authorized network scope';
   if (binding?.kind === 'shelly-mqtt') return 'Existing authorized MQTT route';
-  if (binding?.kind === 'shelly-http') return 'Existing local RPC route · endpoint revalidated';
-  if (binding?.kind === 'shelly-virtual-lab') return 'Existing remote RPC route · scope revalidated';
+  if (binding?.kind === 'shelly-http') return 'Configured local RPC route · current endpoint verification required';
+  if (binding?.kind === 'shelly-virtual-lab') return 'Configured remote RPC route · current scope verification required';
   if (binding?.kind === 'generic-mqtt') return `MQTT · ${binding.topic}`;
   if (device.memberDeviceIds?.length) return 'Member control routes';
   if (device.adapter.protocol === 'simulated') return 'Simulation';

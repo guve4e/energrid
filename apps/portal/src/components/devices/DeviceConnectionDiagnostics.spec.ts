@@ -272,8 +272,56 @@ describe('connection diagnostic UI', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][0]).toBe('/api/portal/devices/shellyplus1-00c0de000002%3Aswitch%3A0/observe-shelly-status');
     expect(fetchMock.mock.calls[0][1].method).toBe('POST');
-    expect(page.text()).toContain('Switch:0 was On');
+    expect(page.text()).toContain('Switch 1 was On');
     expect(page.text()).toContain('virtual-observer (192.168.1.138)');
+    expect(page.emitted('status-observed')).toHaveLength(1);
+  });
+
+  it('offers the read-only status action for an approved discovered Shelly switch profile', () => {
+    setup({
+      id: 'shellypro2pm-ec6260888084:switch:0',
+      kind: 'physical',
+      metadata: { component: 'switch:0' },
+      adapter: { protocol: 'mqtt', driver: 'shelly-discovered' },
+    });
+    expect(page.text()).toContain('Read status once');
+  });
+
+  it('shows the API reason when authorized read-only status verification is rejected', async () => {
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({
+      message: 'The reconciled endpoint evidence belongs to a different observer.',
+    }) });
+    setup({
+      id: 'shellypro2pm-ec6260888084:switch:0',
+      kind: 'physical', metadata: { component: 'switch:0' },
+      adapter: { protocol: 'mqtt', driver: 'shelly-discovered' },
+    });
+    await page.findAll('button').find(button => button.text().includes('Read status once'))!.trigger('click');
+    await flushPromises();
+    expect(page.text()).toContain('belongs to a different observer');
+    expect(page.text()).toContain('No device command was sent');
+  });
+
+  it('reads and labels the selected second Shelly channel without changing the operation', async () => {
+    const observedAt = '2026-10-31T20:00:00.000Z';
+    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({
+      deviceId: 'shellypro2pm-ec6260888084:switch:1', component: 'switch:1', output: false,
+      observedAt, source: 'site-local-http-rpc:mac-eero-en0',
+      observer: { id: 'mac-eero-en0', host: 'mac.local' },
+    }) });
+    setup({
+      id: 'shellypro2pm-ec6260888084:switch:1', kind: 'physical',
+      metadata: { component: 'switch:1' },
+      adapter: { protocol: 'mqtt', driver: 'shelly-discovered' },
+    });
+
+    expect(page.text()).toContain('One read-only Switch 2 status request');
+    await page.findAll('button').find(button => button.text().includes('Read status once'))!.trigger('click');
+    await flushPromises();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toContain('/shellypro2pm-ec6260888084%3Aswitch%3A1/observe-shelly-status');
+    expect(page.text()).toContain('Switch 2 was Off');
     expect(page.emitted('status-observed')).toHaveLength(1);
   });
 
@@ -281,8 +329,9 @@ describe('connection diagnostic UI', () => {
     { trustStatus: 'discovered', metadata: { component: 'switch:0' } },
     { kind: 'logical', metadata: { component: 'switch:0' } },
     { adapter: { protocol: 'http', driver: 'http-json-sensor' }, metadata: { component: 'switch:0' } },
-    { metadata: { component: 'switch:1' } },
-  ])('does not offer a Shelly status request when the enrolled switch:0 boundary is absent (%j)', overrides => {
+    { metadata: { component: 'em1:0' } },
+    { adapter: { protocol: 'http', driver: 'http-json-sensor' }, metadata: { component: 'switch:1' } },
+  ])('does not offer a Shelly status request when the approved physical Shelly boundary is absent (%j)', overrides => {
     setup(overrides);
     expect(page.text()).not.toContain('Read status once');
   });

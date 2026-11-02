@@ -151,13 +151,23 @@ describe('device control setup UI', () => {
     expect(readOnly.page.find('form').exists()).toBe(false);
   });
 
-  it('labels an existing remote execution route as read-only diagnostics rather than a setup choice', () => {
+  it('labels a saved remote route as configuration without claiming it is currently verified', () => {
     expect(controlRouteLabel({
       ...device,
       control: {
         status: 'ready', reason: 'legacy',
         binding: { kind: 'shelly-virtual-lab', enabled: true, physicalId, channel: 0 },
       },
-    })).toContain('Existing remote RPC route · scope revalidated');
+    })).toContain('Configured remote RPC route · current scope verification required');
+  });
+
+  it('does not describe an unverified local endpoint as revalidated', () => {
+    expect(controlRouteLabel({
+      ...device,
+      control: {
+        status: 'ready', reason: 'legacy',
+        binding: { kind: 'shelly-http', enabled: true, physicalId, channel: 0, baseUrl: 'http://192.0.2.1' },
+      },
+    })).toContain('Configured local RPC route · current endpoint verification required');
   });
 });

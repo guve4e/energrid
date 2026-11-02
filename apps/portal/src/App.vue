@@ -30,7 +30,7 @@ import {
 } from './voice-microphone';
 import { closeCompletedTurnSocket } from './voice-turn-socket';
 import { diagnoseVoicePerformance } from './voice-performance-diagnosis';
-import { filterInventoryDevices, formatDeviceObservationTime, inventoryConnectionStatus, isExampleDevice, needsControlSetup } from './components/devices/device-inventory';
+import { applyEnrollmentPhysicalAssignment, filterInventoryDevices, formatDeviceObservationTime, groupInventoryDevices, inventoryComponentDisplayName, inventoryConnectionStatus, isExampleDevice, needsControlSetup, physicalComponentLabel } from './components/devices/device-inventory';
 import { matchNetworkDevice, hasVerifiedEnrolledNetworkIdentity } from './components/devices/device-network';
 import { canSwitchDevice, controlRouteLabel } from './components/devices/device-control';
 import { applyDeviceOperationalStateEvent, takePortalSseFrames, type DeviceOperationalStateChangedEvent } from './device-state-events';
@@ -1040,14 +1040,21 @@ function deviceEnrollmentStatus(device: PortalDevice): 'enrolled' | 'suspended' 
   return enrollmentStatuses.value.get(JSON.stringify([device.tenantId, device.siteId, device.id])) || 'not_enrolled';
 }
 
-const enrolledInventoryDevices = computed(() =>
-  deviceCards.value.filter(device =>
+const enrolledInventoryDevices = computed(() => deviceCards.value
+  .filter(device =>
     device.trustStatus === 'approved' &&
     enrolledDeviceKeys.value.has(
       JSON.stringify([device.tenantId, device.siteId, device.id]),
     ),
-  ),
-);
+  )
+  .map(device => {
+    const enrollment = lifecycleEnrollmentRecords.value.find(record =>
+      record.id === device.id && record.tenantId === device.tenantId && record.siteId === device.siteId,
+    );
+    return enrollment
+      ? applyEnrollmentPhysicalAssignment(device, enrollment.physicalAssignments || [])
+      : device;
+  }));
 
 const retiredInventoryDevices = computed(() =>
   deviceCards.value.filter(device =>
@@ -1059,10 +1066,11 @@ const retiredInventoryDevices = computed(() =>
 const inventoryDeviceSummary = computed(() => {
   const devices = enrolledInventoryDevices.value;
   const ids = new Set(devices.map(device => device.id));
+  const physicalUnits = groupInventoryDevices(devices).length;
 
   return {
-    total: devices.length,
-    approved: devices.length,
+    physicalUnits,
+    components: devices.length,
     controllable: devices.filter(canUseDeviceControl).length,
     sensors: devices.filter(device =>
       device.capabilities.some(capability =>
@@ -1104,6 +1112,7 @@ const filteredInventoryDevices = computed(() => filterInventoryDevices(enrolledI
   zone: deviceZoneFilter.value,
   status: deviceStatusFilter.value,
 }, canUseDeviceControl));
+const filteredPhysicalInventoryGroups = computed(() => groupInventoryDevices(filteredInventoryDevices.value));
 const hasInventoryFilters = computed(() => !!deviceSearch.value || deviceSourceFilter.value !== 'site' || deviceCapabilityFilter.value !== 'all' || deviceZoneFilter.value !== 'all' || deviceStatusFilter.value !== 'all');
 
 watch([deviceSearch, deviceSourceFilter, deviceCapabilityFilter, deviceZoneFilter, deviceStatusFilter, deviceApprovalFilter], () => {
@@ -5107,12 +5116,12 @@ onBeforeUnmount(() => {
           <div class="device-inventory-content">
           <div class="summary-strip">
             <div>
-              <span>Total</span>
-              <strong>{{ inventoryDeviceSummary.total }}</strong>
+              <span>Physical devices</span>
+              <strong>{{ inventoryDeviceSummary.physicalUnits }}</strong>
             </div>
             <div>
-              <span>Approved</span>
-              <strong>{{ inventoryDeviceSummary.approved }}</strong>
+              <span>Components</span>
+              <strong>{{ inventoryDeviceSummary.components }}</strong>
             </div>
             <div>
               <span>Controllable</span>
@@ -5192,7 +5201,7 @@ onBeforeUnmount(() => {
               <option value="needs_setup">Needs setup</option>
             </select>
             <div class="inventory-filter-summary">
-              <span role="status" aria-live="polite" aria-atomic="true">{{ filteredInventoryDevices.length }} shown</span>
+              <span role="status" aria-live="polite" aria-atomic="true">{{ filteredInventoryDevices.length }} {{ filteredInventoryDevices.length === 1 ? 'component' : 'components' }} · {{ filteredPhysicalInventoryGroups.length }} {{ filteredPhysicalInventoryGroups.length === 1 ? 'physical device' : 'physical devices' }}</span>
               <button type="button" class="ghost" :disabled="!hasInventoryFilters" @click="clearInventoryFilters">Clear filters</button>
             </div>
           </div>
@@ -5245,16 +5254,27 @@ onBeforeUnmount(() => {
                 </tr>
               </thead>
               <tbody>
+                <template v-for="group in filteredPhysicalInventoryGroups" :key="group.key">
+                <tr class="physical-device-group-row" :data-physical-inventory-id="group.physicalInventoryId || 'unlinked'">
+                  <td colspan="6">
+                    <strong>{{ group.label }}</strong>
+                    <span>{{ group.components.length }} {{ group.components.length === 1 ? 'component' : 'components' }}</span>
+                    <small v-if="group.physicalId">{{ group.physicalId }}</small>
+                    <small v-if="group.physicalInventoryId">Physical Inventory {{ group.physicalInventoryId }}</small>
+                    <small v-else>Physical Inventory association not recorded; shown separately</small>
+                  </td>
+                </tr>
                 <tr
-                  v-for="device in filteredInventoryDevices"
+                  v-for="device in group.components"
                   :key="device.id"
                   :id="`device-record-${encodeURIComponent(device.id)}`"
-                  :class="{ selected: selectedDeviceId === device.id }"
+                  :class="{ selected: selectedDeviceId === device.id, 'physical-device-component-row': true }"
+                  :data-component="device.metadata?.component || ''"
                   @click="selectDevice(device)"
                 >
                   <td data-label="Device">
-                    <button type="button" class="device-name-button" @click.stop="selectDevice(device)">{{ device.displayName }}</button>
-                    <span>{{ device.kind }} · {{ device.id }}</span>
+                    <button type="button" class="device-name-button" @click.stop="selectDevice(device)">{{ inventoryComponentDisplayName(device) }}</button>
+                    <span>{{ physicalComponentLabel(device) }} · {{ device.kind }} · {{ device.id }}</span>
                     <span v-if="isExampleDevice(device)" class="device-example-label">Example / simulation</span>
                     <span v-else-if="device.trustStatus !== 'approved'" class="device-approval-label">Approval required</span>
                   </td>
@@ -5296,6 +5316,7 @@ onBeforeUnmount(() => {
                     <span v-if="canToggleDevice(device)">{{ controlRouteLabel(device) }}</span>
                   </td>
                 </tr>
+                </template>
               </tbody>
             </table>
           </div>
@@ -5320,7 +5341,7 @@ onBeforeUnmount(() => {
                   >{{ selectedDevice.zoneName }} ·
                   {{ selectedDevice.kind }}</span
                 >
-                <h3>{{ selectedDevice.displayName }}</h3>
+                <h3>{{ inventoryComponentDisplayName(selectedDevice) }}</h3>
               </div>
               <button
                 class="icon-button"
@@ -5384,7 +5405,7 @@ onBeforeUnmount(() => {
                     :api-base="apiBase"
                     :access-token="accessToken"
                   />
-                  <DeviceConnectionDiagnostics v-if="canToggleDevice(selectedDevice) || (selectedDevice.trustStatus === 'approved' && selectedDevice.adapter.driver === 'shelly-lan' && selectedDevice.metadata?.component === 'switch:0')" :key="selectedDevice.id" :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" @identity-verification="updateHttpIdentityVerification" @status-observed="loadState" />
+                  <DeviceConnectionDiagnostics v-if="canToggleDevice(selectedDevice) || (selectedDevice.trustStatus === 'approved' && ['shelly-lan', 'shelly-discovered'].includes(selectedDevice.adapter.driver) && /^switch:\d+$/.test(String(selectedDevice.metadata?.component || '')) )" :key="selectedDevice.id" :device="selectedDevice" :api-base="apiBase" :access-token="accessToken" @identity-verification="updateHttpIdentityVerification" @status-observed="loadState" />
                 </div>
               </details>
 

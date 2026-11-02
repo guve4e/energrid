@@ -72,6 +72,12 @@ interface AuthorizedLocalShellyStatusTarget {
   interfaceAddress: string
 }
 
+interface AcceptedShellyStatusObservation {
+  output: boolean
+  observedAt: string
+  observer: { id: string; host: string }
+}
+
 @Injectable()
 export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(DeviceHttpPollService.name)
@@ -150,7 +156,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       const zone = this.configuredShellyZone(device)
       // Never fall back to an API-host request when the installation has no
       // configured scope or belongs to a remote observer.
-      if (!zone || zone.collectionSource !== 'local' || !httpTargetWithinZone(device.adapter.target, zone)) return
+      if (!zone || (zone.collectionSource ?? 'local') !== 'local' || !httpTargetWithinZone(device.adapter.target, zone)) return
     }
 
     const target = device.adapter.target
@@ -220,19 +226,22 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async pollAuthorizedLocalShellyStatus(device: RegisteredDevice): Promise<void> {
-    let target: AuthorizedLocalShellyStatusTarget | null
+  private async pollAuthorizedLocalShellyStatus(
+    device: RegisteredDevice,
+    resolvedTarget?: AuthorizedLocalShellyStatusTarget,
+  ): Promise<AcceptedShellyStatusObservation | null> {
+    let target: AuthorizedLocalShellyStatusTarget | null = resolvedTarget || null
     try {
-      target = await this.resolveAuthorizedLocalShellyStatusTarget(device)
+      if (!target) target = await this.resolveAuthorizedLocalShellyStatusTarget(device)
     } catch (error) {
       this.logger.warn(JSON.stringify({
         event: 'shelly_operational_status_poll', outcome: 'rejected', deviceId: device.id,
         failureCategory: 'authorization_resolution_failed',
         error: safeRemoteObserverError(error),
       }))
-      return
+      return null
     }
-    if (!target) return
+    if (!target) return null
     const { observer, physicalId, component, channel, ipAddress, zone } = target
     const correlationId = randomUUID()
     const startedAt = performance.now()
@@ -282,6 +291,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         deviceId: device.id, observerId: observer.id, scopeId: zone.id,
         observedAt, observerDurationMs: Math.max(0, Math.round(performance.now() - startedAt)),
       }))
+      return { output: values.on, observedAt, observer: { id: observer.id, host: observer.host } }
     } catch (error) {
       this.registry.recordObserverReachability(device.id, {
         status: 'unreachable', checkedAt: new Date().toISOString(), endpoint: statusUrl,
@@ -301,6 +311,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     } finally {
       clearTimeout(timeout)
     }
+    return null
   }
 
   private async resolveAuthorizedLocalShellyStatusTarget(
@@ -726,6 +737,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     }
 
     const history = (await this.discovery.listIdentityEvidence(ownership)).filter(record => {
+      if (!record?.device) return false
       const observations = record.device.observations || []
       const independentlyVerifiedAt = new Set(observations.filter(item => item.source === 'http_identity' &&
         item.attribute === 'identity.verified' && item.value === true).map(item => item.observedAt))
@@ -789,11 +801,32 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
           this.logShellyObservation(correlationId, nextStage, 'completed', startedAt, deviceId, ownership, scopeId ? { scopeId } : {})
       })
       const { device, inventory, physicalId, component, ipAddress, zone } = target
-      const lanDiscovery = this.lanDiscovery
-      if (!lanDiscovery) throw new BadGatewayException('The configured Lab observer is unavailable.')
-
       const zoneId = zone.id
       scopeId = zoneId
+
+      if (zone.collectionSource === 'local') {
+        const localTarget = await this.resolveAuthorizedLocalShellyStatusTarget(device, ipAddress)
+        if (!localTarget || localTarget.ipAddress !== ipAddress || localTarget.zone.id !== zoneId ||
+            localTarget.observer.id !== device.metadata?.siteLocalObserverId) {
+          throw new ConflictException('The authorized local observer cannot verify this saved Home endpoint and scope.')
+        }
+        observerId = localTarget.observer.id
+        this.logShellyObservation(correlationId, 'remote_execution_started', 'started', startedAt, deviceId, ownership, { scopeId, observerId })
+        stage = 'rpc_response_validation'
+        const observation = await this.pollAuthorizedLocalShellyStatus(device, localTarget)
+        if (!observation) throw new BadGatewayException('The authorized local observer could not verify Shelly identity and read the switch status.')
+        this.logShellyObservation(correlationId, 'rpc_response_validated', 'completed', startedAt, deviceId, ownership, { scopeId, observerId })
+        stage = 'operational_state_ingestion_completed'
+        this.logShellyObservation(correlationId, stage, 'completed', startedAt, deviceId, ownership, { scopeId, observerId })
+        return {
+          deviceId: device.id, physicalId, component, physicalInventoryId: inventory.physicalDeviceId,
+          site: ownership, output: observation.output, observedAt: observation.observedAt,
+          source: `site-local-http-rpc:${observerId}`, observer: observation.observer, networkScopeId: zoneId,
+        }
+      }
+
+      const lanDiscovery = this.lanDiscovery
+      if (!lanDiscovery) throw new BadGatewayException('The configured Lab observer is unavailable.')
 
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), 18_000)
@@ -817,7 +850,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         }
         const status = evidence.componentStatuses.find(item => item.componentKey === component)
         const values = status ? parseShellySwitchStatus(status.body, component) : null
-        if (!values) throw new BadGatewayException('Switch.GetStatus returned a malformed or mismatched switch:0 response.')
+        if (!values) throw new BadGatewayException(`Switch.GetStatus returned a malformed or mismatched ${component} response.`)
 
         const observedAt = status!.observedAt
         const observedTime = Date.parse(observedAt)

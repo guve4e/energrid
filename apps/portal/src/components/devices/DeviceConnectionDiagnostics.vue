@@ -20,6 +20,14 @@ const expired = ref(false);
 const shellyStatus = ref<{ output: boolean; observedAt: string; observer: { id: string; host: string } } | null>(null);
 const statusBusy = ref(false);
 const statusError = ref('');
+const shellyComponent = computed(() => {
+  const component = props.device.metadata?.component;
+  return typeof component === 'string' && /^switch:\d+$/.test(component) ? component : null;
+});
+const shellySwitchLabel = computed(() => {
+  const channel = shellyComponent.value?.split(':')[1];
+  return channel === undefined ? 'Switch' : `Switch ${Number(channel) + 1}`;
+});
 let request: AbortController | null = null;
 let statusRequest: AbortController | null = null;
 let expires: ReturnType<typeof setTimeout> | undefined;
@@ -35,7 +43,8 @@ const routingWarning = computed(
 );
 const canReadShellyStatus = computed(() =>
   props.device.trustStatus === 'approved' && props.device.kind !== 'logical' &&
-  props.device.adapter.driver === 'shelly-lan' && props.device.metadata?.component === 'switch:0',
+  ['shelly-lan', 'shelly-discovered'].includes(props.device.adapter.driver) &&
+  !!shellyComponent.value,
 );
 
 function reset() {
@@ -151,14 +160,16 @@ async function readShellyStatusOnce() {
       { method: 'POST', headers: { Authorization: `Bearer ${props.accessToken}` }, signal: controller.signal },
     );
     if (!response.ok) {
-      statusError.value = `Read-only status observation failed (HTTP ${response.status}). No device command was sent.`;
+      const failure = await response.json().catch(() => null) as { message?: unknown } | null;
+      const reason = typeof failure?.message === 'string' ? failure.message : 'The authorized observer rejected the request.';
+      statusError.value = `Read-only status observation failed (HTTP ${response.status}): ${reason} No device command was sent.`;
       return;
     }
     const result = await response.json().catch(() => null) as {
       deviceId?: unknown; component?: unknown; output?: unknown; observedAt?: unknown;
       observer?: { id?: unknown; host?: unknown };
     } | null;
-    if (!result || result.deviceId !== props.device.id || result.component !== 'switch:0' ||
+    if (!result || result.deviceId !== props.device.id || result.component !== shellyComponent.value ||
         typeof result.output !== 'boolean' || typeof result.observedAt !== 'string' ||
         !Number.isFinite(Date.parse(result.observedAt)) || !result.observer ||
         typeof result.observer.id !== 'string' || typeof result.observer.host !== 'string') {
@@ -220,10 +231,10 @@ function outcomeLabel(value: string) {
       <button type="button" class="ghost" :disabled="statusBusy" @click="readShellyStatusOnce">
         {{ statusBusy ? 'Reading status…' : 'Read status once' }}
       </button>
-      <p class="muted">One read-only switch status request through the authorized site observer. No relay command is sent.</p>
+      <p class="muted">One read-only {{ shellySwitchLabel }} status request through the authorized site observer. No relay command is sent.</p>
       <p v-if="statusError" role="alert">{{ statusError }}</p>
       <p v-if="shellyStatus" role="status" aria-live="polite">
-        Switch:0 was {{ shellyStatus.output ? 'On' : 'Off' }} at {{ time(shellyStatus.observedAt) }} · Observer {{ shellyStatus.observer.id }} ({{ shellyStatus.observer.host }}).
+        {{ shellySwitchLabel }} was {{ shellyStatus.output ? 'On' : 'Off' }} at {{ time(shellyStatus.observedAt) }} · Observer {{ shellyStatus.observer.id }} ({{ shellyStatus.observer.host }}).
       </p>
     </section>
     <p v-if="!report && !error" class="muted" role="status">

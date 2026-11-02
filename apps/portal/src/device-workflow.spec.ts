@@ -468,34 +468,82 @@ describe('device onboarding page workflow with mocked services', () => {
     table.scrollTop = 250;
     table.scrollLeft = 90;
     await search.setValue('Kitchen');
-    expect(count()).toBe('1 shown');
+    expect(count()).toBe('1 component · 1 physical device');
     expect(table.scrollTop).toBe(0);
     expect(table.scrollLeft).toBe(0);
     expect(page!.get('tbody').text()).toContain('Kitchen Shelly');
     await search.setValue('missing-device');
-    expect(count()).toBe('0 shown');
+    expect(count()).toBe('0 components · 0 physical devices');
     expect(page!.text()).toContain('No devices match this filter');
     await button('Clear filters').trigger('click');
-    expect(count()).toBe('2 shown');
+    expect(count()).toBe('2 components · 2 physical devices');
     await page!.get('[aria-label="Filter by capability"]').setValue('power');
-    expect(count()).toBe('1 shown');
+    expect(count()).toBe('1 component · 1 physical device');
     expect(page!.get('tbody').text()).toContain('Utility meter');
     await page!.get('[aria-label="Filter by zone"]').setValue('kitchen');
-    expect(count()).toBe('0 shown');
+    expect(count()).toBe('0 components · 0 physical devices');
     await button('Clear filters').trigger('click');
     await page!.get('[aria-label="Filter by status"]').setValue('needs_setup');
-    expect(count()).toBe('1 shown');
+    expect(count()).toBe('1 component · 1 physical device');
     await button('Clear filters').trigger('click');
-    expect(count()).toBe('2 shown');
+    expect(count()).toBe('2 components · 2 physical devices');
     expect(page!.get('tbody').text()).not.toContain('Pending relay');
     await page!.get('[aria-label="Filter by source"]').setValue('examples');
-    expect(count()).toBe('1 shown');
+    expect(count()).toBe('1 component · 1 physical device');
     expect(page!.get('tbody').text()).toContain('Example relay');
     await button('Clear filters').trigger('click');
-    expect(count()).toBe('2 shown');
+    expect(count()).toBe('2 components · 2 physical devices');
     expect(button('Clear filters').attributes('disabled')).toBeDefined();
     expect(fetch.mock.calls.length).toBe(initialRequests);
   });
+
+  it('presents two Pro 2PM channel records beneath one site-owned physical inventory unit', async () => {
+    const physicalId = 'shellypro2pm-ec6260888084';
+    const physicalInventoryId = '8e15ec60-a22b-4f8c-ab09-5e61d44030f9';
+    const makeChannel = (channel: number, displayName: string) => ({
+      ...relay,
+      id: `${physicalId}:switch:${channel}`,
+      displayName,
+      trustStatus: 'approved',
+      capabilities: [{ kind: channel === 0 ? 'switch' : 'power', actions: channel === 0 ? ['turn_on', 'turn_off'] : ['read'] }],
+      metadata: { physicalId, component: `switch:${channel}`, channel },
+      control: { status: channel === 0 ? 'ready' : 'read-only', binding: null, reason: '' },
+    });
+    const state = data([
+      makeChannel(0, 'Washer/Fan'),
+      makeChannel(1, `${physicalId}:switch:1`),
+    ]);
+    const componentByDeviceId = new Map<string, string>(
+      state.devices.map((device: any) => [device.id, device.metadata.component]),
+    );
+    const fetch = vi.fn(async (url: string) => ({
+      ok: true,
+      json: async () => url.endsWith('/portal/state')
+        ? structuredClone(state)
+        : url.includes('/devices/enrollments') ? {
+          enrollments: enrollmentsFor(state).map((enrollment: any) => ({
+            ...enrollment,
+            physicalAssignments: [{
+              physicalDeviceId: physicalInventoryId,
+              componentKey: componentByDeviceId.get(enrollment.deviceId),
+            }],
+          })),
+        } : { runs: [] },
+    }));
+    await render('/devices/', fetch);
+
+    expect(page!.get('.summary-strip').text()).toContain('Physical devices1');
+    expect(page!.get('.summary-strip').text()).toContain('Components2');
+    expect(page!.findAll('.physical-device-group-row')).toHaveLength(1);
+    expect(page!.find('.physical-device-group-row').text()).toContain('Shelly Pro 2PM');
+    expect(page!.findAll('.physical-device-component-row')).toHaveLength(2);
+    expect(page!.get('tbody').text()).toContain('Switch 2');
+    expect(page!.get('tbody').text()).not.toContain(`${physicalId} switch:1`);
+    expect(page!.get('tbody').text()).toContain(physicalInventoryId);
+    await button('Switch 2').trigger('click');
+    expect(page!.get('.device-sheet-head h3').text()).toBe('Switch 2');
+  });
+
   it('keeps search and an unsaved switch-permission draft when state is refreshed', async () => {
     const approved = { ...relay, trustStatus: 'approved', control: { status: 'needs-setup', binding: null, reason: '' } };
     const state = data([approved]);
@@ -509,7 +557,7 @@ describe('device onboarding page workflow with mocked services', () => {
     await flushPromises();
     expect((page!.get('[aria-label="Search devices"]').element as HTMLInputElement).value).toBe('Kitchen');
     expect((setup.get('input[type="checkbox"]').element as HTMLInputElement).checked).toBe(true);
-    expect(page!.get('.inventory-filter-summary [role="status"]').text()).toBe('1 shown');
+    expect(page!.get('.inventory-filter-summary [role="status"]').text()).toBe('1 component · 1 physical device');
     expect(fetch.mock.calls.some(([url]) => /\/(actions|control|approve)$/.test(url))).toBe(false);
   });
   it('does not poll the full Portal state on a timer when no event is available', async () => {
@@ -719,7 +767,7 @@ describe('device onboarding page workflow with mocked services', () => {
         json: async () => url === '/portal/state' ? state : url.includes('/devices/enrollments') ? { enrollments: enrollmentsFor(state) } : { runs: [] },
       })),
     );
-    expect(page!.findAll('tbody tr')).toHaveLength(1);
+    expect(page!.findAll('.physical-device-component-row')).toHaveLength(1);
     await page!
       .get('select[aria-label="Filter by status"]')
       .setValue('controllable');
@@ -728,7 +776,7 @@ describe('device onboarding page workflow with mocked services', () => {
     await page!
       .get('select[aria-label="Filter by source"]')
       .setValue('examples');
-    expect(page!.findAll('tbody tr')).toHaveLength(1);
+    expect(page!.findAll('.physical-device-component-row')).toHaveLength(1);
     expect(page!.get('tbody').text()).toContain('Lab example');
   });
 

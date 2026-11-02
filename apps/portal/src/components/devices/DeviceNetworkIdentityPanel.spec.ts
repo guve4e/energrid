@@ -53,6 +53,31 @@ describe('DeviceNetworkIdentityPanel', () => {
     expect(page.text()).not.toContain('User confirmed');
   });
 
+  it('distinguishes verified Shelly RPC identity from an unverified MAC association', async () => {
+    fetchMock.mockResolvedValue(response({
+      association: {
+        ipAddress: '192.168.7.39', networkZoneId: 'eero-lan', networkZoneName: 'eero-lan',
+        observedAt: '2026-10-29T05:23:04.000Z', evidenceSource: 'lan discovery protocol match',
+        verificationStatus: 'protocol_observed', isCurrent: true, macAddress: 'ec:62:60:88:80:84',
+      },
+      history: [],
+      physicalDevice: { physicalDeviceId: 'pi-id', assignments: [], components: [], endpoints: [] },
+      rpcVerification: {
+        status: 'verified', physicalId: 'shellypro2pm-ec6260888084', component: 'switch:0',
+        endpoint: '192.168.7.39', networkScope: 'eero-lan:192.168.7.0/24', observerId: 'mac-eero-en0',
+        identityVerifiedAt: '2026-10-29T05:23:00.000Z', componentVerifiedAt: '2026-10-29T05:23:01.000Z',
+      },
+      recovery: { status: 'not_recoverable', reason: 'Already associated.' },
+    }));
+    const page = mountPanel('shellypro2pm-ec6260888084:switch:0');
+    await flushPromises();
+
+    expect(page.text()).toContain('Shelly RPC identity and componentVerified');
+    expect(page.text()).toContain('mac-eero-en0');
+    expect(page.text()).toContain('MAC address last verified');
+    expect(page.text()).toContain('No independent MAC verification recorded');
+  });
+
   it('retires an enrollment only after explicit confirmation', async () => {
     vi.stubGlobal('confirm', vi.fn(() => true));
     fetchMock.mockImplementation((_url, options) => {
@@ -89,7 +114,7 @@ describe('DeviceNetworkIdentityPanel', () => {
       recovery: { status: 'not_recoverable', reason: 'The logical component is already linked.' } }));
     const page = mountPanel('shellyplus1-00c0de000001:switch:0');
     await flushPromises();
-    expect(page.text()).toContain('Identity recovery unavailable');
+    expect(page.text()).toContain('Partial enrollment recovery unavailable');
     expect(page.text()).toContain('The logical component is already linked.');
     expect(page.text()).not.toContain('Complete identity association');
     expect(page.text()).not.toContain('Verify selected device');
@@ -302,6 +327,24 @@ describe('DeviceNetworkIdentityPanel', () => {
     expect(page.text()).toContain('Current IP address');
     expect(page.text()).toContain('Verified MAC address');
     expect(page.text()).toContain('Hardware verified');
-    expect(page.text()).toContain('Last verified');
+    expect(page.text()).toContain(new Date('2026-10-19T12:11:00.000Z').toLocaleString());
+  });
+
+  it('distinguishes a claimed protocol identity from missing site-local RPC evidence', async () => {
+    fetchMock.mockResolvedValue(response({
+      association: { ipAddress: '192.168.7.39', networkZoneId: 'eero-lan', networkZoneName: 'Eero LAN', observedAt: '2026-10-29T05:23:04.000Z', evidenceSource: 'lan_discovery_protocol_match', verificationStatus: 'protocol_observed', isCurrent: true },
+      history: [],
+      physicalDevice: { physicalDeviceId: 'home-pro2', identities: [{ namespace: 'mqtt:shelly-protocol-id', value: 'shellypro2pm-ec6260888084' }], components: [{ key: 'switch:0', capabilities: ['switch'] }, { key: 'switch:1', capabilities: ['switch'] }], endpoints: [], assignments: [{ deviceId: 'shellypro2pm-ec6260888084:switch:1', physicalDeviceId: 'home-pro2', componentKey: 'switch:1' }] },
+      logicalAssignment: { deviceId: 'shellypro2pm-ec6260888084:switch:1', physicalDeviceId: 'home-pro2', componentKey: 'switch:1' },
+      rpcVerification: { status: 'not_verified' },
+      recovery: { status: 'not_recoverable', reason: 'This is not an approved, site-owned discovery enrollment.' },
+    }));
+    const page = mountPanel('shellypro2pm-ec6260888084:switch:1');
+    await flushPromises();
+    expect(page.text()).toContain('shellypro2pm-ec6260888084');
+    expect(page.text()).toContain('Not verified');
+    expect(page.text()).toContain('not fresh, site-local RPC evidence for this component');
+    expect(page.text()).toContain('Partial enrollment recovery unavailable');
+    expect(page.text()).not.toContain('Identity recovery unavailable');
   });
 });

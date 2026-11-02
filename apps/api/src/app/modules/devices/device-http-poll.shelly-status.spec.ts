@@ -1,23 +1,29 @@
 import { DeviceHttpPollService } from './device-http-poll.service'
 import type { DeviceRegistryService } from './device-registry.service'
+import type { NetworkDiscoveryZone } from './device-registry.types'
 
 const ownership = { tenantId: 'tenant-demo', siteId: 'site-device-lab' }
 const physicalId = 'shellyplus1-00c0de000002'
 const deviceId = `${physicalId}:switch:0`
 const observedAt = new Date().toISOString()
-const zone = { id: 'device-lab-vlan', cidr: '172.30.250.0/28', collectionSource: 'virtual-lab' }
+const zone: NetworkDiscoveryZone = { id: 'device-lab-vlan', cidr: '172.30.250.0/28', collectionSource: 'virtual-lab' }
 const device = {
   id: deviceId, tenantId: ownership.tenantId, siteId: ownership.siteId,
   trustStatus: 'approved', kind: 'physical', displayName: 'Lab Shelly', zoneName: 'Lab',
   adapter: { driver: 'shelly-lan', protocol: 'http', configured: true, target: 'http://172.30.250.13/rpc/Switch.GetStatus?id=0' },
-  metadata: { physicalId, component: 'switch:0', channel: 0, networkScope: 'virtual-lab-observer:device-lab-vlan', physicalInventoryId: '70a41259-3e04-4559-a490-a41afc7a3193' },
+  metadata: {
+    physicalId, component: 'switch:0', channel: 0, ipAddress: '172.30.250.13',
+    networkScope: 'virtual-lab-observer:device-lab-vlan', physicalInventoryId: '70a41259-3e04-4559-a490-a41afc7a3193',
+    identityEvidenceSource: 'verified_site_local_shelly_rpc', componentEvidenceSource: 'verified_site_local_shelly_rpc',
+    siteLocalEvidenceScanId: 'site-observer-fixture-scan', siteLocalObserverId: 'virtual-lab-observer',
+  },
   capabilities: [{ kind: 'switch', actions: ['read'] }],
   control: { status: 'unavailable' }, assistantEnabled: false,
 }
 const identityEvidence = {
   ownership,
   device: {
-    vendor: 'Shelly', id: physicalId, ipAddress: '172.30.250.13', networkZoneId: zone.id,
+    vendor: 'Shelly', id: physicalId, ipAddress: '172.30.250.13', networkZoneId: zone.id, protocol: 'http',
     components: [{ component: 'switch:0' }],
     observations: [
       { source: 'http_rpc', attribute: 'shelly.device_id', value: physicalId },
@@ -31,6 +37,7 @@ const inventory = {
   identity: { namespace: 'mqtt:shelly-protocol-id', value: physicalId },
   components: [{ key: 'switch:0', capabilities: ['switch'] }],
   assignments: [{ deviceId, physicalDeviceId: '70a41259-3e04-4559-a490-a41afc7a3193', componentKey: 'switch:0' }],
+  networkObservations: [{ ipAddress: '172.30.250.13', networkScope: 'virtual-lab-observer:device-lab-vlan', isCurrent: true }],
 }
 
 function setup(overrides: { ownership?: typeof ownership; identity?: Record<string, unknown>; remote?: unknown; remoteError?: Error } = {}) {
@@ -80,20 +87,117 @@ describe('one-shot authorized Shelly status observation', () => {
     })
   })
 
+  it('observes switch:1 independently while retaining the shared physical identity and inventory', async () => {
+    const device1Id = `${physicalId}:switch:1`
+    const device1 = {
+      ...device,
+      id: device1Id,
+      adapter: { ...device.adapter, target: 'http://172.30.250.13/rpc/Switch.GetStatus?id=1' },
+      metadata: {
+        ...device.metadata,
+        component: 'switch:1', channel: 1, ipAddress: '172.30.250.13',
+        identityEvidenceSource: 'verified_site_local_shelly_rpc',
+        componentEvidenceSource: 'verified_site_local_shelly_rpc',
+        siteLocalEvidenceScanId: 'site-observer-test-scan', siteLocalObserverId: 'virtual-lab-observer',
+      },
+    }
+    const sharedInventory = {
+      ...inventory,
+      networkObservations: [{ ipAddress: '172.30.250.13', networkScope: zone.id, isCurrent: true }],
+      components: [
+        { key: 'switch:0', capabilities: ['switch'] },
+        { key: 'switch:1', capabilities: ['switch'] },
+      ],
+      assignments: [
+        ...inventory.assignments,
+        { deviceId: device1Id, physicalDeviceId: inventory.physicalDeviceId, componentKey: 'switch:1' },
+      ],
+    }
+    const channelEvidence = {
+      ownership,
+      device: {
+        vendor: 'Shelly', id: physicalId, ipAddress: '172.30.250.13', networkZoneId: zone.id, protocol: 'http',
+        components: [{ component: 'switch:0' }, { component: 'switch:1' }],
+        observations: [
+          { source: 'http_rpc', attribute: 'shelly.device_id', value: physicalId },
+          { source: 'http_rpc', attribute: 'shelly.component_status', value: 'switch:1', method: 'Switch.GetStatus?id=1' },
+        ],
+      },
+      lastSeenAt: observedAt,
+    }
+    const fixture = setup({ identity: channelEvidence, remote: {
+      identity: { id: physicalId, gen: 2 },
+      componentKeys: ['switch:0', 'switch:1'],
+      componentStatuses: [{ componentKey: 'switch:1', body: { id: 1, output: false }, observedAt }],
+      observer: { id: 'virtual-lab-observer', host: '192.168.1.138', interfaceName: 'eth0' },
+    } })
+    fixture.registry.getDevices.mockReturnValue([device1])
+    fixture.registry.getShellyReconciliationTargetDecision.mockResolvedValue({ matched: true, device: device1 })
+    fixture.physical.forLogicalDevice.mockResolvedValue(sharedInventory as never)
+
+    const target = await fixture.poller.resolveShellyControlTarget(device1Id, ownership)
+    expect(target).toMatchObject({ component: 'switch:1', channel: 1, physicalId, ipAddress: '172.30.250.13' })
+    const observation = await fixture.poller.observeShellySwitchStatusOnce(device1Id, ownership)
+
+    expect(fixture.remote).toHaveBeenCalledWith(zone.id, '172.30.250.13', physicalId, ['switch:0', 'switch:1'], expect.any(AbortSignal))
+    expect(observation).toMatchObject({ deviceId: device1Id, component: 'switch:1', output: false, physicalInventoryId: inventory.physicalDeviceId })
+    expect(fixture.registry.ingestDeviceTelemetry).toHaveBeenCalledWith(expect.objectContaining({
+      deviceId: device1Id, values: { on: false }, state: expect.objectContaining({ values: { on: false } }),
+    }))
+  })
+
+  it('treats legacy configured Home scopes without a source as local execution scopes', async () => {
+    const homeZone: NetworkDiscoveryZone = { id: 'upstream-lan', cidr: '192.168.1.0/24', seedIps: [] }
+    const homeEvidence = {
+      ...identityEvidence,
+      device: { ...identityEvidence.device, ipAddress: '192.168.1.166', networkZoneId: homeZone.id },
+    }
+    const fixture = setup({ identity: homeEvidence })
+    fixture.registry.getDevices.mockReturnValue([{
+      ...device,
+      adapter: { ...device.adapter, target: 'http://192.168.1.166/rpc/Switch.GetStatus?id=0' },
+      metadata: { ...device.metadata, ipAddress: '192.168.1.166', networkScope: 'home-observer:upstream-lan', siteLocalObserverId: 'mac-eero-en0' },
+    }])
+    fixture.physical.forLogicalDevice.mockResolvedValue({
+      ...inventory, networkObservations: [{ ipAddress: '192.168.1.166', networkScope: homeZone.id, isCurrent: true }],
+    } as never)
+    jest.spyOn(fixture.poller as never, 'resolveAuthorizedLocalShellyStatusTarget' as never).mockResolvedValue({
+      ipAddress: '192.168.1.166', physicalId, component: 'switch:0', channel: 0,
+      zone: homeZone, interfaceAddress: '192.168.1.10',
+      observer: { id: 'mac-eero-en0', host: 'localhost', tenantId: ownership.tenantId, siteId: ownership.siteId,
+        scopeId: homeZone.id, cidr: homeZone.cidr, interfaceName: 'en0', expectedDeviceIds: [physicalId],
+        expectedComponentKeys: ['switch:0'] },
+    } as never)
+    const legacyZone = homeZone
+    fixture.lan.getConfiguredZone.mockReturnValue(legacyZone)
+    const target = await fixture.poller.resolveShellyControlTarget(deviceId, ownership)
+    expect(target).toMatchObject({ ipAddress: '192.168.1.166', zone: { id: 'upstream-lan', collectionSource: 'local' } })
+  })
+
   it('rejects a saved IP that is associated with the scope ID but outside its configured CIDR', async () => {
     const outsideEvidence = {
       ...identityEvidence,
       device: { ...identityEvidence.device, ipAddress: '192.168.1.21' },
     }
     const fixture = setup({ identity: outsideEvidence })
+    fixture.registry.getDevices.mockReturnValue([{
+      ...device, metadata: { ...device.metadata, ipAddress: '192.168.1.21' },
+    }])
+    fixture.physical.forLogicalDevice.mockResolvedValue({
+      ...inventory, networkObservations: [{ ipAddress: '192.168.1.21', networkScope: zone.id, isCurrent: true }],
+    } as never)
     await expect(fixture.poller.resolveShellyControlTarget(deviceId, ownership))
       .rejects.toThrow('outside the configured network scope')
   })
 
   it('uses the same canonical status projection for the direct local HTTP poll path', async () => {
     const fixture = setup()
-    const localDevice = { ...device, metadata: { ...device.metadata, networkScope: 'home-observer:home-iot' } }
-    const localZone = { ...zone, id: 'home-iot', collectionSource: 'local' as const }
+    const localDevice = {
+      ...device,
+      adapter: { ...device.adapter, target: 'http://192.168.1.166/rpc/Switch.GetStatus?id=0' },
+      metadata: { ...device.metadata, ipAddress: '192.168.1.166', networkScope: 'home-observer:upstream-lan' },
+    }
+    const localZone: NetworkDiscoveryZone = { id: 'upstream-lan', cidr: '192.168.1.0/24', seedIps: [] }
     fixture.registry.getDevices.mockReturnValue([localDevice])
     fixture.lan.getConfiguredZone.mockImplementation((id: string) => id === localZone.id ? localZone : undefined)
     const fetch = jest.spyOn(global, 'fetch').mockResolvedValue({
@@ -145,10 +249,11 @@ describe('one-shot authorized Shelly status observation', () => {
 
   it('continues direct polling for a Shelly assigned to a configured local scope', async () => {
     const fixture = setup()
-    const localZone = { ...zone, id: 'home-iot', collectionSource: 'local' as const }
+    const localZone: NetworkDiscoveryZone = { id: 'upstream-lan', cidr: '192.168.1.0/24', seedIps: [] }
     const localDevice = {
       ...device,
-      metadata: { ...device.metadata, networkScope: 'home-observer:home-iot' },
+      adapter: { ...device.adapter, target: 'http://192.168.1.166/rpc/Switch.GetStatus?id=0' },
+      metadata: { ...device.metadata, networkScope: 'home-observer:upstream-lan' },
     }
     fixture.registry.getDevices.mockReturnValue([localDevice])
     fixture.lan.getConfiguredZone.mockImplementation((id: string) => id === localZone.id ? localZone : undefined)
@@ -158,7 +263,7 @@ describe('one-shot authorized Shelly status observation', () => {
 
     try {
       await fixture.poller.pollOnce()
-      expect(fixture.lan.getConfiguredZone).toHaveBeenCalledWith('home-iot')
+      expect(fixture.lan.getConfiguredZone).toHaveBeenCalledWith('upstream-lan')
       expect(fetch).toHaveBeenCalledWith(localDevice.adapter.target, expect.any(Object))
       expect(fixture.registry.ingestDeviceTelemetry).toHaveBeenCalledWith(expect.objectContaining({
         deviceId, values: { on: true },
@@ -303,7 +408,7 @@ describe('one-shot authorized Shelly status observation', () => {
 
   it('fails closed for wrong-scope or missing saved evidence and observer errors', async () => {
     const wrongScope = setup({ identity: { ...identityEvidence, device: { ...identityEvidence.device, networkZoneId: 'home-lan' } } })
-    await expect(wrongScope.poller.observeShellySwitchStatusOnce(deviceId, ownership)).rejects.toThrow(/does not belong to the installation network scope/)
+    await expect(wrongScope.poller.observeShellySwitchStatusOnce(deviceId, ownership)).rejects.toThrow(/component-status evidence supports the reconciled/)
     const noEvidence = setup({ identity: {} })
     await expect(noEvidence.poller.observeShellySwitchStatusOnce(deviceId, ownership)).rejects.toThrow(/No saved site-owned identity/)
     const failure = setup({ remoteError: new Error('observer failure') })

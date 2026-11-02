@@ -1109,6 +1109,37 @@ pre {
   background: #eaf2ff;
 }
 
+.device-table tbody .physical-device-group-row {
+  cursor: default;
+  background: #f4f7fb;
+}
+
+.device-table .physical-device-group-row td {
+  padding: 10px 14px 8px;
+  border-top: 1px solid #dbe3ee;
+}
+
+.device-table .physical-device-group-row span,
+.device-table .physical-device-group-row small {
+  display: block;
+  margin-top: 3px;
+  color: #667085;
+  font-size: 11px;
+}
+
+.device-table .physical-device-component-row td:first-child {
+  padding-left: 24px;
+}
+
+.theme-dark .device-table tbody .physical-device-group-row {
+  background: #1b2638;
+}
+
+.theme-dark .device-table .physical-device-group-row span,
+.theme-dark .device-table .physical-device-group-row small {
+  color: #b3bfd2;
+}
+
 .device-table th:nth-child(1),
 .device-table td:nth-child(1) {
   width: 21%;
@@ -3473,6 +3504,19 @@ pre {
   .device-table tr {
     display: grid;
     gap: 8px;
+  }
+
+  .device-table .physical-device-group-row {
+    display: block;
+  }
+
+  .device-table .physical-device-group-row td {
+    display: block;
+    padding: 10px 0;
+  }
+
+  .device-table .physical-device-group-row td::before {
+    content: none;
   }
 
   .device-table td {

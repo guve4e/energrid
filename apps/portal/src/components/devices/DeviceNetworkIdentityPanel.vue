@@ -34,6 +34,16 @@ type IdentityRecovery = {
   physicalId?: string;
   componentKey?: string;
 };
+type RpcVerification = {
+  status: 'verified' | 'not_verified';
+  identityVerifiedAt?: string | null;
+  componentVerifiedAt?: string | null;
+  observerId?: string | null;
+  networkScope?: string | null;
+  endpoint?: string | null;
+  physicalId?: string | null;
+  component?: string | null;
+};
 
 const props = defineProps<{
   deviceId: string;
@@ -50,10 +60,13 @@ const history = ref<IdentityEvidence[]>([]);
 const physicalDevice = ref<PhysicalDevice | null>(null);
 const logicalAssignment = ref<PhysicalDevice['assignments'][number] | null>(null);
 const recovery = ref<IdentityRecovery | null>(null);
+const rpcVerification = ref<RpcVerification | null>(null);
 const displayedIdentity = computed(() =>
   physicalDevice.value?.identities?.find(item => item.namespace === 'mqtt:shelly-protocol-id')
     || physicalDevice.value?.identity || null,
 );
+const isShelly = computed(() => physicalDevice.value?.vendor === 'Shelly' ||
+  displayedIdentity.value?.namespace === 'mqtt:shelly-protocol-id' || /^shelly/i.test(props.deviceId));
 const logicalRole = ref('');
 const editingRole = ref(false);
 const busy = ref(false);
@@ -67,6 +80,7 @@ async function fetchIdentity(): Promise<boolean> {
     physicalDevice.value = null;
     logicalAssignment.value = null;
     recovery.value = null;
+    rpcVerification.value = null;
     return true;
   }
   try {
@@ -82,6 +96,7 @@ async function fetchIdentity(): Promise<boolean> {
     logicalAssignment.value = result.logicalAssignment || null;
     logicalRole.value = result.logicalAssignment?.role || '';
     recovery.value = result.recovery || null;
+    rpcVerification.value = result.rpcVerification || null;
     return true;
   } catch {
     error.value = 'Network identity details are currently unavailable.';
@@ -270,8 +285,8 @@ watch(() => [props.deviceId, props.enrollmentStatus], load);
 
     <p v-if="!association" class="device-identity-empty">No LAN identity is associated with {{ deviceName }}.</p>
 
-    <div v-if="recovery" class="device-identity-recovery">
-      <strong v-if="recovery.status === 'not_recoverable'">Identity recovery unavailable</strong>
+    <div v-if="recovery && isShelly" class="device-identity-recovery">
+      <strong v-if="recovery.status === 'not_recoverable'">Partial enrollment recovery unavailable</strong>
       <p>{{ recovery.reason }}</p>
       <p v-if="recovery.status === 'ready'">Link this existing component to Physical Inventory {{ recovery.physicalDeviceId }} as {{ recovery.componentKey }}. No measurement or control authority is added.</p>
       <button v-if="recovery.status === 'verification_required'" type="button" class="ghost" :disabled="busy" @click="verifySelectedDevice">
@@ -288,7 +303,9 @@ watch(() => [props.deviceId, props.enrollmentStatus], load);
         <div><dt>Endpoint</dt><dd>{{ protocol.toUpperCase() }} · {{ protocolEndpoint || 'Unknown' }}</dd></div>
         <div><dt>Evidence source</dt><dd>{{ evidenceSourceLabel(association?.evidenceSource) }}</dd></div>
         <div><dt>Last observed</dt><dd>{{ observedAt(association?.observedAt) }}</dd></div>
-        <div><dt>Last verified</dt><dd>{{ observedAt(association?.hardwareVerifiedAt || (association?.verificationStatus === 'hardware_verified' ? association.observedAt : undefined)) }}</dd></div>
+        <div><dt>MAC address last verified</dt><dd>{{ association?.hardwareVerifiedAt || association?.verificationStatus === 'hardware_verified' ? observedAt(association?.hardwareVerifiedAt || association?.observedAt) : 'No independent MAC verification recorded' }}</dd></div>
+        <div v-if="rpcVerification && isShelly"><dt>Shelly RPC identity and component</dt><dd>{{ rpcVerification.status === 'verified' ? 'Verified' : 'Not verified' }}</dd><small v-if="rpcVerification.status === 'verified'">{{ rpcVerification.physicalId }} · {{ rpcVerification.component }} · {{ rpcVerification.endpoint }} · {{ rpcVerification.networkScope }}</small><small v-else>The stored protocol identity claim is not fresh, site-local RPC evidence for this component.</small></div>
+        <div v-if="rpcVerification?.status === 'verified'"><dt>RPC evidence</dt><dd>{{ observedAt(rpcVerification.identityVerifiedAt || undefined) }}</dd><small>Identity verified by {{ rpcVerification.observerId || 'authorized site observer' }}; component status at {{ observedAt(rpcVerification.componentVerifiedAt || undefined) }}. This is historical verification evidence, separate from the MAC association.</small></div>
         <div><dt>Hostname</dt><dd>{{ association?.hostname || 'Unknown' }}</dd></div>
         <div><dt>Protocol identity</dt><dd>{{ displayedIdentity ? `${displayedIdentity.namespace} · ${displayedIdentity.value}` : 'Unknown' }}</dd></div>
         <div v-if="physicalDevice?.vendor || physicalDevice?.hardwareModel || physicalDevice?.firmwareVersion"><dt>Inventory metadata</dt><dd>{{ [physicalDevice?.vendor, physicalDevice?.hardwareModel, physicalDevice?.firmwareVersion].filter(Boolean).join(' · ') }}</dd><small>Stored inventory details; firmware health reports its current version separately.</small></div>
