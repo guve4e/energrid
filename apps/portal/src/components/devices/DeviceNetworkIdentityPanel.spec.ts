@@ -67,6 +67,7 @@ describe('DeviceNetworkIdentityPanel', () => {
         endpoint: '192.168.7.39', networkScope: 'eero-lan:192.168.7.0/24', observerId: 'mac-eero-en0',
         identityVerifiedAt: '2026-10-29T05:23:00.000Z', componentVerifiedAt: '2026-10-29T05:23:01.000Z',
       },
+      installationRoute: { endpoint: '192.168.7.39', networkScope: 'eero-lan:192.168.7.0/24' },
       recovery: { status: 'not_recoverable', reason: 'Already associated.' },
     }));
     const page = mountPanel('shellypro2pm-ec6260888084:switch:0');
@@ -76,6 +77,25 @@ describe('DeviceNetworkIdentityPanel', () => {
     expect(page.text()).toContain('mac-eero-en0');
     expect(page.text()).toContain('MAC address last verified');
     expect(page.text()).toContain('No independent MAC verification recorded');
+    expect(page.text()).toContain('Saved installation scope');
+    expect(page.text()).toContain('eero-lan:192.168.7.0/24');
+  });
+
+  it('shows missing saved route values separately from observed inventory scope', async () => {
+    fetchMock.mockResolvedValue(response({
+      association: { ipAddress: '192.168.7.39', networkZoneId: 'eero-lan', networkZoneName: 'eero-lan', isCurrent: true },
+      physicalDevice: { vendor: 'Shelly', physicalDeviceId: 'physical-1', assignments: [], components: [], endpoints: [] },
+      rpcVerification: { status: 'not_verified' },
+      installationRoute: { endpoint: null, networkScope: null },
+    }));
+    const page = mountPanel('shellypro2pm-ec6260888084:switch:1');
+    await flushPromises();
+    await page.get('details.device-identity-technical summary').trigger('click');
+
+    expect(page.text()).toContain('192.168.7.39');
+    expect(page.text()).toContain('Saved installation endpoint');
+    expect(page.text()).toContain('Saved installation scope');
+    expect(page.text()).toContain('Not saved');
   });
 
   it('retires an enrollment only after explicit confirmation', async () => {

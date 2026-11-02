@@ -437,6 +437,10 @@ export class PortalController {
       item.id === deviceId && item.tenantId === scope.tenantId && item.siteId === scope.siteId,
     )
     const metadata = enrolledDevice?.metadata
+    const installationRoute = {
+      endpoint: typeof metadata?.ipAddress === 'string' ? metadata.ipAddress : null,
+      networkScope: typeof metadata?.networkScope === 'string' ? metadata.networkScope : null,
+    }
     const rpcVerified = metadata?.identityEvidenceSource === 'verified_site_local_shelly_rpc' &&
       metadata?.componentEvidenceSource === 'verified_site_local_shelly_rpc' &&
       typeof metadata?.siteLocalObserverId === 'string' && !!metadata.siteLocalObserverId &&
@@ -473,6 +477,9 @@ export class PortalController {
       association,
       history,
       physicalDevice,
+      // Keep the saved route inputs distinct from inventory evidence and
+      // independently verified identity.
+      installationRoute,
       rpcVerification,
       recovery,
     }

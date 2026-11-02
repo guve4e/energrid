@@ -227,6 +227,14 @@ describe('authorized Home Shelly operational observation', () => {
     expect(global.fetch).not.toHaveBeenCalled()
   })
 
+  it('rejects a missing saved installation endpoint and scope before any device request', async () => {
+    const fixture = setup({ metadata: { ipAddress: undefined, networkScope: undefined } })
+
+    await expect(fixture.poller.resolveShellyControlTarget(deviceId, owner))
+      .rejects.toThrow('The saved endpoint does not belong to a configured installation network scope.')
+    expect(global.fetch).not.toHaveBeenCalled()
+  })
+
   it('ignores superseded endpoints in other scopes while preserving the selected Home endpoint', async () => {
     const oldEndpoint = structuredClone(knownRecord)
     oldEndpoint.lastSeenAt = '2026-10-25T06:06:52.000Z'

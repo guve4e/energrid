@@ -44,6 +44,7 @@ type RpcVerification = {
   physicalId?: string | null;
   component?: string | null;
 };
+type InstallationRoute = { endpoint: string | null; networkScope: string | null };
 
 const props = defineProps<{
   deviceId: string;
@@ -61,6 +62,7 @@ const physicalDevice = ref<PhysicalDevice | null>(null);
 const logicalAssignment = ref<PhysicalDevice['assignments'][number] | null>(null);
 const recovery = ref<IdentityRecovery | null>(null);
 const rpcVerification = ref<RpcVerification | null>(null);
+const installationRoute = ref<InstallationRoute | null>(null);
 const displayedIdentity = computed(() =>
   physicalDevice.value?.identities?.find(item => item.namespace === 'mqtt:shelly-protocol-id')
     || physicalDevice.value?.identity || null,
@@ -81,6 +83,7 @@ async function fetchIdentity(): Promise<boolean> {
     logicalAssignment.value = null;
     recovery.value = null;
     rpcVerification.value = null;
+    installationRoute.value = null;
     return true;
   }
   try {
@@ -97,6 +100,7 @@ async function fetchIdentity(): Promise<boolean> {
     logicalRole.value = result.logicalAssignment?.role || '';
     recovery.value = result.recovery || null;
     rpcVerification.value = result.rpcVerification || null;
+    installationRoute.value = result.installationRoute || null;
     return true;
   } catch {
     error.value = 'Network identity details are currently unavailable.';
@@ -301,6 +305,8 @@ watch(() => [props.deviceId, props.enrollmentStatus], load);
       <summary>Endpoint, provenance and physical components</summary>
       <dl class="device-identity-technical-grid">
         <div><dt>Endpoint</dt><dd>{{ protocol.toUpperCase() }} · {{ protocolEndpoint || 'Unknown' }}</dd></div>
+        <div v-if="isShelly"><dt>Saved installation endpoint</dt><dd>{{ installationRoute?.endpoint || 'Not saved' }}</dd><small>Used by route validation; inventory observations are shown separately above.</small></div>
+        <div v-if="isShelly"><dt>Saved installation scope</dt><dd>{{ installationRoute?.networkScope || 'Not saved' }}</dd><small>This component value is checked against the API's active network scopes.</small></div>
         <div><dt>Evidence source</dt><dd>{{ evidenceSourceLabel(association?.evidenceSource) }}</dd></div>
         <div><dt>Last observed</dt><dd>{{ observedAt(association?.observedAt) }}</dd></div>
         <div><dt>MAC address last verified</dt><dd>{{ association?.hardwareVerifiedAt || association?.verificationStatus === 'hardware_verified' ? observedAt(association?.hardwareVerifiedAt || association?.observedAt) : 'No independent MAC verification recorded' }}</dd></div>

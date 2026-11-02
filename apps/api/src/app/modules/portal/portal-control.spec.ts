@@ -532,6 +532,7 @@ describe('portal control configuration authorization', () => {
     })).resolves.toMatchObject({
       association: expect.objectContaining({ ipAddress: '192.168.1.204' }),
       physicalDevice,
+      installationRoute: { endpoint: '192.168.7.39', networkScope: 'eero-lan:192.168.7.0/24' },
       rpcVerification: {
         status: 'verified', observerId: 'mac-eero-en0', endpoint: '192.168.7.39',
         networkScope: 'eero-lan:192.168.7.0/24', physicalId: 'shellypro2pm-ec6260888084', component: 'switch:0',
