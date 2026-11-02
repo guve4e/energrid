@@ -2,9 +2,9 @@
 
 ## Control path
 
-The API's `DeviceControlService` accepts the implemented binary switch actions (`turn_on`, `turn_off`). Other recognized capability actions are not wired to a control adapter and are rejected before transport. For an executable action, the API checks that the device exists, is approved, matches the configured current tenant/site, supports the action, has a ready adapter binding and has an active enrollment. Group control also validates every member and detects cycles before sending commands.
+The API's `DeviceControlService` accepts the implemented binary switch actions (`turn_on`, `turn_off`). Other recognized capability actions are not wired to a control adapter and are rejected before transport. For an executable action, the API checks approval, active enrollment, tenant/site ownership, switching capability, explicit permission and route readiness. The scope-resolved Shelly binding selects an execution transport from verified site-owned identity, component, active endpoint, configured scope and observer. Group control validates every member and detects cycles before dispatch.
 
-The adapter sends a Shelly RPC payload over its configured MQTT or HTTP binding, or a generic MQTT command payload. The command enters a pending state before transport. Transport success moves it to published; MQTT control remains pending until a later state observation confirms the expected value. Transport errors are marked failed. An HTTP adapter may return an immediate state, which is ingested as an observation; a matching value confirms the result. “Published” means transport accepted the message, not that the actuator changed state.
+The adapter sends a Shelly RPC payload over the resolved or explicitly configured route, or a generic MQTT command payload. The command enters a pending state before transport. Transport success alone is not settled success: fresh matching state readback is required. Transport errors are reported failed or uncertain according to the adapter result. Stale or mismatched readback cannot confirm the requested state.
 
 ```mermaid
 sequenceDiagram
@@ -32,6 +32,8 @@ sequenceDiagram
 - A discovery candidate is not a control target until approval, active enrollment and a valid binding exist.
 - Inferred reachability, publisher identity, physical inventory and logical enrollment are separate evidence and authorization states.
 - Missing credentials, transport binding or unsupported action fail closed; no command should be sent when a prerequisite fails.
+- Capability, enrollment, explicit per-component switching permission and executable route readiness are separate checks. Measurement approval and assistant permission remain separate. Read-only status collection does not grant switching authority.
+- Historical endpoint observations do not silently select a route. A current endpoint must match the active configured site scope and authorized observer. The Home route validation failures observed on 2 November 2026 are listed in the backlog; no physical command was sent.
 
 ## Audit and retention limits
 

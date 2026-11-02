@@ -2,7 +2,7 @@
 
 This focused guide explains selected observation paths. For the complete current collection schedule, MQTT route distinctions, discovery lifecycle, scope behavior and open architecture work, see [Collection and ingestion](collection-and-ingestion.md).
 
-This page describes the repository implementation at the documentation base commit. It does not define firmware guarantees beyond the API's accepted contracts.
+This page describes repository behavior at local main `dbf63c26` (2 November 2026). It does not prove a deployed runtime or define firmware guarantees beyond the API's accepted contracts.
 
 ## MQTT ingestion
 
@@ -30,13 +30,13 @@ The diagram combines the durable-subscriber contract with the approved observati
 
 ### Shelly Gen2+ LAN onboarding and MQTT measurement admission
 
-The Shelly path treats a Gen2+ MQTT identity/topic as a protocol claim, not physical authentication. A normal Shelly MQTT message does not create a pending registry candidate, select the current/default site, create an inventory record, update device state, or write measurements. Unknown Shelly hardware must first be found in an operator-authorized configured LAN scope.
+The Shelly path treats a Gen2+ MQTT identity/topic as a protocol claim, not physical authentication. An MQTT claim alone cannot select the current/default site, authenticate a physical asset, or authorize enrollment. Unknown Shelly hardware can enter the pending projection only through a trusted site-attributed discovery source; an exact configured MQTT source binding can support an unverified candidate, while LAN RPC evidence supports physical identity/component verification. Neither source grants measurement or control authority. Existing enrollment checks suppress duplicate candidates. See [device lifecycle](device-model-lifecycle.md) for the observed Home result.
 
-The read-only LAN collector obtains `Shelly.GetDeviceInfo`, enumerates supported components with `Shelly.GetComponents` (or its documented status fallback), and confirms each component with its own `Switch.GetStatus?id=N` or `EM1.GetStatus?id=N` response. Only that scan evidence creates the ordinary Discovery candidate. The candidate carries separate scan timestamp, observer IP/MAC evidence, device-reported MAC, protocol identity, component method and timestamp. Enrollment requires the same tenant/site owner and recent identity plus component RPC evidence (currently 15 minutes); stale or MQTT-only Shelly candidates remain blocked until a new configured-scope scan.
+The read-only LAN collector obtains `Shelly.GetDeviceInfo`, enumerates supported components with `Shelly.GetComponents` (or its documented status fallback), and confirms each component with its own `Switch.GetStatus?id=N` or `EM1.GetStatus?id=N` response. Scan records keep endpoint response and identity evidence distinct and retain observer, endpoint, protocol identity, component method and timestamps. Enrollment requires the same tenant/site owner and fresh identity plus component RPC evidence; the server rechecks freshness at enrollment. Stale candidates use selected-device verification or a newly authorized scan, according to the configured observer path.
 
 After manual enrollment, a separate authenticated Portal approval proposes only the numeric `power` field when the corresponding status RPC reported `apower`/`act_power`. The saved installation binds the logical component to the exact device-root `shelly-mqtt` event topic and the `power` field. The operator must confirm that single proposal. This grants no relay command permission. MQTT processing then resolves the already enrolled LAN-verified device from its persisted tenant/site, checks the exact topic and binding, and passes the measurement to `DeviceIntelligenceObservationIngress`; accepted samples use the existing durable observation state and generic measurement history writer. Device-observed sample timestamps and a stable message evidence ID support duplicate delivery handling. The existing electrical history sink receives only the accepted, approved power reading when its observation timestamp is device-reported.
 
-This initial Shelly approval supports `power` only. Other electrical values parsed by the adapter are not made authorized by this approval. Control route setup and switching remain separate and disabled until independently configured and verified. Unmatched MQTT traffic is not attributed to the active Portal site, and a site change cannot transfer the device's persisted installation authority.
+Power measurements and switch output are separate data. Each approved measurement field uses its own installation authority. Switching requires explicit component permission and a ready command route; component capability or measurement approval does not authorize a relay command. A route is resolved from valid site-owned identity/endpoint evidence and active configured scope, not inferred from a saved MQTT topic. Unmatched MQTT traffic is not attributed to the active Portal site, and a site change cannot transfer persisted installation authority.
 
 Implementation anchors: [Shelly LAN candidate adapter](../apps/api/src/app/modules/devices/adapters/inbound/shelly/shelly-lan-candidates.ts), [onboarding service](../apps/api/src/app/modules/portal/device-onboarding.service.ts), [Shelly observation approval contract](../apps/api/src/app/modules/devices/adapters/inbound/shelly/shelly-mqtt-observation-approval.ts), and [approved Shelly ingress](../apps/api/src/app/modules/devices/mqtt/approved-mqtt-observation.runtime.ts).
 
@@ -65,6 +65,12 @@ sequenceDiagram
 ```
 
 Status observation and firmware diagnostics have different schemas and persistence paths. The V1 firmware diagnostics endpoint is `GET /api/v1/diagnostics`; the parser accepts a bounded schema version and exact expected physical ID. Samples have a collector timestamp (`collectedAt`); firmware currently supplies no trusted wall-clock sample time, so `deviceObservedAt` is null. Communication failures are retained as failures; they do not prove that the device is offline.
+
+### Shelly operational status and Portal state events
+
+For approved Shelly switch components, `DeviceHttpPollService` resolves the component through the enrolled logical ID, site-owned Physical Inventory assignment, saved endpoint, configured scope and matching observer. It reads stable device identity and the requested `Switch.GetStatus?id=N` channel, parses the result with the shared Shelly status parser, and sends accepted output state through `DeviceRegistryService.ingestDeviceTelemetry`. This is operational state, not electrical measurement history. Read-only status collection does not require switching permission. The operator-triggered one-shot API path uses the same target resolution and writer; it does not bypass site, identity, scope or freshness checks.
+
+After the registry accepts and projects operational state for an approved device, it emits a typed, process-local state-change event. The authenticated Portal SSE route filters events to the requesting principal's tenant/site. The Portal validates scope and sequence, applies events to the affected device, and obtains an authoritative `/portal/state` snapshot after stream readiness/reconnect to reconcile events missed while disconnected. The heartbeat describes stream liveness, not device reachability. The event sequence and stream are in memory; a fresh snapshot is required after API restart. **Automatic external-toggle-to-Portal latency and physical Home channel-1 delivery were not demonstrated by the 2 November 2026 runtime check.**
 
 ## Rejection and recovery
 

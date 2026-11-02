@@ -1,5 +1,46 @@
 # Documentation audit and remaining gaps
 
+## Current device status and backlog (local main `dbf63c26`, 2 November 2026)
+
+This section is the current device roadmap/status ledger. It reconciles source at local main `dbf63c26` and the authenticated local Home Portal check on 2 November 2026. The commit is local only; this report does not claim Pi 5 or production deployment. Runtime results below are limited to the stated Portal actions. No network scan, relay command, enrollment change, or permission change was made during that check.
+
+### Implemented in source; verification level
+
+| Capability | Source status | Verified evidence and limit |
+| --- | --- | --- |
+| Physical inventory and logical component assignments | Implemented | Portal groups components only by exact tenant/site-scoped enrollment assignments. At local commit `dbf63c26`, authenticated Home Portal showed 6 physical units and 7 components. The Pro 2PM `switch:0` and `switch:1` rows shared inventory `8e15ec60-a22b-4f8c-ab09-5e61d44030f9`. This confirms the read model's grouping, not fresh identity for each channel. |
+| Per-component Shelly read-only status API and authorized observer resolution | Implemented with fail-closed checks | Focused API tests cover local/remote scope, identity, component and persistence behavior. In the live Home Portal, a status request for `switch:1` and requests for both Plus 1s returned 409 before RPC because their saved endpoints did not match the currently configured installation scope. |
+| Shelly physical identity and component evidence | Partially validated | The existing Pro 2PM inventory and `switch:0` evidence are present. `switch:1` has historical component evidence; a fresh status was not collected. Plus 1 evidence does not currently satisfy route resolution. |
+| Authorized scope-resolved Shelly control | Implemented; Lab acceptance reported | The Device Lab reported a virtual Shelly #1 ON/OFF round trip with RPC readback and independent dashboard confirmation. No physical Home switching test has been performed. Current permission is not proof that a route is ready. |
+| Accepted-state SSE to Portal | Implemented in source and covered by tests | Registry events are emitted for projected state of approved devices; the authenticated SSE endpoint filters by principal tenant/site and Portal reconciliation fetches `/portal/state` on stream readiness/reconnect. Live external-toggle latency, Home channel-1 updates, and restart recovery were not demonstrated in the 2 November check. |
+| Multi-channel Device Lab Pro 2PM | Not implemented | The recorded Lab supports virtual ESP8266 and single-switch Plus 1 profiles. No two-channel Pro 2PM emulator exists in the inspected Lab configuration; Energrid tests do not substitute for this live acceptance. |
+
+### Current priorities
+
+| Priority | Status | Next safe action |
+| --- | --- | --- |
+| 1. Resolve authorized Home routes for Pro 2PM `switch:1` and both Plus 1 devices | **Blocked** | Reconcile each device's persisted active endpoint, installation scope, and authorized observer against current server configuration. Do not infer scope from a reachable address or widen a CIDR. |
+| 2. Complete read-only physical observation for those components | **Blocked by priority 1** | After scope authorization is valid, run selected-component identity/status checks and confirm fresh state and capability evidence. Do not send `Switch.Set`. |
+| 3. Extend the existing Device Lab for multi-channel Shelly | **Planned** | Add a protocol-faithful two-switch profile to the existing emulator, then exercise the same production discovery, verification, observation and candidate code. No Lab-specific Core policy. |
+| 4. Test restart, recovery, stale state and control reliability | **Partially implemented; live acceptance pending** | Verify actual observed-state recovery and stale/unknown transitions across API and observer restart, with correlated timestamps. No physical actuation without explicit safety approval. |
+| 5. Integrate the physical Shelly EM | **Planned** | Establish actual device identity, endpoint, component and authorized Home scope before integration; keep measurement approval separate from switching. |
+
+### Known unresolved defects / acceptance gaps
+
+- **Discovery HTTP 500:** previous Virtual Device Lab Portal scans returned HTTP 500. The original runner packaging failure (`MODULE_NOT_FOUND: ./network-discovery-evidence-utils`) was corrected and tested, but this does not establish that every later HTTP 500 cause was fixed. No current root cause or successful follow-up scan is recorded here. Reproduce only with structured stage diagnostics and the authorized Lab scope; do not count an earlier scan as proof.
+- **Current Home endpoint/scope mismatch:** read-only requests for Pro 2PM `switch:1` and both Plus 1s returned HTTP 409 because persisted endpoint evidence was not accepted by the current configured installation scope. The API made no device request. Keep this distinct from the earlier discovery HTTP 500.
+- **Live event synchronization:** SSE code and tests exist, but measured external device change-to-Portal latency and live API restart recovery remain unverified for Home hardware.
+- **Collection scale/retry policy:** the HTTP collector still uses unbounded per-cycle `Promise.all` and lacks per-device backoff/jitter; collection coordinator work remains roadmap, not implemented.
+- **Background MQTT ownership/history convergence:** normal configured routes and legacy adapter effects do not all traverse the common ingress/history writer. The existing limitation remains documented in [Collection and ingestion](collection-and-ingestion.md) and ADR 0002.
+- **Durable user-attributed device command audit:** current registry command/runtime logs are not a durable append-only command ledger; see [Commands and authority](commands-and-authority.md).
+- **Generic HTTP reachability semantics:** some generic configured HTTP failures still project `offline` without observer-relative context; see ADR 0004.
+
+### Runtime and deployment evidence
+
+The evidence above is from the authenticated **local Mac Home Portal** and repository source at local `main dbf63c26`. No Pi service was restarted or deployed as part of this check. The Virtual Device Lab control result is a previously reported Lab result, not proof that this local commit is deployed to Lab or production. The current live route failures mean fresh channel-1/Plus 1 operational state is not verified. Do not report these devices as online, offline, or freshly observed from historical inventory alone.
+
+The handbook intentionally keeps no second standalone roadmap/backlog: this table is the status source; the lifecycle, collection, control and Lab pages carry the detailed contracts.
+
 ## Audit scope
 
 This is a historical, read-only architecture audit of repository commit `6bd4b5f`; it did not query or modify live PostgreSQL, LevelDB, brokers, services, LAB equipment or physical devices. Since that audit, main `558c6d3` finalized the Device Health V1 Core query boundary and main `46f3846` committed the ESP8266 observer-reachability correction. Current contracts are documented in [Device Health history V1](device-health-history.md) and [Collection and ingestion](collection-and-ingestion.md). This page retains the original audit scope and findings; it is not a claim that the audit snapshot is the current source baseline.

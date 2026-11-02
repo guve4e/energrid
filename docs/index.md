@@ -1,19 +1,21 @@
 # Energrid engineering handbook
 
-This handbook describes the repository at the commit from which this branch was created. It separates current implementation from proposals and notes where the current checkout cannot verify a contract. Source and migrations remain authoritative.
+This handbook is maintained against local `main`. The latest reconciliation covers `dbf63c26` (2 November 2026); it does not assert that this local commit is deployed. Source, migrations and checked-in deployment configuration remain authoritative. Runtime claims name the environment and evidence date.
 
 ## Start here
 
 - [Architecture overview](architecture-overview.md): applications, libraries, boundaries and data paths.
-- [Collection and ingestion](collection-and-ingestion.md): scheduled HTTP collection, MQTT push, manual discovery, persistence boundaries and roadmap.
+- [Collection and ingestion](collection-and-ingestion.md): scheduled HTTP collection, MQTT push, Shelly operational state, SSE, manual discovery, persistence boundaries and roadmap.
 - [Device model and lifecycle](device-model-lifecycle.md): installation scope, physical inventory, logical enrollment, components and identity.
-- [Shelly Pro 2PM onboarding](shelly-pro2pm-switch-onboarding.md): isolated switch-profile verification and onboarding path; not activated.
+- [Shelly Pro 2PM reconciliation history](shelly-pro2pm-switch-onboarding.md): focused reconciliation behavior and its limits; see lifecycle and audit pages for current status.
 - [Observation and identity flows](observation-pipelines.md): MQTT ingestion, HTTP polling, identity verification and failure handling.
 - [Commands, authorization and audit](commands-and-authority.md): current control gates, command acknowledgement and audit limitations.
 - [Persistence map](persistence.md): PostgreSQL schemas, LevelDB ownership and local key families.
 - [Operations and deployment](operations.md): local commands, configuration sources, deployment references and safe operational guidance.
 - [Python Device Lab integration](device-lab-integration.md): simulator purpose, currently implemented transports and integration boundaries.
 - [Audit and remaining gaps](audit-and-gaps.md): what this pass found and which areas need follow-up.
+
+Current device priorities and known blockers are tracked in [Audit and remaining gaps](audit-and-gaps.md), rather than a separate roadmap file.
 
 Architecture decisions are indexed in [Architecture decisions](decisions/index.md). They state design direction separately from implemented behavior.
 

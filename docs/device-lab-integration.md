@@ -10,7 +10,11 @@ The Python scripts in `device-scripts/` are separate fixtures:
 - `serve-fake-http-device.py` serves synthetic JSON values at `/`, `/status` and `/state` using Python's standard library. It is not the Energrid firmware identity API and does not implement `GET /api/v1/identity` or `/api/v1/diagnostics`.
 - `publish-mqtt-explorer-fixtures.py` seeds synthetic retained/live topics for the Portal MQTT explorer view. It does not establish enrollment or command authority.
 
-The checkout has no Python Device Lab client library, typed Python protocol package or documented direct Python-to-API ingestion contract. Treat these as test/support utilities, not a stable SDK.
+This Energrid checkout has no Python Device Lab client library, typed Python protocol package or documented direct Python-to-API ingestion contract. The separate `energrid-device-lab` repository contains its own emulator/runtime; it is not a production discovery or enrollment implementation. Treat the Python fixtures here as test/support utilities, not a stable SDK.
+
+## Multi-component Shelly coverage status
+
+The recorded external Device Lab has virtual ESP8266 and Shelly Plus 1 profiles, but no multi-channel Pro 2PM profile. Earlier Lab acceptance verified selected-device RPC verification for a single-switch Plus 1, and a virtual Shelly control ON/OFF round trip was reported for Shelly #1 with RPC readback and independent dashboard confirmation. These results do not validate Pro 2PM two-channel discovery, independent channel state, or current Home route configuration. No Device Lab emulator changes were made in the `dbf63c26` Energrid commit.
 
 ## Local fixture use
 

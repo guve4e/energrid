@@ -54,4 +54,4 @@ The diagram shows repository-level relationships, not a deployment guarantee. AP
 
 ## Current-state boundary
 
-Implemented capabilities and known gaps are summarized in the [audit and remaining gaps](audit-and-gaps.md). A separate Device Health Core-query milestone is in progress outside the base commit used for this documentation worktree; its final query contract is intentionally not described as implemented here.
+This overview's current-state reconciliation is local main `dbf63c26` (2 November 2026), not a deployment claim. Implemented capabilities, runtime evidence and known gaps are summarized in the [audit and remaining gaps](audit-and-gaps.md). Device Health V1 query behavior is implemented and documented in [Device Health history](device-health-history.md); that does not imply deployment on any particular host.

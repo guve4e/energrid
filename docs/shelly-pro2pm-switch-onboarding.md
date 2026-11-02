@@ -1,5 +1,7 @@
 # Shelly Pro 2PM switch-mode reconciliation and MQTT measurements
 
+> **Historical implementation note:** this page describes the focused reconciliation/MQTT measurement workflow and its original example profile. It is not a current live-device inventory or proof that the profile is active. For current Home state and known blockers, see [Device model and lifecycle](device-model-lifecycle.md) and [Audit and remaining gaps](audit-and-gaps.md). Local main `dbf63c26` is not a production deployment.
+
 This page documents the scoped implementation for reconciling accepted site-local RPC evidence to already-enrolled Shelly components, then independently proposing MQTT measurements. Reconciliation preserves device IDs, names, rooms, physical inventory association, history, observation authority and control configuration. The Mac LAB activation status is reported separately by the operator.
 
 ## Current profile evidence

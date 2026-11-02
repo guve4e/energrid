@@ -2,7 +2,7 @@
 
 ## Status and scope
 
-This chapter was reconciled against committed Energrid main `46f3846` (which includes Device Health V1 Core queries and the observer-reachability correction). It describes source behavior; it does not prove that a particular API process has loaded that source or that a live device is reachable. The handbook's original architecture audit used an earlier source snapshot; later implementation details are linked to their owning source and the [Device Health history guide](device-health-history.md).
+This chapter was reconciled against local main `dbf63c26` on 2 November 2026. It describes source behavior and separately records observed Home Portal outcomes; it does not prove that a production API process has loaded this source. Local integration is not deployment. Earlier audit sections are historical snapshots; current gaps are summarized in [Audit and remaining gaps](audit-and-gaps.md).
 
 ## Current collection map
 
@@ -63,6 +63,12 @@ The diagram intentionally separates **collection** from **discovery** and **cont
 `DeviceHttpPollService` owns the one application-level HTTP timer. `HOME_HTTP_POLL_ENABLED` enables it; `HOME_HTTP_POLL_INTERVAL_MS` defaults to 5 seconds (minimum accepted value 500 ms). Each cycle enumerates approved installations across sites, selects configured HTTP targets and invokes the appropriate branch. It runs once immediately at module startup and clears its interval during module destruction.
 
 The service uses a process-local `polling` flag to skip a timer tick while the previous full cycle is still running. It does **not** cap device-level concurrency: eligible devices are collected with `Promise.all`. There is no per-device plan, retry schedule, exponential backoff or jitter. A failed request is normally observed again on a later interval. The default HTTP timeout is 2 seconds (`HOME_HTTP_POLL_TIMEOUT_MS`, with a 250 ms minimum).
+
+### Shelly read-only operational status
+
+The poller also has an enrolled Shelly switch-status path. It resolves the exact tenant/site-owned physical assignment and component, saved endpoint, configured scope, and matching observer; verifies device identity; then reads `Switch.GetStatus?id=N`. Accepted boolean output is written as operational state through `DeviceRegistryService.ingestDeviceTelemetry`, not as electrical measurement history. The operator-triggered one-shot status endpoint uses the same target validation and writer. Read-only status collection does not require switching permission. A previous scan or IP address alone does not authorize a route.
+
+After the registry accepts and projects state for an approved device, it emits a typed, process-local event. The authenticated Portal SSE route filters events to the requesting principal's tenant/site. The Portal reconciles from `/portal/state` on stream readiness/reconnect and applies subsequent ordered events to the affected device. The heartbeat describes stream liveness, not device reachability. The event sequence and stream are in memory; reconnect snapshot reconciliation is the recovery mechanism. Live external-toggle-to-Portal timing and physical Home channel-1 delivery were not demonstrated in the 2 November 2026 runtime check.
 
 ### Generic configured HTTP branch
 
@@ -146,10 +152,12 @@ At `46f3846`, the ESP8266 poll path exposes observer reachability in the registr
 | HTTP collection has unbounded device-level concurrency and no per-device/capability plan | [`DeviceHttpPollService`](../apps/api/src/app/modules/devices/device-http-poll.service.ts) | Large installations can create request bursts; only a process-local whole-cycle guard prevents overlap. |
 | Generic HTTP failure is modeled differently from ESP profile failures | [`DeviceHttpPollService`](../apps/api/src/app/modules/devices/device-http-poll.service.ts) | A timeout can update generic registry status to offline without observer-relative qualification. |
 | Poll overlap protection is process-local | [`DeviceHttpPollService`](../apps/api/src/app/modules/devices/device-http-poll.service.ts) | Multiple workers/gateways could duplicate scheduled work without leases/partitioning; idempotent ingress remains important. |
+| Home Shelly read-only requests for Pro 2PM `switch:1` and two Plus 1 units fail current route validation | [`DeviceHttpPollService`](../apps/api/src/app/modules/devices/device-http-poll.service.ts) | Authenticated Portal requests returned HTTP 409: the saved endpoint was not in the currently configured installation network scope. No RPC was sent. Reconcile site/scope/observer authorization; do not widen a scope based on reachability. |
+| External-toggle SSE latency and recovery have not passed live Home acceptance | [`DeviceRegistryService`](../apps/api/src/app/modules/devices/device-registry.service.ts), [`Portal SSE route`](../apps/api/src/app/modules/portal/portal.controller.ts) | Tests establish source behavior, not physical device-to-Portal timing or restart recovery. |
 
 ## Intended architecture (roadmap, not implemented)
 
-The smallest future boundary is a typed collection plan and result around the existing poller. A plan would identify authorized tenant/site/device, capability, selected protocol adapter, verified endpoint evidence, requested interval and timeout. The coordinator—not a device-specific service—would enforce bounded concurrency, per-operation overlap, retry/backoff/jitter and lifecycle cancellation. Adapters would gather protocol evidence and return typed outcomes without owning global scheduling or mutating enrollment.
+The smallest future boundary is a typed collection plan and result around the existing poller. A plan would identify authorized tenant/site/device, capability, selected protocol adapter, verified endpoint evidence, requested interval and timeout. The coordinator—not a device-specific service—would enforce bounded concurrency, per-operation overlap, retry/backoff/jitter and lifecycle cancellation. Adapters would gather protocol evidence and return typed outcomes without owning global scheduling or mutating enrollment. This remains roadmap work; the Shelly path has not introduced a separate recurring observer service.
 
 Per-capability intervals and a distributed worker/gateway lease/partition model are future work. The same deterministic observation policy, evidence IDs, state store and history writer should process both scheduled samples and MQTT push messages. Discovery remains a separately authorized operation, and control remains a separately authorized action. None of these roadmap items should be read as implemented by this handbook chapter.
 
