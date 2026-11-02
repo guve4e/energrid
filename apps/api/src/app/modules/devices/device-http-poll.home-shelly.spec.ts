@@ -176,6 +176,44 @@ describe('authorized Home Shelly operational observation', () => {
     expect(global.fetch).not.toHaveBeenCalled()
   })
 
+  it('resolves a second logical channel through the same parent endpoint only with its own assignment and RPC evidence', async () => {
+    const channel1Id = `${physicalId}:switch:1`
+    const channel1 = {
+      ...device,
+      id: channel1Id,
+      displayName: 'Switch 2',
+      metadata: { ...device.metadata, component: 'switch:1', channel: 1, networkScope: 'gateway-unknown:eero-lan' },
+    } as RegisteredDevice
+    const channel1Inventory = {
+      ...inventory,
+      components: [...inventory.components, { key: 'switch:1', capabilities: ['switch'] }],
+      assignments: [...inventory.assignments, {
+        deviceId: channel1Id, physicalDeviceId: inventory.physicalDeviceId, componentKey: 'switch:1',
+      }],
+    }
+    const channel1Evidence = structuredClone(knownRecord)
+    channel1Evidence.device.components.push({ component: 'switch:1' })
+    channel1Evidence.device.observations.push({
+      source: 'site_local_http_rpc', attribute: 'shelly.component_status', value: 'switch:1',
+      observedAt: '2026-11-01T19:02:01.000Z', scopeId: zone.id, interfaceName: 'en0',
+      method: 'Switch.GetStatus?id=1',
+    })
+    const fixture = setup({
+      inventory: channel1Inventory,
+      records: [channel1Evidence],
+      authorizedObserver: { ...observer, expectedComponentKeys: ['switch:0', 'switch:1'] },
+    })
+    fixture.registry.getDevices.mockReturnValue([channel1])
+    fixture.registry.getShellyReconciliationTargetDecision.mockResolvedValue({ matched: true, device: channel1 })
+
+    await expect(fixture.poller.resolveShellyControlTarget(channel1Id, owner)).resolves.toMatchObject({
+      physicalId, component: 'switch:1', channel: 1, ipAddress: '192.168.7.39',
+      zone: { id: 'eero-lan', collectionSource: 'local' },
+    })
+    expect(fixture.physical.forLogicalDevice).toHaveBeenCalledWith(owner, channel1Id)
+    expect(global.fetch).not.toHaveBeenCalled()
+  })
+
   it('rejects an installation scope that does not identify the configured endpoint zone', async () => {
     const fixture = setup()
     fixture.registry.getDevices.mockReturnValue([{
