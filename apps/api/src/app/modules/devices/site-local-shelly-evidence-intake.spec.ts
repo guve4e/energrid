@@ -1,4 +1,4 @@
-import { validateSiteLocalShellyEvidence, type SiteLocalShellyEvidenceInput } from './site-local-shelly-evidence-intake';
+import { selectAuthorizedSiteLocalObserver, validateSiteLocalShellyEvidence, type SiteLocalShellyEvidenceInput } from './site-local-shelly-evidence-intake';
 
 const now = Date.parse('2026-10-27T06:40:00.000Z');
 const timestamp = '2026-10-27T06:39:00.000Z';
@@ -30,6 +30,28 @@ function validate(input: unknown) {
 }
 
 describe('site-local Shelly evidence intake', () => {
+  describe('site-local observer selection', () => {
+    const secondIdentity = 'shellyplus1-8813bfcdc8bc';
+    const secondObserver = { ...observer, id: 'pi-upstream-bathroom', host: 'pi', expectedDeviceIds: [secondIdentity],
+      expectedComponentKeys: ['switch:0'] };
+
+    it('selects the uniquely authorized identity and component when a scope has multiple observers', () => {
+      expect(selectAuthorizedSiteLocalObserver({ observers: [observer, secondObserver], tenantId: owner.tenantId,
+        siteId: owner.siteId, scopeId: zone.id, physicalId: secondIdentity, component: 'switch:0' }))
+        .toEqual({ observer: secondObserver, reason: 'selected' });
+    });
+
+    it('fails closed for a wrong site, device, component, or duplicate assignment', () => {
+      const input = { observers: [observer, secondObserver], tenantId: owner.tenantId,
+        siteId: owner.siteId, scopeId: zone.id, physicalId: secondIdentity, component: 'switch:0' };
+      expect(selectAuthorizedSiteLocalObserver({ ...input, siteId: 'other-site' })).toMatchObject({ observer: null, reason: 'observer_identity_not_authorized' });
+      expect(selectAuthorizedSiteLocalObserver({ ...input, physicalId: 'shellyplus1-000000000000' })).toMatchObject({ observer: null, reason: 'observer_identity_not_authorized' });
+      expect(selectAuthorizedSiteLocalObserver({ ...input, component: 'switch:1' })).toMatchObject({ observer: null, reason: 'observer_component_not_authorized' });
+      expect(selectAuthorizedSiteLocalObserver({ ...input, observers: [observer, secondObserver, { ...secondObserver, id: 'duplicate-assignment' }] }))
+        .toMatchObject({ observer: null, reason: 'observer_assignment_ambiguous' });
+    });
+  });
+
   it('projects fresh observer-owned RPC evidence into the existing network endpoint contract', () => {
     const result = validate(report());
     expect(result.device).toMatchObject({ id: physicalId, ipAddress: '192.168.1.166', vendor: 'Shelly',

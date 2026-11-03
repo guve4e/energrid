@@ -131,6 +131,21 @@ describe('authorized Home Shelly operational observation', () => {
     expect(fixture.registry.ingestDeviceTelemetry.mock.calls[0][0]).not.toHaveProperty('observationAuthority')
   })
 
+  it('passes an approved MQTT-profile Shelly component to the scoped remote observer collector', async () => {
+    const fixture = setup({ authorizedObserver: { ...observer, host: 'pi', sshTarget: 'pi-housenet' } })
+    const mqttShelly = {
+      ...device,
+      adapter: { id: 'shelly-discovered', driver: 'shelly-discovered', protocol: 'mqtt', configured: true, target: physicalId },
+    } as RegisteredDevice
+    fixture.registry.getDevices.mockReturnValue([mqttShelly])
+    const refresh = jest.spyOn(fixture.poller as any, 'refreshRemoteShellyObservers').mockResolvedValue(undefined)
+
+    await fixture.poller.pollOnce()
+
+    expect(refresh).toHaveBeenCalledWith([mqttShelly])
+    expect(global.fetch).not.toHaveBeenCalled()
+  })
+
   it('fails closed when the observer has no exact component authorization', async () => {
     const fixture = setup({ authorizedObserver: { ...observer, expectedComponentKeys: ['switch:1'] } })
     await fixture.poller.pollOnce()

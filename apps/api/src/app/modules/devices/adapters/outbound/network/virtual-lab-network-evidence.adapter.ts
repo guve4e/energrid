@@ -2,6 +2,7 @@ import { execFile, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { Logger } from '@nestjs/common'
 import type { NetworkDiscoveredDevice, NetworkDiscoveryZone } from '../../../device-registry.types'
+import type { AuthorizedSiteLocalObserver } from '../../../site-local-shelly-evidence-intake'
 import type { LocalNetworkRuntimeReport } from './local-network-runtime.adapter'
 import type { NmapCapability, NmapScanResult } from './nmap-network-evidence.adapter'
 
@@ -82,6 +83,14 @@ export interface RemoteShellyStatusObserverHandle {
   isAlive(): boolean
 }
 
+export interface RemoteShellyObserverRuntime {
+  id: string
+  host: string
+  interfaceName: string
+  platform: 'docker' | 'linux'
+  localScopes: Array<{ interfaceName: string; cidr: string; address: string }>
+}
+
 type ScannerPayload = {
   schemaVersion: number
   scope: { id: string; name: string; configuredNetworkCidr: string; interfaceName: string; explicitTargets: string[] }
@@ -118,7 +127,7 @@ export class VirtualLabNetworkEvidenceAdapter {
     assignments: RemoteShellyStatusAssignment[],
     onMessage: (message: unknown) => void,
     onExit: (reason: 'spawn_failed' | 'runner_exited') => void,
-  ): Promise<{ handle: RemoteShellyStatusObserverHandle; observer: { id: string; host: string; interfaceName: string } }> {
+  ): Promise<{ handle: RemoteShellyStatusObserverHandle; observer: RemoteShellyObserverRuntime }> {
     const targets = authorizedVirtualLabScanTargets(zone)
     validateRemoteStatusAssignments(assignments, targets)
     if (!/^[a-f0-9-]{36}$/i.test(observerSessionId)) throw new Error('Remote observer session identity is invalid.')
@@ -191,7 +200,127 @@ export class VirtualLabNetworkEvidenceAdapter {
       isAlive: () => alive,
     }
     const interfaceName = zone.interfaceName || 'eth0'
-    return { handle, observer: { id: `remote-docker/${host}/${interfaceName}`, host, interfaceName } }
+    return { handle, observer: { id: `remote-docker/${host}/${interfaceName}`, host, interfaceName, platform: 'docker', localScopes: [] } }
+  }
+
+  /** Run the same fixed read-only collector on an authorized site-local host over authenticated SSH stdio. */
+  async startSiteLocalShellyOperationalObserver(
+    zone: NetworkDiscoveryZone,
+    observerAuthorization: AuthorizedSiteLocalObserver,
+    observerSessionId: string,
+    assignments: RemoteShellyStatusAssignment[],
+    onMessage: (message: unknown) => void,
+    onExit: (reason: 'spawn_failed' | 'runner_exited') => void,
+  ): Promise<{ handle: RemoteShellyStatusObserverHandle; observer: RemoteShellyObserverRuntime }> {
+    if (!observerAuthorization.sshTarget || !observerAuthorization.interfaceName ||
+        zone.collectionSource === 'virtual-lab' || zone.id !== observerAuthorization.scopeId ||
+        zone.cidr !== observerAuthorization.cidr || !zone.cidr) {
+      throw new Error('Remote site-local collection requires an exact configured observer, interface and scope.')
+    }
+    const observerInterface = observerAuthorization.interfaceName
+    const observerCidr = zone.cidr
+    if (!/^[a-f0-9-]{36}$/i.test(observerSessionId)) throw new Error('Remote observer session identity is invalid.')
+    const allowedTargets = [...new Set(assignments.map(item => item.ipAddress))]
+    validateRemoteStatusAssignments(assignments, allowedTargets)
+    if (assignments.some(item => !insideCidr(item.ipAddress, zone.cidr!))) {
+      throw new Error('Remote observer assignments include an endpoint outside its authorized network scope.')
+    }
+
+    const remoteCommand = `node -e ${shellQuote(FIXED_SHELLY_STATUS_OBSERVER_SCRIPT)}`
+    const child = spawn('ssh', [
+      '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=5',
+      '-o', 'PasswordAuthentication=no', '-o', 'KbdInteractiveAuthentication=no',
+      '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=2',
+      observerAuthorization.sshTarget, remoteCommand,
+    ], { stdio: 'pipe' })
+    let alive = true
+    let pending = ''
+    let readyResolve: ((value: RemoteShellyObserverRuntime) => void) | undefined
+    let readyReject: ((error: Error) => void) | undefined
+    let ready = false
+    let exitNotified = false
+    const notifyExit = (reason: 'spawn_failed' | 'runner_exited') => {
+      alive = false
+      if (!ready) readyReject?.(new Error(`Site-local observer ${reason.replace('_', ' ')}.`))
+      if (exitNotified) return
+      exitNotified = true
+      onExit(reason)
+    }
+    const handleLine = (line: string) => {
+      if (!line.trim()) return
+      let event: unknown
+      try { event = JSON.parse(line) as unknown } catch { onMessage({ schemaVersion: -1, kind: 'invalid_output' }); return }
+      if (!event || typeof event !== 'object' || Array.isArray(event)) {
+        onMessage({ schemaVersion: -1, kind: 'invalid_output' }); return
+      }
+      const value = event as Record<string, unknown>
+      if (value.kind === 'ready') {
+        const interfaceAddress = typeof value.interfaceAddress === 'string' ? value.interfaceAddress : ''
+        const hostMatches = typeof value.host === 'string' && value.host.toLowerCase() === observerAuthorization.host.toLowerCase()
+        const routeMatches = value.schemaVersion === 1 && value.observerSessionId === observerSessionId &&
+          value.scopeId === zone.id && value.observerId === observerAuthorization.id &&
+          value.interfaceName === observerInterface && value.cidr === observerCidr &&
+          insideCidr(interfaceAddress, observerCidr)
+        if (value.ready !== true || !hostMatches || !routeMatches) {
+          readyReject?.(new Error('Remote observer runtime identity, interface or authorized scope did not match.'))
+          child.kill('SIGTERM')
+          return
+        }
+        ready = true
+        readyResolve?.({ id: observerAuthorization.id, host: observerAuthorization.host,
+          interfaceName: observerInterface, platform: 'linux',
+          localScopes: [{ interfaceName: observerInterface, cidr: observerCidr, address: interfaceAddress }] })
+        return
+      }
+      if (!ready) { readyReject?.(new Error('Remote observer emitted data before its runtime identity was validated.')); child.kill('SIGTERM'); return }
+      onMessage(event)
+    }
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      pending += chunk
+      if (pending.length > 64 * 1024) {
+        pending = ''; child.kill('SIGTERM'); onMessage({ schemaVersion: -1, kind: 'invalid_output' }); return
+      }
+      let newline = pending.indexOf('\n')
+      while (newline >= 0) {
+        handleLine(pending.slice(0, newline))
+        pending = pending.slice(newline + 1)
+        newline = pending.indexOf('\n')
+      }
+    })
+    child.stderr.resume()
+    child.on('error', () => notifyExit('spawn_failed'))
+    child.on('close', () => notifyExit('runner_exited'))
+    const readyPromise = new Promise<RemoteShellyObserverRuntime>((resolve, reject) => {
+      readyResolve = resolve; readyReject = reject
+    })
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('SSH observer process did not start within 8 seconds.')), 8_000)
+      child.once('spawn', () => { clearTimeout(timer); resolve() })
+      child.once('error', () => { clearTimeout(timer); reject(new Error('SSH observer process could not be started.')) })
+    }).catch(error => { child.kill('SIGTERM'); throw error })
+    const writeAssignments = (next: RemoteShellyStatusAssignment[]): boolean => {
+      if (!alive || !child.stdin.writable) return false
+      try {
+        validateRemoteStatusAssignments(next, allowedTargets)
+        if (next.some(item => !insideCidr(item.ipAddress, zone.cidr!))) return false
+        child.stdin.write(`${JSON.stringify({ schemaVersion: 1, kind: 'assignments', observerSessionId,
+          scopeId: zone.id, observer: { id: observerAuthorization.id, host: observerAuthorization.host,
+            interfaceName: observerAuthorization.interfaceName, cidr: zone.cidr }, assignments: next })}\n`)
+        return true
+      } catch { return false }
+    }
+    if (!writeAssignments(assignments)) { child.kill('SIGTERM'); throw new Error('SSH observer rejected its authorized assignments.') }
+    const observer = await new Promise<RemoteShellyObserverRuntime>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('SSH observer route validation timed out.')), 8_000)
+      readyPromise.then(value => { clearTimeout(timer); resolve(value) }, error => { clearTimeout(timer); reject(error) })
+    }).catch(error => { child.kill('SIGTERM'); throw error })
+    const handle: RemoteShellyStatusObserverHandle = {
+      update: writeAssignments,
+      close: () => { if (alive) child.kill('SIGTERM') },
+      isAlive: () => alive,
+    }
+    return { handle, observer }
   }
 
   /** Read the two fixed firmware GET endpoints from the isolated observer network. */
@@ -690,8 +819,9 @@ async function get(path, maxBytes = 16384) {
 const FIXED_SHELLY_STATUS_OBSERVER_SCRIPT = String.raw`
 const readline = require('node:readline');
 const { randomUUID } = require('node:crypto');
-const scopeId = process.env.M9_SCOPE_ID || '';
+let scopeId = process.env.M9_SCOPE_ID || '';
 const cache = new Map();
+const retries = new Map();
 let config = null; let sequence = 0; let running = false; let timer = null;
 const emit = value => process.stdout.write(JSON.stringify(value) + '\n');
 function validTargets(value) {
@@ -768,7 +898,13 @@ async function collect(target, activeConfig) {
         ipAddress: target.ipAddress, componentKeys: keys, componentKey: status.componentKey,
         identity: { id: identity.id, gen: identity.gen }, body: status.body, observedAt });
     }
+    retries.delete(target.key);
+    return true;
   } catch (error) {
+    const previous = retries.get(target.key) || { failures: 0, retryAt: 0 };
+    previous.failures = Math.min(previous.failures + 1, 5);
+    previous.retryAt = Date.now() + Math.min(60000, 5000 * (2 ** (previous.failures - 1)));
+    retries.set(target.key, previous);
     for (const item of target.components) {
       const eventSequence = ++sequence;
       emit({ schemaVersion: 1, kind: 'failure', scopeId, observerSessionId: activeConfig.observerSessionId,
@@ -778,6 +914,7 @@ async function collect(target, activeConfig) {
         reasonCode: ['identity_mismatch', 'component_mismatch', 'invalid_status'].includes(error.code) ? error.code : 'rpc_unavailable',
         checkedAt: new Date().toISOString() });
     }
+    return false;
   }
 }
 async function cycle() {
@@ -786,7 +923,8 @@ async function cycle() {
   const activeConfig = config;
   try {
     for (let i = 0; i < activeConfig.assignments.length; i += 4) {
-      await Promise.all(activeConfig.assignments.slice(i, i + 4).map(target => collect(target, activeConfig)));
+      const due = activeConfig.assignments.slice(i, i + 4).filter(target => (retries.get(target.key)?.retryAt || 0) <= Date.now());
+      await Promise.all(due.map(target => collect(target, activeConfig)));
     }
   } finally {
     running = false;
@@ -799,7 +937,31 @@ input.on('line', line => {
   try {
     const update = JSON.parse(line);
     if (update.schemaVersion !== 1 || update.kind !== 'assignments' || !/^[a-f0-9-]{36}$/i.test(update.observerSessionId || '') || !validTargets(update.assignments)) return;
+    if (update.observer) {
+      if (typeof update.scopeId !== 'string' || typeof update.observer.host !== 'string' ||
+          typeof update.observer.id !== 'string' || typeof update.observer.interfaceName !== 'string' ||
+          typeof update.observer.cidr !== 'string') return;
+      const os = require('node:os'); const hostname = os.hostname();
+      const addresses = (os.networkInterfaces()[update.observer.interfaceName] || [])
+        .filter(item => item && item.family === 'IPv4' && !item.internal).map(item => item.address);
+      const validCidr = (address, cidr) => {
+        const net = require('node:net'); if (net.isIP(address) !== 4 || !/^\d+\.\d+\.\d+\.\d+\/\d+$/.test(cidr)) return false;
+        const [base, prefixText] = cidr.split('/'); const prefix = Number(prefixText);
+        if (net.isIP(base) !== 4 || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
+        const number = value => value.split('.').reduce((n, part) => ((n << 8) | Number(part)) >>> 0, 0);
+        const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+        return (number(address) & mask) === (number(base) & mask);
+      };
+      const matching = addresses.filter(address => validCidr(address, update.observer.cidr));
+      const ready = hostname === update.observer.host && matching.length === 1;
+      emit({ schemaVersion: 1, kind: 'ready', observerSessionId: update.observerSessionId,
+        scopeId: update.scopeId, observerId: update.observer.id, host: hostname,
+        interfaceName: update.observer.interfaceName, interfaceAddress: matching[0] || '',
+        cidr: update.observer.cidr, ready });
+      if (!ready) return;
+    }
     config = update;
+    if (typeof update.scopeId === 'string') scopeId = update.scopeId;
     if (timer) clearTimeout(timer);
     if (!running) timer = setTimeout(cycle, 0);
   } catch {}
@@ -1036,6 +1198,10 @@ function insideCidr(ip: string, cidr: string): boolean {
 function isIpv4(value: string): boolean {
   const octets = value.split('.')
   return octets.length === 4 && octets.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
 }
 
 function ipv4Number(value: string): number {

@@ -29,8 +29,8 @@ import { parseShellySwitchStatus } from './adapters/inbound/shelly/shelly-switch
 import { PHYSICAL_DEVICE_INVENTORY_SERVICE } from './enrollment/physical-device-inventory.token'
 import type { PhysicalDeviceInventoryService } from './enrollment/physical-device-inventory.service'
 import { hasPhysicalDeviceIdentityClaim } from './enrollment/physical-device-inventory.repository'
-import type { RemoteShellyStatusAssignment, RemoteShellyStatusObserverHandle } from './adapters/outbound/network/virtual-lab-network-evidence.adapter'
-import { configuredSiteLocalObservers, type AuthorizedSiteLocalObserver } from './site-local-shelly-evidence-intake'
+import type { RemoteShellyObserverRuntime, RemoteShellyStatusAssignment, RemoteShellyStatusObserverHandle } from './adapters/outbound/network/virtual-lab-network-evidence.adapter'
+import { configuredSiteLocalObservers, selectAuthorizedSiteLocalObserver, type AuthorizedSiteLocalObserver } from './site-local-shelly-evidence-intake'
 
 interface AuthorizedRemoteShellyStatusTarget {
   assignmentKey: string
@@ -51,7 +51,7 @@ interface RemoteShellyObserverState {
   sessionId: string
   scopeId: string
   owner: { tenantId: string; siteId: string }
-  observer?: { id: string; host: string; interfaceName: string }
+  observer?: RemoteShellyObserverRuntime
   handle?: RemoteShellyStatusObserverHandle
   assignmentMap: Map<string, AuthorizedRemoteShellyStatusTarget>
   lastObservedAtByAssignmentKey: Map<string, number>
@@ -140,7 +140,10 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
 
       await Promise.all(devices.map((device) => this.pollDevice(device)))
       await Promise.all(localShellyDevices.map(device => this.pollAuthorizedLocalShellyStatus(device)))
-      await this.refreshRemoteShellyObservers(devices)
+      // The HTTP-only `devices` list excludes MQTT-profile Shelly installations,
+      // even though their verified site-owned endpoint can still be observed by
+      // this read-only RPC collector. Use the enrolled Shelly component list.
+      await this.refreshRemoteShellyObservers(localShellyDevices)
     } finally {
       this.polling = false
     }
@@ -343,28 +346,26 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       : installationScope
     let observers: AuthorizedSiteLocalObserver[]
     try { observers = configuredSiteLocalObservers() } catch { return reject('observer_configuration_invalid') }
-    const matchesConfiguredScope = (observer: AuthorizedSiteLocalObserver) =>
-      observer.scopeId === installationScopeId || observer.cidr === installationScope ||
-      installationScope.endsWith(`:${observer.cidr}`)
-    const scopedObservers = observers.filter(item => item.tenantId === device.tenantId &&
-      item.siteId === device.siteId && matchesConfiguredScope(item))
-    if (scopedObservers.length !== 1) return reject('no_unique_authorized_site_scope_observer', {
-      tenantScopeMatchCount: observers.filter(item => item.tenantId === device.tenantId).length,
-      tenantSiteMatchCount: observers.filter(item => item.tenantId === device.tenantId && item.siteId === device.siteId).length,
-      tenantSiteScopeMatchCount: scopedObservers.length,
+    const matchingScopeIds = [...new Set(observers.filter(item => item.tenantId === device.tenantId && item.siteId === device.siteId &&
+      (item.scopeId === installationScopeId || item.cidr === installationScope || installationScope.endsWith(`:${item.cidr}`)))
+      .map(item => item.scopeId))]
+    if (matchingScopeIds.length !== 1) return reject(matchingScopeIds.length ? 'site_scope_authorization_ambiguous' : 'site_scope_authorization_missing', {
+      tenantSiteScopeMatchCount: matchingScopeIds.length,
+    })
+    const scopeId = matchingScopeIds[0]
+    const selection = selectAuthorizedSiteLocalObserver({ observers, tenantId: device.tenantId,
+      siteId: device.siteId, scopeId, physicalId, component })
+    if (!selection.observer) return reject(selection.reason, {
+      tenantSiteObserverCount: observers.filter(item => item.tenantId === device.tenantId && item.siteId === device.siteId &&
+        (item.scopeId === scopeId || item.cidr === installationScope || installationScope.endsWith(`:${item.cidr}`))).length,
       installationTenantId: device.tenantId,
       installationSiteId: device.siteId,
-      installationScopeId: installationScopeId === installationScope ? 'cidr' : installationScopeId,
+      installationScopeId: scopeId === installationScope ? 'cidr' : scopeId,
     })
-    const observer = scopedObservers[0]
-    const scopeId = observer.scopeId
-    if (!observer.expectedDeviceIds.some(id => id.toLowerCase() === physicalId.toLowerCase())) {
-      return reject('physical_identity_not_explicitly_authorized')
-    }
-    if (!observer.interfaceName || !observer.expectedComponentKeys?.includes(component)) {
-      return reject('component_or_interface_not_explicitly_authorized')
-    }
-    const zone = this.lanDiscovery.getConfiguredZone(scopeId)
+    const observer = selection.observer
+    const selectedScopeId = observer.scopeId
+    if (!observer.interfaceName) return reject('component_or_interface_not_explicitly_authorized')
+    const zone = this.lanDiscovery.getConfiguredZone(selectedScopeId)
     if (!zone || zone.collectionSource === 'virtual-lab' || zone.cidr !== observer.cidr || !zone.cidr ||
         (installationScopeId !== observer.scopeId && installationScope !== observer.cidr &&
           !installationScope.endsWith(`:${observer.cidr}`))) {
@@ -428,10 +429,6 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private isVirtualLabShelly(device: RegisteredDevice): boolean {
-    return this.configuredShellyZone(device)?.collectionSource === 'virtual-lab'
-  }
-
   private configuredShellyZone(device: RegisteredDevice): NetworkDiscoveryZone | undefined {
     const scope = String(device.metadata?.networkScope || '').trim()
     if (!scope || !this.lanDiscovery?.getConfiguredZone) return undefined
@@ -453,23 +450,45 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       const groups = new Map<string, {
         owner: { tenantId: string; siteId: string }
         scopeId: string
+        transport: 'virtual-lab' | 'site-local-ssh'
+        siteLocalObserver?: AuthorizedSiteLocalObserver
         assignments: Map<string, AuthorizedRemoteShellyStatusTarget>
         remoteTargets: Map<string, RemoteShellyStatusAssignment>
       }>()
-      const candidates = devices.filter(device => device.adapter.driver === 'shelly-lan' && this.isVirtualLabShelly(device))
+      const candidates = devices.filter(device => ['shelly-lan', 'shelly-discovered'].includes(device.adapter.driver))
       for (const device of candidates) {
         const owner = { tenantId: device.tenantId, siteId: device.siteId }
         try {
-          const target = await this.resolveShellyControlTarget(device.id, owner)
-          if (target.zone.collectionSource !== 'virtual-lab') continue
+          const target = await this.resolveShellyInstallationTarget(device.id, owner)
+          let transport: 'virtual-lab' | 'site-local-ssh'
+          let siteLocalObserver: AuthorizedSiteLocalObserver | undefined
+          if (target.zone.collectionSource === 'virtual-lab') {
+            transport = 'virtual-lab'
+          } else {
+            if ((target.device.metadata?.siteLocalObserverId || '') === '') continue
+            const observers = configuredSiteLocalObservers()
+            const selection = selectAuthorizedSiteLocalObserver({ observers,
+              tenantId: owner.tenantId, siteId: owner.siteId, scopeId: target.zone.id,
+              physicalId: target.physicalId, component: target.component })
+            if (!selection.observer || selection.observer.id !== target.device.metadata?.siteLocalObserverId) {
+              throw new ConflictException(selection.observer ? 'The reconciled endpoint belongs to a different authorized observer.' : selection.reason)
+            }
+            siteLocalObserver = selection.observer
+            if (normalizedObserverHost(hostname()) === normalizedObserverHost(siteLocalObserver.host)) continue
+            if (!siteLocalObserver.sshTarget || !siteLocalObserver.interfaceName ||
+                siteLocalObserver.cidr !== target.zone.cidr || !target.zone.cidr) {
+              throw new ConflictException('The authorized remote observer has no explicit secure SSH execution target, interface, or matching scope.')
+            }
+            transport = 'site-local-ssh'
+          }
           const expectedComponentKeys = target.inventory.components
             .map(component => component.key)
             .filter(component => /^switch:\d+$/.test(component))
             .sort()
           if (!expectedComponentKeys.includes(target.component)) continue
-          const groupKey = `${owner.tenantId}\u0000${owner.siteId}\u0000${target.zone.id}`
+          const groupKey = `${owner.tenantId}\u0000${owner.siteId}\u0000${target.zone.id}\u0000${transport}\u0000${siteLocalObserver?.id || 'virtual-lab'}`
           const group = groups.get(groupKey) || {
-            owner, scopeId: target.zone.id,
+            owner, scopeId: target.zone.id, transport, ...(siteLocalObserver ? { siteLocalObserver } : {}),
             assignments: new Map<string, AuthorizedRemoteShellyStatusTarget>(),
             remoteTargets: new Map<string, RemoteShellyStatusAssignment>(),
           }
@@ -497,7 +516,8 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
           group.remoteTargets.set(targetKey, remoteTarget)
           groups.set(groupKey, group)
         } catch (error) {
-          this.logger.warn(`[REMOTE SHELLY OBSERVER] assignment rejected device=${device.id} reason=${safeRemoteObserverError(error)}`)
+          this.logger.warn(JSON.stringify({ event: 'remote_shelly_observer_assignment', outcome: 'rejected',
+            deviceId: device.id, failureCategory: safeRemoteAssignmentFailure(error) }))
         }
       }
 
@@ -542,14 +562,16 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         session.lastSequence = 0
         session.lastObservedAtByAssignmentKey.clear()
         try {
-          const started = await this.lanDiscovery.startRemoteShellyOperationalObserver(
-            group.scopeId, session.sessionId, assignments,
-            message => this.acceptRemoteShellyMessage(session!, message),
-            reason => this.handleRemoteShellyObserverExit(session!, reason),
-          )
+          const onMessage = (message: unknown) => this.acceptRemoteShellyMessage(session!, message)
+          const onExit = (reason: 'spawn_failed' | 'runner_exited') => this.handleRemoteShellyObserverExit(session!, reason)
+          const started = group.transport === 'site-local-ssh' && group.siteLocalObserver
+            ? await this.lanDiscovery.startSiteLocalShellyOperationalObserver(group.scopeId, group.siteLocalObserver,
+              session.sessionId, assignments, onMessage, onExit)
+            : await this.lanDiscovery.startRemoteShellyOperationalObserver(
+              group.scopeId, session.sessionId, assignments, onMessage, onExit)
           session.handle = started.handle
           session.observer = started.observer
-          if (!started.handle.update(assignments)) {
+          if (group.transport === 'virtual-lab' && !started.handle.update(assignments)) {
             started.handle.close()
             throw new Error('Remote observer rejected authorized assignments.')
           }
@@ -605,12 +627,16 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     if (event.kind === 'failure') {
       const checkedAt = typeof event.checkedAt === 'string' && freshRemoteTimestamp(event.checkedAt, 30_000)
         ? event.checkedAt : new Date().toISOString()
+      const reason = safeRemoteFailureCode(event.reasonCode)
+      this.logger.warn(JSON.stringify({ event: 'remote_shelly_operational_observation', outcome: 'observer_failure',
+        deviceId: assignment.device.id, observerId: observer.id, scopeId: assignment.scopeId,
+        component: assignment.component, observationId: String(event.observationId), reason, checkedAt }))
       this.registry.recordObserverReachability(assignment.device.id, {
         status: 'unreachable', checkedAt,
         endpoint: `http://${assignment.ipAddress}/rpc/Switch.GetStatus?id=${assignment.component.split(':')[1]}`,
         targetIpAddress: assignment.ipAddress, networkScopeId: assignment.scopeId,
-        observer: { id: observer.id, host: observer.host, platform: 'docker', localScopes: [] },
-        reason: safeRemoteFailureCode(event.reasonCode),
+        observer: { id: observer.id, host: observer.host, platform: observer.platform, localScopes: observer.localScopes },
+        reason,
       })
       return
     }
@@ -650,16 +676,38 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       values, state: { values, source, status: 'online', observedAt }, observedAt,
       observationId: String(event.observationId),
     })
+    this.logger.log(JSON.stringify({ event: 'remote_shelly_operational_observation', outcome: 'submitted_to_canonical_writer',
+      deviceId: assignment.device.id, observerId: observer.id, scopeId: assignment.scopeId,
+      component: assignment.component, observationId: String(event.observationId), observedAt }))
     session.lastObservedAtByAssignmentKey.set(assignmentKey, observedTime)
     this.registry.recordObserverReachability(assignment.device.id, {
       status: 'reachable', checkedAt: observedAt, endpoint,
       targetIpAddress: assignment.ipAddress, networkScopeId: assignment.scopeId,
-      observer: { id: observer.id, host: observer.host, platform: 'docker', localScopes: [] },
+      observer: { id: observer.id, host: observer.host, platform: observer.platform, localScopes: observer.localScopes },
     })
   }
 
   /** Resolve a command target only from the enrolled installation and saved site-owned RPC evidence. */
   async resolveShellyControlTarget(
+    deviceId: string,
+    ownership: { tenantId: string; siteId: string },
+    onStage?: (stage: 'enrollment_and_inventory_validation' | 'enrollment_inventory_validated' | 'saved_endpoint_observer_scope_validation' | 'saved_endpoint_observer_scope_validated') => void,
+  ) {
+    const target = await this.resolveShellyInstallationTarget(deviceId, ownership, onStage)
+    if (target.zone.collectionSource === 'local') {
+      const localTarget = await this.resolveAuthorizedLocalShellyStatusTarget(target.device, target.ipAddress)
+      if (!localTarget || localTarget.ipAddress !== target.ipAddress || localTarget.zone.id !== target.zone.id) {
+        throw new ConflictException('The configured local observer cannot verify this Shelly endpoint in its authorized interface and scope.')
+      }
+      if (target.device.metadata?.siteLocalObserverId !== localTarget.observer.id) {
+        throw new ConflictException('The reconciled endpoint evidence belongs to a different observer; review network identity before enabling switching.')
+      }
+    }
+    return target
+  }
+
+  /** Resolve the enrolled site-owned endpoint/evidence independently from an executable command transport. */
+  private async resolveShellyInstallationTarget(
     deviceId: string,
     ownership: { tenantId: string; siteId: string },
     onStage?: (stage: 'enrollment_and_inventory_validation' | 'enrollment_inventory_validated' | 'saved_endpoint_observer_scope_validation' | 'saved_endpoint_observer_scope_validated') => void,
@@ -767,17 +815,8 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     if (!endpointInScope) {
       throw new ConflictException('The saved Shelly endpoint is outside the configured network scope.')
     }
-    const collectionSource = zone.collectionSource ?? 'local'
-    if (collectionSource === 'local') {
-      const localTarget = await this.resolveAuthorizedLocalShellyStatusTarget(device, ipAddress)
-      if (!localTarget || localTarget.ipAddress !== ipAddress || localTarget.zone.id !== zone.id) {
-        throw new ConflictException('The configured local observer cannot verify this Shelly endpoint in its authorized interface and scope.')
-      }
-      if (device.metadata?.siteLocalObserverId !== localTarget.observer.id) {
-        throw new ConflictException('The reconciled endpoint evidence belongs to a different observer; review network identity before enabling switching.')
-      }
-    }
     onStage?.('saved_endpoint_observer_scope_validated')
+    const collectionSource = zone.collectionSource ?? 'local'
     return { device, inventory, physicalId, component, channel: channel as number, ipAddress,
       zone: { ...zone, collectionSource } }
   }
@@ -1402,6 +1441,30 @@ function safeRemoteObserverError(error: unknown): string {
   if (typeof code === 'string' && /^[A-Z0-9_]{1,80}$/.test(code)) return code
   const name = (error as { name?: unknown }).name
   return typeof name === 'string' && /^[A-Za-z0-9_]{1,80}$/.test(name) ? name : 'observer_error'
+}
+
+function safeRemoteAssignmentFailure(error: unknown): string {
+  if (!(error instanceof Error)) return 'observer_error'
+  const message = error.message
+  if (message.startsWith('Shelly route rejected (')) {
+    const reason = /^Shelly route rejected \(([a-z0-9_]{1,80})\)\.$/.exec(message)?.[1]
+    return reason ? `route_rejected_${reason}` : 'route_rejected'
+  }
+  if (message.includes('exact same-site physical inventory assignment')) return 'physical_inventory_assignment_mismatch'
+  if (message.includes('configured installation network scope')) return 'installation_scope_not_configured'
+  if (message.includes('conflicting active endpoints')) return 'active_endpoint_conflict'
+  if (message.includes('active Physical Inventory association')) return 'active_endpoint_mismatch'
+  if (message.includes('No reconciled active Shelly endpoint')) return 'active_endpoint_missing'
+  if (message.includes('operator-reconciled site-local Shelly identity')) return 'reconciled_identity_metadata_missing'
+  if (message.startsWith('No saved site-owned identity and ')) return 'saved_identity_or_component_evidence_missing'
+  if (message.includes('outside the configured network scope')) return 'endpoint_out_of_scope'
+  if (message.includes('belongs to a different authorized observer')) return 'observer_assignment_mismatch'
+  if (message.includes('explicit secure SSH execution target')) return 'observer_transport_configuration_missing'
+  if (message.includes('scope, physical ID and component allowlist')) return 'observer_assignment_unauthorized'
+  if (['observer_identity_not_authorized', 'observer_component_not_authorized', 'observer_assignment_ambiguous'].includes(message)) {
+    return message
+  }
+  return safeRemoteObserverError(error)
 }
 
 function scopeMatchesConfiguredZone(scopeValue: string, zone: NetworkDiscoveryZone): boolean {

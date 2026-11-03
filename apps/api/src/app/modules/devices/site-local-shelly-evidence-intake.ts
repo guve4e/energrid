@@ -9,6 +9,8 @@ const supportedComponents = new Set(['switch', 'em1']);
 export interface AuthorizedSiteLocalObserver {
   id: string;
   host: string;
+  /** Optional SSH alias used by the API to supervise a persistent read-only worker on this host. */
+  sshTarget?: string;
   tenantId: string;
   siteId: string;
   scopeId: string;
@@ -16,6 +18,30 @@ export interface AuthorizedSiteLocalObserver {
   interfaceName?: string;
   expectedDeviceIds: string[];
   expectedComponentKeys?: string[];
+}
+
+export type SiteLocalObserverSelection =
+  | { observer: AuthorizedSiteLocalObserver; reason: 'selected' }
+  | { observer: null; reason: 'observer_identity_not_authorized' | 'observer_component_not_authorized' | 'observer_assignment_ambiguous' };
+
+/** Select an observer only after applying its explicit site, scope, physical-ID and component allowlists. */
+export function selectAuthorizedSiteLocalObserver(input: {
+  observers: AuthorizedSiteLocalObserver[];
+  tenantId: string;
+  siteId: string;
+  scopeId: string;
+  physicalId: string;
+  component: string;
+}): SiteLocalObserverSelection {
+  const scoped = input.observers.filter(observer => observer.tenantId === input.tenantId &&
+    observer.siteId === input.siteId && observer.scopeId === input.scopeId);
+  const identityMatches = scoped.filter(observer => observer.expectedDeviceIds.some(id =>
+    id.toLowerCase() === input.physicalId.toLowerCase()));
+  if (!identityMatches.length) return { observer: null, reason: 'observer_identity_not_authorized' };
+  const assignmentMatches = identityMatches.filter(observer => observer.expectedComponentKeys?.includes(input.component));
+  if (!assignmentMatches.length) return { observer: null, reason: 'observer_component_not_authorized' };
+  if (assignmentMatches.length !== 1) return { observer: null, reason: 'observer_assignment_ambiguous' };
+  return { observer: assignmentMatches[0], reason: 'selected' };
 }
 
 export interface SiteLocalShellyEvidenceInput {
@@ -42,6 +68,10 @@ export function configuredSiteLocalObservers(raw = process.env.HOME_SITE_LOCAL_O
     const value = item as Record<string, unknown>;
     for (const key of ['id', 'host', 'tenantId', 'siteId', 'scopeId', 'cidr']) {
       if (typeof value[key] !== 'string' || !(value[key] as string).trim()) throw new Error(`Site-local observer authorization requires ${key}.`);
+    }
+    if (value.sshTarget !== undefined && (typeof value.sshTarget !== 'string' ||
+        !/^[a-zA-Z0-9][a-zA-Z0-9_.@-]{0,127}$/.test(value.sshTarget))) {
+      throw new Error('Site-local observer SSH target must be a safe configured SSH alias or host.');
     }
     if (!Array.isArray(value.expectedDeviceIds) || !value.expectedDeviceIds.length || value.expectedDeviceIds.length > 32 ||
         value.expectedDeviceIds.some(id => typeof id !== 'string' || !/^shelly[a-z0-9._-]{1,114}$/i.test(id))) {

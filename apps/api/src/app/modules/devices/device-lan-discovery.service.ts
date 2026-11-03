@@ -34,7 +34,8 @@ import {
   type LocalNetworkRuntimeReport,
 } from './adapters/outbound/network/local-network-runtime.adapter'
 import { EnergridHttpIdentityAdapter } from './adapters/outbound/network/energrid-http-identity.adapter'
-import { VirtualLabNetworkEvidenceAdapter, type RemoteShellyStatusAssignment, type RemoteShellyStatusObserverHandle, type VirtualLabEnergridHttpEvidence, type VirtualLabScanResult, type VirtualLabShellyControlResult } from './adapters/outbound/network/virtual-lab-network-evidence.adapter'
+import { VirtualLabNetworkEvidenceAdapter, type RemoteShellyObserverRuntime, type RemoteShellyStatusAssignment, type RemoteShellyStatusObserverHandle, type VirtualLabEnergridHttpEvidence, type VirtualLabScanResult, type VirtualLabShellyControlResult } from './adapters/outbound/network/virtual-lab-network-evidence.adapter'
+import type { AuthorizedSiteLocalObserver } from './site-local-shelly-evidence-intake'
 
 const execFileAsync = promisify(execFile)
 const activeScanConcurrency = 24
@@ -572,12 +573,29 @@ export class DeviceLanDiscoveryService {
     assignments: RemoteShellyStatusAssignment[],
     onMessage: (message: unknown) => void,
     onExit: (reason: 'spawn_failed' | 'runner_exited') => void,
-  ): Promise<{ handle: RemoteShellyStatusObserverHandle; observer: { id: string; host: string; interfaceName: string } }> {
+  ): Promise<{ handle: RemoteShellyStatusObserverHandle; observer: RemoteShellyObserverRuntime }> {
     const zone = this.getConfiguredZone(scopeId)
     if (!zone || zone.collectionSource !== 'virtual-lab') {
       throw new Error('Remote Shelly status collection requires an explicitly configured remote observer scope.')
     }
     return this.virtualLabEvidence.startShellyOperationalObserver(zone, sessionId, assignments, onMessage, onExit)
+  }
+
+  startSiteLocalShellyOperationalObserver(
+    scopeId: string,
+    observer: AuthorizedSiteLocalObserver,
+    sessionId: string,
+    assignments: RemoteShellyStatusAssignment[],
+    onMessage: (message: unknown) => void,
+    onExit: (reason: 'spawn_failed' | 'runner_exited') => void,
+  ): Promise<{ handle: RemoteShellyStatusObserverHandle; observer: RemoteShellyObserverRuntime }> {
+    const zone = this.getConfiguredZone(scopeId)
+    if (!zone || zone.collectionSource === 'virtual-lab' || zone.cidr !== observer.cidr || observer.scopeId !== zone.id) {
+      throw new Error('Site-local remote status collection requires its explicitly authorized configured network scope.')
+    }
+    return this.virtualLabEvidence.startSiteLocalShellyOperationalObserver(
+      zone, observer, sessionId, assignments, onMessage, onExit,
+    )
   }
 
   executeVirtualLabSwitchControl(
