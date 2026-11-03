@@ -1,4 +1,5 @@
 import { DeviceHttpPollService } from './device-http-poll.service'
+import { ShellyRouteResolver } from './shelly-route.resolver'
 import type { DeviceRegistryService } from './device-registry.service'
 import type { NetworkDiscoveryZone } from './device-registry.types'
 
@@ -56,10 +57,21 @@ function setup(overrides: { ownership?: typeof ownership; identity?: Record<stri
     }))
   const lan = { getConfiguredZone: jest.fn((id: string) => id === zone.id ? zone : undefined), readVirtualLabShellyStatusEvidence: remote }
   const physical = { forLogicalDevice: jest.fn().mockResolvedValue(inventory) }
-  const poller = new DeviceHttpPollService(
-    registry as unknown as DeviceRegistryService, undefined, discovery as never, lan as never, undefined, physical as never,
+  const routes = new ShellyRouteResolver(
+    registry as unknown as DeviceRegistryService, discovery as never, lan as never, physical as never,
   )
-  return { poller, registry, discovery, lan, remote, physical }
+  const poller = new DeviceHttpPollService(
+    registry as unknown as DeviceRegistryService, undefined, discovery as never, lan as never, undefined, physical as never, routes,
+  )
+  return { poller, routes, registry, discovery, lan, remote, physical }
+}
+
+// Virtual Lab routes intentionally use their current virtual observer rather than
+// historical site-local RPC evidence. Test that fail-closed contract on a local
+// route instead of accidentally asserting it for the virtual transport.
+function requireSavedSiteLocalEvidence(fixture: ReturnType<typeof setup>) {
+  fixture.lan.getConfiguredZone.mockImplementation((id: string) =>
+    id === zone.id ? { ...zone, collectionSource: 'local' } : undefined)
 }
 
 function loggerSpies(poller: DeviceHttpPollService) {
@@ -161,7 +173,7 @@ describe('one-shot authorized Shelly status observation', () => {
     fixture.physical.forLogicalDevice.mockResolvedValue({
       ...inventory, networkObservations: [{ ipAddress: '192.168.1.166', networkScope: homeZone.id, isCurrent: true }],
     } as never)
-    jest.spyOn(fixture.poller as never, 'resolveAuthorizedLocalShellyStatusTarget' as never).mockResolvedValue({
+    jest.spyOn(fixture.routes, 'resolveAuthorizedLocalShellyStatusTarget').mockResolvedValue({
       ipAddress: '192.168.1.166', physicalId, component: 'switch:0', channel: 0,
       zone: homeZone, interfaceAddress: '192.168.1.10',
       observer: { id: 'mac-eero-en0', host: 'localhost', tenantId: ownership.tenantId, siteId: ownership.siteId,
@@ -406,10 +418,12 @@ describe('one-shot authorized Shelly status observation', () => {
     expect(wrongSite.remote).not.toHaveBeenCalled()
   })
 
-  it('fails closed for wrong-scope or missing saved evidence and observer errors', async () => {
+  it('fails closed for wrong-scope or missing saved site-local evidence and for observer errors', async () => {
     const wrongScope = setup({ identity: { ...identityEvidence, device: { ...identityEvidence.device, networkZoneId: 'home-lan' } } })
+    requireSavedSiteLocalEvidence(wrongScope)
     await expect(wrongScope.poller.observeShellySwitchStatusOnce(deviceId, ownership)).rejects.toThrow(/component-status evidence supports the reconciled/)
     const noEvidence = setup({ identity: {} })
+    requireSavedSiteLocalEvidence(noEvidence)
     await expect(noEvidence.poller.observeShellySwitchStatusOnce(deviceId, ownership)).rejects.toThrow(/No saved site-owned identity/)
     const failure = setup({ remoteError: new Error('observer failure') })
     await expect(failure.poller.observeShellySwitchStatusOnce(deviceId, ownership)).rejects.toThrow('observer failure')
@@ -431,6 +445,7 @@ describe('one-shot authorized Shelly status observation', () => {
 
   it('reports the saved endpoint and scope failure without starting remote execution', async () => {
     const fixture = setup({ identity: {} })
+    requireSavedSiteLocalEvidence(fixture)
     const diagnostics = loggerSpies(fixture.poller)
     await expect(fixture.poller.observeShellySwitchStatusOnce(deviceId, ownership)).rejects.toThrow(/No saved site-owned identity/)
     expect(diagnostics.records().at(-1)).toMatchObject({

@@ -27,7 +27,7 @@ import type {
 } from './device-registry.types';
 import { DEVICE_ENROLLMENT_SERVICE } from './enrollment/device-enrollment.module';
 import type { DeviceEnrollmentService } from './enrollment/device-enrollment.service';
-import { DeviceHttpPollService } from './device-http-poll.service';
+import { ShellyRouteResolver } from './shelly-route.resolver';
 import { DeviceLanDiscoveryService } from './device-lan-discovery.service';
 import { SiteLocalShellyCommandExecutor } from './site-local-shelly-command.executor';
 import { verifySiteLocalShellyCommandReadback } from './site-local-shelly-command-readback'
@@ -56,7 +56,7 @@ export class DeviceControlService {
     private readonly registry: DeviceRegistryService,
     @Inject(DEVICE_ENROLLMENT_SERVICE)
     private readonly enrollment: DeviceEnrollmentService,
-    @Optional() private readonly httpPoll?: DeviceHttpPollService,
+    @Optional() private readonly routes?: ShellyRouteResolver,
     @Optional() private readonly lanDiscovery?: DeviceLanDiscoveryService,
     @Optional() private readonly siteLocalCommands?: SiteLocalShellyCommandExecutor,
   ) {}
@@ -245,10 +245,10 @@ export class DeviceControlService {
     action: DeviceCapabilityAction,
     binding: Extract<DeviceControlBinding, { kind: 'shelly-switch' | 'shelly-virtual-lab' | 'shelly-http' | 'shelly-mqtt' }>,
   ): Promise<DeviceActionResult> {
-    if (!this.httpPoll)
+    if (!this.routes)
       throw new ServiceUnavailableException('Scope-authorized Shelly control is unavailable.')
     const site = configuredPortalSite()
-    const target = await this.httpPoll.resolveShellyControlTarget(device.id, site, undefined, true)
+    const target = await this.routes.resolveShellyControlTarget(device.id, site, undefined, true)
     if (target.physicalId !== binding.physicalId || target.component !== `switch:${binding.channel}`) {
       throw new ForbiddenException('The switch permission no longer matches the enrolled physical component.')
     }

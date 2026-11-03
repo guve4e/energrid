@@ -7,6 +7,7 @@ import { SiteLocalShellyCommandExecutor } from './site-local-shelly-command.exec
 import { DeviceAssistantLightingService } from './device-assistant-lighting.service'
 import { DeviceDiagnosticsService } from './device-diagnostics.service'
 import { DeviceHttpPollService } from './device-http-poll.service'
+import { ShellyRouteResolver } from './shelly-route.resolver'
 import {
   DeviceLanDiscoveryService,
   DeviceLanNetworkEvidenceCollector,
@@ -44,6 +45,7 @@ import { EnergridHttpIdentityAdapter } from './adapters/outbound/network/energri
     MqttEvidenceCaptureService,
     MqttEvidenceDiscoveryService,
     MqttBrokerAttributionService,
+    ShellyRouteResolver,
     DeviceHttpPollService,
     DeviceLanNetworkEvidenceCollector,
     NmapNetworkEvidenceAdapter,
