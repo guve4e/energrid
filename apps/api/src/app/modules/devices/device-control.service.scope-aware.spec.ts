@@ -64,7 +64,7 @@ describe('scope-aware Shelly execution', () => {
     const fixture = setup();
     const result = await runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, output ? 'turn_on' : 'turn_off'));
     expect(result).toMatchObject({ status: 'success', adapter: 'http' });
-    expect(fixture.httpPoll.resolveShellyControlTarget).toHaveBeenCalledWith(deviceId, site);
+    expect(fixture.httpPoll.resolveShellyControlTarget).toHaveBeenCalledWith(deviceId, site, undefined, true);
     expect(execFile).toHaveBeenCalledTimes(3);
     const calls = jest.mocked(execFile).mock.calls;
     expect(calls[0][1]).toContain(`http://192.168.7.21/rpc/Shelly.GetDeviceInfo`);
@@ -87,7 +87,7 @@ describe('scope-aware Shelly execution', () => {
     const result = await runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, 'turn_on'))
 
     expect(result).toMatchObject({ status: 'success', adapter: 'http' })
-    expect(fixture.httpPoll.resolveShellyControlTarget).toHaveBeenCalledWith(deviceId, site)
+    expect(fixture.httpPoll.resolveShellyControlTarget).toHaveBeenCalledWith(deviceId, site, undefined, true)
     expect(execFile).toHaveBeenCalledTimes(3)
     expect(jest.mocked(execFile).mock.calls[1][1]).toContain('http://192.168.7.21/rpc/Switch.Set')
   })

@@ -49,7 +49,7 @@ describe('Virtual Lab Shelly control authorization and confirmation', () => {
     });
     const result = await runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, output ? 'turn_on' : 'turn_off'));
     expect(result).toMatchObject({ status: 'success', adapter: 'virtual-lab' });
-    expect(fixture.poll.resolveShellyControlTarget).toHaveBeenCalledWith(deviceId, site);
+    expect(fixture.poll.resolveShellyControlTarget).toHaveBeenCalledWith(deviceId, site, undefined, true);
     expect(fixture.lab.executeVirtualLabSwitchControl).toHaveBeenCalledWith('device-lab-vlan', '172.30.250.11', physicalId, 0, output, expect.any(AbortSignal));
     expect(fixture.registry.ingestDeviceTelemetry).toHaveBeenCalledWith(expect.objectContaining({
       deviceId, tenantId: site.tenantId, siteId: site.siteId, values: { on: output },
@@ -71,7 +71,7 @@ describe('Virtual Lab Shelly control authorization and confirmation', () => {
     }, permission);
     const result = await runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, 'turn_on'));
     expect(result).toMatchObject({ status: 'success', adapter: 'virtual-lab' });
-    expect(fixture.poll.resolveShellyControlTarget).toHaveBeenCalledWith(deviceId, site);
+    expect(fixture.poll.resolveShellyControlTarget).toHaveBeenCalledWith(deviceId, site, undefined, true);
     expect(fixture.lab.executeVirtualLabSwitchControl).toHaveBeenCalledWith(
       'device-lab-vlan', '172.30.250.11', physicalId, 0, true, expect.any(AbortSignal),
     );

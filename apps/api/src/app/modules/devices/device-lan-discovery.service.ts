@@ -36,6 +36,12 @@ import {
 import { EnergridHttpIdentityAdapter } from './adapters/outbound/network/energrid-http-identity.adapter'
 import { VirtualLabNetworkEvidenceAdapter, type RemoteShellyObserverRuntime, type RemoteShellyStatusAssignment, type RemoteShellyStatusObserverHandle, type VirtualLabEnergridHttpEvidence, type VirtualLabScanResult, type VirtualLabShellyControlResult } from './adapters/outbound/network/virtual-lab-network-evidence.adapter'
 import type { AuthorizedSiteLocalObserver } from './site-local-shelly-evidence-intake'
+import { configuredSiteLocalObservers, selectAuthorizedSiteLocalObserver } from './site-local-shelly-evidence-intake'
+import { SiteLocalShellyControlAdapter } from './adapters/outbound/network/site-local-shelly-control.adapter'
+import {
+  configuredSiteLocalShellyControlRoutes,
+  selectSiteLocalShellyControlRoute,
+} from './site-local-shelly-control-route'
 
 const execFileAsync = promisify(execFile)
 const activeScanConcurrency = 24
@@ -226,6 +232,8 @@ export class DeviceLanDiscoveryService {
     private readonly physicalInventory?: PhysicalDeviceInventoryService,
     @Optional()
     private readonly virtualLabEvidence: VirtualLabNetworkEvidenceAdapter = new VirtualLabNetworkEvidenceAdapter(),
+    @Optional()
+    private readonly siteLocalShellyControl = new SiteLocalShellyControlAdapter(),
   ) {}
 
   getLastScan(): NetworkDiscoveredDevice[] {
@@ -614,6 +622,46 @@ export class DeviceLanDiscoveryService {
       throw new Error('Switch control requires the configured Virtual Lab scope.')
     }
     return this.virtualLabEvidence.setShellySwitch(zone, targetIp, physicalId, channel, on, signal)
+  }
+
+  async readSiteLocalShellySwitchStatus(input: {
+    scopeId: string; observerId: string; tenantId: string; siteId: string; physicalId: string
+    ipAddress: string; component: string; expectedComponentKeys: string[]
+  }) {
+    const { zone, observer } = this.resolveSiteLocalObserver(input)
+    return this.siteLocalShellyControl.readStatus({ ...input, zone, observer })
+  }
+
+  async executeSiteLocalShellySwitchControl(input: {
+    scopeId: string; observerId: string; tenantId: string; siteId: string; physicalId: string
+    ipAddress: string; component: string; expectedComponentKeys: string[]; on: boolean
+  }) {
+    const { zone, observer } = this.resolveSiteLocalObserver(input)
+    const route = selectSiteLocalShellyControlRoute({
+      routes: configuredSiteLocalShellyControlRoutes(), observer, tenantId: input.tenantId,
+      siteId: input.siteId, scopeId: input.scopeId, physicalId: input.physicalId, component: input.component,
+    })
+    if (!route) throw new Error('No separately authorized site-local Shelly command route matches this device component.')
+    return this.siteLocalShellyControl.setSwitch({ ...input, zone, observer, route })
+  }
+
+  private resolveSiteLocalObserver(input: {
+    scopeId: string; observerId: string; tenantId: string; siteId: string; physicalId: string
+    ipAddress: string; component: string; expectedComponentKeys: string[]
+  }) {
+    const zone = this.getConfiguredZone(input.scopeId)
+    if (!zone || zone.collectionSource === 'virtual-lab' || !zone.cidr) throw new Error('No configured site-local scope matches the authorized observer.')
+    const selection = selectAuthorizedSiteLocalObserver({
+      observers: configuredSiteLocalObservers(), tenantId: input.tenantId, siteId: input.siteId,
+      scopeId: input.scopeId, physicalId: input.physicalId, component: input.component,
+    })
+    const observer = selection.observer
+    if (!observer || observer.id !== input.observerId || !observer.sshTarget || !observer.interfaceName ||
+        observer.cidr !== zone.cidr || !input.expectedComponentKeys.includes(input.component) ||
+        !ipInCidr(input.ipAddress, observer.cidr)) {
+      throw new Error('The site-local observer route does not match the enrolled device, component, endpoint, and scope.')
+    }
+    return { zone, observer }
   }
 
   getNmapCapability(): Promise<NmapCapability & { enabled: boolean }> {

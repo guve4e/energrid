@@ -29,6 +29,9 @@ import { DEVICE_ENROLLMENT_SERVICE } from './enrollment/device-enrollment.module
 import type { DeviceEnrollmentService } from './enrollment/device-enrollment.service';
 import { DeviceHttpPollService } from './device-http-poll.service';
 import { DeviceLanDiscoveryService } from './device-lan-discovery.service';
+import { parseShellySwitchStatus } from './adapters/inbound/shelly/shelly-switch-status'
+import { readOnlyShellyRpcDeviceInfoFromBody } from './adapters/inbound/shelly/read-only-shelly-rpc'
+import { SiteLocalShellyCommandError } from './adapters/outbound/network/site-local-shelly-control.adapter'
 
 const execFileAsync = promisify(execFile);
 const virtualLabCommandAckTtlMs = 25_000;
@@ -244,7 +247,7 @@ export class DeviceControlService {
     if (!this.httpPoll)
       throw new ServiceUnavailableException('Scope-authorized Shelly control is unavailable.')
     const site = configuredPortalSite()
-    const target = await this.httpPoll.resolveShellyControlTarget(device.id, site)
+    const target = await this.httpPoll.resolveShellyControlTarget(device.id, site, undefined, true)
     if (target.physicalId !== binding.physicalId || target.component !== `switch:${binding.channel}`) {
       throw new ForbiddenException('The switch permission no longer matches the enrolled physical component.')
     }
@@ -253,8 +256,84 @@ export class DeviceControlService {
     }
     if (binding.kind === 'shelly-http') {
       const configured = new URL(binding.baseUrl)
-      if (target.zone.collectionSource !== 'local' || configured.hostname !== target.ipAddress || (configured.port && configured.port !== '80')) {
+      if ((target.zone.collectionSource ?? 'local') !== 'local' || configured.hostname !== target.ipAddress || (configured.port && configured.port !== '80')) {
         throw new ForbiddenException('The saved legacy HTTP route differs from the verified endpoint and scope.')
+      }
+    }
+
+    if (target.siteLocalObserver) {
+      if (!this.lanDiscovery) throw new ServiceUnavailableException('The authorized site-local Shelly command adapter is unavailable.')
+      const command = this.registry.markDeviceCommandPending(device.id, {
+        action, expectedValues: { on }, ttlMs: virtualLabCommandAckTtlMs,
+        message: `Requesting ${action} through the separately authorized site-local Shelly route.`,
+        actor: { type: 'user', id: 'portal-installer', name: 'Portal installer' },
+      })
+      try {
+        const result = await this.lanDiscovery.executeSiteLocalShellySwitchControl({
+          scopeId: target.zone.id, observerId: target.siteLocalObserver.id,
+          tenantId: site.tenantId, siteId: site.siteId, physicalId: target.physicalId,
+          ipAddress: target.ipAddress, component: target.component,
+          expectedComponentKeys: target.inventory.components.map(item => item.key).filter(key => /^switch:\d+$/.test(key)), on,
+        })
+        if (result.writeAttempted) {
+          this.registry.markDeviceCommandPublished(device.id, command.id, { adapter: 'site-local-ssh-http-rpc' })
+        }
+        const identity = readOnlyShellyRpcDeviceInfoFromBody(result.identityBefore, 'GET /rpc/Shelly.GetDeviceInfo')
+        const identityAfter = readOnlyShellyRpcDeviceInfoFromBody(result.identityAfter, 'GET /rpc/Shelly.GetDeviceInfo')
+        const before = parseShellySwitchStatus(result.statusBefore, target.component)
+        const values = parseShellySwitchStatus(result.statusAfter, target.component)
+        const expectedKeys = target.inventory.components.map(item => item.key).sort()
+        const componentMatch = result.componentKeys.length === expectedKeys.length &&
+          [...result.componentKeys].sort().every((key, index) => key === expectedKeys[index])
+        const acknowledgement = result.acknowledgement as Record<string, unknown> | null
+        const timestamp = result.observedAt ? Date.parse(result.observedAt) : Number.NaN
+        const fresh = Number.isFinite(timestamp) && timestamp <= Date.now() + 30_000 && Date.now() - timestamp <= 15 * 60_000
+        const identityMatches = identity?.id?.toLowerCase() === target.physicalId.toLowerCase() && (identity.gen || 0) >= 2 &&
+          identityAfter?.id?.toLowerCase() === target.physicalId.toLowerCase() && (identityAfter.gen || 0) >= 2
+        const ackValid = Boolean(acknowledgement && typeof acknowledgement.was_on === 'boolean')
+        if (result.failure || !result.writeAttempted || !result.acknowledgement || !identityMatches ||
+            !componentMatch || !before || !values || !fresh) {
+          const uncertain = result.writeAttempted
+          const message = 'The site-local Shelly command could not be confirmed with fresh matching identity, component, and status evidence.'
+          if (!uncertain) this.registry.markDeviceCommandFailed(device.id, { action, expectedValues: { on }, message })
+          return { deviceId: device.id, action, status: uncertain ? 'pending' : 'failed', adapter: 'http',
+            message: uncertain ? `${message} Check the device state before retrying.` : message,
+            affectedDeviceIds: uncertain ? [device.id] : [], command: this.findDevice(device.id)?.state.command || command }
+        }
+        // A well-formed but mismatching readback is real state and is ingested;
+        // transport success alone never settles the command.
+        const observedAt = result.observedAt!
+        const source = `site-local-http-rpc:${target.siteLocalObserver.id}`
+        this.registry.ingestDeviceTelemetry({
+          id: device.id, deviceId: device.id, tenantId: site.tenantId, siteId: site.siteId,
+          displayName: device.displayName, protocol: 'http', transport: 'http', driver: 'shelly-lan',
+          target: `http://${target.ipAddress}/rpc/Switch.GetStatus?id=${target.channel}`, location: device.zoneName,
+          capabilities: device.capabilities.map(item => item.kind), values,
+          state: { values, source, status: 'online', observedAt }, observedAt,
+        })
+        this.registry.recordObserverReachability(device.id, {
+          status: 'reachable', checkedAt: observedAt,
+          endpoint: `http://${target.ipAddress}/rpc/Switch.GetStatus?id=${target.channel}`,
+          targetIpAddress: target.ipAddress, networkScopeId: target.zone.id,
+          observer: { id: target.siteLocalObserver.id, host: target.siteLocalObserver.host, platform: 'docker', localScopes: [] },
+        })
+        const confirmed = values.on === on && ackValid
+        const settledCommand = confirmed ? (this.findDevice(device.id)?.state.command || command) :
+          this.registry.markDeviceCommandFailed(device.id, {
+            action, expectedValues: { on }, message: `Shelly switch readback was ${values.on ? 'ON' : 'OFF'}, not the requested state.`,
+          })
+        return { deviceId: device.id, action, status: confirmed ? 'success' : 'failed', adapter: 'http',
+          message: confirmed ? `Switch:${target.channel} ${on ? 'ON' : 'OFF'} confirmed by a fresh Shelly status read.`
+            : `The Shelly reported ${values.on ? 'ON' : 'OFF'} after the ${on ? 'ON' : 'OFF'} request.`,
+          affectedDeviceIds: [device.id], command: settledCommand }
+      } catch (error) {
+        const uncertain = error instanceof SiteLocalShellyCommandError && error.writeMayHaveBeenSent
+        const message = uncertain
+          ? 'The site-local command may have reached the Shelly, but fresh readback was not received. Check the current state before retrying.'
+          : error instanceof Error ? error.message : 'The site-local Shelly command failed before execution.'
+        if (!uncertain) this.registry.markDeviceCommandFailed(device.id, { action, expectedValues: { on }, message })
+        return { deviceId: device.id, action, status: uncertain ? 'pending' : 'failed', adapter: 'http',
+          message, affectedDeviceIds: uncertain ? [device.id] : [], command: this.findDevice(device.id)?.state.command || command }
       }
     }
 

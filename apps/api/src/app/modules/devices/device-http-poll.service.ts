@@ -26,11 +26,13 @@ import { createHash, randomUUID } from 'node:crypto'
 import { hostname, networkInterfaces } from 'node:os'
 import { isIP } from 'node:net'
 import { parseShellySwitchStatus } from './adapters/inbound/shelly/shelly-switch-status'
+import { readOnlyShellyRpcDeviceInfoFromBody } from './adapters/inbound/shelly/read-only-shelly-rpc'
 import { PHYSICAL_DEVICE_INVENTORY_SERVICE } from './enrollment/physical-device-inventory.token'
 import type { PhysicalDeviceInventoryService } from './enrollment/physical-device-inventory.service'
 import { hasPhysicalDeviceIdentityClaim } from './enrollment/physical-device-inventory.repository'
 import type { RemoteShellyObserverRuntime, RemoteShellyStatusAssignment, RemoteShellyStatusObserverHandle } from './adapters/outbound/network/virtual-lab-network-evidence.adapter'
 import { configuredSiteLocalObservers, selectAuthorizedSiteLocalObserver, type AuthorizedSiteLocalObserver } from './site-local-shelly-evidence-intake'
+import { configuredSiteLocalShellyControlRoutes, selectSiteLocalShellyControlRoute } from './site-local-shelly-control-route'
 
 interface AuthorizedRemoteShellyStatusTarget {
   assignmentKey: string
@@ -692,16 +694,30 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     deviceId: string,
     ownership: { tenantId: string; siteId: string },
     onStage?: (stage: 'enrollment_and_inventory_validation' | 'enrollment_inventory_validated' | 'saved_endpoint_observer_scope_validation' | 'saved_endpoint_observer_scope_validated') => void,
+    requireControlRoute = false,
   ) {
     const target = await this.resolveShellyInstallationTarget(deviceId, ownership, onStage)
     if (target.zone.collectionSource === 'local') {
       const localTarget = await this.resolveAuthorizedLocalShellyStatusTarget(target.device, target.ipAddress)
-      if (!localTarget || localTarget.ipAddress !== target.ipAddress || localTarget.zone.id !== target.zone.id) {
-        throw new ConflictException('The configured local observer cannot verify this Shelly endpoint in its authorized interface and scope.')
+      if (localTarget && localTarget.ipAddress === target.ipAddress && localTarget.zone.id === target.zone.id &&
+          target.device.metadata?.siteLocalObserverId === localTarget.observer.id) return { ...target, siteLocalObserver: undefined }
+
+      // The API may be outside this authorized LAN. In that case execute only
+      // through the exact Pi observer already recorded on the reconciled device.
+      const observerId = String(target.device.metadata?.siteLocalObserverId || '')
+      const selection = selectAuthorizedSiteLocalObserver({ observers: configuredSiteLocalObservers(),
+        tenantId: ownership.tenantId, siteId: ownership.siteId, scopeId: target.zone.id,
+        physicalId: target.physicalId, component: target.component })
+      const observer = selection.observer
+      if (!observer || observer.id !== observerId || !observer.sshTarget || !observer.interfaceName ||
+          observer.cidr !== target.zone.cidr || !target.zone.cidr || !ipInCidr(target.ipAddress, observer.cidr)) {
+        throw new ConflictException('The saved endpoint has no matching authorized site-local execution observer.')
       }
-      if (target.device.metadata?.siteLocalObserverId !== localTarget.observer.id) {
-        throw new ConflictException('The reconciled endpoint evidence belongs to a different observer; review network identity before enabling switching.')
-      }
+      if (requireControlRoute && !selectSiteLocalShellyControlRoute({
+        routes: configuredSiteLocalShellyControlRoutes(), observer, tenantId: ownership.tenantId,
+        siteId: ownership.siteId, scopeId: target.zone.id, physicalId: target.physicalId, component: target.component,
+      })) throw new ConflictException('No separately authorized site-local Shelly command route matches this device component.')
+      return { ...target, siteLocalObserver: observer }
     }
     return target
   }
@@ -777,34 +793,37 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         ? `Physical Inventory has conflicting active endpoints in ${zone.id}; review network identity reconciliation before enabling switching.`
         : `The saved ${zone.id} endpoint differs from the active Physical Inventory association; explicitly reconcile the endpoint before enabling switching.`)
     }
-    if (device.metadata?.identityEvidenceSource !== 'verified_site_local_shelly_rpc' ||
-        device.metadata?.componentEvidenceSource !== 'verified_site_local_shelly_rpc' ||
-        !String(device.metadata?.siteLocalEvidenceScanId || '').startsWith('site-observer-') ||
-        !String(device.metadata?.siteLocalObserverId || '')) {
-      throw new ConflictException('The active endpoint lacks operator-reconciled site-local Shelly identity and component evidence.')
-    }
+    const collectionSource = zone.collectionSource ?? 'local'
+    if (collectionSource !== 'virtual-lab') {
+      if (device.metadata?.identityEvidenceSource !== 'verified_site_local_shelly_rpc' ||
+          device.metadata?.componentEvidenceSource !== 'verified_site_local_shelly_rpc' ||
+          !String(device.metadata?.siteLocalEvidenceScanId || '').startsWith('site-observer-') ||
+          !String(device.metadata?.siteLocalObserverId || '')) {
+        throw new ConflictException('The active endpoint lacks operator-reconciled site-local Shelly identity and component evidence.')
+      }
 
-    const history = (await this.discovery.listIdentityEvidence(ownership)).filter(record => {
-      if (!record?.device) return false
-      const observations = record.device.observations || []
-      const independentlyVerifiedAt = new Set(observations.filter(item => item.source === 'http_identity' &&
-        item.attribute === 'identity.verified' && item.value === true).map(item => item.observedAt))
-      const identityMatches = observations.some(item =>
-        ['http_identity', 'http_rpc', 'site_local_http_rpc'].includes(item.source) &&
-        ['shelly.device_id', 'identity.device_id'].includes(item.attribute) &&
-        typeof item.value === 'string' && item.value.toLowerCase() === physicalId.toLowerCase() &&
-        (item.source !== 'http_identity' || independentlyVerifiedAt.has(item.observedAt)))
-      return record.ownership?.tenantId === ownership.tenantId && record.ownership.siteId === ownership.siteId &&
-        record.device.vendor === 'Shelly' && record.device.id.toLowerCase() === physicalId.toLowerCase() &&
-        record.device.networkZoneId === zone.id && record.device.ipAddress === ipAddress &&
-        record.device.components?.some(item => item.component === component) && identityMatches &&
-        observations.some(item => ['http_rpc', 'site_local_http_rpc'].includes(item.source) &&
-          item.attribute === 'shelly.component_status' && item.value === component &&
-          item.method === `Switch.GetStatus?id=${channel}`)
-    })
-      .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt))
-    if (!history.length) {
-      throw new ConflictException(`No saved site-owned identity and ${component} component-status evidence supports the reconciled ${zone.id} endpoint.`)
+      const history = (await this.discovery.listIdentityEvidence(ownership)).filter(record => {
+        if (!record?.device) return false
+        const observations = record.device.observations || []
+        const independentlyVerifiedAt = new Set(observations.filter(item => item.source === 'http_identity' &&
+          item.attribute === 'identity.verified' && item.value === true).map(item => item.observedAt))
+        const identityMatches = observations.some(item =>
+          ['http_identity', 'http_rpc', 'site_local_http_rpc'].includes(item.source) &&
+          ['shelly.device_id', 'identity.device_id'].includes(item.attribute) &&
+          typeof item.value === 'string' && item.value.toLowerCase() === physicalId.toLowerCase() &&
+          (item.source !== 'http_identity' || independentlyVerifiedAt.has(item.observedAt)))
+        return record.ownership?.tenantId === ownership.tenantId && record.ownership.siteId === ownership.siteId &&
+          record.device.vendor === 'Shelly' && record.device.id.toLowerCase() === physicalId.toLowerCase() &&
+          record.device.networkZoneId === zone.id && record.device.ipAddress === ipAddress &&
+          record.device.components?.some(item => item.component === component) && identityMatches &&
+          observations.some(item => ['http_rpc', 'site_local_http_rpc'].includes(item.source) &&
+            item.attribute === 'shelly.component_status' && item.value === component &&
+            item.method === `Switch.GetStatus?id=${channel}`)
+      })
+        .sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt))
+      if (!history.length) {
+        throw new ConflictException(`No saved site-owned identity and ${component} component-status evidence supports the reconciled ${zone.id} endpoint.`)
+      }
     }
     if (isIP(ipAddress) !== 4) {
       throw new ConflictException('The saved Shelly endpoint is not in a configured authorized execution scope.')
@@ -816,9 +835,8 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       throw new ConflictException('The saved Shelly endpoint is outside the configured network scope.')
     }
     onStage?.('saved_endpoint_observer_scope_validated')
-    const collectionSource = zone.collectionSource ?? 'local'
     return { device, inventory, physicalId, component, channel: channel as number, ipAddress,
-      zone: { ...zone, collectionSource } }
+      zone: { ...zone, collectionSource }, siteLocalObserver: undefined as AuthorizedSiteLocalObserver | undefined }
   }
 
   /** Perform one operator-triggered, read-only status read for an enrolled Shelly. */
@@ -842,6 +860,50 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       const { device, inventory, physicalId, component, ipAddress, zone } = target
       const zoneId = zone.id
       scopeId = zoneId
+
+      if (zone.collectionSource === 'local' && target.siteLocalObserver) {
+        if (!this.lanDiscovery) throw new BadGatewayException('The authorized site-local observer adapter is unavailable.')
+        observerId = target.siteLocalObserver.id
+        this.logShellyObservation(correlationId, 'remote_execution_started', 'started', startedAt, deviceId, ownership, { scopeId, observerId })
+        stage = 'rpc_response_validation'
+        const result = await this.lanDiscovery.readSiteLocalShellySwitchStatus({
+          scopeId: zoneId, observerId, tenantId: ownership.tenantId, siteId: ownership.siteId,
+          physicalId, ipAddress, component,
+          expectedComponentKeys: inventory.components.map(item => item.key).filter(key => /^switch:\d+$/.test(key)),
+        })
+        const identity = readOnlyShellyRpcDeviceInfoFromBody(result.identityBefore, 'GET /rpc/Shelly.GetDeviceInfo')
+        const identityAfter = readOnlyShellyRpcDeviceInfoFromBody(result.identityAfter, 'GET /rpc/Shelly.GetDeviceInfo')
+        const values = parseShellySwitchStatus(result.statusBefore, component)
+        if (result.failure || identity?.id?.toLowerCase() !== physicalId.toLowerCase() ||
+            identity.gen === undefined || identity.gen < 2 || identityAfter?.id?.toLowerCase() !== physicalId.toLowerCase() ||
+            identityAfter.gen === undefined || identityAfter.gen < 2 || !values) {
+          throw new ConflictException('The authorized site-local RPC did not verify the enrolled Shelly identity and switch component.')
+        }
+        const observedAt = result.observedAt!
+        const observedTime = Date.parse(observedAt)
+        if (!Number.isFinite(observedTime) || observedTime > Date.now() + 30_000 || Date.now() - observedTime > 15 * 60_000) {
+          throw new BadGatewayException('The site-local observer returned stale or invalid status evidence; no state was changed.')
+        }
+        this.logShellyObservation(correlationId, 'rpc_response_validated', 'completed', startedAt, deviceId, ownership, { scopeId, observerId })
+        const source = `site-local-http-rpc:${observerId}`
+        this.registry.ingestDeviceTelemetry({
+          id: device.id, deviceId: device.id, tenantId: ownership.tenantId, siteId: ownership.siteId,
+          displayName: device.displayName, protocol: 'http', transport: 'http', driver: 'shelly-lan',
+          target: `http://${ipAddress}/rpc/Switch.GetStatus?id=${target.channel}`, location: device.zoneName,
+          capabilities: device.capabilities.map(item => item.kind), values,
+          state: { values, source, status: 'online', observedAt }, observedAt,
+        })
+        this.registry.recordObserverReachability(device.id, {
+          status: 'reachable', checkedAt: observedAt,
+          endpoint: `http://${ipAddress}/rpc/Switch.GetStatus?id=${target.channel}`, targetIpAddress: ipAddress,
+          networkScopeId: zoneId,
+          observer: { id: observerId, host: target.siteLocalObserver.host, platform: 'docker', localScopes: [] },
+        })
+        this.logShellyObservation(correlationId, 'operational_state_ingestion_completed', 'completed', startedAt, deviceId, ownership, { scopeId, observerId })
+        return { deviceId: device.id, physicalId, component, physicalInventoryId: inventory.physicalDeviceId,
+          site: ownership, output: values.on, observedAt, source,
+          observer: { id: observerId, host: target.siteLocalObserver.host }, networkScopeId: zoneId }
+      }
 
       if (zone.collectionSource === 'local') {
         const localTarget = await this.resolveAuthorizedLocalShellyStatusTarget(device, ipAddress)

@@ -206,6 +206,26 @@ describe('connection diagnostic UI', () => {
       verified: false,
     });
   });
+  it('unlocks a site-local HTTP route only after a successful authorized remote status observation', async () => {
+    const remoteDevice = {
+      ...device, tenantId: 'tenant-demo', siteId: 'site-home',
+      metadata: { physicalId: 'shellyplus1-8813bfcdc8bc', component: 'switch:0', channel: 0 },
+      control: { status: 'ready' as const, reason: 'Permission enabled.', binding: {
+        kind: 'shelly-http' as const, enabled: true, physicalId: 'shellyplus1-8813bfcdc8bc',
+        channel: 0, baseUrl: 'http://192.168.1.219',
+      } },
+    }
+    fetchMock.mockResolvedValue({ ok: true, json: async () => ({ deviceId: remoteDevice.id, component: 'switch:0',
+      output: true, observedAt: new Date().toISOString(), observer: { id: 'pi-upstream-bathroom', host: 'pi' } }) })
+    setup(remoteDevice)
+    await page.get('.shelly-read-status button').trigger('click')
+    await flushPromises()
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/portal/devices/shelly%3Aswitch%3A0/observe-shelly-status')
+    expect(page.emitted('identity-verification')?.at(-1)?.[0]).toEqual({
+      deviceId: remoteDevice.id, tenantId: 'tenant-demo', siteId: 'site-home', route: 'http://192.168.1.219', verified: true,
+    })
+    expect(page.text()).toContain('On')
+  })
   it('shows a scoped authorization failure without exposing server details', async () => {
     fetchMock.mockResolvedValue({
       ok: false,

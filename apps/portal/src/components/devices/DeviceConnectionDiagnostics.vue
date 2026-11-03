@@ -178,6 +178,12 @@ async function readShellyStatusOnce() {
     }
     if (statusRequest !== controller) return;
     shellyStatus.value = { output: result.output, observedAt: result.observedAt, observer: { id: result.observer.id, host: result.observer.host } };
+    // The API only returns this read after its selected observer has verified
+    // the enrolled identity, component, endpoint and scope. It is the usable
+    // route check for a site-local device the Portal host cannot reach.
+    reportIdentity(true);
+    clearTimeout(expires);
+    expires = setTimeout(() => reportIdentity(false), 60000);
     emit('status-observed');
   } catch {
     if (statusRequest === controller) statusError.value = controller.signal.aborted

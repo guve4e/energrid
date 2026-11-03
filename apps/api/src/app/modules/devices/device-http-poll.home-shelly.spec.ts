@@ -77,7 +77,8 @@ describe('authorized Home Shelly operational observation', () => {
   function setup(options: {
     authorizedObserver?: typeof observer; status?: Record<string, unknown>; identity?: Record<string, unknown>
     physicalInventoryId?: string; omitPhysicalInventoryId?: boolean; metadata?: Record<string, unknown>
-    inventory?: typeof inventory; records?: typeof knownRecord[]
+    inventory?: typeof inventory; records?: typeof knownRecord[]; configuredScope?: typeof zone
+    siteLocalStatus?: Record<string, unknown>
   } = {}) {
     process.env.HOME_SITE_LOCAL_OBSERVERS_JSON = JSON.stringify([options.authorizedObserver ?? observer])
     const deviceToPoll = {
@@ -98,7 +99,11 @@ describe('authorized Home Shelly operational observation', () => {
       recordObserverReachability: jest.fn(),
     }
     const discovery = { listIdentityEvidence: jest.fn().mockResolvedValue(options.records || [knownRecord]) }
-    const lan = { getConfiguredZone: jest.fn((id: string) => id === zone.id ? zone : undefined) }
+    const configuredScope = options.configuredScope || zone
+    const lan = {
+      getConfiguredZone: jest.fn((id: string) => id === configuredScope.id ? configuredScope : undefined),
+      readSiteLocalShellySwitchStatus: jest.fn().mockResolvedValue(options.siteLocalStatus),
+    }
     const physical = { forLogicalDevice: jest.fn().mockResolvedValue(options.inventory || inventory) }
     global.fetch = jest.fn()
       .mockResolvedValueOnce(response(options.identity ?? { id: physicalId, gen: 2 }))
@@ -159,6 +164,39 @@ describe('authorized Home Shelly operational observation', () => {
     expect(global.fetch).not.toHaveBeenCalled()
     expect(fixture.registry.ingestDeviceTelemetry).not.toHaveBeenCalled()
     expect(fixture.registry.ingestDeviceStatus).not.toHaveBeenCalled()
+  })
+
+  it('reads the upstream endpoint through its exact remote observer and writes verified status canonically', async () => {
+    const upstream = { id: 'upstream-lan', name: 'Upstream LAN', cidr: '192.168.1.0/24', seedIps: ['192.168.1.1'] }
+    const piObserver = { ...observer, host: 'pi', sshTarget: 'pi-housenet', scopeId: upstream.id, cidr: upstream.cidr,
+      expectedDeviceIds: [physicalId], expectedComponentKeys: ['switch:0'] }
+    const upstreamDevice = { ...device, metadata: { ...device.metadata, ipAddress: '192.168.1.219',
+      networkScope: 'upstream-lan:192.168.1.0/24', siteLocalObserverId: piObserver.id } } as RegisteredDevice
+    const upstreamInventory = { ...inventory, components: [{ key: 'switch:0' }],
+      networkObservations: [{ ...inventory.networkObservations[0], ipAddress: '192.168.1.219', networkScope: 'upstream-lan:192.168.1.0/24' }] }
+    const identityObservations = knownRecord.device.observations.map(item => ({ ...item, scopeId: upstream.id,
+      ...(item.attribute === 'observer.identity' ? { value: piObserver.id, interfaceName: 'eth0' } : {}) }))
+    const upstreamRecord = { ...knownRecord, ownership: owner,
+      device: { ...knownRecord.device, networkZoneId: upstream.id, ipAddress: '192.168.1.219', observations: identityObservations } }
+    const result = { identityBefore: { id: physicalId, gen: 2 }, identityAfter: { id: physicalId, gen: 2 },
+      componentKeys: ['switch:0'], statusBefore: { id: 0, output: true }, statusAfter: null,
+      acknowledgement: null, observedAt: new Date().toISOString(),
+      observer: { id: piObserver.id, host: 'pi', interfaceName: 'eth0', interfaceAddress: '192.168.1.6' }, writeAttempted: false }
+    const fixture = setup({ authorizedObserver: piObserver, configuredScope: upstream, metadata: upstreamDevice.metadata as Record<string, unknown>,
+      inventory: upstreamInventory as typeof inventory, records: [upstreamRecord as typeof knownRecord], siteLocalStatus: result })
+    fixture.registry.getDevices.mockReturnValue([upstreamDevice])
+
+    await expect(fixture.poller.observeShellySwitchStatusOnce(deviceId, owner)).resolves.toMatchObject({
+      physicalId, component: 'switch:0', output: true, observer: { id: piObserver.id }, networkScopeId: upstream.id,
+    })
+    expect(global.fetch).not.toHaveBeenCalled()
+    expect(fixture.lan.readSiteLocalShellySwitchStatus).toHaveBeenCalledWith(expect.objectContaining({
+      scopeId: upstream.id, observerId: piObserver.id, ipAddress: '192.168.1.219', component: 'switch:0',
+    }))
+    expect(fixture.registry.ingestDeviceTelemetry).toHaveBeenCalledWith(expect.objectContaining({
+      deviceId, tenantId: owner.tenantId, siteId: owner.siteId, values: { on: true },
+      state: expect.objectContaining({ source: `site-local-http-rpc:${piObserver.id}`, status: 'online' }),
+    }))
   })
 
   it('uses the site-owned assigned inventory record when the optional registry mirror is absent', async () => {
@@ -226,6 +264,45 @@ describe('authorized Home Shelly operational observation', () => {
       zone: { id: 'eero-lan', collectionSource: 'local' },
     })
     expect(fixture.physical.forLogicalDevice).toHaveBeenCalledWith(owner, channel1Id)
+    expect(global.fetch).not.toHaveBeenCalled()
+  })
+
+  it('requires the separately authorized observer/component command route for remote Home control', async () => {
+    const upstream = { id: 'upstream-lan', name: 'Upstream LAN', cidr: '192.168.1.0/24', seedIps: ['192.168.1.1'] }
+    const piObserver = { ...observer, id: 'pi-upstream-bathroom', host: 'pi', sshTarget: 'pi-housenet',
+      scopeId: upstream.id, cidr: upstream.cidr, interfaceName: 'eth0' }
+    const upstreamDevice = { ...device, metadata: { ...device.metadata, ipAddress: '192.168.1.219',
+      networkScope: 'upstream-lan:192.168.1.0/24', siteLocalObserverId: piObserver.id } } as RegisteredDevice
+    const upstreamInventory = { ...inventory,
+      networkObservations: [{ ...inventory.networkObservations[0], ipAddress: '192.168.1.219', networkScope: 'upstream-lan:192.168.1.0/24' }],
+    }
+    const upstreamRecord = structuredClone(knownRecord)
+    upstreamRecord.device.ipAddress = '192.168.1.219'
+    upstreamRecord.device.networkZoneId = upstream.id
+    upstreamRecord.device.observations = upstreamRecord.device.observations.map(item => ({ ...item,
+      scopeId: upstream.id,
+      ...(item.attribute === 'observer.identity' ? { value: piObserver.id, interfaceName: 'eth0' } : {}),
+    }))
+    const fixture = setup({ authorizedObserver: piObserver, configuredScope: upstream, metadata: upstreamDevice.metadata as Record<string, unknown>,
+      inventory: upstreamInventory as typeof inventory, records: [upstreamRecord] })
+    fixture.registry.getDevices.mockReturnValue([upstreamDevice])
+    process.env.HOME_SITE_LOCAL_SHELLY_CONTROL_ROUTES_JSON = JSON.stringify([{
+      observerId: piObserver.id, tenantId: owner.tenantId, siteId: owner.siteId, scopeId: upstream.id,
+      physicalId, component: 'switch:0',
+    }])
+
+    await expect(fixture.poller.resolveShellyControlTarget(deviceId, owner, undefined, true)).resolves.toMatchObject({
+      physicalId, component: 'switch:0', ipAddress: '192.168.1.219',
+      zone: { id: upstream.id, collectionSource: 'local' },
+      siteLocalObserver: { id: piObserver.id, sshTarget: 'pi-housenet' },
+    })
+
+    process.env.HOME_SITE_LOCAL_SHELLY_CONTROL_ROUTES_JSON = JSON.stringify([{
+      observerId: piObserver.id, tenantId: owner.tenantId, siteId: owner.siteId, scopeId: upstream.id,
+      physicalId, component: 'switch:1',
+    }])
+    await expect(fixture.poller.resolveShellyControlTarget(deviceId, owner, undefined, true))
+      .rejects.toThrow('No separately authorized site-local Shelly command route matches this device component.')
     expect(global.fetch).not.toHaveBeenCalled()
   })
 
@@ -350,8 +427,6 @@ describe('authorized Home Shelly operational observation', () => {
       metadata: {
         physicalId: labPhysicalId, component: 'switch:0', channel: 0, ipAddress: '172.30.250.11',
         networkScope: 'virtual-lab-observer:device-lab-vlan', physicalInventoryId: 'lab-inventory-id',
-        identityEvidenceSource: 'verified_site_local_shelly_rpc', componentEvidenceSource: 'verified_site_local_shelly_rpc',
-        siteLocalEvidenceScanId: 'site-observer-lab-current', siteLocalObserverId: 'virtual-lab-docker',
       },
     } as unknown as RegisteredDevice
     const labInventory = {
@@ -360,22 +435,11 @@ describe('authorized Home Shelly operational observation', () => {
       assignments: [{ deviceId: labDeviceId, physicalDeviceId: 'lab-inventory-id', componentKey: 'switch:0' }],
       networkObservations: [{ ...inventory.networkObservations[0], id: 'lab-current', physicalDeviceId: 'lab-inventory-id', ipAddress: '172.30.250.11', networkScope: 'virtual-lab-observer:device-lab-vlan' }],
     }
-    const labEvidence = {
-      ...knownRecord, ownership: labOwner, identity: `device:${labZone.id}:${labPhysicalId}`,
-      device: {
-        ...knownRecord.device, id: labPhysicalId, ipAddress: '172.30.250.11',
-        networkZoneId: labZone.id, networkZoneName: labZone.name,
-        observations: [
-          { source: 'http_rpc', attribute: 'shelly.device_id', value: labPhysicalId },
-          { source: 'http_rpc', attribute: 'shelly.component_status', value: 'switch:0', method: 'Switch.GetStatus?id=0' },
-        ],
-      },
-    }
     const registry = {
       getDevices: jest.fn().mockReturnValue([labDevice]), ensureInstallationsLoaded: jest.fn().mockResolvedValue(undefined),
       getShellyReconciliationTargetDecision: jest.fn().mockResolvedValue({ matched: true, device: labDevice }),
     }
-    const discovery = { listIdentityEvidence: jest.fn().mockResolvedValue([labEvidence]) }
+    const discovery = { listIdentityEvidence: jest.fn().mockResolvedValue([]) }
     const lan = { getConfiguredZone: jest.fn((id: string) => id === labZone.id ? labZone : undefined) }
     const physical = { forLogicalDevice: jest.fn().mockResolvedValue(labInventory) }
     const fetch = jest.spyOn(global, 'fetch')
@@ -385,7 +449,19 @@ describe('authorized Home Shelly operational observation', () => {
       physicalId: labPhysicalId, component: 'switch:0', channel: 0, ipAddress: '172.30.250.11',
       zone: { id: labZone.id, collectionSource: 'virtual-lab' },
     })
+    expect(discovery.listIdentityEvidence).not.toHaveBeenCalled()
     expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('still requires persisted site-local identity and component evidence for physical Home routes', async () => {
+    const fixture = setup({ metadata: {
+      identityEvidenceSource: undefined, componentEvidenceSource: undefined,
+      siteLocalEvidenceScanId: undefined, siteLocalObserverId: undefined,
+    }, records: [] })
+
+    await expect(fixture.poller.resolveShellyControlTarget(deviceId, owner))
+      .rejects.toThrow('The active endpoint lacks operator-reconciled site-local Shelly identity and component evidence.')
+    expect(global.fetch).not.toHaveBeenCalled()
   })
 
   it('rejects a mismatched live identity without ingesting relay state', async () => {
