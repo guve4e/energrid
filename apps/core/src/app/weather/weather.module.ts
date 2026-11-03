@@ -37,9 +37,11 @@ import { WeatherInvestigatorController } from './weather-investigator.controller
 import { WEATHER_INVESTIGATOR_PROVIDER, WeatherInvestigatorService } from './weather-investigator.service';
 import { WeatherInvestigatorScheduler } from './weather-investigator.scheduler';
 import { ApiWeatherInvestigatorProvider, FixtureWeatherInvestigatorProvider } from './weather-investigator';
+import { DwdForecastTileController } from './dwd-forecast-tile.controller';
+import { DwdForecastTileService } from './dwd-forecast-tile.service';
 
 @Module({
-  controllers: [WeatherController, RiverController, WeatherVerificationController, WeatherInvestigatorController],
+  controllers: [WeatherController, RiverController, WeatherVerificationController, WeatherInvestigatorController, DwdForecastTileController],
   providers: [
     WeatherVerificationService,
     WeatherVerificationScheduler,
@@ -48,6 +50,7 @@ import { ApiWeatherInvestigatorProvider, FixtureWeatherInvestigatorProvider } fr
     WeatherStationDailyService,
     WeatherInvestigatorService,
     WeatherInvestigatorScheduler,
+    DwdForecastTileService,
     { provide: WEATHER_INVESTIGATOR_PROVIDER, useFactory: () =>
       process.env.ENERGRID_LAB_MODE === 'true' &&
       process.env.WEATHER_INVESTIGATOR_PROVIDER === 'api-llm' &&
