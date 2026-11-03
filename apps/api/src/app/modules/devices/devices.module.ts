@@ -78,6 +78,7 @@ import { EnergridHttpIdentityAdapter } from './adapters/outbound/network/energri
     MqttEvidenceCaptureService,
     DeviceLanDiscoveryService,
     DeviceHttpPollService,
+    ShellyRouteResolver,
     DeviceDiscoveryMemoryStore,
     DEVICE_DISCOVERY_MEMORY_STORE,
     DeviceControlService,

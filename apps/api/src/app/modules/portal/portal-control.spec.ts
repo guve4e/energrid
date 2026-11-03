@@ -36,7 +36,8 @@ describe('portal control configuration authorization', () => {
     const listIdentityEvidence = jest.fn().mockResolvedValue([]);
     const observeShellySwitchStatusOnce = jest.fn().mockResolvedValue({ deviceId: 'shelly:switch:0', output: false });
     const resolveShellyControlTarget = jest.fn().mockResolvedValue({ physicalId: 'shelly-test', channel: 0, zone: { collectionSource: 'local' } });
-    const deviceHttpPoll = { resolveShellyControlTarget, observeShellySwitchStatusOnce };
+    const deviceHttpPoll = { observeShellySwitchStatusOnce };
+    const shellyRoutes = { resolveShellyControlTarget };
     const stateEvents = new Subject<any>();
     const portalSites = {
       list: jest.fn().mockResolvedValue([]),
@@ -89,6 +90,7 @@ describe('portal control configuration authorization', () => {
         undefined,
         undefined,
         portalSites as never,
+        shellyRoutes as never,
       ),
     };
   }
@@ -742,6 +744,22 @@ describe('portal control configuration authorization', () => {
     resolveShellyControlTarget.mockResolvedValueOnce({ physicalId: 'different-device', channel: 0, zone: { collectionSource: 'local' } });
     await expect(controller.configureDeviceControl('shelly-test:switch:0', { binding: permission }, request as never))
       .rejects.toThrow(/does not match the verified physical component/);
+  });
+
+  it('fails closed when the shared Shelly route resolver is unavailable', async () => {
+    const { controller, configure, persistInstallation } = setup();
+    Object.assign(controller, { shellyRoutes: undefined });
+    const request = {
+      method: 'POST', url: '/', headers: {}, user: {
+        userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin',
+        sessionId: 'test-session', sessionVersion: 0,
+      },
+    };
+    await expect(controller.configureDeviceControl('shelly-test:switch:0', {
+      binding: { kind: 'shelly-switch', enabled: true, physicalId: 'shelly-test', channel: 0 },
+    }, request as never)).rejects.toThrow('Authorized Shelly route validation is unavailable.');
+    expect(configure).not.toHaveBeenCalled();
+    expect(persistInstallation).not.toHaveBeenCalled();
   });
 
   it('records command evidence after the control service returns', async () => {

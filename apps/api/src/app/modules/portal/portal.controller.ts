@@ -55,6 +55,7 @@ import { MqttEvidenceCaptureService } from '../devices/mqtt/mqtt-evidence-captur
 import { DeviceControlService } from '../devices/device-control.service'
 import { DeviceDiagnosticsService } from '../devices/device-diagnostics.service'
 import { DeviceHttpPollService } from '../devices/device-http-poll.service'
+import { ShellyRouteResolver } from '../devices/shelly-route.resolver'
 import { DeviceDiscoveryMemoryStore } from '../devices/device-discovery-memory.store'
 import type { DiscoveryOwnership } from '../devices/device-discovery-memory.store'
 import { DeviceLanDiscoveryService } from '../devices/device-lan-discovery.service'
@@ -204,6 +205,8 @@ export class PortalController {
     @Optional()
     private readonly weatherAssistant?: WeatherAssistantQueryService,
     private readonly portalSites?: PortalSiteService,
+    @Optional()
+    private readonly shellyRoutes?: ShellyRouteResolver,
   ) {}
 
   @Get()
@@ -1891,9 +1894,9 @@ export class PortalController {
       const candidate = binding as Record<string, unknown>
       const isShellyPermission = ['shelly-switch', 'shelly-http', 'shelly-virtual-lab', 'shelly-mqtt'].includes(String(candidate['kind']))
       if (isShellyPermission && candidate['enabled'] === true) {
-        if (!this.deviceHttpPoll)
+        if (!this.shellyRoutes)
           throw new ServiceUnavailableException('Authorized Shelly route validation is unavailable.')
-        const target = await this.deviceHttpPoll.resolveShellyControlTarget(
+        const target = await this.shellyRoutes.resolveShellyControlTarget(
           deviceId, this.discoveryOwner().ownership,
         )
         if (candidate['physicalId'] !== target.physicalId || candidate['channel'] !== target.channel)
