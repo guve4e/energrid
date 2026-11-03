@@ -12,6 +12,8 @@ import { DeviceInvestigationHistoryStore } from '../llm/device-investigation-his
 import { PortalController } from './portal.controller'
 import { PortalDeviceTelemetryController } from './portal-device-telemetry.controller'
 import { PortalMqttDiagnosticsController } from './portal-mqtt-diagnostics.controller'
+import { PortalNetworkDiscoveryReadController } from './portal-network-discovery-read.controller'
+import { PortalNetworkDiscoveryScanController } from './portal-network-discovery-scan.controller'
 import { PortalDeviceProxyService } from './portal-device-proxy.service'
 import { PortalStateService } from './portal-state.service'
 import { DeviceOnboardingService } from './device-onboarding.service'
@@ -29,7 +31,7 @@ import { PortalSiteContextInterceptor } from './portal-site-context.interceptor'
 
 @Module({
   imports: [DevicesModule, DeviceEnrollmentModule, HouseIntelligenceModule, TelemetryModule],
-  controllers: [PortalController, PortalDeviceTelemetryController, PortalMqttDiagnosticsController, PortalWeatherController, WeatherInferenceController],
+  controllers: [PortalController, PortalDeviceTelemetryController, PortalMqttDiagnosticsController, PortalNetworkDiscoveryReadController, PortalNetworkDiscoveryScanController, PortalWeatherController, WeatherInferenceController],
   providers: [
     PortalStateService,
     PortalDeviceProxyService,

@@ -21,7 +21,6 @@ import {
   All,
   BadRequestException,
   BadGatewayException,
-  GatewayTimeoutException,
   ConflictException,
   Body,
   Controller,
@@ -58,12 +57,9 @@ import { ShellyRouteResolver } from '../devices/shelly-route.resolver'
 import { DeviceDiscoveryMemoryStore } from '../devices/device-discovery-memory.store'
 import type { DiscoveryOwnership } from '../devices/device-discovery-memory.store'
 import { DeviceLanDiscoveryService } from '../devices/device-lan-discovery.service'
-import { lookupMacVendor } from '../devices/mac-vendor-lookup'
-import { compareNetworkSnapshots } from '../devices/network-discovery-snapshot'
 import { projectNetworkRoles } from '../devices/network-role-evidence'
 import { configuredShellyMqttBroker, isSafeShellyMqttEventTopic } from '../devices/adapters/inbound/shelly/shelly-mqtt-observation-approval'
 import { configuredSiteLocalObservers, validateSiteLocalShellyEvidence } from '../devices/site-local-shelly-evidence-intake'
-import type { AuthorizedSiteLocalObserver } from '../devices/site-local-shelly-evidence-intake'
 import type { SiteLocalShellyEvidenceInput } from '../devices/site-local-shelly-evidence-intake'
 import type { NetworkDiscoverySnapshot } from '../devices/network-discovery-snapshot'
 import { DeviceRegistryService } from '../devices/device-registry.service'
@@ -84,7 +80,6 @@ import { projectPendingDeviceIdentity } from './pending-device-identity.projecti
 import { projectDeviceSummaryObservation } from './portal-device-summary-observation'
 import { projectEnrollmentIdentityLinks } from './enrollment-identity-projection'
 import { findExactShellyInventoryAssignment } from './site-local-shelly-inventory-match'
-import { projectShellyEndpointRecoveryProposals } from './shelly-endpoint-recovery-projection'
 import { isNetworkObservationFresh } from '../devices/network-observation-freshness'
 import { shellyLanCandidates } from '../devices/adapters/inbound/shelly/shelly-lan-candidates'
 import { energridDiscoveryCandidate } from '../devices/adapters/inbound/energrid/energrid-discovery-candidate'
@@ -95,20 +90,14 @@ import {
 } from './portal-device-proxy.service'
 import { PortalStateService } from './portal-state.service'
 import { assertPortalAdministrator } from './portal-authorization'
+import { registerOwnedDiscoveryCandidate, sameDiscoveryOwner } from './portal-discovery-candidate'
 export { assertPortalAdministrator } from './portal-authorization'
 
-const networkScanDeadlineMs = 180_000
 import { AccessJwtGuard, PublicRoute, RequireRoles, RoleGuard } from '../auth/auth.guard'
 import { AuthConfig } from '../auth/auth-config'
 import { PortalDeviceMeasurementsService } from './portal-device-measurements.service'
 import { WeatherAssistantQueryService } from './weather-assistant-query.service'
 import { PortalSiteService, portalSiteProjection } from './portal-site.service'
-
-type DisconnectAwareResponse = {
-  writableEnded: boolean;
-  once(event: 'close', listener: () => void): unknown;
-  off(event: 'close', listener: () => void): unknown;
-};
 
 function projectEnergridCandidateIdentity(device: RegisteredDevice) {
   const observedAt = String(device.metadata?.networkObservedAt || '') || null
@@ -595,97 +584,6 @@ export class PortalController {
       actor: (request.user?.email || 'portal-admin'),
     })
     return { physicalDevice }
-  }
-
-  @Post('network/scan')
-  async scanNetwork(
-    @Body() body: { scopeIds?: unknown; fullSubnetConfirmed?: unknown },
-    @Req() request: DeviceProxyRequest,
-    @Res({ passthrough: true }) response?: DisconnectAwareResponse,
-  ) {
-    assertPortalAdministrator(request)
-    if (!Array.isArray(body?.scopeIds) || body.scopeIds.length === 0 ||
-      body.scopeIds.some(id => typeof id !== 'string' || !id.trim()) ||
-      typeof body.fullSubnetConfirmed !== 'boolean') {
-      throw new BadRequestException('Choose network scopes and explicitly confirm any full-subnet scan')
-    }
-    const configured = this.lanDiscovery.getZones()
-    const selected = configured.filter(zone => (body.scopeIds as string[]).includes(zone.id))
-    if (selected.length !== new Set(body.scopeIds as string[]).size) {
-      throw new BadRequestException('One or more selected network scopes are not configured')
-    }
-    if (selected.some(zone => zone.cidr && zone.collectionSource !== 'virtual-lab') && body.fullSubnetConfirmed !== true) {
-      throw new BadRequestException('Full-subnet discovery requires explicit operator confirmation')
-    }
-    if (selected.some(zone => zone.collectionSource === 'virtual-lab') && body.fullSubnetConfirmed !== true) {
-      throw new BadRequestException('Virtual Lab discovery requires explicit operator confirmation')
-    }
-    const controller = new AbortController()
-    const abortIfDisconnected = () => {
-      if (response && !response.writableEnded) controller.abort()
-    }
-    response?.once('close', abortIfDisconnected)
-    let scan: Awaited<ReturnType<DeviceLanDiscoveryService['scanNow']>>
-    let deadlineTimer: ReturnType<typeof setTimeout> | undefined
-    try {
-      const result = await Promise.race([
-        this.lanDiscovery.scanNow({
-          scopeIds: body.scopeIds as string[],
-          fullSubnetConfirmed: body.fullSubnetConfirmed,
-          signal: controller.signal,
-        }),
-        new Promise<null>(resolve => {
-          deadlineTimer = setTimeout(() => {
-            controller.abort()
-            resolve(null)
-          }, networkScanDeadlineMs)
-        }),
-      ])
-      if (!result) {
-        throw new GatewayTimeoutException(
-          'Network scan exceeded the 180-second execution limit. The observer may not be able to reach the selected subnet; check its network route or use an observer on that network. No conclusion about device availability was made.',
-        )
-      }
-      scan = result
-    } finally {
-      if (deadlineTimer) clearTimeout(deadlineTimer)
-      response?.off('close', abortIfDisconnected)
-    }
-    const active = this.discoveryOwner()
-    const scanOwner = scan.snapshot.ownership
-    if (scanOwner && sameDiscoveryOwner(scanOwner, active.ownership)) {
-      const currentSiteDevices = this.deviceRegistry.getDevices(true).filter(device =>
-        device.tenantId === scanOwner.tenantId && device.siteId === scanOwner.siteId,
-      )
-      for (const device of scan.devices) {
-        const freshComponents = new Set((device.components || []).map(item => item.component))
-        const historicalComponents = [...new Set(currentSiteDevices.flatMap(existing =>
-          existing.metadata?.physicalId === device.id && typeof existing.metadata?.component === 'string' &&
-          !freshComponents.has(existing.metadata.component) && /^(?:switch|em1|cover):\d+$/.test(existing.metadata.component)
-            ? [existing.metadata.component] : [],
-        ))].sort()
-        for (const candidate of shellyLanCandidates(device)) {
-          const candidateWithConflict = historicalComponents.length
-            ? { ...candidate,
-                reason: `${candidate.reason} Historical component evidence ${historicalComponents.join(', ')} conflicts with the fresh RPC component profile and is preserved for operator reconciliation.`,
-                metadata: { ...candidate.metadata, historicalComponentConflicts: historicalComponents.join(','), requiresProfileReconciliation: true },
-              }
-            : candidate
-          this.registerOwnedDiscoveryCandidate(candidateWithConflict, scanOwner, active.siteName)
-        }
-      }
-    }
-    return scan
-  }
-
-  @Post('discovery/:deviceId/verify-shelly')
-  async verifyShellyDiscoveryCandidate(
-    @Param('deviceId') deviceId: string,
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-    const { ownership } = this.discoveryOwner()
-    return this.lanDiscovery.verifyShellyCandidate(deviceId, ownership)
   }
 
   @Post('network/site-local-shelly-evidence')
@@ -1273,75 +1171,6 @@ export class PortalController {
     };
   }
 
-  @Get('network/snapshots')
-  async listNetworkSnapshots(@Req() request: DeviceProxyRequest) {
-    assertPortalAdministrator(request)
-    const { ownership } = this.discoveryOwner()
-    const snapshots = await this.discoveryMemory.listHistoricalSnapshots(ownership, 50)
-    const devices = this.deviceRegistry.getDevices(true)
-    let inventories: PhysicalDeviceInventoryRecord[] = []
-    let inventoryAvailable = !!this.physicalInventory
-    try { inventories = await this.physicalInventory?.list(ownership) || [] } catch { inventoryAvailable = false }
-    let observers: AuthorizedSiteLocalObserver[] | null = []
-    try { observers = configuredSiteLocalObservers() } catch { observers = null }
-    return { snapshots: snapshots.map(snapshot => ({
-      ...snapshot,
-      endpointRecoveryProposals: projectShellyEndpointRecoveryProposals({
-        snapshot, owner: ownership, devices, inventories, inventoryAvailable, observers,
-      }),
-      networkRoles: projectNetworkRoles(snapshot),
-      endpoints: snapshot.endpoints.map(endpoint => {
-        const vendor = lookupMacVendor(endpoint.macAddress)
-        return vendor.status === 'matched'
-          ? { ...endpoint, macVendorClue: vendor }
-          : endpoint
-      }),
-    })) }
-  }
-
-  @Get('network/capabilities')
-  async networkCapabilities(@Req() request: DeviceProxyRequest) {
-    assertPortalAdministrator(request)
-    return this.lanDiscovery.getRuntimeCapabilities()
-  }
-
-  @Get('network/snapshots/:fromScanId/compare/:toScanId')
-  async compareNetworkSnapshotRoute(
-    @Param('fromScanId') fromScanId: string,
-    @Param('toScanId') toScanId: string,
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-    const ownership = this.discoveryOwner().ownership
-    const [previous, current] = await Promise.all([
-      this.discoveryMemory.getSnapshot(fromScanId, ownership),
-      this.discoveryMemory.getSnapshot(toScanId, ownership),
-    ])
-    if (!previous || !current) throw new NotFoundException('Network discovery snapshot was not found')
-    return compareNetworkSnapshots(previous, current)
-  }
-
-  @Get('network/memory')
-  async getNetworkDiscoveryMemory(@Req() request: DeviceProxyRequest) {
-    assertPortalAdministrator(request)
-
-    const ownership = this.discoveryOwner().ownership
-    const [devices, summary] = await Promise.all([
-      this.discoveryMemory.list(ownership),
-      this.discoveryMemory.summary(ownership),
-    ])
-
-    return { summary, devices }
-  }
-
-  @Get('network/memory/summary')
-  async getNetworkDiscoveryMemorySummary(
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-    return this.discoveryMemory.summary(this.discoveryOwner().ownership)
-  }
-
   @Post('network/:deviceId/investigate')
   async investigateNetworkDeviceWithAi(
     @Param('deviceId') deviceId: string,
@@ -1582,17 +1411,7 @@ export class PortalController {
     ownership: DiscoveryOwnership,
     siteName: string,
   ): boolean {
-    return this.deviceRegistry.registerDiscoveredDevice({
-      ...candidate,
-      tenantId: ownership.tenantId,
-      siteId: ownership.siteId,
-      siteName,
-      metadata: {
-        ...candidate.metadata,
-        discoveryTenantId: ownership.tenantId,
-        discoverySiteId: ownership.siteId,
-      },
-    })
+    return registerOwnedDiscoveryCandidate(this.deviceRegistry, candidate, ownership, siteName)
   }
 
   @Sse('devices/state/events')
@@ -1980,10 +1799,6 @@ export class PortalController {
   }
 }
 
-
-function sameDiscoveryOwner(a: DiscoveryOwnership, b: DiscoveryOwnership): boolean {
-  return a.tenantId === b.tenantId && a.siteId === b.siteId
-}
 
 function validEvidenceTimestamp(value: unknown, completedAt: number): boolean {
   if (typeof value !== 'string') return false

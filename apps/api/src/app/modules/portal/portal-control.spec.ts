@@ -1,6 +1,7 @@
 import { UnauthorizedException } from '@nestjs/common';
 import { Subject, filter, firstValueFrom } from 'rxjs';
 import { PortalController } from './portal.controller';
+import { PortalNetworkDiscoveryScanController } from './portal-network-discovery-scan.controller';
 import type { PortalStateService } from './portal-state.service';
 import type { DeviceLanDiscoveryService } from '../devices/device-lan-discovery.service';
 import type { PortalDeviceProxyService } from './portal-device-proxy.service';
@@ -38,6 +39,12 @@ describe('portal control configuration authorization', () => {
     const deviceHttpPoll = { observeShellySwitchStatusOnce };
     const shellyRoutes = { resolveShellyControlTarget };
     const stateEvents = new Subject<any>();
+    const lanDiscovery = { scanNow, getZones, getLastScan, verifyShellyCandidate } as unknown as DeviceLanDiscoveryService;
+    const registry = { registerDiscoveredDevice, persistInstallation, persistInstallationEvent, getDevices,
+      setEnrollmentStatus,
+      streamOperationalStateChanges: () => stateEvents.asObservable(),
+      getSnapshot: () => ({ tenant: { id: 'tenant-demo' }, site: { id: 'site-home' } }),
+    } as unknown as DeviceRegistryService;
     const portalSites = {
       list: jest.fn().mockResolvedValue([]),
       forPrincipal: jest.fn().mockResolvedValue({ tenantId: 'tenant-demo', siteId: 'site-home' }),
@@ -62,15 +69,13 @@ describe('portal control configuration authorization', () => {
       observeShellySwitchStatusOnce,
       resolveShellyControlTarget,
       deviceHttpPoll,
+      scanController: new PortalNetworkDiscoveryScanController(lanDiscovery, registry),
       controller: new PortalController(
         { getState } as unknown as PortalStateService,
-        { scanNow, getZones, getLastScan, verifyShellyCandidate } as unknown as DeviceLanDiscoveryService,
+        lanDiscovery,
         {} as PortalDeviceProxyService,
         { configure, execute } as unknown as DeviceControlService,
-        { registerDiscoveredDevice, persistInstallation, persistInstallationEvent, getDevices,
-          setEnrollmentStatus,
-          streamOperationalStateChanges: () => stateEvents.asObservable(),
-          getSnapshot: () => ({ tenant: { id: 'tenant-demo' }, site: { id: 'site-home' } }) } as unknown as DeviceRegistryService,
+        registry,
         { check } as unknown as DeviceDiagnosticsService,
         { investigate: jest.fn() } as never,
         {} as never,
@@ -91,16 +96,16 @@ describe('portal control configuration authorization', () => {
     };
   }
   it('authorizes selected Shelly verification and derives ownership from the active Portal site', async () => {
-    const { controller, verifyShellyCandidate } = setup();
+    const { scanController, verifyShellyCandidate } = setup();
     const request = { method: 'POST', url: '/', headers: {}, user: {
       userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0,
     } };
-    await expect(controller.verifyShellyDiscoveryCandidate('shellyproem50-8c4f00dbd258:em1:0', request as never))
+    await expect(scanController.verifyShellyDiscoveryCandidate('shellyproem50-8c4f00dbd258:em1:0', request as never))
       .resolves.toEqual({ status: 'verified' });
     expect(verifyShellyCandidate).toHaveBeenCalledWith('shellyproem50-8c4f00dbd258:em1:0', {
       tenantId: 'tenant-demo', siteId: 'site-home',
     });
-    await expect(controller.verifyShellyDiscoveryCandidate('candidate', { method: 'POST', url: '/', headers: {} }))
+    await expect(scanController.verifyShellyDiscoveryCandidate('candidate', { method: 'POST', url: '/', headers: {} }))
       .rejects.toThrow(UnauthorizedException);
   });
   it('subscribes to state changes only for the authenticated principal site', async () => {
@@ -140,16 +145,16 @@ describe('portal control configuration authorization', () => {
     expect(observeShellySwitchStatusOnce).toHaveBeenCalledTimes(1);
   });
   it('requires authorization before scanning or registering channels', async () => {
-    const { controller, scanNow, registerDiscoveredDevice } = setup();
+    const { scanController, scanNow, registerDiscoveredDevice } = setup();
     await expect(
-      controller.scanNetwork({ scopeIds: ['home-lan'], fullSubnetConfirmed: true }, { method: 'POST', url: '/', headers: {} }),
+      scanController.scanNetwork({ scopeIds: ['home-lan'], fullSubnetConfirmed: true }, { method: 'POST', url: '/', headers: {} }),
     ).rejects.toThrow(UnauthorizedException);
     expect(scanNow).not.toHaveBeenCalled();
     expect(registerDiscoveredDevice).not.toHaveBeenCalled();
   });
   it('rejects an unconfirmed full-subnet scan before invoking LAN discovery', async () => {
-    const { controller, scanNow, registerDiscoveredDevice } = setup()
-    await expect(controller.scanNetwork(
+    const { scanController, scanNow, registerDiscoveredDevice } = setup()
+    await expect(scanController.scanNetwork(
       { scopeIds: ['home-lan'], fullSubnetConfirmed: false },
       { method: 'POST', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 } },
     )).rejects.toThrow('explicit operator confirmation')
@@ -160,9 +165,9 @@ describe('portal control configuration authorization', () => {
   it('aborts and returns an actionable gateway timeout when a scan never settles', async () => {
     jest.useFakeTimers()
     try {
-      const { controller, scanNow } = setup()
+      const { scanController, scanNow } = setup()
       scanNow.mockImplementationOnce(() => new Promise(() => undefined))
-      const pending = controller.scanNetwork(
+      const pending = scanController.scanNetwork(
         { scopeIds: ['home-lan'], fullSubnetConfirmed: true },
         { method: 'POST', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 } },
       )
@@ -602,7 +607,7 @@ describe('portal control configuration authorization', () => {
   });
   it('registers reported channels for review without approving, configuring, or switching', async () => {
     const {
-      controller,
+      scanController,
       scanNow,
       registerDiscoveredDevice,
       configure,
@@ -639,7 +644,7 @@ describe('portal control configuration authorization', () => {
       .mockResolvedValueOnce({ ok: true, json: async () => ({ components: [{ key: 'switch:0' }] }) })
       .mockResolvedValueOnce({ ok: true, json: async () => ({ id: 0, output: false, apower: 6.2 }) }) as unknown as typeof fetch;
     try {
-      await controller.scanNetwork({ scopeIds: ['home-lan'], fullSubnetConfirmed: true }, {
+      await scanController.scanNetwork({ scopeIds: ['home-lan'], fullSubnetConfirmed: true }, {
         method: 'POST',
         url: '/',
         headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 },
@@ -664,7 +669,7 @@ describe('portal control configuration authorization', () => {
     expect(execute).not.toHaveBeenCalled();
   });
   it('keeps verified Energrid HTTP identities in Discovery without registering or approving them', async () => {
-    const { controller, scanNow, registerDiscoveredDevice, configure, execute } = setup();
+    const { scanController, scanNow, registerDiscoveredDevice, configure, execute } = setup();
     scanNow.mockResolvedValue({ snapshot: { ownership: { tenantId: 'tenant-demo', siteId: 'site-home' } }, devices: [{
       id: 'esp8266:324864', vendor: 'Energrid', protocol: 'http', status: 'online',
       ipAddress: '192.168.1.198', networkZoneId: 'home-lan', networkZoneName: 'Home LAN',
@@ -675,7 +680,7 @@ describe('portal control configuration authorization', () => {
       ],
     }], zones: [] });
 
-    await controller.scanNetwork({ scopeIds: ['home-lan'], fullSubnetConfirmed: true }, {
+    await scanController.scanNetwork({ scopeIds: ['home-lan'], fullSubnetConfirmed: true }, {
       method: 'POST', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 },
     });
 
