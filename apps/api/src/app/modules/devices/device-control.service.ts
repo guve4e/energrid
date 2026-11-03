@@ -254,7 +254,10 @@ export class DeviceControlService {
     if (binding.kind === 'shelly-virtual-lab' && target.zone.collectionSource !== 'virtual-lab') {
       throw new ForbiddenException('The saved legacy route does not match this device’s authorized network scope.')
     }
-    if (binding.kind === 'shelly-http') {
+    // A site-local observer is the active execution route for this target.
+    // The legacy HTTP URL may be historical; endpoint, scope, observer and
+    // command-route authorization are resolved and revalidated separately.
+    if (binding.kind === 'shelly-http' && !target.siteLocalObserver) {
       const configured = new URL(binding.baseUrl)
       if ((target.zone.collectionSource ?? 'local') !== 'local' || configured.hostname !== target.ipAddress || (configured.port && configured.port !== '80')) {
         throw new ForbiddenException('The saved legacy HTTP route differs from the verified endpoint and scope.')

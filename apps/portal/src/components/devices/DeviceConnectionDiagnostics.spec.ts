@@ -206,7 +206,7 @@ describe('connection diagnostic UI', () => {
       verified: false,
     });
   });
-  it('unlocks a site-local HTTP route only after a successful authorized remote status observation', async () => {
+  it('reports identity evidence from an authorized site-local status observation', async () => {
     const remoteDevice = {
       ...device, tenantId: 'tenant-demo', siteId: 'site-home',
       metadata: { physicalId: 'shellyplus1-8813bfcdc8bc', component: 'switch:0', channel: 0 },

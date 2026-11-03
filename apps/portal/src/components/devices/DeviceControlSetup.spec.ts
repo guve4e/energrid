@@ -170,4 +170,20 @@ describe('device control setup UI', () => {
       },
     })).toContain('Configured local RPC route · current endpoint verification required');
   });
+
+  it('explains that site-local command execution performs its own identity preflight', () => {
+    expect(controlRouteLabel({
+      ...device,
+      metadata: {
+        ...device.metadata,
+        identityEvidenceSource: 'verified_site_local_shelly_rpc',
+        componentEvidenceSource: 'verified_site_local_shelly_rpc',
+        siteLocalObserverId: 'pi-upstream-bathroom',
+      },
+      control: {
+        status: 'ready', reason: 'Explicit switching permission.',
+        binding: { kind: 'shelly-http', enabled: true, physicalId, channel: 0, baseUrl: 'http://192.168.1.219' },
+      },
+    })).toContain('identity and component checked before each command');
+  });
 });

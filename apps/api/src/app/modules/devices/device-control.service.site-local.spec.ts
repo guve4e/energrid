@@ -61,6 +61,43 @@ describe('site-local Shelly manual control', () => {
     }))
   })
 
+  it('uses the authorized site-local route instead of a stale legacy HTTP URL', async () => {
+    const fixture = setup(result(true))
+    const legacyDevice: RegisteredDevice = {
+      ...device,
+      control: { ...device.control!, binding: {
+        kind: 'shelly-http', enabled: true, physicalId, channel: 0, baseUrl: 'http://192.168.1.44',
+      } },
+    }
+    fixture.registry.getDevices.mockReturnValue([legacyDevice])
+
+    const response = await runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, 'turn_on'))
+
+    expect(response.status).toBe('success')
+    expect(fixture.lan.executeSiteLocalShellySwitchControl).toHaveBeenCalledWith(expect.objectContaining({
+      observerId: observer.id, ipAddress: '192.168.1.219', physicalId, component: 'switch:0', on: true,
+    }))
+  })
+
+  it('still rejects a mismatched direct HTTP URL when no site-local observer route is resolved', async () => {
+    const fixture = setup(result(true))
+    const legacyDevice: RegisteredDevice = {
+      ...device,
+      control: { ...device.control!, binding: {
+        kind: 'shelly-http', enabled: true, physicalId, channel: 0, baseUrl: 'http://192.168.1.44',
+      } },
+    }
+    fixture.registry.getDevices.mockReturnValue([legacyDevice])
+    fixture.httpPoll.resolveShellyControlTarget.mockResolvedValue({
+      ...fixture.target, siteLocalObserver: undefined,
+    } as never)
+
+    await expect(runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, 'turn_on')))
+      .rejects.toThrow('The saved legacy HTTP route differs from the verified endpoint and scope.')
+    expect(fixture.lan.executeSiteLocalShellySwitchControl).not.toHaveBeenCalled()
+    expect(fixture.registry.markDeviceCommandPending).not.toHaveBeenCalled()
+  })
+
   it('ingests actual mismatching readback but marks the requested command failed', async () => {
     const fixture = setup(result(false))
     const response = await runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, 'turn_on'))

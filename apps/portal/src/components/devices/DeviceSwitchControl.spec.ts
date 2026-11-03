@@ -34,6 +34,56 @@ describe('device switch control', () => {
     expect(page.emitted('action')).toEqual([['turn_on']]);
     expect(page.findAll('button[aria-pressed="true"]')).toHaveLength(0);
   });
+  it('allows a site-local Shelly action without a separate one-minute browser verification', async () => {
+    const siteLocal = {
+      ...device,
+      id: 'shellyplus1-8813bfcdc8bc:switch:0',
+      adapter: { protocol: 'http', driver: 'shelly-discovered' },
+      metadata: {
+        physicalId: 'shellyplus1-8813bfcdc8bc',
+        component: 'switch:0',
+        channel: 0,
+        networkScope: 'upstream-lan:192.168.1.0/24',
+        identityEvidenceSource: 'verified_site_local_shelly_rpc',
+        componentEvidenceSource: 'verified_site_local_shelly_rpc',
+        siteLocalObserverId: 'pi-upstream-bathroom',
+      },
+      control: {
+        status: 'ready' as const,
+        binding: {
+          kind: 'shelly-http' as const,
+          enabled: true,
+          physicalId: 'shellyplus1-8813bfcdc8bc',
+          channel: 0,
+          baseUrl: 'http://192.168.1.219',
+        },
+        reason: 'Explicit switching permission.',
+      },
+    };
+    const page = mount(DeviceSwitchControl, { props: { device: siteLocal } });
+    expect(page.findAll('button:disabled')).toHaveLength(0);
+    await page.get('button[title="Turn off"]').trigger('click');
+    expect(page.emitted('action')).toEqual([['turn_off']]);
+    expect(page.findAll('button[aria-pressed="true"]')).toHaveLength(0);
+  });
+  it('still requires a fresh browser check for an ordinary direct HTTP route', () => {
+    const directHttp = {
+      ...device,
+      control: {
+        status: 'ready' as const,
+        binding: {
+          kind: 'shelly-http' as const,
+          enabled: true,
+          physicalId: 'shelly-device',
+          channel: 0,
+          baseUrl: 'http://192.168.1.10',
+        },
+        reason: 'Explicit switching permission.',
+      },
+    };
+    const page = mount(DeviceSwitchControl, { props: { device: directHttp } });
+    expect(page.findAll('button:disabled')).toHaveLength(2);
+  });
   it.each([
     { device, busy: true },
     {

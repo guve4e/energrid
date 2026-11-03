@@ -70,6 +70,26 @@ describe('site-local Shelly RPC transport', () => {
     expect(spawn).toHaveBeenCalledTimes(1)
   })
 
+  it('performs fresh identity, component, and status checks before the write marker', async () => {
+    const route = { observerId: observer.id, tenantId: 'tenant-demo', siteId: 'site-home', scopeId: 'upstream-lan', physicalId: identity, component: 'switch:0' }
+    prepareRunner(validResult(true), true)
+    await new SiteLocalShellyControlAdapter().setSwitch({ ...input, route, on: true })
+    const args = jest.mocked(spawn).mock.calls[0][1] as string[]
+    // The fixed script is shell-quoted as the final SSH argument. Unquote its
+    // escaped single quotes before checking the preflight/write ordering.
+    const script = args.at(-1)!.replace(/'\\''/g, "'")
+    const identityCheck = script.indexOf("identityBefore=await read(input.endpoint,'/rpc/Shelly.GetDeviceInfo')")
+    const componentCheck = script.indexOf("read(input.endpoint,'/rpc/Shelly.GetComponents')")
+    const statusCheck = script.indexOf("statusBefore=await read(input.endpoint,'/rpc/Switch.GetStatus?id='+channel)")
+    const writeGuard = script.indexOf("if(input.mode==='set')")
+    const writeCall = script.indexOf("acknowledgement=await write(input.endpoint")
+    expect(identityCheck).toBeGreaterThanOrEqual(0)
+    expect(componentCheck).toBeGreaterThan(identityCheck)
+    expect(statusCheck).toBeGreaterThan(componentCheck)
+    expect(writeCall).toBeGreaterThan(writeGuard)
+    expect(writeGuard).toBeGreaterThan(statusCheck)
+  })
+
   it('rejects a route for another scope before any SSH execution', async () => {
     const route = { observerId: observer.id, tenantId: 'tenant-demo', siteId: 'site-home', scopeId: 'eero-lan', physicalId: identity, component: 'switch:0' }
     expect(() => new SiteLocalShellyControlAdapter().setSwitch({ ...input, route, on: false }))
