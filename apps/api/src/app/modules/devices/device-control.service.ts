@@ -29,8 +29,7 @@ import { DEVICE_ENROLLMENT_SERVICE } from './enrollment/device-enrollment.module
 import type { DeviceEnrollmentService } from './enrollment/device-enrollment.service';
 import { DeviceHttpPollService } from './device-http-poll.service';
 import { DeviceLanDiscoveryService } from './device-lan-discovery.service';
-import { parseShellySwitchStatus } from './adapters/inbound/shelly/shelly-switch-status'
-import { readOnlyShellyRpcDeviceInfoFromBody } from './adapters/inbound/shelly/read-only-shelly-rpc'
+import { verifySiteLocalShellyCommandReadback } from './site-local-shelly-command-readback'
 import { SiteLocalShellyCommandError } from './adapters/outbound/network/site-local-shelly-control.adapter'
 
 const execFileAsync = promisify(execFile);
@@ -281,21 +280,13 @@ export class DeviceControlService {
         if (result.writeAttempted) {
           this.registry.markDeviceCommandPublished(device.id, command.id, { adapter: 'site-local-ssh-http-rpc' })
         }
-        const identity = readOnlyShellyRpcDeviceInfoFromBody(result.identityBefore, 'GET /rpc/Shelly.GetDeviceInfo')
-        const identityAfter = readOnlyShellyRpcDeviceInfoFromBody(result.identityAfter, 'GET /rpc/Shelly.GetDeviceInfo')
-        const before = parseShellySwitchStatus(result.statusBefore, target.component)
-        const values = parseShellySwitchStatus(result.statusAfter, target.component)
-        const expectedKeys = target.inventory.components.map(item => item.key).sort()
-        const componentMatch = result.componentKeys.length === expectedKeys.length &&
-          [...result.componentKeys].sort().every((key, index) => key === expectedKeys[index])
-        const acknowledgement = result.acknowledgement as Record<string, unknown> | null
-        const timestamp = result.observedAt ? Date.parse(result.observedAt) : Number.NaN
-        const fresh = Number.isFinite(timestamp) && timestamp <= Date.now() + 30_000 && Date.now() - timestamp <= 15 * 60_000
-        const identityMatches = identity?.id?.toLowerCase() === target.physicalId.toLowerCase() && (identity.gen || 0) >= 2 &&
-          identityAfter?.id?.toLowerCase() === target.physicalId.toLowerCase() && (identityAfter.gen || 0) >= 2
-        const ackValid = Boolean(acknowledgement && typeof acknowledgement.was_on === 'boolean')
-        if (result.failure || !result.writeAttempted || !result.acknowledgement || !identityMatches ||
-            !componentMatch || !before || !values || !fresh) {
+        const readback = verifySiteLocalShellyCommandReadback(result, {
+          physicalId: target.physicalId,
+          component: target.component,
+          expectedComponentKeys: target.inventory.components.map(item => item.key),
+          requestedOn: on,
+        })
+        if (!readback) {
           const uncertain = result.writeAttempted
           const message = 'The site-local Shelly command could not be confirmed with fresh matching identity, component, and status evidence.'
           if (!uncertain) this.registry.markDeviceCommandFailed(device.id, { action, expectedValues: { on }, message })
@@ -305,7 +296,8 @@ export class DeviceControlService {
         }
         // A well-formed but mismatching readback is real state and is ingested;
         // transport success alone never settles the command.
-        const observedAt = result.observedAt!
+        const { observedAt, confirmed } = readback
+        const values = { on: readback.on }
         const source = `site-local-http-rpc:${target.siteLocalObserver.id}`
         this.registry.ingestDeviceTelemetry({
           id: device.id, deviceId: device.id, tenantId: site.tenantId, siteId: site.siteId,
@@ -320,7 +312,6 @@ export class DeviceControlService {
           targetIpAddress: target.ipAddress, networkScopeId: target.zone.id,
           observer: { id: target.siteLocalObserver.id, host: target.siteLocalObserver.host, platform: 'docker', localScopes: [] },
         })
-        const confirmed = values.on === on && ackValid
         const settledCommand = confirmed ? (this.findDevice(device.id)?.state.command || command) :
           this.registry.markDeviceCommandFailed(device.id, {
             action, expectedValues: { on }, message: `Shelly switch readback was ${values.on ? 'ON' : 'OFF'}, not the requested state.`,
