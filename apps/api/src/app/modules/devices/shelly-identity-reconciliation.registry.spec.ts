@@ -234,8 +234,8 @@ describe('site-scoped Shelly enrollment reconciliation', () => {
       collector: { host: 'pi' }, scopes: [{ id: 'upstream-lan', cidr: '192.168.1.0/24' }], endpoints: [endpoint],
     } as any;
     const controller = new PortalController(
-      {} as any, {} as any, {} as any, {} as any, {} as any, registry,
-      {} as any, {} as any, {} as any, {} as any, {} as any,
+      {} as any, {} as any, {} as any, {} as any, registry,
+      {} as any, {} as any, {} as any, {} as any,
       undefined, undefined, { list: jest.fn().mockResolvedValue([inventory]) } as any,
     );
     const review = await (controller as any).buildSiteLocalShellyReview(

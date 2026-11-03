@@ -51,7 +51,6 @@ import { ReadOnlyHttpIdentityProbe } from '../llm/read-only-http-identity-probe'
 import { NetworkEndpointIdentityRefresh } from '../llm/network-endpoint-identity-refresh'
 import type { DeviceInvestigationScope } from '../llm/device-investigation-history.store'
 import { DeviceInvestigationWorkflowService } from '../llm/device-investigation-workflow.service'
-import { MqttEvidenceCaptureService } from '../devices/mqtt/mqtt-evidence-capture.service'
 import { DeviceControlService } from '../devices/device-control.service'
 import { DeviceDiagnosticsService } from '../devices/device-diagnostics.service'
 import { DeviceHttpPollService } from '../devices/device-http-poll.service'
@@ -67,7 +66,6 @@ import { configuredSiteLocalObservers, validateSiteLocalShellyEvidence } from '.
 import type { AuthorizedSiteLocalObserver } from '../devices/site-local-shelly-evidence-intake'
 import type { SiteLocalShellyEvidenceInput } from '../devices/site-local-shelly-evidence-intake'
 import type { NetworkDiscoverySnapshot } from '../devices/network-discovery-snapshot'
-import { DeviceMqttIngestService } from '../devices/device-mqtt-ingest.service'
 import { DeviceRegistryService } from '../devices/device-registry.service'
 import { DeviceIntelligenceQueryService } from '../devices/device-intelligence-query.service'
 import { DeviceOnboardingService } from './device-onboarding.service'
@@ -96,14 +94,13 @@ import {
   PortalDeviceProxyService,
 } from './portal-device-proxy.service'
 import { PortalStateService } from './portal-state.service'
+import { assertPortalAdministrator } from './portal-authorization'
+export { assertPortalAdministrator } from './portal-authorization'
 
 const networkScanDeadlineMs = 180_000
 import { AccessJwtGuard, PublicRoute, RequireRoles, RoleGuard } from '../auth/auth.guard'
 import { AuthConfig } from '../auth/auth-config'
 import { PortalDeviceMeasurementsService } from './portal-device-measurements.service'
-import { PortalDeviceElectricalMeasurementsService } from './portal-device-electrical-measurements.service'
-import { DeviceFirmwareDiagnosticsService } from '../devices/device-firmware-diagnostics'
-import type { DeviceHealthHistoryQuery } from '../devices/device-health-history'
 import { WeatherAssistantQueryService } from './weather-assistant-query.service'
 import { PortalSiteService, portalSiteProjection } from './portal-site.service'
 
@@ -165,20 +162,15 @@ export class PortalController {
   @Inject(PortalDeviceMeasurementsService)
   private readonly deviceMeasurements!: PortalDeviceMeasurementsService;
 
-  @Inject(PortalDeviceElectricalMeasurementsService)
-  private readonly deviceElectricalMeasurements!: PortalDeviceElectricalMeasurementsService;
-
   constructor(
     private readonly stateService: PortalStateService,
     private readonly lanDiscovery: DeviceLanDiscoveryService,
     private readonly deviceProxy: PortalDeviceProxyService,
     private readonly deviceControl: DeviceControlService,
-    private readonly mqttIngest: DeviceMqttIngestService,
     private readonly deviceRegistry: DeviceRegistryService,
     private readonly diagnostics: DeviceDiagnosticsService,
     private readonly deviceAi: DeviceAiInvestigationService,
     private readonly investigationWorkflow: DeviceInvestigationWorkflowService,
-    private readonly mqttEvidence: MqttEvidenceCaptureService,
     private readonly discoveryMemory: DeviceDiscoveryMemoryStore,
     @Optional()
     @Inject(DEVICE_ENROLLMENT_SERVICE)
@@ -200,8 +192,6 @@ export class PortalController {
     private readonly installerNotesLlm?: LlmGatewayService,
     @Optional()
     private readonly authConfig?: AuthConfig,
-    @Optional()
-    private readonly firmwareDiagnostics?: DeviceFirmwareDiagnosticsService,
     @Optional()
     private readonly weatherAssistant?: WeatherAssistantQueryService,
     private readonly portalSites?: PortalSiteService,
@@ -490,26 +480,6 @@ export class PortalController {
     }
   }
 
-  @Get('devices/:deviceId/observations')
-  async getDeviceObservations(
-    @Param('deviceId') deviceId: string,
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-    const { tenant, site } = this.deviceRegistry.getSnapshot()
-    return this.deviceMeasurements.current({ tenantId: tenant.id, siteId: site.id }, deviceId)
-  }
-
-  @Get('devices/:deviceId/read-model')
-  async getDeviceReadModel(
-    @Param('deviceId') deviceId: string,
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-    const { tenant, site } = this.deviceRegistry.getSnapshot()
-    return this.deviceMeasurements.readModel({ tenantId: tenant.id, siteId: site.id }, deviceId)
-  }
-
   @Get('devices/:deviceId/observation-approval')
   async getDeviceObservationApproval(
     @Param('deviceId') deviceId: string,
@@ -588,113 +558,6 @@ export class PortalController {
       if (error instanceof NotFoundException || error instanceof BadRequestException || error instanceof ConflictException) throw error
       if (error instanceof Error && error.message.includes('different observation authority')) {
         throw new ConflictException(error.message)
-      }
-      throw error
-    }
-  }
-
-  @Get('devices/:deviceId/measurements')
-  async getDeviceMeasurementHistory(
-    @Param('deviceId') deviceId: string,
-    @Query('metric') metric: unknown,
-    @Query('from') from: unknown,
-    @Query('to') to: unknown,
-    @Query('limit') limit: unknown,
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-    const { tenant, site } = this.deviceRegistry.getSnapshot()
-    return this.deviceMeasurements.history(
-      { tenantId: tenant.id, siteId: site.id }, deviceId, metric, from, to, limit,
-    )
-  }
-
-  @Get('devices/:deviceId/electrical-measurements')
-  async getDeviceElectricalMeasurementHistory(
-    @Param('deviceId') deviceId: string,
-    @Query('metric') metric: unknown,
-    @Query('from') from: unknown,
-    @Query('to') to: unknown,
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-    return this.deviceElectricalMeasurements.history(deviceId, metric, from, to)
-  }
-
-  @Get('devices/:deviceId/firmware-diagnostics')
-  async getDeviceFirmwareDiagnostics(
-    @Param('deviceId') deviceId: string,
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-    if (!this.firmwareDiagnostics) throw new ServiceUnavailableException('Firmware diagnostics are unavailable')
-    const { tenant, site } = this.deviceRegistry.getSnapshot()
-    const enrolled = this.deviceRegistry.getDevices().find(device => {
-      const physicalId = String(device.metadata?.physicalId || '').toLowerCase()
-      const networkScope = String(device.metadata?.networkScope || '')
-      return device.id === deviceId && device.tenantId === tenant.id && device.siteId === site.id &&
-        device.trustStatus === 'approved' && device.adapter.driver === 'energrid-esp8266' &&
-        /^esp8266:[0-9a-f]{6}$/.test(physicalId) && device.id === `device:${networkScope}:${physicalId}`
-    })
-    if (!enrolled) throw new NotFoundException('Approved Energrid device was not found in this site')
-    const result = await this.firmwareDiagnostics.get({ tenantId: tenant.id, siteId: site.id }, deviceId)
-    return result ?? { deviceId, available: false, events: [], restartCount10m: 0 }
-  }
-
-  @Get('device-health/history')
-  async getDeviceHealthHistory(
-    @Query('deviceId') deviceId: unknown,
-    @Query('from') from: unknown,
-    @Query('to') to: unknown,
-    @Query('granularity') granularity: unknown,
-    @Query('limit') limit: unknown,
-    @Query('timezone') timezone: unknown,
-    @Query('cursor') cursor: unknown,
-    @Query('metrics') metrics: unknown,
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-    if (!this.firmwareDiagnostics) throw new ServiceUnavailableException('Device health history is unavailable')
-    const { tenant, site } = this.deviceRegistry.getSnapshot()
-    const selectedGranularity = typeof granularity === 'string' ? granularity : 'hourly'
-    if (!['raw', 'hourly', 'daily', 'events', 'failures'].includes(selectedGranularity)) {
-      throw new BadRequestException('Unsupported device health history granularity')
-    }
-    const parsedLimit = limit === undefined ? undefined : Number(limit)
-    if (parsedLimit !== undefined && (!Number.isSafeInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 1000)) {
-      throw new BadRequestException('Device health history limit must be between 1 and 1000')
-    }
-    if ((typeof cursor === 'string' && cursor.length > 600) ||
-        (typeof metrics === 'string' && metrics.split(',').length > 25)) {
-      throw new BadRequestException('Device health history cursor or metric selection is too large')
-    }
-    const query: DeviceHealthHistoryQuery = {
-      granularity: selectedGranularity as DeviceHealthHistoryQuery['granularity'],
-      ...(typeof deviceId === 'string' && deviceId.trim() ? { deviceId: deviceId.trim() } : {}),
-      ...(typeof from === 'string' ? { from } : {}),
-      ...(typeof to === 'string' ? { to } : {}),
-      ...(typeof timezone === 'string' ? { timezone } : {}),
-      ...(typeof cursor === 'string' ? { cursor } : {}),
-      ...(typeof metrics === 'string' && metrics.trim() ? { metrics: metrics.split(',').map(value => value.trim()).filter(Boolean) } : {}),
-      ...(parsedLimit !== undefined ? { limit: parsedLimit } : {}),
-    }
-    const authorizedDevices = this.deviceRegistry.getDevices().flatMap(device => {
-      const physicalDeviceId = String(device.metadata?.physicalId || '').toLowerCase()
-      const networkScope = String(device.metadata?.networkScope || '')
-      return device.tenantId === tenant.id && device.siteId === site.id && device.trustStatus === 'approved' &&
-        device.adapter.driver === 'energrid-esp8266' && /^esp8266:[0-9a-f]{6}$/.test(physicalDeviceId) &&
-        device.id === `device:${networkScope}:${physicalDeviceId}`
-        ? [{ deviceId: device.id, physicalDeviceId }] : []
-    })
-    if (query.deviceId && !authorizedDevices.some(device => device.deviceId === query.deviceId)) {
-      throw new NotFoundException('Approved diagnostic device was not found in this site')
-    }
-    try {
-      return await this.firmwareDiagnostics.queryHistory({ tenantId: tenant.id, siteId: site.id }, query, authorizedDevices)
-    } catch (error) {
-      if (error instanceof Error && (error.message.startsWith('Invalid device health history') ||
-          error.message.startsWith('Invalid device health query'))) {
-        throw new BadRequestException(error.message)
       }
       throw error
     }
@@ -1732,21 +1595,6 @@ export class PortalController {
     })
   }
 
-  @Get('mqtt/evidence/:deviceId/status')
-  async getKitchenMqttEvidenceStatus(
-    @Param('deviceId') deviceId: string,
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-
-    const { tenant, site } = this.deviceRegistry.getSnapshot()
-
-    return this.mqttEvidence.getCaptureStatus(
-      { tenantId: tenant.id, siteId: site.id },
-      deviceId,
-    )
-  }
-
   @Sse('devices/state/events')
   @Header('Cache-Control', 'no-cache, no-transform')
   @Header('X-Accel-Buffering', 'no')
@@ -1764,34 +1612,6 @@ export class PortalController {
       map(() => ({ type: 'heartbeat', data: { tenantId: owner.tenantId, siteId: owner.siteId } })),
     )
     return merge(scopedChanges, ready, heartbeat)
-  }
-
-  @Get('bus/mqtt')
-  getMqttBus(@Req() request: DeviceProxyRequest) {
-    assertPortalAdministrator(request)
-    return this.mqttIngest.getDebugState()
-  }
-
-  @Sse('bus/mqtt/events')
-  @Header('Cache-Control', 'no-cache, no-transform')
-  @Header('X-Accel-Buffering', 'no')
-  streamMqttBus(@Req() request: DeviceProxyRequest) {
-    assertPortalAdministrator(request)
-    return this.mqttIngest.streamDebugMessages().pipe(
-      map((message) => ({
-        type: 'mqtt_message',
-        data: message,
-      })),
-    )
-  }
-
-  @Post('bus/mqtt/publish')
-  publishMqtt(
-    @Body() body: { topic?: string; payload?: unknown },
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-    return this.mqttIngest.publishDebugMessage(body?.topic, body?.payload)
   }
 
   @Post('devices/:deviceId/actions')
@@ -2160,11 +1980,6 @@ export class PortalController {
   }
 }
 
-export function assertPortalAdministrator(request: DeviceProxyRequest): void {
-  if (request.user?.role !== 'admin') {
-    throw new UnauthorizedException('Device control requires portal authorization.')
-  }
-}
 
 function sameDiscoveryOwner(a: DiscoveryOwnership, b: DiscoveryOwnership): boolean {
   return a.tenantId === b.tenantId && a.siteId === b.siteId

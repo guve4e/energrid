@@ -5,7 +5,6 @@ import type { PortalStateService } from './portal-state.service';
 import type { DeviceLanDiscoveryService } from '../devices/device-lan-discovery.service';
 import type { PortalDeviceProxyService } from './portal-device-proxy.service';
 import type { DeviceControlService } from '../devices/device-control.service';
-import type { DeviceMqttIngestService } from '../devices/device-mqtt-ingest.service';
 import type { DeviceRegistryService } from '../devices/device-registry.service';
 import type { DeviceDiagnosticsService } from '../devices/device-diagnostics.service';
 
@@ -68,7 +67,6 @@ describe('portal control configuration authorization', () => {
         { scanNow, getZones, getLastScan, verifyShellyCandidate } as unknown as DeviceLanDiscoveryService,
         {} as PortalDeviceProxyService,
         { configure, execute } as unknown as DeviceControlService,
-        {} as DeviceMqttIngestService,
         { registerDiscoveredDevice, persistInstallation, persistInstallationEvent, getDevices,
           setEnrollmentStatus,
           streamOperationalStateChanges: () => stateEvents.asObservable(),
@@ -76,13 +74,11 @@ describe('portal control configuration authorization', () => {
         { check } as unknown as DeviceDiagnosticsService,
         { investigate: jest.fn() } as never,
         {} as never,
-        {} as never,
         { listIdentityEvidence } as never,
         enrollment,
         undefined,
         undefined,
         deviceHttpPoll as never,
-        undefined,
         undefined,
         undefined,
         undefined,
@@ -247,12 +243,12 @@ describe('portal control configuration authorization', () => {
         })),
       };
       const controller = new PortalController(
-        { getState: () => ({ devices: [] }) } as never, { getLastScan: () => [] } as never, {} as never, {} as never, {} as never,
-        registry as never, {} as never, {} as never, {} as never, {} as never,
+        { getState: () => ({ devices: [] }) } as never, { getLastScan: () => [] } as never, {} as never, {} as never,
+        registry as never, {} as never, {} as never, {} as never,
         { listIdentityEvidence: jest.fn(async (owner: { tenantId: string; siteId: string }) =>
           owner.tenantId === record.ownership.tenantId && owner.siteId === record.ownership.siteId ? [record] : [],
         ) } as never,
-        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
         { list: jest.fn().mockResolvedValue([]) } as never,
       );
       return { controller, registry };
@@ -321,10 +317,10 @@ describe('portal control configuration authorization', () => {
         }),
       };
       const controller = new PortalController(
-        { getState: () => ({ devices: [] }) } as never, { getLastScan: () => [] } as never, {} as never, {} as never, {} as never,
-        registry as never, {} as never, {} as never, {} as never, {} as never,
+        { getState: () => ({ devices: [] }) } as never, { getLastScan: () => [] } as never, {} as never, {} as never,
+        registry as never, {} as never, {} as never, {} as never,
         { listIdentityEvidence } as never,
-        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
         { list: jest.fn().mockResolvedValue([]) } as never,
       );
       return { controller, registerDiscoveredDevice, listIdentityEvidence };
@@ -389,12 +385,12 @@ describe('portal control configuration authorization', () => {
     };
     const controller = new PortalController(
       { getState: () => ({ devices: [] }) } as never,
-      { getLastScan: () => [] } as never, {} as never, {} as never, {} as never,
-      registry as never, {} as never, {} as never, {} as never, {} as never,
+      { getLastScan: () => [] } as never, {} as never, {} as never,
+      registry as never, {} as never, {} as never, {} as never,
       { listIdentityEvidence: jest.fn().mockResolvedValue(history) } as never,
       undefined, undefined,
       { list: jest.fn().mockResolvedValue([]), listRecentMqttPublisherEvidence: jest.fn().mockResolvedValue([]) } as never,
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       { list: jest.fn().mockResolvedValue([]) } as never,
     );
 
@@ -438,12 +434,12 @@ describe('portal control configuration authorization', () => {
     const controller = new PortalController(
       { getState } as never,
       { getLastScan: () => [lan] } as never,
-      {} as never, {} as never, {} as never,
+      {} as never, {} as never,
       { getSnapshot: () => ({ tenant: { id: 'tenant-demo' }, site: { id: 'site-home' } }) } as never,
-      {} as never, {} as never, {} as never, {} as never,
+      {} as never, {} as never, {} as never,
       { listIdentityEvidence: jest.fn().mockResolvedValue([]) } as never,
       undefined, undefined, { list: inventoryList } as never,
-      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       { list: jest.fn().mockResolvedValue([]) } as never,
     );
 
@@ -510,11 +506,9 @@ describe('portal control configuration authorization', () => {
       { getZones: jest.fn(() => []), scanNow: jest.fn() } as unknown as DeviceLanDiscoveryService,
       {} as PortalDeviceProxyService,
       {} as DeviceControlService,
-      {} as DeviceMqttIngestService,
       { getSnapshot: () => ({ tenant: { id: 'tenant-a' }, site: { id: 'site-a' } }),
         getDevices: jest.fn().mockReturnValue([enrolledDevice]) } as unknown as DeviceRegistryService,
       {} as DeviceDiagnosticsService,
-      {} as never,
       {} as never,
       {} as never,
       { list: jest.fn().mockRejectedValue(new Error('Discovery offline')) } as never,
@@ -571,11 +565,9 @@ describe('portal control configuration authorization', () => {
       { getZones: jest.fn(() => []), scanNow: jest.fn() } as unknown as DeviceLanDiscoveryService,
       {} as PortalDeviceProxyService,
       {} as DeviceControlService,
-      {} as DeviceMqttIngestService,
       { getSnapshot: () => ({ tenant: { id: 'tenant-a' }, site: { id: 'site-a' } }),
         getDevices: jest.fn().mockReturnValue([]) } as unknown as DeviceRegistryService,
       {} as DeviceDiagnosticsService,
-      {} as never,
       {} as never,
       {} as never,
       { list: jest.fn().mockResolvedValue([]) } as never,
