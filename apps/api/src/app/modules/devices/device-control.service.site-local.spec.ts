@@ -30,10 +30,10 @@ function setup(result?: Record<string, unknown>) {
     ingestDeviceTelemetry: jest.fn(), recordObserverReachability: jest.fn(),
   }
   const httpPoll = { resolveShellyControlTarget: jest.fn().mockResolvedValue(target) }
-  const lan = { executeSiteLocalShellySwitchControl: jest.fn().mockResolvedValue(result) }
+  const siteLocalCommands = { execute: jest.fn().mockResolvedValue(result) }
   const service = new DeviceControlService(registry as never, { find: async () => ({ status: 'enrolled' }) } as never,
-    httpPoll as never, lan as never)
-  return { service, registry, httpPoll, lan, target }
+    httpPoll as never, undefined, siteLocalCommands as never)
+  return { service, registry, httpPoll, siteLocalCommands, target }
 }
 
 function result(output: boolean, identityId = physicalId) {
@@ -52,7 +52,7 @@ describe('site-local Shelly manual control', () => {
     const response = await runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, output ? 'turn_on' : 'turn_off'))
     expect(response).toMatchObject({ status: 'success', adapter: 'http' })
     expect(fixture.httpPoll.resolveShellyControlTarget).toHaveBeenCalledWith(deviceId, site, undefined, true)
-    expect(fixture.lan.executeSiteLocalShellySwitchControl).toHaveBeenCalledWith(expect.objectContaining({
+    expect(fixture.siteLocalCommands.execute).toHaveBeenCalledWith(expect.objectContaining({
       tenantId: site.tenantId, siteId: site.siteId, physicalId, ipAddress: '192.168.1.219', component: 'switch:0', on: output,
     }))
     expect(fixture.registry.ingestDeviceTelemetry).toHaveBeenCalledWith(expect.objectContaining({
@@ -74,7 +74,7 @@ describe('site-local Shelly manual control', () => {
     const response = await runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, 'turn_on'))
 
     expect(response.status).toBe('success')
-    expect(fixture.lan.executeSiteLocalShellySwitchControl).toHaveBeenCalledWith(expect.objectContaining({
+    expect(fixture.siteLocalCommands.execute).toHaveBeenCalledWith(expect.objectContaining({
       observerId: observer.id, ipAddress: '192.168.1.219', physicalId, component: 'switch:0', on: true,
     }))
   })
@@ -94,7 +94,7 @@ describe('site-local Shelly manual control', () => {
 
     await expect(runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, 'turn_on')))
       .rejects.toThrow('The saved legacy HTTP route differs from the verified endpoint and scope.')
-    expect(fixture.lan.executeSiteLocalShellySwitchControl).not.toHaveBeenCalled()
+    expect(fixture.siteLocalCommands.execute).not.toHaveBeenCalled()
     expect(fixture.registry.markDeviceCommandPending).not.toHaveBeenCalled()
   })
 
@@ -126,10 +126,10 @@ describe('site-local Shelly manual control', () => {
 
   it('keeps a possible post-write SSH timeout pending, never retries automatically', async () => {
     const fixture = setup()
-    fixture.lan.executeSiteLocalShellySwitchControl.mockRejectedValue(new SiteLocalShellyCommandError('timeout', true))
+    fixture.siteLocalCommands.execute.mockRejectedValue(new SiteLocalShellyCommandError('timeout', true))
     const response = await runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, 'turn_on'))
     expect(response.status).toBe('pending')
-    expect(fixture.lan.executeSiteLocalShellySwitchControl).toHaveBeenCalledTimes(1)
+    expect(fixture.siteLocalCommands.execute).toHaveBeenCalledTimes(1)
     expect(fixture.registry.markDeviceCommandFailed).not.toHaveBeenCalled()
   })
 
@@ -138,6 +138,6 @@ describe('site-local Shelly manual control', () => {
     fixture.httpPoll.resolveShellyControlTarget.mockRejectedValue(new Error('wrong site'))
     await expect(runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, 'turn_on'))).rejects.toThrow('wrong site')
     expect(fixture.registry.markDeviceCommandPending).not.toHaveBeenCalled()
-    expect(fixture.lan.executeSiteLocalShellySwitchControl).not.toHaveBeenCalled()
+    expect(fixture.siteLocalCommands.execute).not.toHaveBeenCalled()
   })
 })

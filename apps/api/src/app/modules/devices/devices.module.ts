@@ -3,6 +3,7 @@ import { deviceCommandTrackerProvider } from './commands/device-command-tracker.
 import { DeviceIntelligenceQueryService } from './device-intelligence-query.service';
 import { Module } from '@nestjs/common'
 import { DeviceControlService } from './device-control.service'
+import { SiteLocalShellyCommandExecutor } from './site-local-shelly-command.executor'
 import { DeviceAssistantLightingService } from './device-assistant-lighting.service'
 import { DeviceDiagnosticsService } from './device-diagnostics.service'
 import { DeviceHttpPollService } from './device-http-poll.service'
@@ -51,6 +52,7 @@ import { EnergridHttpIdentityAdapter } from './adapters/outbound/network/energri
     DeviceLanDiscoveryService,
     DeviceDiscoveryMemoryStore,
     { provide: DEVICE_DISCOVERY_MEMORY_STORE, useExisting: DeviceDiscoveryMemoryStore },
+    SiteLocalShellyCommandExecutor,
     DeviceControlService,
     DeviceAssistantLightingService,
     DeviceDiagnosticsService,

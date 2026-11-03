@@ -2,6 +2,11 @@
 
 ## Current device status and backlog (local `main` plus authenticated runtime evidence, 3 November 2026)
 
+## Architecture simplification checkpoint (candidate; not runtime-accepted)
+
+The proposed site-local command-executor extraction moves physical `Switch.Set` transport and its exact command-grant/observer/scope revalidation out of LAN discovery. `DeviceControlService` still owns command lifecycle and readback, and still obtains the installed execution target through `DeviceHttpPollService`. This is **not** complete route-resolver separation, and it does not change the Kitchen Plus 1 blocker or establish additional live hardware acceptance. Until applicable tests and builds pass on the complete checkout and the diff is reviewed, this remains a candidate refactor, not a completed milestone.
+
+
 This is the current status ledger. **Historical 2 November capture:** the 14:49 Sofia upstream subnet scan was a discovery operation from the Mac over a routed path; it did not authorize device polling. A later single-target read-only capture ran from Pi `192.168.1.6` on directly connected `eth0`. At `2026-11-02T16:29:01Z` (18:29:01 Sofia), `Shelly.GetDeviceInfo` returned the expected Bathroom Plus 1 identity, model `SNSW-001X16EU`, generation 2, firmware 1.4.0; `Switch.GetStatus?id=0` returned `output:true`. The authenticated evidence report was accepted through the existing site-local evidence intake, and the existing identity reconciliation action recorded fresh identity/component evidence for Physical Inventory `dc565b3f-87ad-410c-9ae3-862d6b655c47`. The installation already displayed `192.168.1.219` / `upstream-lan`; the proposal therefore reported no route reconciliation needed. That capture was accepted as identity/component evidence, not ingested as operational state. No enrollment, permission, relay state, or Pi service was changed. No `Switch.Set` was sent. No production deployment is claimed.
 
 ### Implemented in source; verification level

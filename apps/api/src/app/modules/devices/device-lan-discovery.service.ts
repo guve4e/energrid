@@ -38,10 +38,6 @@ import { VirtualLabNetworkEvidenceAdapter, type RemoteShellyObserverRuntime, typ
 import type { AuthorizedSiteLocalObserver } from './site-local-shelly-evidence-intake'
 import { configuredSiteLocalObservers, selectAuthorizedSiteLocalObserver } from './site-local-shelly-evidence-intake'
 import { SiteLocalShellyControlAdapter } from './adapters/outbound/network/site-local-shelly-control.adapter'
-import {
-  configuredSiteLocalShellyControlRoutes,
-  selectSiteLocalShellyControlRoute,
-} from './site-local-shelly-control-route'
 
 const execFileAsync = promisify(execFile)
 const activeScanConcurrency = 24
@@ -632,19 +628,6 @@ export class DeviceLanDiscoveryService {
     return this.siteLocalShellyControl.readStatus({ ...input, zone, observer })
   }
 
-  async executeSiteLocalShellySwitchControl(input: {
-    scopeId: string; observerId: string; tenantId: string; siteId: string; physicalId: string
-    ipAddress: string; component: string; expectedComponentKeys: string[]; on: boolean
-  }) {
-    const { zone, observer } = this.resolveSiteLocalObserver(input)
-    const route = selectSiteLocalShellyControlRoute({
-      routes: configuredSiteLocalShellyControlRoutes(), observer, tenantId: input.tenantId,
-      siteId: input.siteId, scopeId: input.scopeId, physicalId: input.physicalId, component: input.component,
-    })
-    if (!route) throw new Error('No separately authorized site-local Shelly command route matches this device component.')
-    return this.siteLocalShellyControl.setSwitch({ ...input, zone, observer, route })
-  }
-
   private resolveSiteLocalObserver(input: {
     scopeId: string; observerId: string; tenantId: string; siteId: string; physicalId: string
     ipAddress: string; component: string; expectedComponentKeys: string[]
@@ -1032,7 +1015,7 @@ function configuredSeedHosts(): Array<{
     .map((ipAddress) => ({ ipAddress }))
 }
 
-function configuredNetworkZones(): NetworkDiscoveryZone[] {
+export function configuredNetworkZones(): NetworkDiscoveryZone[] {
   const parsed = parseNetworkZones(process.env.HOME_NETWORK_ZONES_JSON)
   const configured = parsed.filter(zone =>
     zone.collectionSource !== 'virtual-lab' || process.env.HOME_VIRTUAL_LAB_ENABLED === 'true',

@@ -29,6 +29,7 @@ import { DEVICE_ENROLLMENT_SERVICE } from './enrollment/device-enrollment.module
 import type { DeviceEnrollmentService } from './enrollment/device-enrollment.service';
 import { DeviceHttpPollService } from './device-http-poll.service';
 import { DeviceLanDiscoveryService } from './device-lan-discovery.service';
+import { SiteLocalShellyCommandExecutor } from './site-local-shelly-command.executor';
 import { verifySiteLocalShellyCommandReadback } from './site-local-shelly-command-readback'
 import { SiteLocalShellyCommandError } from './adapters/outbound/network/site-local-shelly-control.adapter'
 
@@ -57,6 +58,7 @@ export class DeviceControlService {
     private readonly enrollment: DeviceEnrollmentService,
     @Optional() private readonly httpPoll?: DeviceHttpPollService,
     @Optional() private readonly lanDiscovery?: DeviceLanDiscoveryService,
+    @Optional() private readonly siteLocalCommands?: SiteLocalShellyCommandExecutor,
   ) {}
 
   configure(deviceId: string, value: unknown): RegisteredDevice {
@@ -264,14 +266,14 @@ export class DeviceControlService {
     }
 
     if (target.siteLocalObserver) {
-      if (!this.lanDiscovery) throw new ServiceUnavailableException('The authorized site-local Shelly command adapter is unavailable.')
+      if (!this.siteLocalCommands) throw new ServiceUnavailableException('The authorized site-local Shelly command adapter is unavailable.')
       const command = this.registry.markDeviceCommandPending(device.id, {
         action, expectedValues: { on }, ttlMs: virtualLabCommandAckTtlMs,
         message: `Requesting ${action} through the separately authorized site-local Shelly route.`,
         actor: { type: 'user', id: 'portal-installer', name: 'Portal installer' },
       })
       try {
-        const result = await this.lanDiscovery.executeSiteLocalShellySwitchControl({
+        const result = await this.siteLocalCommands.execute({
           scopeId: target.zone.id, observerId: target.siteLocalObserver.id,
           tenantId: site.tenantId, siteId: site.siteId, physicalId: target.physicalId,
           ipAddress: target.ipAddress, component: target.component,
