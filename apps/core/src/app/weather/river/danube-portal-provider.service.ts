@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { fetchRiverHtml } from './river-provider-http';
 import { RiverStationReading } from './river.types';
 
 @Injectable()
@@ -8,10 +9,7 @@ export class DanubePortalProviderService {
 
   async getStations(): Promise<RiverStationReading[]> {
     try {
-      const res = await fetch(this.url);
-      if (!res.ok) throw new Error(`DanubePortal HTTP ${res.status}`);
-
-      const html = await res.text();
+      const html = await fetchRiverHtml(this.url);
       const rows = [...html.matchAll(/<tr[^>]*>[\s\S]*?<\/tr>/gi)].map((m) => m[0]);
 
       return rows

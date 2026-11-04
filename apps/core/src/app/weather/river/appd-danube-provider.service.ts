@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { fetchRiverHtml } from './river-provider-http';
 import { RiverStationReading, RiverTrend } from './river.types';
 
 @Injectable()
@@ -8,10 +9,7 @@ export class AppdDanubeProviderService {
 
   async getStations(): Promise<RiverStationReading[]> {
     try {
-      const res = await fetch(this.url);
-      if (!res.ok) throw new Error(`APPD HTTP ${res.status}`);
-
-      const html = await res.text();
+      const html = await fetchRiverHtml(this.url);
       const rows = this.extractRows(html);
 
       return ['Novo Selo', 'Vidin', 'Lom', 'Oryahovo']

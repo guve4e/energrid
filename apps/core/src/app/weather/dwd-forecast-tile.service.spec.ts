@@ -227,6 +227,106 @@ describe('DWD forecast tile transport', () => {
     expect(pool.activeUpstream).toBe(0);
   });
 
+  it('expires queued requests without consuming capacity or leaking client queue state', async () => {
+    const service = new DwdForecastTileService();
+    const pool = service as unknown as {
+      activeUpstream: number;
+      queuedUpstream: number;
+      upstreamQueue: Map<string, unknown[]>;
+      upstreamQueueOrder: string[];
+      acquireUpstreamSlot(clientId: string): Promise<void>;
+      releaseUpstreamSlot(clientId: string): void;
+    };
+    await Promise.all([
+      pool.acquireUpstreamSlot('client-a'), pool.acquireUpstreamSlot('client-a'),
+      pool.acquireUpstreamSlot('client-a'), pool.acquireUpstreamSlot('client-b'),
+    ]);
+    const expiredA = pool.acquireUpstreamSlot('client-a');
+    const expiredB = pool.acquireUpstreamSlot('client-b');
+    const assertions = Promise.all([
+      expect(expiredA).rejects.toThrow('DWD forecast queue wait timed out'),
+      expect(expiredB).rejects.toThrow('DWD forecast queue wait timed out'),
+    ]);
+
+    expect(pool.queuedUpstream).toBe(2);
+    await jest.advanceTimersByTimeAsync(8_000);
+    await assertions;
+    expect(pool.activeUpstream).toBe(4);
+    expect(pool.queuedUpstream).toBe(0);
+    expect(pool.upstreamQueue.size).toBe(0);
+    expect(pool.upstreamQueueOrder).toEqual([]);
+
+    for (const clientId of ['client-a', 'client-a', 'client-a', 'client-b']) {
+      pool.releaseUpstreamSlot(clientId);
+    }
+    await expect(pool.acquireUpstreamSlot('client-a')).resolves.toBeUndefined();
+    pool.releaseUpstreamSlot('client-a');
+    expect(pool.activeUpstream).toBe(0);
+  });
+
+  it('clears a granted queue entry deadline and preserves later clients', async () => {
+    const service = new DwdForecastTileService();
+    const pool = service as unknown as {
+      activeUpstream: number;
+      queuedUpstream: number;
+      upstreamQueueOrder: string[];
+      acquireUpstreamSlot(clientId: string): Promise<void>;
+      releaseUpstreamSlot(clientId: string): void;
+    };
+    await Promise.all([
+      pool.acquireUpstreamSlot('client-a'), pool.acquireUpstreamSlot('client-a'),
+      pool.acquireUpstreamSlot('client-a'), pool.acquireUpstreamSlot('client-b'),
+    ]);
+    const first = pool.acquireUpstreamSlot('client-c');
+    await jest.advanceTimersByTimeAsync(4_000);
+    const later = pool.acquireUpstreamSlot('client-d');
+    pool.releaseUpstreamSlot('client-b');
+    await first;
+    expect(pool.queuedUpstream).toBe(1);
+
+    await jest.advanceTimersByTimeAsync(4_000); // Original deadline: c was granted; d is still queued.
+    expect(pool.queuedUpstream).toBe(1);
+    expect(pool.upstreamQueueOrder).toEqual(['client-d']);
+    pool.releaseUpstreamSlot('client-c');
+    await later;
+    expect(pool.queuedUpstream).toBe(0);
+
+    for (const clientId of ['client-a', 'client-a', 'client-a', 'client-d']) {
+      pool.releaseUpstreamSlot(clientId);
+    }
+    expect(pool.activeUpstream).toBe(0);
+  });
+
+  it('frees global queue capacity after deadlines even when upstream stays stalled', async () => {
+    const service = new DwdForecastTileService();
+    const pool = service as unknown as {
+      activeUpstream: number;
+      queuedUpstream: number;
+      acquireUpstreamSlot(clientId: string): Promise<void>;
+      releaseUpstreamSlot(clientId: string): void;
+    };
+    await Promise.all([
+      pool.acquireUpstreamSlot('client-a'), pool.acquireUpstreamSlot('client-a'),
+      pool.acquireUpstreamSlot('client-a'), pool.acquireUpstreamSlot('client-b'),
+    ]);
+    const pending = [
+      ...Array.from({ length: 16 }, () => pool.acquireUpstreamSlot('client-a')),
+      ...Array.from({ length: 8 }, () => pool.acquireUpstreamSlot('client-b')),
+    ];
+    const assertions = Promise.all(pending.map(request => expect(request).rejects.toThrow('queue wait timed out')));
+    await expect(pool.acquireUpstreamSlot('client-c')).rejects.toThrow('capacity is temporarily full');
+    await jest.advanceTimersByTimeAsync(8_000);
+    await assertions;
+    expect(pool.queuedUpstream).toBe(0);
+    const newRequest = pool.acquireUpstreamSlot('client-c');
+    pool.releaseUpstreamSlot('client-b');
+    await newRequest;
+    for (const clientId of ['client-a', 'client-a', 'client-a', 'client-c']) {
+      pool.releaseUpstreamSlot(clientId);
+    }
+    expect(pool.activeUpstream).toBe(0);
+  });
+
   it('rejects per-client and global queue overload, then recovers after capacity drains', async () => {
     const service = new DwdForecastTileService();
     const pool = service as unknown as {

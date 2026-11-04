@@ -20,6 +20,7 @@ const WCS_ENDPOINT = 'https://maps.dwd.de/geoserver/ows';
 const WMS_CAPABILITIES_URL = 'https://maps.dwd.de/geoserver/dwd/Icon-eu_reg00625_fd_sl_TOTPREC01H/wms?service=WMS&version=1.3.0&request=GetCapabilities';
 const WCS_ENVELOPE: GeographicBounds = { west: -23.53125, south: 29.46875, east: 62.53125, north: 70.53125 };
 const UPSTREAM_TIMEOUT_MS = 12_000;
+const MAX_UPSTREAM_QUEUE_WAIT_MS = 8_000;
 const NO_DATA_RETRIES = 2;
 const MAX_UPSTREAM_BYTES = 3 * 1024 * 1024;
 const MAX_PARALLEL_UPSTREAM = 4;
@@ -41,6 +42,7 @@ function snapCropToGrid(bounds: GeographicBounds): GeographicBounds {
 }
 
 type CachedTile = { image: Buffer; bytes: number };
+type QueuedUpstream = { resolve: () => void; reject: (reason: Error) => void; timer: ReturnType<typeof setTimeout> };
 
 function toUtcIso(compact: string) {
   if (!/^\d{8}T\d{6}Z$/.test(compact)) throw new RangeError('Forecast timestamps must be explicit UTC values');
@@ -103,7 +105,7 @@ export class DwdForecastTileService {
   private readonly inFlight = new Map<string, Promise<Buffer>>();
   private activeUpstream = 0;
   private readonly activeUpstreamByClient = new Map<string, number>();
-  private readonly upstreamQueue = new Map<string, Array<() => void>>();
+  private readonly upstreamQueue = new Map<string, QueuedUpstream[]>();
   private readonly upstreamQueueOrder: string[] = [];
   private queuedUpstream = 0;
   private metadataPromise?: Promise<string>;
@@ -322,16 +324,37 @@ export class DwdForecastTileService {
         (clientQueue?.length ?? 0) >= MAX_QUEUED_UPSTREAM_PER_CLIENT) {
       throw new ServiceUnavailableException('DWD forecast tile capacity is temporarily full');
     }
-    await new Promise<void>(resolve => {
+    await new Promise<void>((resolve, reject) => {
+      const queued: QueuedUpstream = {
+        resolve,
+        reject,
+        timer: setTimeout(() => this.expireQueuedUpstream(clientId, queued), MAX_UPSTREAM_QUEUE_WAIT_MS),
+      };
       if (!clientQueue) {
-        this.upstreamQueue.set(clientId, [resolve]);
+        this.upstreamQueue.set(clientId, [queued]);
         this.upstreamQueueOrder.push(clientId);
       } else {
-        clientQueue.push(resolve);
+        clientQueue.push(queued);
       }
       this.queuedUpstream++;
       this.dispatchQueuedUpstream();
     });
+  }
+
+  private expireQueuedUpstream(clientId: string, queued: QueuedUpstream) {
+    const queue = this.upstreamQueue.get(clientId);
+    const index = queue?.indexOf(queued) ?? -1;
+    if (!queue || index < 0) return; // Already granted; its timeout was cleared.
+
+    queue.splice(index, 1);
+    this.queuedUpstream--;
+    if (queue.length === 0) {
+      this.upstreamQueue.delete(clientId);
+      const orderIndex = this.upstreamQueueOrder.indexOf(clientId);
+      if (orderIndex >= 0) this.upstreamQueueOrder.splice(orderIndex, 1);
+    }
+    queued.reject(new ServiceUnavailableException('DWD forecast queue wait timed out'));
+    this.dispatchQueuedUpstream();
   }
 
   private releaseUpstreamSlot(clientId: string) {
@@ -363,8 +386,9 @@ export class DwdForecastTileService {
       this.queuedUpstream--;
       if (clientQueue.length > 0) this.upstreamQueueOrder.push(clientId);
       else this.upstreamQueue.delete(clientId);
+      clearTimeout(next.timer);
       this.grantUpstreamSlot(clientId);
-      next();
+      next.resolve();
     }
   }
 
