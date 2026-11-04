@@ -2295,17 +2295,18 @@ function displayNameFromDeviceKey(key: string): string {
 }
 
 function dedupeDevices(devices: RegisteredDevice[]): RegisteredDevice[] {
-  const byId = new Map<string, RegisteredDevice>();
+  const byScopedId = new Map<string, RegisteredDevice>();
 
   for (const device of devices) {
-    const existing = byId.get(device.id);
+    const key = scopedDeviceKey(device.id, device.tenantId, device.siteId);
+    const existing = byScopedId.get(key);
 
     if (!existing || devicePriority(device) > devicePriority(existing)) {
-      byId.set(device.id, device);
+      byScopedId.set(key, device);
     }
   }
 
-  return [...byId.values()];
+  return [...byScopedId.values()];
 }
 
 function devicePriority(device: RegisteredDevice): number {

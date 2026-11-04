@@ -95,6 +95,52 @@ describe('DeviceRegistryService', () => {
     process.env = originalEnv;
   });
 
+  it('keeps same-ID devices in distinct site and tenant scopes in the all-site inventory', () => {
+    const deviceId = 'shared-temperature';
+    const scopes = [
+      { tenantId: 'tenant-a', siteId: 'site-1' },
+      { tenantId: 'tenant-a', siteId: 'site-2' },
+      { tenantId: 'tenant-b', siteId: 'site-1' },
+    ];
+    process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({
+      devices: scopes.map((scope) => ({
+        deviceId,
+        ...scope,
+        protocol: 'http',
+        driver: 'energrid-esp8266',
+        capabilities: ['temperature'],
+      })),
+    });
+
+    const devices = new DeviceRegistryService()
+      .getDevices(true)
+      .filter((device) => device.id === deviceId);
+
+    expect(devices.map((device) => `${device.tenantId}/${device.siteId}`).sort())
+      .toEqual(scopes.map((scope) => `${scope.tenantId}/${scope.siteId}`).sort());
+  });
+
+  it('still prefers approved inventory over a same-scope discovery candidate', () => {
+    const scope = { tenantId: 'tenant-demo', siteId: 'site-home' };
+    process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({
+      devices: [{
+        deviceId: 'same-scope-device', ...scope,
+        protocol: 'http', driver: 'energrid-esp8266', capabilities: ['temperature'],
+      }],
+    });
+    process.env.HOME_DISCOVERED_DEVICES_JSON = JSON.stringify([{
+      id: 'same-scope-device', ...scope, protocol: 'http',
+      capabilities: ['temperature'], source: 'http', confidence: 0.4,
+    }]);
+
+    const devices = new DeviceRegistryService()
+      .getDevices(true)
+      .filter((device) => device.id === 'same-scope-device');
+
+    expect(devices).toHaveLength(1);
+    expect(devices[0].trustStatus).toBe('approved');
+  });
+
   it('returns a device-first snapshot with logical and physical devices', () => {
     process.env.PORTAL_KITCHEN_TEMP_C = '23.6';
     process.env.HOME_KITCHEN_LIGHT_SHELLY_RPC_DEVICES =

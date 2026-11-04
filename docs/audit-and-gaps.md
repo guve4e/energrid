@@ -1,5 +1,11 @@
 # Documentation audit and remaining gaps
 
+## M1.4 — Tenant/site/device identity corrections (in progress, not yet accepted)
+
+**M1.4a candidate:** the registry's all-site inventory previously deduplicated by `device.id` alone. It now uses the existing encoded tenant/site/device key to retain distinct devices across sites and tenants while still preferring the higher-priority record *within the same scope*. A regression test constructs identical logical IDs across three scopes. This candidate is not accepted until Jest and TypeScript validation pass on the local checkout.
+
+**Still open:** `DeviceRegistryService` runtime maps for operational and authoritative state, command tracking, plus some callers that accept only `deviceId`, are not yet consistently owner-scoped. `DeviceInstallationStore` LevelDB installations use `installation:${siteId}:${deviceId}`; proposal keys omit tenant; event keys use only device ID. Do **not** change these persisted key formats without a read-only collision inventory, backward-compatible migration/restart tests and a verified rollback plan. M1.4a does **not** establish complete cross-tenant isolation or authorize new device control.
+
 ## Current device status and backlog (local `main` plus authenticated runtime evidence, 3 November 2026)
 
 ## Architecture simplification checkpoint (candidate; not runtime-accepted)
