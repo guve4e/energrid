@@ -61,11 +61,12 @@ describe('DeviceHttpPollService', () => {
     const unapproved = makeDevice('shellyplus1-78ee4ccf4b54:switch:0', 'shelly-discovered', 'mqtt', true, 'discovered')
 
     const work = selectScheduledHttpCollection([esp, generic, unconfigured, mqttSwitch, httpSwitch, em, unapproved])
-    expect(work.httpDevices.map(device => device.id)).toEqual([esp.id, generic.id, em.id])
+    expect(work.httpDevices.map(device => device.id)).toEqual([esp.id])
+    expect(work.httpDevices).not.toContain(generic)
     expect(work.httpDevices).not.toContain(httpSwitch)
     expect(work.shellySwitches.map(device => device.id)).toEqual([mqttSwitch.id, httpSwitch.id])
-    // An EM1 installation may still be selected by the legacy generic HTTP
-    // branch, but must never be scheduled for Switch.GetStatus or switching.
+    // EM1 needs a verified measurement adapter; switch RPC must never be used.
+    expect(work.httpDevices).not.toContain(em)
     expect(work.shellySwitches).not.toContain(em)
   })
 
@@ -105,39 +106,22 @@ describe('DeviceHttpPollService', () => {
     expect(registry.getDevices).toHaveBeenCalledWith(true)
   })
 
-  it('polls approved HTTP devices into live registry state', async () => {
+  it('does not poll or project configured generic HTTP JSON without a verified integration', async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
-      json: async () => ({
-        values: {
-          temperature: 23.2,
-          humidity: 47.4,
-        },
-      }),
+      json: async () => ({ values: { temperature: 23.2, humidity: 47.4 } }),
     } as Response) as unknown as typeof fetch
 
     const registry = new DeviceRegistryService()
     const poller = new DeviceHttpPollService(registry)
+    const telemetryWriter = jest.spyOn(registry, 'ingestDeviceTelemetry')
 
     await poller.pollOnce()
 
-    const device = registry
-      .getSnapshot()
-      .devices.find((item) => item.id === 'kitchen.temperature.http')
-
-    expect(global.fetch).toHaveBeenCalledWith(
-      'http://127.0.0.1:8088/status',
-      expect.objectContaining({
-        headers: expect.objectContaining({ Accept: 'application/json' }),
-      }),
-    )
-    expect(device?.state).toEqual(
-      expect.objectContaining({
-        values: { temperature: 23.2, humidity: 47.4 },
-        source: 'http-poll',
-        status: 'online',
-      }),
-    )
+    expect(global.fetch).not.toHaveBeenCalled()
+    expect(telemetryWriter).not.toHaveBeenCalled()
+    const device = registry.getSnapshot().devices.find(item => item.id === 'kitchen.temperature.http')
+    expect(device?.state.source).not.toBe('http-poll')
   })
 
   it('polls an approved Lab-site ESP through the scoped remote HTTP transport and the same observation ingress', async () => {
@@ -194,22 +178,17 @@ describe('DeviceHttpPollService', () => {
     }))
   })
 
-  it('marks HTTP devices offline when polling fails', async () => {
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: false,
-      status: 503,
-    } as Response) as unknown as typeof fetch
+  it('does not invent offline state for an unverified generic HTTP endpoint', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503 } as Response) as unknown as typeof fetch
 
     const registry = new DeviceRegistryService()
     const poller = new DeviceHttpPollService(registry)
+    const statusWriter = jest.spyOn(registry, 'ingestDeviceStatus')
 
     await poller.pollOnce()
 
-    const device = registry
-      .getSnapshot()
-      .devices.find((item) => item.id === 'kitchen.temperature.http')
-
-    expect(device?.state.status).toBe('offline')
+    expect(global.fetch).not.toHaveBeenCalled()
+    expect(statusWriter).not.toHaveBeenCalled()
   })
 
   it('keeps the configured gate for non-Energrid HTTP adapters', async () => {

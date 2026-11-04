@@ -1,4 +1,3 @@
-import { httpPollTimeoutMs } from './collection/http-collection-timeout'
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional, Inject } from '@nestjs/common'
 import { DeviceRegistryService } from './device-registry.service'
 import type { RegisteredDevice } from './device-registry.types'
@@ -76,67 +75,10 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       return
     }
 
-    if (device.adapter.driver === 'shelly-lan') {
-      await this.shelly.pollLegacyShellyHttp(device)
-      return
-    }
-
-    const target = device.adapter.target
-    if (!isHttpTarget(target)) return
-
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), httpPollTimeoutMs())
-
-    try {
-      const startedAt = Date.now()
-      const observedAt = new Date().toISOString()
-      const response = await fetch(target, {
-        signal: controller.signal,
-        headers: {
-          Accept: 'application/json',
-        },
-      })
-
-      if (!response.ok) {
-        this.registry.ingestDeviceStatus({
-          deviceId: device.id, tenantId: device.tenantId, siteId: device.siteId,
-          status: 'offline',
-          observedAt: new Date().toISOString(),
-        })
-        this.logger.warn(`[DEVICE HTTP POLL] ${device.id} status=${response.status}`)
-        return
-      }
-
-      const json = await response.json()
-      const values = normalizeHttpValues(json)
-      this.registry.ingestDeviceTelemetry({
-        deviceId: device.id, tenantId: device.tenantId, siteId: device.siteId,
-        name: device.displayName,
-        protocol: 'http',
-        transport: 'http',
-        driver: device.adapter.driver,
-        target,
-        location: device.zoneName,
-        capabilities: device.capabilities.map((capability) => capability.kind),
-        values,
-        state: {
-          values,
-          source: 'http-poll',
-          status: 'online',
-        },
-        observedAt,
-      })
-      this.logger.log(`[DEVICE HTTP POLL] ${device.id} ${Date.now() - startedAt}ms`)
-    } catch (error) {
-      this.registry.ingestDeviceStatus({
-        deviceId: device.id, tenantId: device.tenantId, siteId: device.siteId,
-        status: 'offline',
-        observedAt: new Date().toISOString(),
-      })
-      this.logger.warn(`[DEVICE HTTP POLL] ${device.id} ${error instanceof Error ? error.message : 'failed'}`)
-    } finally {
-      clearTimeout(timeout)
-    }
+    // Only the identity-aware HTTP integration can submit scheduled samples.
+    // Shelly switch status uses the separate identity-verified operational path.
+    // Legacy generic JSON and Shelly EM1 collection fail closed until their
+    // adapters establish source/field authority through approved ingress.
   }
 
   /** @deprecated Portal/tests compatibility; the Shelly integration owns this policy. */
@@ -160,30 +102,6 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
   }
 }
 
-function normalizeHttpValues(payload: unknown): Record<string, number | boolean | string | null> {
-  if (!payload || typeof payload !== 'object') return {}
-
-  const raw = payload as Record<string, unknown>
-  const source =
-    raw.values && typeof raw.values === 'object'
-      ? (raw.values as Record<string, unknown>)
-      : raw
-  const values: Record<string, number | boolean | string | null> = {}
-
-  for (const [key, value] of Object.entries(source)) {
-    if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'string' || value === null) {
-      values[key] = value
-    } else if (value && typeof value === 'object' && 'value' in value) {
-      const nested = (value as { value?: unknown }).value
-      if (typeof nested === 'number' || typeof nested === 'boolean' || typeof nested === 'string' || nested === null) {
-        values[key] = nested
-      }
-    }
-  }
-
-  return values
-}
-
 function isHttpTarget(value: string | undefined): value is string {
   return !!value && /^https?:\/\//.test(value)
 }
@@ -201,22 +119,22 @@ export function explainScheduledHttpCollection(device: RegisteredDevice): {
     ? { selected: true, reason: 'identity_checked_switch_candidate' }
     : { selected: false, reason: 'no_operational_switch_collector' }
 
-  const eligibleHttpRead = device.trustStatus !== 'approved'
+  // Only a collection integration that verifies identity/provenance can be
+  // scheduled to submit measurements. An approved adapter or URL alone does
+  // not authorize a generic JSON-to-registry telemetry write.
+  const httpRead = device.trustStatus !== 'approved'
     ? { selected: false, reason: 'device_not_approved' }
-    : device.adapter.protocol !== 'http'
-      ? { selected: false, reason: 'adapter_not_http' }
-      : !device.adapter.configured && device.adapter.driver !== 'energrid-esp8266'
-        ? { selected: false, reason: 'adapter_not_configured' }
-        : device.adapter.driver !== 'shelly-lan' && !isHttpTarget(device.adapter.target)
-          ? { selected: false, reason: 'http_target_missing' }
-          : { selected: true, reason: 'scheduled_http_candidate' }
-
-  // One switch must not be read by both the identity-verified operational route
-  // and the legacy HTTP route. Never fall back to the weaker route when the
-  // operational reader rejects an endpoint, identity, scope or component.
-  const httpRead = eligibleHttpRead.selected && operationalStatusRead.selected
-    ? { selected: false, reason: 'covered_by_operational_status_read' }
-    : eligibleHttpRead
+    : operationalStatusRead.selected && device.adapter.protocol === 'http'
+      ? { selected: false, reason: 'covered_by_operational_status_read' }
+      : device.adapter.protocol !== 'http'
+        ? { selected: false, reason: 'adapter_not_http' }
+        : !device.adapter.configured && device.adapter.driver !== 'energrid-esp8266'
+          ? { selected: false, reason: 'adapter_not_configured' }
+          : !isHttpTarget(device.adapter.target)
+            ? { selected: false, reason: 'http_target_missing' }
+            : device.adapter.driver !== 'energrid-esp8266'
+              ? { selected: false, reason: 'no_trusted_http_integration' }
+              : { selected: true, reason: 'scheduled_http_candidate' }
 
   return { httpRead, operationalStatusRead }
 }

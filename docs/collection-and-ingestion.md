@@ -64,16 +64,16 @@ The diagram intentionally separates **collection** from **discovery** and **cont
 
 ## Scheduled HTTP polling
 
-`DeviceHttpPollService` owns the one application-level HTTP timer. `HOME_HTTP_POLL_ENABLED` enables it; `HOME_HTTP_POLL_INTERVAL_MS` defaults to 5 seconds (minimum accepted value 500 ms). Each cycle enumerates approved installations across sites, selects configured HTTP targets and invokes the appropriate branch. It runs once immediately at module startup and clears its interval during module destruction.
+`DeviceHttpPollService` owns the one application-level HTTP timer. `HOME_HTTP_POLL_ENABLED` enables it; `HOME_HTTP_POLL_INTERVAL_MS` defaults to 5 seconds (minimum accepted value 500 ms). Each cycle enumerates approved installations across sites and dispatches only supported identity-aware collection routes. It runs once immediately at module startup and clears its interval during module destruction.
 
 The service uses a process-local `polling` flag to skip a timer tick while the previous full cycle is still running. It does **not** cap device-level concurrency: eligible devices are collected with `Promise.all`. There is no per-device retry schedule, exponential backoff or jitter. A failed request is normally observed again on a later interval. The default HTTP timeout is 2 seconds (`HOME_HTTP_POLL_TIMEOUT_MS`, with a 250 ms minimum).
 
-`selectScheduledHttpCollection()` now makes the two HTTP scheduling lists explicit in one pure, tested function. An approved configured HTTP adapter (or the special Energrid ESP8266 identity-aware adapter) can be selected for the HTTP read; an approved physical Shelly **switch** component can independently be selected for identity-verified operational `Switch.GetStatus`, even when its advertised adapter protocol is MQTT. This selection is only a **candidate schedule**, never source approval or control permission. MQTT subscriptions are configured independently; one device can use multiple transports for different fields. The poller obtains one inventory snapshot per cycle.
+`selectScheduledHttpCollection()` now makes the two HTTP scheduling lists explicit in one pure, tested function. Only the identity-aware Energrid ESP8266 adapter can be selected for the general HTTP measurement read; an approved physical Shelly **switch** component can independently be selected for identity-verified operational `Switch.GetStatus`, even when its advertised adapter protocol is MQTT. This selection is only a **candidate schedule**, never source approval or control permission. MQTT subscriptions are configured independently; one device can use multiple transports for different fields. The poller obtains one inventory snapshot per cycle.
 
 The **T1.2a boundary extraction** moves Shelly switch candidate matching and the bounded, identity-checked local `Shelly.GetDeviceInfo` / `Switch.GetStatus` read into `adapters/outbound/network/shelly-switch-collection.adapter.ts`. It does not grant observation authority: `ShellyRouteResolver` still establishes a site-owned endpoint before the adapter is called, and the caller still owns registry projection and observer reachability. JSON response-size handling is shared through a transport helper, not duplicated in the device adapter. The API poller still supervises remote Shelly observers and has a legacy generic `shelly-lan` HTTP branch; T1.2a **does not** enable EM1 power collection or make transport choice entirely binding-driven. This is a staged extraction, not completion of the transport simplification.
 
 
-**Known EM limitation:** `em1:N` is no longer offered to the switch-only operational collector, which cannot decode it. A configured `shelly-lan` EM1 target may still reach the older generic HTTP branch, but that branch currently uses `parseShellySwitchStatus()` and rejects its power response. This change does not implement EM1 measurement ingestion. It requires a separate EM1 parser and a checked source/field binding into the authorized observation ingress; do not treat HTTP collection eligibility as proof of readable power.
+**Known EM limitation:** `em1:N` is not scheduled by either switch-status collection or the identity-aware HTTP measurement collector. The legacy `shelly-lan` EM1 HTTP fallback is now disabled rather than attempting to parse a power response as a switch. This does not implement EM1 ingestion. The Shelly integration needs an EM1 parser, identity-verified RPC read and an authorized source/field binding to the existing ingress.
 
 ### Shelly read-only operational status
 
@@ -85,15 +85,17 @@ This remote worker collects relay operational status only. It does not enroll, r
 
 After the registry accepts and projects state for an approved device, it emits a typed, process-local event. The authenticated Portal SSE route filters events to the requesting principal's tenant/site. The Portal reconciles from `/portal/state` on stream readiness/reconnect and applies subsequent ordered events to the affected device. The heartbeat describes stream liveness, not device reachability. The event sequence and stream are in memory; reconnect snapshot reconciliation is the recovery mechanism. Live external-toggle-to-Portal timing and physical Home channel-1 delivery were not demonstrated in the 2 November 2026 runtime check.
 
-### Generic configured HTTP branch
+### Legacy generic HTTP JSON branch (T1.3c1 compatibility change)
 
-For non-Energrid HTTP adapters, the poller fetches the configured target, normalizes simple JSON values and updates the registry's runtime telemetry/status projection. It does not perform the ESP identity/discovery-memory sequence or submit through `DeviceIntelligenceObservationIngress`. In the committed implementation, a non-success response or thrown request error sets registry status to `offline`. This is a different failure contract from the identity-aware path and should not be read as independently verified physical-device health.
+Configured `http-json-sensor` and other unknown HTTP drivers **are not scheduled**. The previous generic `fetch` → `normalizeHttpValues` → `registry.ingestDeviceTelemetry` path was not identity-verified and bypassed installation source/field authority. It also marked a device `offline` on an observer-side HTTP error without verified device health. This fallback has been removed from the generic scheduler; `explainScheduledHttpCollection()` returns `no_trusted_http_integration` for configured HTTP drivers without a supported identity-aware integration. Such configurations remain present in inventory but cannot update live state through this route. Specifically, the legacy `HOME_KITCHEN_TEMP_URL` / `http-json-sensor` demonstration will no longer collect through generic HTTP polling.
+
+This is a **fail-closed behavior change**, not a migration of legacy JSON devices to the approved ingress. A future device integration must establish trusted identity/provenance, normalize its payload, and submit to the existing `DeviceIntelligenceObservationIngress` with persisted installation field/source authority. Do not feed arbitrary JSON into the trusted ingress with a fabricated source ID. The Energrid ESP8266 integration and identity-verified Shelly switch operational routes remain active. The legacy `shelly-lan` HTTP collection method remains in the integration for compatibility but is no longer selected by the generic scheduler (including EM1). It is not a power-measurement integration; do not invoke it as a fallback. Separately, the approved Shelly operational-state writer is not the durable per-field electrical-measurement ingress and requires its own boundary review.
 
 ### Energrid ESP8266 branch
 
 The ESP profile derives tenant/site and expected physical identity from the registered installation. It reads identity evidence only within the device's configured network zone, resolves the enrolled target, and makes a bounded identity request before status collection. Redirects are rejected, identity must match exactly, response bodies are bounded, and a mismatch is not admitted as telemetry. Once identity is accepted, the status response is parsed and submitted with a deterministic sample/evidence ID to `ApprovedMqttObservationRuntime.ingestHttpObservation`; installation authority and approval are checked again in the ingress.
 
-At `46f3846`, transport failures in the identity-aware Energrid ESP8266 path record observer reachability separately and do not overwrite the last successful registry values, sample timestamp, source or device status. Failures in the due firmware-diagnostics collection are persisted with observer host/platform, local IPv4 scopes, target endpoint/address, configured network scope, attempt time and known failure category; the last successful diagnostic snapshot is retained. A successful HTTP identity response establishes only that the observer reached an HTTP endpoint; exact identity is still required before status observations are admitted. The generic configured HTTP path remains different: non-success responses and request exceptions still set its runtime status to `offline` without observer context. This is an open limitation, not evidence of physical power or Wi-Fi failure.
+At `46f3846`, transport failures in the identity-aware Energrid ESP8266 path record observer reachability separately and do not overwrite the last successful registry values, sample timestamp, source or device status. Failures in the due firmware-diagnostics collection are persisted with observer host/platform, local IPv4 scopes, target endpoint/address, configured network scope, attempt time and known failure category; the last successful diagnostic snapshot is retained. A successful HTTP identity response establishes only that the observer reached an HTTP endpoint; exact identity is still required before status observations are admitted. The legacy generic HTTP path was disabled in T1.3c1; an unknown generic HTTP URL no longer creates an offline state.
 
 ## Firmware diagnostics and Device Health
 
@@ -156,7 +158,7 @@ These are separate concepts:
 - **Device status/health**: evidence reported by the device or derived from authenticated, identity-verified device responses.
 - **Measurement freshness**: when an accepted sample was measured/received and whether it is recent.
 
-At `46f3846`, the ESP8266 poll path exposes observer reachability in the registry projection, while durable diagnostic failures retain observer and target provenance. The Device Health detail and Home summary present observer reachability separately from device-reported Wi-Fi/health and measurement freshness. The registry reachability projection is process-local; the diagnostic failure record is durable. Generic configured HTTP polling still marks status `offline` on request failure and does not yet provide the same observer context. No timeout from one observer proves power loss or Wi-Fi disconnection. See ADR [0004](decisions/0004-observer-reachability.md).
+At `46f3846`, the ESP8266 poll path exposes observer reachability in the registry projection, while durable diagnostic failures retain observer and target provenance. The Device Health detail and Home summary present observer reachability separately from device-reported Wi-Fi/health and measurement freshness. The registry reachability projection is process-local; the diagnostic failure record is durable. The legacy generic HTTP polling fallback is now disabled; it no longer marks devices offline. No timeout from one observer proves power loss or Wi-Fi disconnection. See ADR [0004](decisions/0004-observer-reachability.md).
 
 ## Outages, restarts and data recovery
 
@@ -173,7 +175,7 @@ At `46f3846`, the ESP8266 poll path exposes observer reachability in the registr
 | Normal configured MQTT route may bypass common ingress and its generic measurement history hook | [`ApprovedMqttObservationRuntime`](../apps/api/src/app/modules/devices/mqtt/approved-mqtt-observation.runtime.ts), [`ApprovedMqttObservationRoute`](../apps/api/src/app/modules/devices/mqtt/approved-mqtt-observation.route.ts) | Approved state can be durable while measurement history semantics differ from HTTP/Lab ingress. |
 | Generic background MQTT effects can use default site context | [`DeviceMqttMessageRouter`](../apps/api/src/app/modules/devices/mqtt/device-mqtt-message-router.ts), [`portal-site-context.ts`](../apps/api/src/app/modules/portal/portal-site-context.ts) | Exact configured routes have explicit scope; generic discovery/legacy paths need an explicit device/broker-to-site owner for multi-site operation. |
 | HTTP collection has unbounded device-level concurrency and no per-device/capability plan | [`DeviceHttpPollService`](../apps/api/src/app/modules/devices/device-http-poll.service.ts) | Large installations can create request bursts; only a process-local whole-cycle guard prevents overlap. |
-| Generic HTTP failure is modeled differently from ESP profile failures | [`DeviceHttpPollService`](../apps/api/src/app/modules/devices/device-http-poll.service.ts) | A timeout can update generic registry status to offline without observer-relative qualification. |
+| Generic HTTP failure is modeled differently from ESP profile failures | [`DeviceHttpPollService`](../apps/api/src/app/modules/devices/device-http-poll.service.ts) | Legacy behavior eliminated in T1.3c1: unknown generic HTTP drivers are not scheduled. Keep other status writers under review. |
 | Poll overlap protection is process-local | [`DeviceHttpPollService`](../apps/api/src/app/modules/devices/device-http-poll.service.ts) | Multiple workers/gateways could duplicate scheduled work without leases/partitioning; idempotent ingress remains important. |
 | Kitchen Plus 1 route recovery remains incomplete | [`DeviceHttpPollService`](../apps/api/src/app/modules/devices/device-http-poll.service.ts) | Current installation/observer authorization is incomplete for `shellyplus1-78ee4ccf4b54`; the route fails closed. Do not widen a scope or infer a current endpoint from historical discovery. |
 | Physical external-toggle attribution and all-source stale behavior remain unverified | [`DeviceRegistryService`](../apps/api/src/app/modules/devices/device-registry.service.ts), [`Portal SSE route`](../apps/api/src/app/modules/portal/portal.controller.ts) | Bathroom API-restart recovery and a correlated worker sample → Portal timestamp were observed locally. MQTT is another active source, so worker-only pause cannot establish the stale transition or prove which source produced each projected update. |
@@ -212,13 +214,12 @@ registry observation and reachability writers are unchanged. The generic poller
 retains compatibility delegation methods for existing Portal callers. It does not
 parse Shelly RPC or ESP8266 payloads or manage remote Shelly worker sessions.
 
-**Not complete:** The scheduler still contains a transitional device-driver dispatch;
-HTTP/MQTT binding selection and observation authority are not yet one declarative
-policy. The legacy `shelly-lan` polling route continues to use its existing registry
-telemetry path (not an approved EM1 measurement ingestion route). The Shelly EM1
-`act_power` adapter, duplicate-path removal, and actual-device acceptance remain
-separate work, not consequences of this extraction. No hardware switching or
-deployment is part of T1.2b. Verify tests/build against the latest repo before commit.
+**T1.2b historical limitation:** The scheduler still contained transitional
+device-driver dispatch, and the legacy `shelly-lan` polling route wrote registry
+telemetry rather than approved EM1 measurements. Later T1.3b2 removed duplicate
+switch scheduling; T1.3c1 disables the legacy HTTP collection fallback entirely.
+HTTP/MQTT binding selection and observation authority are still not one declarative
+policy; EM1 `act_power` ingestion and physical acceptance remain separate work.
 
 
 ### T1.3a Shelly MQTT boundary (pending checkout verification)
@@ -268,8 +269,20 @@ has additional integration-specific identity/broker validation. No Portal
 endpoint is wired by this patch; the methods provide a tested internal read-only
 inspection seam. Future operator diagnostics must combine these existing facts
 with *actual runtime* evidence, without calling the result an active collection
-plan prematurely. Legacy Shelly HTTP reads may still run for other installations
-(including EM1, whose switch-only legacy parser cannot decode power). Generic
-HTTP telemetry bypass, normal configured MQTT history divergence, and EM1 power
-adapter limitations remain open. Remote/local operational observer scheduling
-and cross-process collection duplication have not been changed.
+plan prematurely. The later T1.3c1 change disables the legacy generic JSON and Shelly EM1
+HTTP fallback, rather than silently admitting unsupported measurements. Other
+registry writers and normal configured MQTT history divergence still need review;
+EM1 power integration remains unavailable. Remote/local operational observer
+scheduling and cross-process collection duplication have not been changed.
+
+### T1.3c2a — Shelly EM1 verified read-only adapter (pending repository tests)
+
+The Shelly-specific outbound HTTP adapter now supports bounded identity verification
+followed by `EM1.GetStatus` on the exact requested channel. It normalizes finite
+`act_power` to canonical `power` (W) and rejects wrong identity, channel and
+invalid responses. Negative power is valid. This adapter does not write state,
+enroll anything, or authorize a network route or control. It is not yet scheduled:
+EM1 measurements remain inactive until an independently authorized, scoped
+read-only route and persisted source/field binding are used to submit the
+normalized value through existing approved observation ingress. The switch-only
+route resolver must NOT be widened to permit EM component control.

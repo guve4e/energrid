@@ -50,8 +50,10 @@ describe('scheduled HTTP collection explanations', () => {
     })
     expect(scheduled.httpDevices).not.toContain(shellyHttp)
     expect(scheduled.shellySwitches).toContain(shellyHttp)
-    // Legacy EM1 HTTP eligibility does not imply the existing parser understands EM1.
-    expect(explainScheduledHttpCollection(em).httpRead.selected).toBe(true)
+    // No source/field-verified EM1 HTTP integration is installed yet.
+    expect(explainScheduledHttpCollection(em).httpRead).toEqual({
+      selected: false, reason: 'no_trusted_http_integration',
+    })
     expect(explainScheduledHttpCollection(em).operationalStatusRead.selected).toBe(false)
     expect(explainScheduledHttpCollection(blocked).httpRead.reason).toBe('device_not_approved')
   })
@@ -65,6 +67,15 @@ describe('scheduled HTTP collection explanations', () => {
       httpRead: { selected: false, reason: 'device_not_approved' },
       operationalStatusRead: { selected: false, reason: 'no_operational_switch_collector' },
     })
+  })
+
+  it('blocks generic JSON collection even when an HTTP URL is configured', () => {
+    const legacy = device({ id: 'kitchen.temperature.http', driver: 'http-json-sensor',
+      configured: true, target: 'http://127.0.0.1:8088/status' })
+    expect(explainScheduledHttpCollection(legacy).httpRead).toEqual({
+      selected: false, reason: 'no_trusted_http_integration',
+    })
+    expect(selectScheduledHttpCollection([legacy]).httpDevices).toEqual([])
   })
 
   it('distinguishes a missing HTTP target from an unconfigured adapter', () => {
