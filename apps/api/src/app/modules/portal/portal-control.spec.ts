@@ -2,6 +2,7 @@ import { UnauthorizedException } from '@nestjs/common';
 import { Subject, filter, firstValueFrom } from 'rxjs';
 import { PortalController } from './portal.controller';
 import { PortalNetworkDiscoveryScanController } from './portal-network-discovery-scan.controller';
+import { PortalNetworkInvestigationController } from './portal-network-investigation.controller';
 import type { PortalStateService } from './portal-state.service';
 import type { DeviceLanDiscoveryService } from '../devices/device-lan-discovery.service';
 import type { PortalDeviceProxyService } from './portal-device-proxy.service';
@@ -70,6 +71,10 @@ describe('portal control configuration authorization', () => {
       resolveShellyControlTarget,
       deviceHttpPoll,
       scanController: new PortalNetworkDiscoveryScanController(lanDiscovery, registry),
+      investigationController: new PortalNetworkInvestigationController(
+        registry, lanDiscovery, { list: jest.fn().mockResolvedValue([]) } as never,
+        { investigate: jest.fn() } as never, {} as never,
+      ),
       controller: new PortalController(
         { getState } as unknown as PortalStateService,
         lanDiscovery,
@@ -77,8 +82,6 @@ describe('portal control configuration authorization', () => {
         { configure, execute } as unknown as DeviceControlService,
         registry,
         { check } as unknown as DeviceDiagnosticsService,
-        { investigate: jest.fn() } as never,
-        {} as never,
         { listIdentityEvidence } as never,
         enrollment,
         undefined,
@@ -178,14 +181,14 @@ describe('portal control configuration authorization', () => {
   })
 
   it('requires Portal authorization before approving a diagnostic probe', async () => {
-    const { controller } = setup();
-    await expect(controller.executeInvestigationAction(
+    const { investigationController } = setup();
+    await expect(investigationController.executeInvestigationAction(
       'host-1', 'investigation-1', 'proposal-1', { approved: true },
       { method: 'POST', url: '/', headers: {} },
     )).rejects.toThrow(UnauthorizedException);
   });
   it('keeps recognized Energrid identity out of the LLM investigation path', async () => {
-    const { controller, getLastScan } = setup();
+    const { investigationController, getLastScan } = setup();
     const observedAt = new Date().toISOString();
     getLastScan.mockReturnValue([{
       id: 'esp8266:324864', ipAddress: '192.168.1.198', networkZoneId: 'upstream-lan', networkZoneName: 'Upstream LAN',
@@ -199,7 +202,7 @@ describe('portal control configuration authorization', () => {
         { source: 'http_identity', attribute: 'device.capability', value: 'humidity', observedAt },
       ],
     }]);
-    await expect(controller.investigateNetworkDeviceWithAi('esp8266:324864', {}, {
+    await expect(investigationController.investigateNetworkDeviceWithAi('esp8266:324864', {}, {
       method: 'POST', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 },
     })).rejects.toThrow('LLM investigation is disabled');
   });
@@ -246,7 +249,7 @@ describe('portal control configuration authorization', () => {
       };
       const controller = new PortalController(
         { getState: () => ({ devices: [] }) } as never, { getLastScan: () => [] } as never, {} as never, {} as never,
-        registry as never, {} as never, {} as never, {} as never,
+        registry as never, {} as never,
         { listIdentityEvidence: jest.fn(async (owner: { tenantId: string; siteId: string }) =>
           owner.tenantId === record.ownership.tenantId && owner.siteId === record.ownership.siteId ? [record] : [],
         ) } as never,
@@ -320,7 +323,7 @@ describe('portal control configuration authorization', () => {
       };
       const controller = new PortalController(
         { getState: () => ({ devices: [] }) } as never, { getLastScan: () => [] } as never, {} as never, {} as never,
-        registry as never, {} as never, {} as never, {} as never,
+        registry as never, {} as never,
         { listIdentityEvidence } as never,
         undefined, undefined, undefined, undefined, undefined, undefined, undefined,
         { list: jest.fn().mockResolvedValue([]) } as never,
@@ -388,7 +391,7 @@ describe('portal control configuration authorization', () => {
     const controller = new PortalController(
       { getState: () => ({ devices: [] }) } as never,
       { getLastScan: () => [] } as never, {} as never, {} as never,
-      registry as never, {} as never, {} as never, {} as never,
+      registry as never, {} as never,
       { listIdentityEvidence: jest.fn().mockResolvedValue(history) } as never,
       undefined, undefined,
       { list: jest.fn().mockResolvedValue([]), listRecentMqttPublisherEvidence: jest.fn().mockResolvedValue([]) } as never,
@@ -438,7 +441,7 @@ describe('portal control configuration authorization', () => {
       { getLastScan: () => [lan] } as never,
       {} as never, {} as never,
       { getSnapshot: () => ({ tenant: { id: 'tenant-demo' }, site: { id: 'site-home' } }) } as never,
-      {} as never, {} as never, {} as never,
+      {} as never,
       { listIdentityEvidence: jest.fn().mockResolvedValue([]) } as never,
       undefined, undefined, { list: inventoryList } as never,
       undefined, undefined, undefined, undefined,
@@ -511,8 +514,6 @@ describe('portal control configuration authorization', () => {
       { getSnapshot: () => ({ tenant: { id: 'tenant-a' }, site: { id: 'site-a' } }),
         getDevices: jest.fn().mockReturnValue([enrolledDevice]) } as unknown as DeviceRegistryService,
       {} as DeviceDiagnosticsService,
-      {} as never,
-      {} as never,
       { list: jest.fn().mockRejectedValue(new Error('Discovery offline')) } as never,
       { find: jest.fn().mockResolvedValue({ status: 'enrolled' }) } as never,
       { getShellyIdentityRecovery: jest.fn().mockResolvedValue({
@@ -570,8 +571,6 @@ describe('portal control configuration authorization', () => {
       { getSnapshot: () => ({ tenant: { id: 'tenant-a' }, site: { id: 'site-a' } }),
         getDevices: jest.fn().mockReturnValue([]) } as unknown as DeviceRegistryService,
       {} as DeviceDiagnosticsService,
-      {} as never,
-      {} as never,
       { list: jest.fn().mockResolvedValue([]) } as never,
       { find: jest.fn().mockResolvedValue({ status: 'enrolled' }) } as never,
       undefined,

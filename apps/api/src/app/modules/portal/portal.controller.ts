@@ -43,10 +43,7 @@ import {
 } from '@nestjs/common'
 import { ApiExcludeController } from '@nestjs/swagger'
 import { filter, interval, map, merge, of } from 'rxjs'
-import { DeviceAiInvestigationService } from '../llm/device-ai-investigation.service'
 import { LlmGatewayService } from '../llm/llm-gateway.service'
-import type { DeviceInvestigationScope } from '../llm/device-investigation-history.store'
-import { DeviceInvestigationWorkflowService } from '../llm/device-investigation-workflow.service'
 import { DeviceControlService } from '../devices/device-control.service'
 import { DeviceDiagnosticsService } from '../devices/device-diagnostics.service'
 import { DeviceHttpPollService } from '../devices/device-http-poll.service'
@@ -151,8 +148,6 @@ export class PortalController {
     private readonly deviceControl: DeviceControlService,
     private readonly deviceRegistry: DeviceRegistryService,
     private readonly diagnostics: DeviceDiagnosticsService,
-    private readonly deviceAi: DeviceAiInvestigationService,
-    private readonly investigationWorkflow: DeviceInvestigationWorkflowService,
     private readonly discoveryMemory: DeviceDiscoveryMemoryStore,
     @Optional()
     @Inject(DEVICE_ENROLLMENT_SERVICE)
@@ -880,152 +875,6 @@ export class PortalController {
       nextQuestion: result.nextQuestion,
       persisted: false,
     };
-  }
-
-  @Post('network/:deviceId/investigate')
-  async investigateNetworkDeviceWithAi(
-    @Param('deviceId') deviceId: string,
-    @Body() body: { cloudDataConsent?: unknown },
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-
-    const device = await this.resolveInvestigationTarget(deviceId)
-    if (energridDiscoveryCandidate(device)) {
-      throw new ConflictException('Recognized Energrid devices use first-party identity and enrollment; LLM investigation is disabled.')
-    }
-    const scope = this.investigationScope(device)
-    return this.deviceAi.investigate(
-      scope,
-      deviceId,
-      [device],
-      body?.cloudDataConsent === true,
-    )
-  }
-
-  @Post('network/:deviceId/investigations/:investigationId/actions/:proposalId/execute')
-  async executeInvestigationAction(
-    @Param('deviceId') deviceId: string,
-    @Param('investigationId') investigationId: string,
-    @Param('proposalId') proposalId: string,
-    @Body() body: { approved?: unknown; cloudDataConsent?: unknown },
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-    const target = await this.resolveInvestigationTarget(deviceId)
-    if (energridDiscoveryCandidate(target)) {
-      throw new ConflictException('Recognized Energrid devices do not accept LLM-proposed actions.')
-    }
-    const scope = this.investigationScope(target)
-    return this.investigationWorkflow.executeProposedAction({
-      scope,
-      deviceId,
-      investigationId,
-      proposalId,
-      target,
-      zones: this.lanDiscovery.getZones(),
-      approved: body?.approved === true,
-      cloudDataConsent: body?.cloudDataConsent === true,
-    })
-  }
-
-  @Post('network/:deviceId/profile-investigations')
-  async investigateNetworkMqttProfile(
-    @Param('deviceId') deviceId: string,
-    @Body() body: { cloudDataConsent?: unknown },
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-
-    const { tenant, site } = this.deviceRegistry.getSnapshot()
-
-    return this.deviceAi.investigateStoredMqttProfile(
-      { tenantId: tenant.id, siteId: site.id },
-      deviceId,
-      body?.cloudDataConsent === true,
-    )
-  }
-
-  @Get('network/:deviceId/profile-investigations')
-  async listNetworkMqttProfiles(
-    @Param('deviceId') deviceId: string,
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-
-    const { tenant, site } = this.deviceRegistry.getSnapshot()
-
-    return this.deviceAi.listMqttProfileInvestigations(
-      { tenantId: tenant.id, siteId: site.id },
-      deviceId,
-      50,
-    )
-  }
-
-  @Get('investigations/availability')
-  getInvestigationAvailability(@Req() request: DeviceProxyRequest) {
-    assertPortalAdministrator(request)
-    return this.deviceAi.getProviderAvailability()
-  }
-
-  @Get('network/:deviceId/profile-investigations/:investigationId')
-  async getNetworkMqttProfile(
-    @Param('deviceId') deviceId: string,
-    @Param('investigationId') investigationId: string,
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-
-    const { tenant, site } = this.deviceRegistry.getSnapshot()
-
-    return this.deviceAi.getMqttProfileInvestigation(
-      { tenantId: tenant.id, siteId: site.id },
-      deviceId,
-      investigationId,
-    )
-  }
-
-  @Get('network/:deviceId/investigations')
-  async listNetworkDeviceInvestigations(
-    @Param('deviceId') deviceId: string,
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-    const device = await this.resolveInvestigationTarget(deviceId)
-    return this.deviceAi.listHistory(this.investigationScope(device), deviceId, 50)
-  }
-
-  @Get('network/:deviceId/investigations/:investigationId')
-  async getNetworkDeviceInvestigation(
-    @Param('deviceId') deviceId: string,
-    @Param('investigationId') investigationId: string,
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-    const device = await this.resolveInvestigationTarget(deviceId)
-    return this.deviceAi.getHistoryRecord(this.investigationScope(device), deviceId, investigationId)
-  }
-
-  private async resolveInvestigationTarget(deviceId: string) {
-    const live = this.lanDiscovery.getLastScan().find(device => device.id === deviceId)
-    if (live) return live
-    const remembered = (await this.discoveryMemory.list(this.discoveryOwner().ownership))
-      .find(record => record.device.id === deviceId)
-    if (remembered) return remembered.device
-    throw new NotFoundException('Discovered device not found in this site')
-  }
-
-  private investigationScope(device: {
-    id: string
-    networkZoneId: string
-    gatewayId?: string
-  }): DeviceInvestigationScope {
-    const { tenant, site } = this.deviceRegistry.getSnapshot()
-    return {
-      tenantId: tenant.id,
-      siteId: site.id,
-      networkId: `${device.gatewayId || 'gateway-unknown'}:${device.networkZoneId}`,
-    }
   }
 
   private discoveryOwner(): { ownership: DiscoveryOwnership; siteName: string } {
