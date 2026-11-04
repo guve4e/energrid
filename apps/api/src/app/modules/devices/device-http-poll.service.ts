@@ -178,7 +178,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         // device-reported state. Preserve the last valid Shelly state; its
         // timestamp will age naturally in the Portal.
         if (device.adapter.driver !== 'shelly-lan') this.registry.ingestDeviceStatus({
-          deviceId: device.id,
+          deviceId: device.id, tenantId: device.tenantId, siteId: device.siteId,
           status: 'offline',
           observedAt: new Date().toISOString(),
         })
@@ -195,7 +195,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         return
       }
       this.registry.ingestDeviceTelemetry({
-        deviceId: device.id,
+        deviceId: device.id, tenantId: device.tenantId, siteId: device.siteId,
         name: device.displayName,
         protocol: 'http',
         transport: 'http',
@@ -214,7 +214,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`[DEVICE HTTP POLL] ${device.id} ${Date.now() - startedAt}ms`)
     } catch (error) {
       if (device.adapter.driver !== 'shelly-lan') this.registry.ingestDeviceStatus({
-        deviceId: device.id,
+        deviceId: device.id, tenantId: device.tenantId, siteId: device.siteId,
         status: 'offline',
         observedAt: new Date().toISOString(),
       })
@@ -274,7 +274,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         status: 'reachable', checkedAt: observedAt, endpoint, targetIpAddress: ipAddress,
         networkScopeId: zone.id,
         observer: { id: observer.id, host: observer.host, platform: process.platform, localScopes },
-      })
+      }, { tenantId: device.tenantId, siteId: device.siteId })
       this.registry.ingestDeviceTelemetry({
         id: device.id, deviceId: device.id, tenantId: device.tenantId, siteId: device.siteId,
         displayName: device.displayName, protocol: 'http', transport: 'http', driver: 'shelly-lan',
@@ -298,7 +298,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
           interfaceName: observer.interfaceName!, cidr: zone.cidr!, address: target.interfaceAddress,
         }] },
         reason: error instanceof Error ? safeRemoteObserverError(error) : 'observer_error',
-      })
+      }, { tenantId: device.tenantId, siteId: device.siteId })
       this.logger.warn(JSON.stringify({
         event: 'shelly_operational_status_poll', correlationId, outcome: 'rejected',
         deviceId: device.id, observerId: observer.id, scopeId: zone.id,
@@ -530,7 +530,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         targetIpAddress: assignment.ipAddress, networkScopeId: assignment.scopeId,
         observer: { id: observer.id, host: observer.host, platform: observer.platform, localScopes: observer.localScopes },
         reason,
-      })
+      }, { tenantId: assignment.tenantId, siteId: assignment.siteId })
       return
     }
     const status = event.body
@@ -577,7 +577,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       status: 'reachable', checkedAt: observedAt, endpoint,
       targetIpAddress: assignment.ipAddress, networkScopeId: assignment.scopeId,
       observer: { id: observer.id, host: observer.host, platform: observer.platform, localScopes: observer.localScopes },
-    })
+    }, { tenantId: assignment.tenantId, siteId: assignment.siteId })
   }
 
   /** @deprecated Call ShellyRouteResolver directly. Retained for Portal/legacy read-only callers. */
@@ -649,7 +649,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
           endpoint: `http://${ipAddress}/rpc/Switch.GetStatus?id=${target.channel}`, targetIpAddress: ipAddress,
           networkScopeId: zoneId,
           observer: { id: observerId, host: target.siteLocalObserver.host, platform: 'docker', localScopes: [] },
-        })
+        }, { tenantId: device.tenantId, siteId: device.siteId })
         this.logShellyObservation(correlationId, 'operational_state_ingestion_completed', 'completed', startedAt, deviceId, ownership, { scopeId, observerId })
         return { deviceId: device.id, physicalId, component, physicalInventoryId: inventory.physicalDeviceId,
           site: ownership, output: values.on, observedAt, source,
@@ -725,7 +725,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
           endpoint: `http://${ipAddress}/rpc/Switch.GetStatus?id=${target.channel}`, targetIpAddress: ipAddress,
           networkScopeId: zoneId,
           observer: { id: evidence.observer.id, host: evidence.observer.host, platform: 'docker', localScopes: [] },
-        })
+        }, { tenantId: device.tenantId, siteId: device.siteId })
         stage = 'operational_state_ingestion_completed'
         this.logShellyObservation(correlationId, stage, 'completed', startedAt, deviceId, ownership, { scopeId, observerId })
         return {
@@ -790,7 +790,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     try {
       records = await this.discovery.listIdentityEvidence(scope)
     } catch {
-      this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'unknown', observedAt: new Date().toISOString() })
+      this.registry.ingestDeviceStatus({ deviceId: device.id, tenantId: device.tenantId, siteId: device.siteId, status: 'unknown', observedAt: new Date().toISOString() })
       await recordFailure('endpoint_unverified')
       this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=trusted_identity_evidence_unavailable`)
       return
@@ -810,7 +810,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     const endpoint = resolveEnergridHttpEndpoint(device, records, endpointZones) ||
       resolveEnrolledEnergridHttpEndpoint(device, endpointZones)
     if (!endpoint) {
-      this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'unknown', observedAt: new Date().toISOString() })
+      this.registry.ingestDeviceStatus({ deviceId: device.id, tenantId: device.tenantId, siteId: device.siteId, status: 'unknown', observedAt: new Date().toISOString() })
       await recordFailure('endpoint_unverified')
       this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=verified_endpoint_missing_or_out_of_scope`)
       return
@@ -830,7 +830,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         networkScopeId: collectionContext.target.networkScopeId,
         observer: collectionContext.observer,
         ...(reason ? { reason } : {}),
-      })
+      }, { tenantId: device.tenantId, siteId: device.siteId })
     }
 
     const virtualLabPoll = configuredZone?.collectionSource === 'virtual-lab'
@@ -841,7 +841,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
           throw new Error('virtual_lab_target_not_configured')
         }
       } catch {
-        this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'unknown', observedAt: new Date().toISOString() })
+        this.registry.ingestDeviceStatus({ deviceId: device.id, tenantId: device.tenantId, siteId: device.siteId, status: 'unknown', observedAt: new Date().toISOString() })
         await recordFailure('scope_rejected')
         this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=virtual_lab_target_not_configured`)
         return
@@ -881,7 +881,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       }
       const identity = parseEnergridIdentity(identityPayload)
       if (!identity) {
-        this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'unknown', observedAt: new Date().toISOString() })
+        this.registry.ingestDeviceStatus({ deviceId: device.id, tenantId: device.tenantId, siteId: device.siteId, status: 'unknown', observedAt: new Date().toISOString() })
         await recordFailure('identity_request_failed')
         this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=invalid_firmware_identity_response`)
         return
@@ -890,7 +890,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
         // The endpoint answered, but it is not the enrolled physical device.
         // Keep device reachability unknown instead of labeling it offline or
         // allowing the reused address to supply measurements.
-        this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'unknown', observedAt: new Date().toISOString() })
+        this.registry.ingestDeviceStatus({ deviceId: device.id, tenantId: device.tenantId, siteId: device.siteId, status: 'unknown', observedAt: new Date().toISOString() })
         await recordFailure('identity_mismatch')
         this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=firmware_identity_mismatch`)
         return
@@ -924,7 +924,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
           throw new Error('identity_evidence_persistence_failed')
         }
       }
-      this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'online', observedAt: new Date().toISOString() })
+      this.registry.ingestDeviceStatus({ deviceId: device.id, tenantId: device.tenantId, siteId: device.siteId, status: 'online', observedAt: new Date().toISOString() })
       if (diagnosticsDue) await this.pollFirmwareDiagnostics(device, endpoint.identityUrl, physicalId, scope)
 
       phase = 'status'
@@ -945,7 +945,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
       }
       const parsed = parseEnergridHttpSample(payload, physicalId)
       if (!parsed.accepted) {
-        this.registry.ingestDeviceStatus({ deviceId: device.id, status: 'online', observedAt: new Date().toISOString() })
+        this.registry.ingestDeviceStatus({ deviceId: device.id, tenantId: device.tenantId, siteId: device.siteId, status: 'online', observedAt: new Date().toISOString() })
         this.logger.warn(`[DEVICE HTTP POLL] ${device.id} rejected reason=${parsed.reason}`)
         return
       }

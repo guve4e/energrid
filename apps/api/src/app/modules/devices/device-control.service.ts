@@ -202,7 +202,7 @@ export class DeviceControlService {
 
     if (device.adapter.protocol === 'simulated') {
       this.registry.ingestDeviceTelemetry({
-        deviceId: device.id,
+        deviceId: device.id, tenantId: device.tenantId, siteId: device.siteId,
         values: { on },
         observedAt: new Date().toISOString(),
         origin: 'simulated-control',
@@ -317,7 +317,7 @@ export class DeviceControlService {
           endpoint: `http://${target.ipAddress}/rpc/Switch.GetStatus?id=${target.channel}`,
           targetIpAddress: target.ipAddress, networkScopeId: target.zone.id,
           observer: { id: target.siteLocalObserver.id, host: target.siteLocalObserver.host, platform: 'docker', localScopes: [] },
-        })
+        }, { tenantId: device.tenantId, siteId: device.siteId })
         const settledCommand = confirmed ? (this.findDevice(device.id)?.state.command || command) :
           (this.registry.markDeviceCommandFailed(
             device.id, command.id, 'readback_mismatch',
@@ -386,7 +386,7 @@ export class DeviceControlService {
           endpoint: `http://${target.ipAddress}/rpc/Switch.GetStatus?id=${target.channel}`, targetIpAddress: target.ipAddress,
           networkScopeId: target.zone.id,
           observer: { id: result.observer.id, host: result.observer.host, platform: 'docker', localScopes: [] },
-        })
+        }, { tenantId: device.tenantId, siteId: device.siteId })
         const confirmed = result.output === on
         return {
           deviceId: device.id, action, status: confirmed ? 'success' : 'failed', adapter: 'virtual-lab',
@@ -501,7 +501,7 @@ export class DeviceControlService {
       });
       if (reportedOn !== null)
         this.registry.ingestDeviceTelemetry({
-          deviceId: device.id,
+          deviceId: device.id, tenantId: device.tenantId, siteId: device.siteId,
           values: { on: reportedOn },
           observedAt: new Date().toISOString(),
           origin: 'shelly-http',

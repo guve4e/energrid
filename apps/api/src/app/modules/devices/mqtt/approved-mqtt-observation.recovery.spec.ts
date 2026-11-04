@@ -53,13 +53,13 @@ describe('Approved observation startup recovery', () => {
 
     const internal = registry as any;
 
-    internal.liveStateByDeviceId = new Map();
+    internal.liveStateByScopedDevice = new Map();
     internal.liveApprovedDeviceConfigs = new Map();
     internal.liveDiscoveredDeviceConfigs = new Map();
     internal.commandByDeviceId = new Map();
 
-    internal.authoritativeObservationByDeviceId = new Map();
-    internal.authoritativeFieldOwnershipByDeviceId = new Map();
+    internal.authoritativeObservationByScopedDevice = new Map();
+    internal.authoritativeFieldOwnershipByScopedDevice = new Map();
 
     internal.refreshDeviceCommand = jest.fn();
     internal.observeCommandTelemetry = jest.fn();
@@ -98,6 +98,7 @@ describe('Approved observation startup recovery', () => {
   function displayed(internal: any) {
     return internal.withLiveState({
       id: binding.deviceId,
+      ...scope,
       state: {
         values: {
           temperature: 26,
@@ -169,6 +170,7 @@ describe('Approved observation startup recovery', () => {
       // Simulated old MQTT fixture arrives after recovery.
       registry.ingestDeviceTelemetry({
         deviceId: binding.deviceId,
+        ...scope,
         origin: 'legacy',
         values: {
           temperature: 26,
@@ -213,6 +215,7 @@ describe('Approved observation startup recovery', () => {
 
       registry.ingestDeviceTelemetry({
         deviceId: binding.deviceId,
+        ...scope,
         origin: 'legacy',
         values: {
           temperature: 26,
@@ -254,6 +257,7 @@ describe('Approved observation startup recovery', () => {
 
       registry.ingestDeviceTelemetry({
         deviceId: binding.deviceId,
+        ...scope,
         origin: 'legacy',
         values: { temperature: 26 },
       });

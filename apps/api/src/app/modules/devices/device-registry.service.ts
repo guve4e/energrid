@@ -149,7 +149,7 @@ export class DeviceRegistryService implements OnModuleInit {
    * Accepted observations projected from the durable Observation Engine.
    * This is a runtime projection, not the authoritative persistent store.
    */
-  private readonly authoritativeObservationByDeviceId = new Map<
+  private readonly authoritativeObservationByScopedDevice = new Map<
     string,
     {
       values: Record<string, number | boolean | string | null>;
@@ -157,7 +157,7 @@ export class DeviceRegistryService implements OnModuleInit {
     }
   >();
 
-  private readonly authoritativeFieldOwnershipByDeviceId =
+  private readonly authoritativeFieldOwnershipByScopedDevice =
     new Map<string, Set<string>>();
 
   private readonly controlBindings = new Map<
@@ -173,7 +173,7 @@ export class DeviceRegistryService implements OnModuleInit {
     DiscoveredDeviceConfig
   >();
   private readonly blockedDiscoveredDeviceIds = new Set<string>();
-  private readonly liveStateByDeviceId = new Map<
+  private readonly liveStateByScopedDevice = new Map<
     string,
     RegisteredDeviceState
   >();
@@ -1824,12 +1824,14 @@ export class DeviceRegistryService implements OnModuleInit {
   claimApprovedObservationFields(
     deviceId: string,
     fields: readonly string[],
+    scope: { tenantId: string; siteId: string },
   ): void {
     const id = safeId(deviceId);
     if (!id) return;
+    const key = scopedDeviceKey(id, scope.tenantId, scope.siteId);
 
     const owned =
-      this.authoritativeFieldOwnershipByDeviceId.get(id) ??
+      this.authoritativeFieldOwnershipByScopedDevice.get(key) ??
       new Set<string>();
 
     for (const field of fields) {
@@ -1839,7 +1841,7 @@ export class DeviceRegistryService implements OnModuleInit {
     }
 
     if (owned.size) {
-      this.authoritativeFieldOwnershipByDeviceId.set(id, owned);
+      this.authoritativeFieldOwnershipByScopedDevice.set(key, owned);
     }
   }
 
@@ -1849,14 +1851,17 @@ export class DeviceRegistryService implements OnModuleInit {
    */
   restoreApprovedObservation(payload: {
     deviceId: string;
+    scope: { tenantId: string; siteId: string };
     values: Record<string, number | boolean | string | null>;
     observedAt: string;
   }): void {
     const id = safeId(payload.deviceId);
     if (!id || !Object.keys(payload.values).length) return;
+    const scope = payload.scope;
+    const key = scopedDeviceKey(id, scope.tenantId, scope.siteId);
 
     const previous =
-      this.authoritativeObservationByDeviceId.get(id);
+      this.authoritativeObservationByScopedDevice.get(key);
 
     const values = {
       ...(previous?.values || {}),
@@ -1869,15 +1874,15 @@ export class DeviceRegistryService implements OnModuleInit {
         ? previous.observedAt
         : payload.observedAt;
 
-    this.authoritativeObservationByDeviceId.set(id, {
+    this.authoritativeObservationByScopedDevice.set(key, {
       values,
       observedAt,
     });
 
-    const live = this.liveStateByDeviceId.get(id);
+    const live = this.liveStateByScopedDevice.get(key);
     const latestObservedAt = laterObservationTime(live?.observedAt, observedAt);
 
-    this.liveStateByDeviceId.set(id, {
+    this.liveStateByScopedDevice.set(key, {
       values: {
         ...(live?.values || {}),
         ...values,
@@ -1895,31 +1900,35 @@ export class DeviceRegistryService implements OnModuleInit {
 
   projectApprovedObservation(payload: {
     deviceId: string;
+    scope: { tenantId: string; siteId: string };
     values: Record<string, number | boolean | string | null>;
     observedAt: string;
   }): void {
     const id = safeId(payload.deviceId);
     if (!id) return;
+    const scope = payload.scope;
+    const key = scopedDeviceKey(id, scope.tenantId, scope.siteId);
 
     this.claimApprovedObservationFields(
       id,
       Object.keys(payload.values),
+      scope,
     );
 
-    const previous = this.authoritativeObservationByDeviceId.get(id);
-    const live = this.liveStateByDeviceId.get(id);
+    const previous = this.authoritativeObservationByScopedDevice.get(key);
+    const live = this.liveStateByScopedDevice.get(key);
     const observedAt = laterObservationTime(previous?.observedAt, payload.observedAt);
     const values = {
       ...(previous?.values || {}),
       ...payload.values,
     };
 
-    this.authoritativeObservationByDeviceId.set(id, {
+    this.authoritativeObservationByScopedDevice.set(key, {
       values,
       observedAt,
     });
 
-    this.liveStateByDeviceId.set(id, {
+    this.liveStateByScopedDevice.set(key, {
       values: {
         ...(live?.values || {}),
         ...values,
@@ -1935,7 +1944,7 @@ export class DeviceRegistryService implements OnModuleInit {
       observerReachability: live?.observerReachability,
     });
 
-    this.publishCurrentOperationalStateChanged(id);
+    this.publishOperationalStateChanged(id, scope.tenantId, scope.siteId);
 
     this.observeCommandTelemetry(
       id,
@@ -1972,10 +1981,10 @@ export class DeviceRegistryService implements OnModuleInit {
     const incomingValues = raw.state?.values || raw.values || {};
 
     const owned =
-      this.authoritativeFieldOwnershipByDeviceId.get(id);
+      this.authoritativeFieldOwnershipByScopedDevice.get(key);
 
     const authoritative =
-      this.authoritativeObservationByDeviceId.get(id);
+      this.authoritativeObservationByScopedDevice.get(key);
 
     const keepUnowned = (
       input: Record<string, number | boolean | string | null>,
@@ -1993,7 +2002,7 @@ export class DeviceRegistryService implements OnModuleInit {
     const values = owned
       ? {
           ...keepUnowned(
-            this.liveStateByDeviceId.get(id)?.values || {},
+            this.liveStateByScopedDevice.get(key)?.values || {},
           ),
           ...unownedValues,
           ...(authoritative?.values || {}),
@@ -2002,20 +2011,21 @@ export class DeviceRegistryService implements OnModuleInit {
 
     const observedAt =
       raw.observedAt || raw.state?.observedAt || new Date().toISOString();
-    const currentState = this.liveStateByDeviceId.get(id);
+    const currentState = this.liveStateByScopedDevice.get(key);
     if (isOlderObservation(observedAt, currentState?.observedAt)) return;
     const observationId = typeof raw.observationId === 'string' &&
       /^[A-Za-z0-9:._-]{1,160}$/.test(raw.observationId)
       ? raw.observationId
       : undefined;
-    if (observationId && this.recentOperationalObservationIds.has(observationId)) return;
-    if (observationId) {
-      this.recentOperationalObservationIds.add(observationId);
+    const scopedObservationId = observationId ? `${key}:${observationId}` : undefined;
+    if (scopedObservationId && this.recentOperationalObservationIds.has(scopedObservationId)) return;
+    if (scopedObservationId) {
+      this.recentOperationalObservationIds.add(scopedObservationId);
       if (this.recentOperationalObservationIds.size > 8192)
         this.recentOperationalObservationIds.delete(this.recentOperationalObservationIds.values().next().value!);
     }
 
-    this.liveStateByDeviceId.set(id, {
+    this.liveStateByScopedDevice.set(key, {
       values,
       observedAt: laterObservationTime(observedAt, authoritative?.observedAt),
       fieldObservedAt: {
@@ -2028,7 +2038,7 @@ export class DeviceRegistryService implements OnModuleInit {
       status: normalizeOnlineStatus(
         raw.state?.status || raw.status || 'online',
       ),
-      observerReachability: this.liveStateByDeviceId.get(id)?.observerReachability,
+      observerReachability: this.liveStateByScopedDevice.get(key)?.observerReachability,
     });
     this.publishOperationalStateChanged(id, tenantId, siteId);
     this.observeCommandTelemetry(
@@ -2076,33 +2086,25 @@ export class DeviceRegistryService implements OnModuleInit {
       this.getApprovedDevicesFromConfig(true).some(device =>
         device.id === id && device.tenantId === tenantId && device.siteId === siteId);
     if (!approved) return;
-    const state = this.liveStateByDeviceId.get(id);
+    const state = this.liveStateByScopedDevice.get(deviceKey);
     if (!state) return;
+    // Keep the SSE projection consistent with the device snapshot: legacy-only
+    // fields must not refresh an older approved measurement or own its source.
+    const approvedObservation = this.authoritativeObservationByScopedDevice.get(deviceKey);
     this.operationalStateChanged.next({
       sequence: ++this.operationalStateEventSequence,
       tenantId,
       siteId,
       deviceId: id,
       state: {
-        values: { ...state.values },
-        observedAt: state.observedAt,
+        values: { ...state.values, ...(approvedObservation?.values || {}) },
+        observedAt: approvedObservation?.observedAt || state.observedAt,
         ...(state.fieldObservedAt ? { fieldObservedAt: { ...state.fieldObservedAt } } : {}),
-        source: state.source,
+        source: approvedObservation ? 'approved-observation' : state.source,
         status: state.status,
         observerReachability: state.observerReachability,
       },
     });
-  }
-
-  private publishCurrentOperationalStateChanged(id: string): void {
-    const owners = new Map(this.getApprovedDevicesFromConfig(true)
-      .filter(device => device.id === id)
-      .map(device => [scopedDeviceKey(id, device.tenantId, device.siteId), {
-        tenantId: device.tenantId, siteId: device.siteId,
-      }]));
-    if (owners.size !== 1) return;
-    const owner = owners.values().next().value;
-    if (owner) this.publishOperationalStateChanged(id, owner.tenantId, owner.siteId);
   }
 
   ingestDeviceStatus(payload: unknown): void {
@@ -2110,16 +2112,20 @@ export class DeviceRegistryService implements OnModuleInit {
 
     const raw = payload as {
       deviceId?: string;
+      tenantId?: string;
+      siteId?: string;
       status?: string;
       observedAt?: string;
     };
     const id = safeId(raw.deviceId);
     if (!id) return;
+    const fallbackOwner = configuredInstallationSite();
+    const key = scopedDeviceKey(id, raw.tenantId || fallbackOwner.tenantId, raw.siteId || fallbackOwner.siteId);
 
-    const current = this.liveStateByDeviceId.get(id);
+    const current = this.liveStateByScopedDevice.get(key);
     const observedAt = raw.observedAt || current?.observedAt || new Date().toISOString();
     if (isOlderObservation(observedAt, current?.observedAt)) return;
-    this.liveStateByDeviceId.set(id, {
+    this.liveStateByScopedDevice.set(key, {
       values: current?.values || {},
       observedAt,
       fieldObservedAt: current?.fieldObservedAt,
@@ -2132,11 +2138,13 @@ export class DeviceRegistryService implements OnModuleInit {
   recordObserverReachability(
     deviceId: string,
     observerReachability: NonNullable<RegisteredDeviceState['observerReachability']>,
+    scope: { tenantId: string; siteId: string } = configuredInstallationSite(),
   ): void {
     const id = safeId(deviceId);
     if (!id) return;
-    const current = this.liveStateByDeviceId.get(id);
-    this.liveStateByDeviceId.set(id, {
+    const key = scopedDeviceKey(id, scope.tenantId, scope.siteId);
+    const current = this.liveStateByScopedDevice.get(key);
+    this.liveStateByScopedDevice.set(key, {
       values: current?.values || {},
       observedAt: current?.observedAt || null,
       fieldObservedAt: current?.fieldObservedAt,
@@ -2172,10 +2180,11 @@ export class DeviceRegistryService implements OnModuleInit {
   }
 
   private withLiveState(device: RegisteredDevice): RegisteredDevice {
-    const liveState = this.liveStateByDeviceId.get(device.id);
+    const key = scopedDeviceKey(device.id, device.tenantId, device.siteId);
+    const liveState = this.liveStateByScopedDevice.get(key);
     const command = this.refreshDeviceCommand(device.id);
-    const authoritative = this.authoritativeObservationByDeviceId.get(device.id);
-    const owned = this.authoritativeFieldOwnershipByDeviceId.get(device.id);
+    const authoritative = this.authoritativeObservationByScopedDevice.get(key);
+    const owned = this.authoritativeFieldOwnershipByScopedDevice.get(key);
 
     if (!liveState && !command && !authoritative && !owned?.size) return device;
 
@@ -2193,8 +2202,10 @@ export class DeviceRegistryService implements OnModuleInit {
           ...(authoritative?.values || {}),
         },
         ...(authoritative ? {
-          observedAt: laterObservationTime(liveState?.observedAt, authoritative.observedAt),
-          source: liveState?.source || 'approved-observation',
+          // A newer unowned field (such as battery) does not refresh the
+          // authoritative temperature/humidity measurement.
+          observedAt: authoritative.observedAt,
+          source: 'approved-observation',
         } : {}),
         ...(command ? { command } : {}),
       },

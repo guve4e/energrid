@@ -147,6 +147,7 @@ export class ApprovedMqttObservationRoute {
       this.registry.claimApprovedObservationFields(
         binding.deviceId,
         ownedFields,
+        scope,
       );
 
       const state = await this.store.getState(
@@ -181,7 +182,7 @@ export class ApprovedMqttObservationRoute {
         );
 
       this.registry.restoreApprovedObservation({
-        deviceId: binding.deviceId,
+        deviceId: binding.deviceId, scope,
         values,
         observedAt,
       });
@@ -268,7 +269,7 @@ export class ApprovedMqttObservationRoute {
       }
       if (outcome.accepted && outcome.state) {
         const values = Object.fromEntries(Object.entries(outcome.state.fields).map(([key, field]) => [key, field.value]));
-        this.registry.projectApprovedObservation({ deviceId: binding.deviceId, values, observedAt: new Date().toISOString() });
+        this.registry.projectApprovedObservation({ deviceId: binding.deviceId, scope, values, observedAt: new Date().toISOString() });
       }
       return { outcome: 'admitted' };
     }
@@ -308,7 +309,7 @@ export class ApprovedMqttObservationRoute {
     // The durable state transition has completed.
     // Now project the accepted state into the existing registry.
     this.registry.projectApprovedObservation({
-      deviceId: binding.deviceId,
+      deviceId: binding.deviceId, scope,
       values,
       observedAt: receivedAt,
     });

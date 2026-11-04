@@ -10,12 +10,12 @@ describe('Authoritative observation registry projection', () => {
 
     const internal = registry as any;
 
-    internal.liveStateByDeviceId = new Map();
+    internal.liveStateByScopedDevice = new Map();
     internal.commandByDeviceId = new Map();
     internal.liveApprovedDeviceConfigs = new Map();
     internal.liveDiscoveredDeviceConfigs = new Map();
-    internal.authoritativeObservationByDeviceId = new Map();
-    internal.authoritativeFieldOwnershipByDeviceId = new Map();
+    internal.authoritativeObservationByScopedDevice = new Map();
+    internal.authoritativeFieldOwnershipByScopedDevice = new Map();
 
     // Prevent unrelated command-reconciliation dependencies
     // from running in this focused test.
@@ -33,6 +33,8 @@ describe('Authoritative observation registry projection', () => {
   function displayedValues(internal: any, deviceId: string) {
     const device = {
       id: deviceId,
+      tenantId: process.env.PORTAL_TENANT_ID || 'tenant-demo',
+      siteId: process.env.PORTAL_SITE_ID || process.env.HOME_SITE_ID || 'site-home',
       state: {
         values: {},
         observedAt: null,
@@ -51,6 +53,7 @@ describe('Authoritative observation registry projection', () => {
 
     registry.projectApprovedObservation({
       deviceId: 'virtual-temp',
+      scope: { tenantId: process.env.PORTAL_TENANT_ID || 'tenant-demo', siteId: process.env.PORTAL_SITE_ID || process.env.HOME_SITE_ID || 'site-home' },
       values: {
         temperature: 21.8,
         humidity: 43,
@@ -109,12 +112,15 @@ describe('Authoritative observation registry projection', () => {
 
     registry.projectApprovedObservation({
       deviceId: 'virtual-temp',
+      scope: { tenantId: process.env.PORTAL_TENANT_ID || 'tenant-demo', siteId: process.env.PORTAL_SITE_ID || process.env.HOME_SITE_ID || 'site-home' },
       values: { temperature: 21.8 },
       observedAt: '2026-10-18T12:00:00.000Z',
     });
 
     const device = {
       id: 'virtual-temp',
+      tenantId: process.env.PORTAL_TENANT_ID || 'tenant-demo',
+      siteId: process.env.PORTAL_SITE_ID || process.env.HOME_SITE_ID || 'site-home',
       state: {
         values: { temperature: 26, battery: 80 },
         observedAt: '2026-10-18T11:00:00.000Z',

@@ -154,7 +154,7 @@ export class ApprovedMqttObservationRuntime
         const fields = Object.fromEntries(selected.map(([key, item]) => [key, item.value]));
         const observedAt = selected.map(([, field]) => field.receivedAt)
           .reduce((latest, current) => Date.parse(current) > Date.parse(latest) ? current : latest);
-        this.registry.projectApprovedObservation({ deviceId: input.deviceId, values: fields, observedAt });
+        this.registry.projectApprovedObservation({ deviceId: input.deviceId, scope: input.scope, values: fields, observedAt });
       }
     }
     return result;
@@ -240,7 +240,7 @@ export class ApprovedMqttObservationRuntime
         .map(field => field.measuredAt ?? field.receivedAt)
         .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
       if (Object.keys(fields).length && observedAt) {
-        this.registry.projectApprovedObservation({ deviceId, values: fields, observedAt });
+        this.registry.projectApprovedObservation({ deviceId, scope, values: fields, observedAt });
       }
     }
     return { ...result, deviceId, scope };

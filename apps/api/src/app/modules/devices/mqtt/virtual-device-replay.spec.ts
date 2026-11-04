@@ -56,12 +56,12 @@ describe('Virtual device replay', () => {
 
     const internal = registry as any;
 
-    internal.liveStateByDeviceId = new Map();
+    internal.liveStateByScopedDevice = new Map();
     internal.liveApprovedDeviceConfigs = new Map();
     internal.liveDiscoveredDeviceConfigs = new Map();
     internal.commandByDeviceId = new Map();
-    internal.authoritativeObservationByDeviceId = new Map();
-    internal.authoritativeFieldOwnershipByDeviceId = new Map();
+    internal.authoritativeObservationByScopedDevice = new Map();
+    internal.authoritativeFieldOwnershipByScopedDevice = new Map();
 
     internal.refreshDeviceCommand = jest.fn();
     internal.observeCommandTelemetry = jest.fn();
@@ -105,6 +105,7 @@ describe('Virtual device replay', () => {
     function state() {
       return internal.withLiveState({
         id: deviceId,
+        ...scope,
         state: {
           values: {},
           observedAt: null,
@@ -175,6 +176,7 @@ describe('Virtual device replay', () => {
       // Simulate the conflicting legacy fixture.
       first.registry.ingestDeviceTelemetry({
         deviceId,
+        ...scope,
         origin: 'legacy',
         values: {
           temperature: 26,
@@ -220,6 +222,7 @@ describe('Virtual device replay', () => {
       // A legacy message still cannot overwrite the reading.
       restarted.registry.ingestDeviceTelemetry({
         deviceId,
+        ...scope,
         origin: 'legacy',
         values: {
           temperature: 26,

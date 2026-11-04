@@ -141,6 +141,113 @@ describe('DeviceRegistryService', () => {
     expect(devices[0].trustStatus).toBe('approved');
   });
 
+  it('does not let newer legacy battery telemetry refresh approved measurements in snapshots or SSE', () => {
+    const scope = { tenantId: 'tenant-a', siteId: 'site-1' };
+    const deviceId = 'mixed-telemetry-sensor';
+    process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({
+      devices: [{ deviceId, ...scope, protocol: 'mqtt', capabilities: ['temperature'] }],
+    });
+    const registry = new DeviceRegistryService();
+    const events: Array<{ state: { values: Record<string, unknown>; source: string; observedAt: string | null; fieldObservedAt?: Record<string, string> } }> = [];
+    const subscription = registry.streamOperationalStateChanges().subscribe(event => events.push(event));
+    const approvedAt = '2026-10-18T12:00:00.000Z';
+    const legacyAt = '2026-10-18T12:01:00.000Z';
+    registry.projectApprovedObservation({
+      deviceId, scope, values: { temperature: 21.8 }, observedAt: approvedAt,
+    });
+    registry.ingestDeviceTelemetry({
+      deviceId, ...scope, origin: 'legacy', values: { temperature: 26, battery: 91 }, observedAt: legacyAt,
+    });
+    const state = registry.getDevices(true).find(device => device.id === deviceId &&
+      device.tenantId === scope.tenantId && device.siteId === scope.siteId)!.state;
+    expect(state.values).toMatchObject({ temperature: 21.8, battery: 91 });
+    expect(state.source).toBe('approved-observation');
+    expect(state.observedAt).toBe(approvedAt);
+    expect(state.fieldObservedAt).toMatchObject({ temperature: approvedAt, battery: legacyAt });
+    expect(events).toHaveLength(2);
+    expect(events[1].state).toMatchObject({
+      values: { temperature: 21.8, battery: 91 },
+      source: 'approved-observation', observedAt: approvedAt,
+    });
+    subscription.unsubscribe();
+  });
+
+  it('isolates operational state, freshness and observation IDs across tenant/site scopes', () => {
+    const deviceId = 'shared-sensor';
+    const scopes = [
+      { tenantId: 'tenant-a', siteId: 'site-1' },
+      { tenantId: 'tenant-a', siteId: 'site-2' },
+      { tenantId: 'tenant-b', siteId: 'site-1' },
+    ];
+    process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({
+      devices: scopes.map((scope) => ({
+        deviceId, ...scope, protocol: 'http', driver: 'energrid-esp8266',
+        capabilities: ['temperature'],
+      })),
+    });
+    const registry = new DeviceRegistryService();
+    const events: { tenantId: string; siteId: string; state: { values: Record<string, unknown> } }[] = [];
+    const subscription = registry.streamOperationalStateChanges().subscribe(event => events.push(event));
+    const at = '2026-11-04T09:00:00.000Z';
+    for (const [index, scope] of scopes.entries()) {
+      registry.ingestDeviceTelemetry({
+        deviceId, ...scope, observationId: 'same-source:42',
+        observedAt: at, values: { temperature: 20 + index },
+      });
+    }
+    expect(events).toHaveLength(3);
+    expect(events.map(event => `${event.tenantId}/${event.siteId}`)).toEqual(
+      scopes.map(scope => `${scope.tenantId}/${scope.siteId}`),
+    );
+    expect(events.map(event => event.state.values.temperature)).toEqual([20, 21, 22]);
+    subscription.unsubscribe();
+    const listed = registry.getDevices(true).filter(device => device.id === deviceId);
+    expect(listed).toHaveLength(3);
+    for (const [index, scope] of scopes.entries()) {
+      const state = listed.find(device => device.tenantId === scope.tenantId && device.siteId === scope.siteId)!.state;
+      expect(state.values.temperature).toBe(20 + index);
+      expect(state.observedAt).toBe(at);
+    }
+    registry.ingestDeviceStatus({ deviceId, ...scopes[1], status: 'offline', observedAt: '2026-11-04T09:00:01.000Z' });
+    const refreshed = registry.getDevices(true).filter(device => device.id === deviceId);
+    expect(refreshed.find(device => device.tenantId === scopes[0].tenantId && device.siteId === scopes[0].siteId)?.state.status).toBe('online');
+    expect(refreshed.find(device => device.tenantId === scopes[1].tenantId && device.siteId === scopes[1].siteId)?.state.status).toBe('offline');
+  });
+
+  it('isolates approved field ownership and restored measurements across scopes', () => {
+    const deviceId = 'shared-measurement';
+    const a = { tenantId: 'tenant-a', siteId: 'site-1' };
+    const b = { tenantId: 'tenant-b', siteId: 'site-1' };
+    process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({
+      devices: [a, b].map((scope) => ({
+        deviceId, ...scope, protocol: 'mqtt', capabilities: ['temperature'],
+      })),
+    });
+    const registry = new DeviceRegistryService();
+    registry.claimApprovedObservationFields(deviceId, ['temperature'], a);
+    registry.restoreApprovedObservation({
+      deviceId, scope: a, values: { temperature: 21.5 }, observedAt: '2026-11-04T09:00:00.000Z',
+    });
+    registry.ingestDeviceTelemetry({
+      deviceId, ...a, values: { temperature: 99, battery: 80 }, observedAt: '2026-11-04T09:00:01.000Z',
+    });
+    registry.ingestDeviceTelemetry({
+      deviceId, ...b, values: { temperature: 27.8, battery: 90 }, observedAt: '2026-11-04T09:00:02.000Z',
+    });
+    const listed = registry.getDevices(true).filter(device => device.id === deviceId);
+    const aState = listed.find(device => device.tenantId === a.tenantId && device.siteId === a.siteId)!.state;
+    const bState = listed.find(device => device.tenantId === b.tenantId && device.siteId === b.siteId)!.state;
+    expect(aState.values).toMatchObject({ temperature: 21.5, battery: 80 });
+    expect(bState.values).toMatchObject({ temperature: 27.8, battery: 90 });
+
+    registry.projectApprovedObservation({
+      deviceId, scope: b, values: { temperature: 28.1 }, observedAt: '2026-11-04T09:00:03.000Z',
+    });
+    const afterward = registry.getDevices(true).filter(device => device.id === deviceId);
+    expect(afterward.find(device => device.tenantId === a.tenantId)?.state.values.temperature).toBe(21.5);
+    expect(afterward.find(device => device.tenantId === b.tenantId)?.state.values.temperature).toBe(28.1);
+  });
+
   it('returns a device-first snapshot with logical and physical devices', () => {
     process.env.PORTAL_KITCHEN_TEMP_C = '23.6';
     process.env.HOME_KITCHEN_LIGHT_SHELLY_RPC_DEVICES =
@@ -594,7 +701,7 @@ describe('DeviceRegistryService', () => {
       state: { source: 'site-local-http-rpc:mac-eero-en0', status: 'online', values: { on: true } },
     });
     service.projectApprovedObservation({
-      deviceId, values: { power: 4.2 }, observedAt: '2026-11-01T10:00:05.000Z',
+      deviceId, scope: { tenantId: 'tenant-demo', siteId: 'site-home' }, values: { power: 4.2 }, observedAt: '2026-11-01T10:00:05.000Z',
     });
     expect(service.getDevices().find(device => device.id === deviceId)?.state).toMatchObject({
       values: { on: true, power: 4.2 },
@@ -647,9 +754,9 @@ describe('DeviceRegistryService', () => {
     const service = new DeviceRegistryService();
     const events: any[] = [];
     service.streamOperationalStateChanges().subscribe(event => events.push(event));
-    service.restoreApprovedObservation({ deviceId, values: { temperature: 20 }, observedAt: '2026-11-01T10:00:00.000Z' });
+    service.restoreApprovedObservation({ deviceId, scope: { tenantId: 'tenant-demo', siteId: 'site-home' }, values: { temperature: 20 }, observedAt: '2026-11-01T10:00:00.000Z' });
     expect(events).toHaveLength(0);
-    service.projectApprovedObservation({ deviceId, values: { temperature: 21 }, observedAt: '2026-11-01T10:00:01.000Z' });
+    service.projectApprovedObservation({ deviceId, scope: { tenantId: 'tenant-demo', siteId: 'site-home' }, values: { temperature: 21 }, observedAt: '2026-11-01T10:00:01.000Z' });
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ siteId: 'site-home', deviceId, state: { values: { temperature: 21 }, observedAt: '2026-11-01T10:00:01.000Z' } });
   });

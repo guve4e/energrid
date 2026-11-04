@@ -362,7 +362,7 @@ describe('DeviceHttpPollService', () => {
     expect(registry.recordObserverReachability).toHaveBeenCalledWith(device.id, expect.objectContaining({
       status: 'unreachable', targetIpAddress: '192.168.1.198', networkScopeId: 'upstream-lan', reason: 'request_timeout',
       observer: expect.objectContaining({ host: expect.any(String), localScopes: expect.any(Array) }),
-    }))
+    }), expect.objectContaining({ tenantId: 'tenant-demo', siteId: 'site-home' }))
   })
 
   it('records only same-identity firmware diagnostics without blocking accepted observations when diagnostics fail', async () => {
@@ -539,7 +539,7 @@ describe('DeviceHttpPollService', () => {
     expect(registry.ingestDeviceStatus).not.toHaveBeenCalledWith(expect.objectContaining({ deviceId: device.id, status: 'offline' }))
     expect(registry.recordObserverReachability).toHaveBeenCalledWith(device.id, expect.objectContaining({
       status: 'unreachable', targetIpAddress: '192.168.1.198', networkScopeId: 'upstream-lan',
-    }))
+    }), expect.objectContaining({ tenantId: 'tenant-demo', siteId: 'site-home' }))
   })
 
   it('does not ingest status data when the endpoint firmware identity differs', async () => {
