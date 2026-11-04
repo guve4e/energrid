@@ -16,7 +16,7 @@ describe('PortalStateService', () => {
     process.env = originalEnv
   })
 
-  function createService() {
+  function createService(registry = new DeviceRegistryService()) {
     const observation = {
       getAll: () => [],
     };
@@ -32,7 +32,7 @@ describe('PortalStateService', () => {
     };
 
     return new PortalStateService(
-      new DeviceRegistryService(),
+      registry,
       {
         getLastScan: () => [],
         getZones: () => [],
@@ -55,6 +55,27 @@ describe('PortalStateService', () => {
       investigation as never,
     );
   }
+
+  it('does not show another tenant or site command execution trace', () => {
+    process.env.PORTAL_TENANT_ID = 'tenant-demo';
+    process.env.PORTAL_SITE_ID = 'site-home';
+    const registry = new DeviceRegistryService();
+    const ourSite = { tenantId: 'tenant-demo', siteId: 'site-home' };
+    const otherSite = { tenantId: 'tenant-b', siteId: 'site-home' };
+    const ours = registry.markDeviceCommandPending('shared-relay', {
+      scope: ourSite, action: 'turn_on', expectedValues: { on: true },
+    });
+    registry.markDeviceCommandPending('shared-relay', {
+      scope: otherSite, action: 'turn_off', expectedValues: { on: false },
+    });
+    registry.markDeviceCommandPending('shared-relay', {
+      scope: { tenantId: 'tenant-demo', siteId: 'site-other' },
+      action: 'turn_off', expectedValues: { on: false },
+    });
+    const state = createService(registry).getState();
+    expect(state.executionTraces.map(trace => trace.commandId)).toEqual([ours.id]);
+    expect(state.executionTraces[0]).toMatchObject(ourSite);
+  });
 
   it('returns a demo portal state with kitchen temperature and voice config', () => {
     process.env.PORTAL_KITCHEN_TEMP_C = '23.7'

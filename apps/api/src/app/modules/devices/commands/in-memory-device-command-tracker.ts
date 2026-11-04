@@ -1,9 +1,9 @@
 import type { DeviceExecutionTrace, DeviceExecutionTraceStage, RegisteredDeviceState } from '../device-registry.types';
-import type { CommandClock, CommandEventSink, CommandTrackerSettings, DeviceCommandTracker, ExecutionDiagnosisProvider } from './device-command-tracker';
+import type { CommandClock, CommandEventSink, CommandTrackerSettings, CommandScope, DeviceCommandTracker, ExecutionDiagnosisProvider } from './device-command-tracker';
 
 /** Owns command state and execution evidence; no transport, storage, or framework dependencies. */
 export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
-  private readonly commandByDeviceId = new Map<
+  private readonly commandByScopedDevice = new Map<
     string,
     NonNullable<RegisteredDeviceState['command']> & {
       expiresAt: number;
@@ -23,7 +23,7 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
     }
   >();
 
-  private readonly latestCommandIdByDeviceId = new Map<string, string>();
+  private readonly latestCommandIdByScopedDevice = new Map<string, string>();
   private commandSequence = 0;
 
   constructor(
@@ -33,15 +33,17 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
     private readonly operationalLog?: CommandEventSink,
   ) {}
 
-  getCommand(deviceId: string): NonNullable<RegisteredDeviceState['command']> | undefined {
-    this.refreshDeviceCommand(deviceId);
-    const command = this.commandByDeviceId.get(deviceId);
+  getCommand(deviceId: string, scope: CommandScope): NonNullable<RegisteredDeviceState['command']> | undefined {
+    const key = scopedCommandKey(deviceId, scope);
+    this.refreshDeviceCommand(key, deviceId);
+    const command = this.commandByScopedDevice.get(key);
     return command ? commandForState(command) : undefined;
   }
 
   markDeviceCommandPending(
     deviceId: string,
     command: {
+      scope: CommandScope;
       action: NonNullable<RegisteredDeviceState['command']>['action'];
       expectedValues: Record<string, number | boolean | string | null>;
       message?: string;
@@ -55,8 +57,9 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
   ): NonNullable<RegisteredDeviceState['command']> {
     const now = this.clock.now();
     const requestedAt = new Date(now).toISOString();
+    const key = scopedCommandKey(deviceId, command.scope);
 
-    const previousCommandId = this.latestCommandIdByDeviceId.get(deviceId);
+    const previousCommandId = this.latestCommandIdByScopedDevice.get(key);
     const previousTrace = previousCommandId
       ? this.executionTraceByCommandId.get(previousCommandId)
       : null;
@@ -95,7 +98,7 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
       displayUntil:
         now + this.settings.ackTimeoutMs() + 30000,
     };
-    this.commandByDeviceId.set(deviceId, pending);
+    this.commandByScopedDevice.set(key, pending);
 
     const trace: DeviceExecutionTrace & {
       expiresAt: number;
@@ -108,6 +111,8 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
       id: pending.id,
       commandId: pending.id,
       deviceId,
+      tenantId: command.scope.tenantId,
+      siteId: command.scope.siteId,
 
       actor: command.actor
         ? { ...command.actor }
@@ -142,7 +147,7 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
     };
 
     this.executionTraceByCommandId.set(trace.commandId, trace);
-    this.latestCommandIdByDeviceId.set(deviceId, trace.commandId);
+    this.latestCommandIdByScopedDevice.set(key, trace.commandId);
     this.trimExecutionTraces();
 
     this.operationalLog?.record({
@@ -192,7 +197,8 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
     if (!trace || trace.deviceId !== deviceId) return null;
 
     // A late transport callback must never change a newer (or acknowledged) command.
-    const command = this.commandByDeviceId.get(deviceId);
+    const key = scopedCommandKey(deviceId, trace);
+    const command = this.commandByScopedDevice.get(key);
     if (
       trace.outcome !== 'running' ||
       !command ||
@@ -208,15 +214,16 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
       observedAt,
       message,
     });
-    this.failCurrentCommand(deviceId, command, message, now);
+    this.failCurrentCommand(deviceId, key, command, message, now);
     this.completeExecutionTrace(trace, 'failed', observedAt);
     return publicExecutionTrace(trace);
   }
 
-  getExecutionTraces(limit = 50): DeviceExecutionTrace[] {
+  getExecutionTraces(scope: CommandScope, limit = 50): DeviceExecutionTrace[] {
     this.refreshExecutionTraces();
 
     return [...this.executionTraceByCommandId.values()]
+      .filter(trace => trace.tenantId === scope.tenantId && trace.siteId === scope.siteId)
       .sort(
         (left, right) =>
           Date.parse(right.requestedAt) - Date.parse(left.requestedAt),
@@ -225,10 +232,10 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
       .map(publicExecutionTrace);
   }
 
-  getLatestExecutionTrace(deviceId: string): DeviceExecutionTrace | null {
+  getLatestExecutionTrace(deviceId: string, scope: CommandScope): DeviceExecutionTrace | null {
     this.refreshExecutionTraces();
 
-    const commandId = this.latestCommandIdByDeviceId.get(deviceId);
+    const commandId = this.latestCommandIdByScopedDevice.get(scopedCommandKey(deviceId, scope));
     if (!commandId) return null;
 
     const trace = this.executionTraceByCommandId.get(commandId);
@@ -241,8 +248,9 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
     reason: 'pre_write' | 'readback_mismatch',
     message: string,
   ): NonNullable<RegisteredDeviceState['command']> | null {
-    const command = this.commandByDeviceId.get(deviceId);
     const trace = this.executionTraceByCommandId.get(commandId);
+    const key = trace ? scopedCommandKey(deviceId, trace) : null;
+    const command = key ? this.commandByScopedDevice.get(key) : undefined;
     if (
       !command || command.id !== commandId || command.status !== 'pending' ||
       !trace || trace.deviceId !== deviceId || trace.outcome !== 'running'
@@ -256,13 +264,14 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
       observedAt,
       message,
     });
-    const failed = this.failCurrentCommand(deviceId, command, message, now);
+    const failed = this.failCurrentCommand(deviceId, key!, command, message, now);
     this.completeExecutionTrace(trace, 'failed', observedAt);
     return commandForState(failed);
   }
 
   private failCurrentCommand(
     deviceId: string,
+    key: string,
     command: NonNullable<RegisteredDeviceState['command']> & { expiresAt: number; displayUntil: number },
     message: string,
     now: number,
@@ -274,7 +283,7 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
       expiresAt: now,
       displayUntil: now + 30000,
     };
-    this.commandByDeviceId.set(deviceId, failed);
+    this.commandByScopedDevice.set(key, failed);
     this.operationalLog?.record({
       level: 'error',
       source: 'device-control',
@@ -296,14 +305,16 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
     values: Record<string, number | boolean | string | null>,
     observedAt: string,
     evidenceCommandId: string | null,
+    scope: CommandScope,
     reason?: string,
   ): void {
-    this.refreshDeviceCommand(deviceId);
+    const key = scopedCommandKey(deviceId, scope);
+    this.refreshDeviceCommand(key, deviceId);
     this.refreshExecutionTraces();
 
-    const command = this.commandByDeviceId.get(deviceId);
+    const command = this.commandByScopedDevice.get(key);
     if (!command || command.status !== 'pending') {
-      this.observePossibleDrift(deviceId, values, observedAt);
+      this.observePossibleDrift(key, values, observedAt);
       return;
     }
 
@@ -360,7 +371,7 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
     const now = this.clock.now();
     const nowIso = new Date(now).toISOString();
 
-    this.commandByDeviceId.set(deviceId, {
+    this.commandByScopedDevice.set(key, {
       ...command,
       status: 'acked',
       message: 'Device reported the requested state.',
@@ -423,11 +434,11 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
   }
 
   private observePossibleDrift(
-    deviceId: string,
+    key: string,
     values: Record<string, number | boolean | string | null>,
     observedAt: string,
   ): void {
-    const commandId = this.latestCommandIdByDeviceId.get(deviceId);
+    const commandId = this.latestCommandIdByScopedDevice.get(key);
     if (!commandId) return;
 
     const trace = this.executionTraceByCommandId.get(commandId);
@@ -527,21 +538,22 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
     for (const trace of traces.slice(maxTraces)) {
       this.executionTraceByCommandId.delete(trace.commandId);
 
+      const key = scopedCommandKey(trace.deviceId, trace);
       if (
-        this.latestCommandIdByDeviceId.get(trace.deviceId) === trace.commandId
+        this.latestCommandIdByScopedDevice.get(key) === trace.commandId
       ) {
-        this.latestCommandIdByDeviceId.delete(trace.deviceId);
+        this.latestCommandIdByScopedDevice.delete(key);
       }
     }
   }
 
-  private refreshDeviceCommand(deviceId: string): void {
-    const command = this.commandByDeviceId.get(deviceId);
+  private refreshDeviceCommand(key: string, deviceId: string): void {
+    const command = this.commandByScopedDevice.get(key);
     if (!command) return;
 
     const now = this.clock.now();
     if (command.status === 'pending' && now > command.expiresAt) {
-      this.commandByDeviceId.set(deviceId, {
+      this.commandByScopedDevice.set(key, {
         ...command,
         status: 'no_ack',
         message: 'Command was published, but no matching telemetry arrived.',
@@ -563,7 +575,7 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
     }
 
     if (command.status !== 'pending' && now > command.displayUntil) {
-      this.commandByDeviceId.delete(deviceId);
+      this.commandByScopedDevice.delete(key);
     }
   }
 }
@@ -633,6 +645,8 @@ function publicExecutionTrace(
     id: trace.id,
     commandId: trace.commandId,
     deviceId: trace.deviceId,
+    tenantId: trace.tenantId,
+    siteId: trace.siteId,
 
     actor: { ...trace.actor },
 
@@ -673,4 +687,12 @@ function valuesMatch(
   return Object.entries(expected).every(
     ([key, value]) => actual[key] === value,
   );
+}
+
+/** A device ID is only unique inside its tenant/site installation. */
+function scopedCommandKey(deviceId: string, scope: CommandScope): string {
+  if (!deviceId || !scope.tenantId || !scope.siteId) {
+    throw new Error('A command requires a complete tenant/site/device identity.');
+  }
+  return `${encodeURIComponent(scope.tenantId)}:${encodeURIComponent(scope.siteId)}:${encodeURIComponent(deviceId)}`;
 }

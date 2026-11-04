@@ -67,7 +67,7 @@ export class DeviceDiagnosticsService {
       checkedAt: new Date().toISOString(),
     });
     const binding = device.control?.binding;
-    const trace = this.registry.getLatestExecutionTrace(device.id);
+    const trace = this.registry.getLatestExecutionTrace(device.id, device);
     const debug = this.mqtt.getDebugState();
     const evidence: DeviceConnectionEvidence = {
       deviceId: device.id,

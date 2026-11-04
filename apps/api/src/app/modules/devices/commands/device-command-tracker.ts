@@ -5,7 +5,10 @@ import type { OperationalLogEntry } from '../operational-log.service';
 export const DEVICE_COMMAND_TRACKER = Symbol('DEVICE_COMMAND_TRACKER');
 export type DeviceCommand = NonNullable<RegisteredDeviceState['command']>;
 export type CommandValues = Record<string, number | boolean | string | null>;
+export interface CommandScope { tenantId: string; siteId: string }
 export interface CommandRequest {
+  /** Ownership comes from the enrolled device, never from client input. */
+  scope: CommandScope;
   action: DeviceCommand['action'];
   expectedValues: CommandValues;
   message?: string;
@@ -32,8 +35,8 @@ export interface DeviceCommandTracker {
   markDeviceCommandPublished(deviceId: string, commandId: string, evidence?: CommandPublication): DeviceExecutionTrace | null;
   markDeviceCommandTransportFailed(deviceId: string, commandId: string, message: string): DeviceExecutionTrace | null;
   markDeviceCommandFailed(deviceId: string, commandId: string, reason: 'pre_write' | 'readback_mismatch', message: string): DeviceCommand | null;
-  getCommand(deviceId: string): DeviceCommand | undefined;
-  getExecutionTraces(limit?: number): DeviceExecutionTrace[];
-  getLatestExecutionTrace(deviceId: string): DeviceExecutionTrace | null;
-  observeTelemetry(deviceId: string, values: CommandValues, observedAt: string, evidenceCommandId: string | null, reason?: string): void;
+  getCommand(deviceId: string, scope: CommandScope): DeviceCommand | undefined;
+  getExecutionTraces(scope: CommandScope, limit?: number): DeviceExecutionTrace[];
+  getLatestExecutionTrace(deviceId: string, scope: CommandScope): DeviceExecutionTrace | null;
+  observeTelemetry(deviceId: string, values: CommandValues, observedAt: string, evidenceCommandId: string | null, scope: CommandScope, reason?: string): void;
 }

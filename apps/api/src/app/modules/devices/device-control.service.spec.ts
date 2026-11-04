@@ -66,7 +66,7 @@ describe('DeviceControlService', () => {
     const actor = { type: 'user' as const, id: 'operator-42', name: 'Operator' };
 
     const result = await service.execute('kitchen.island.light', 'turn_on', actor);
-    expect(registry.getLatestExecutionTrace('kitchen.island.light')?.actor).toEqual(actor);
+    expect(registry.getLatestExecutionTrace('kitchen.island.light', { tenantId: 'tenant-demo', siteId: 'site-home' })?.actor).toEqual(actor);
 
     expect(result).toEqual(
       expect.objectContaining({

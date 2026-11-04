@@ -591,7 +591,7 @@ describe('DeviceRegistryService', () => {
   it('tracks a pending command until matching telemetry acknowledges it', () => {
     const service = new DeviceRegistryService();
 
-    const pending = service.markDeviceCommandPending('kitchen_light', {
+    const pending = service.markDeviceCommandPending('kitchen_light', { scope: { tenantId: 'tenant-demo', siteId: 'site-home' },
       action: 'turn_on',
       expectedValues: { on: true },
       ttlMs: 5000,
@@ -764,13 +764,13 @@ describe('DeviceRegistryService', () => {
   it('stores a running diagnosis when an execution is created', () => {
     const service = new DeviceRegistryService();
 
-    service.markDeviceCommandPending('kitchen_light', {
+    service.markDeviceCommandPending('kitchen_light', { scope: { tenantId: 'tenant-demo', siteId: 'site-home' },
       action: 'turn_on',
       expectedValues: { on: true },
       ttlMs: 5000,
     });
 
-    const trace = service.getExecutionTraces()[0];
+    const trace = service.getExecutionTraces({ tenantId: 'tenant-demo', siteId: 'site-home' })[0];
 
     expect(trace).toEqual(
       expect.objectContaining({
@@ -788,7 +788,7 @@ describe('DeviceRegistryService', () => {
   it('stores an acknowledgement-missing diagnosis when an execution times out', () => {
     const service = new DeviceRegistryService();
 
-    service.markDeviceCommandPending('kitchen_light', {
+    service.markDeviceCommandPending('kitchen_light', { scope: { tenantId: 'tenant-demo', siteId: 'site-home' },
       action: 'turn_on',
       expectedValues: { on: true },
       ttlMs: 1,
@@ -796,7 +796,7 @@ describe('DeviceRegistryService', () => {
 
     jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 10);
 
-    const trace = service.getExecutionTraces()[0];
+    const trace = service.getExecutionTraces({ tenantId: 'tenant-demo', siteId: 'site-home' })[0];
 
     expect(trace).toEqual(
       expect.objectContaining({
@@ -816,7 +816,7 @@ describe('DeviceRegistryService', () => {
 
     const baseNow = Date.now();
 
-    service.markDeviceCommandPending('kitchen_light', {
+    service.markDeviceCommandPending('kitchen_light', { scope: { tenantId: 'tenant-demo', siteId: 'site-home' },
       action: 'turn_on',
       expectedValues: { on: true },
       ttlMs: 5000,
@@ -830,7 +830,7 @@ describe('DeviceRegistryService', () => {
 
     jest.spyOn(Date, 'now').mockReturnValue(baseNow + 3000);
 
-    const trace = service.getExecutionTraces()[0];
+    const trace = service.getExecutionTraces({ tenantId: 'tenant-demo', siteId: 'site-home' })[0];
 
     expect(trace).toEqual(
       expect.objectContaining({

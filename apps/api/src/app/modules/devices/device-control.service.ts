@@ -272,6 +272,7 @@ export class DeviceControlService {
     if (target.siteLocalObserver) {
       if (!this.siteLocalCommands) throw new ServiceUnavailableException('The authorized site-local Shelly command adapter is unavailable.')
       const command = this.registry.markDeviceCommandPending(device.id, {
+      scope: { tenantId: device.tenantId, siteId: device.siteId },
         action, expectedValues: { on }, ttlMs: virtualLabCommandAckTtlMs,
         message: `Requesting ${action} through the separately authorized site-local Shelly route.`,
         actor,
@@ -356,6 +357,7 @@ export class DeviceControlService {
       throw new ServiceUnavailableException('The authorized remote Shelly execution adapter is unavailable.')
 
     const command = this.registry.markDeviceCommandPending(device.id, {
+      scope: { tenantId: device.tenantId, siteId: device.siteId },
       action, expectedValues: { on },
       ttlMs: virtualLabCommandAckTtlMs,
       message: `Requesting ${action} through the resolved site-authorized Shelly route.`,
@@ -483,6 +485,7 @@ export class DeviceControlService {
     });
 
     const command = this.registry.markDeviceCommandPending(device.id, {
+      scope: { tenantId: device.tenantId, siteId: device.siteId },
       action,
       expectedValues: { on },
       message: `Publishing Shelly ${action}; waiting for telemetry.`,
@@ -551,6 +554,7 @@ export class DeviceControlService {
     actor?: CommandRequest['actor'],
   ): Promise<DeviceActionResult> {
     const command = this.registry.markDeviceCommandPending(device.id, {
+      scope: { tenantId: device.tenantId, siteId: device.siteId },
       action,
       expectedValues: { on },
       message: `Publishing ${action}; waiting for telemetry.`,

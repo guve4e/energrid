@@ -16,7 +16,7 @@ import type {
   ShellyRpcDeviceConfig,
 } from './device-registry.types';
 import { OperationalLogService } from './operational-log.service';
-import { DEVICE_COMMAND_TRACKER, type DeviceCommandTracker, type CommandRequest, type CommandPublication } from './commands/device-command-tracker';
+import { DEVICE_COMMAND_TRACKER, type DeviceCommandTracker, type CommandRequest, type CommandPublication, type CommandScope } from './commands/device-command-tracker';
 import { createDeviceCommandTracker } from './commands/device-command-tracker.provider';
 import { DeviceInstallationStore } from './device-installation.store';
 import type { DeviceInstallationRecord } from './device-installation.store';
@@ -1951,6 +1951,7 @@ export class DeviceRegistryService implements OnModuleInit {
       payload.values,
       payload.observedAt,
       null,
+      scope,
     );
   }
 
@@ -2046,6 +2047,7 @@ export class DeviceRegistryService implements OnModuleInit {
       unownedValues,
       observedAt,
       raw.evidence?.commandId || null,
+      { tenantId, siteId },
       raw.evidence?.reason,
     );
 
@@ -2167,12 +2169,12 @@ export class DeviceRegistryService implements OnModuleInit {
     return this.commandTracker.markDeviceCommandTransportFailed(deviceId, commandId, message);
   }
 
-  getExecutionTraces(limit = 50) {
-    return this.commandTracker.getExecutionTraces(limit);
+  getExecutionTraces(scope: CommandScope, limit = 50) {
+    return this.commandTracker.getExecutionTraces(scope, limit);
   }
 
-  getLatestExecutionTrace(deviceId: string) {
-    return this.commandTracker.getLatestExecutionTrace(deviceId);
+  getLatestExecutionTrace(deviceId: string, scope: CommandScope) {
+    return this.commandTracker.getLatestExecutionTrace(deviceId, scope);
   }
 
   markDeviceCommandFailed(deviceId: string, commandId: string, reason: 'pre_write' | 'readback_mismatch', message: string) {
@@ -2182,7 +2184,7 @@ export class DeviceRegistryService implements OnModuleInit {
   private withLiveState(device: RegisteredDevice): RegisteredDevice {
     const key = scopedDeviceKey(device.id, device.tenantId, device.siteId);
     const liveState = this.liveStateByScopedDevice.get(key);
-    const command = this.refreshDeviceCommand(device.id);
+    const command = this.refreshDeviceCommand(device.id, device);
     const authoritative = this.authoritativeObservationByScopedDevice.get(key);
     const owned = this.authoritativeFieldOwnershipByScopedDevice.get(key);
 
@@ -2213,8 +2215,8 @@ export class DeviceRegistryService implements OnModuleInit {
   }
 
   /** Refreshes command expiry through the tracker before projecting registry state. */
-  private refreshDeviceCommand(deviceId: string) {
-    return this.commandTracker.getCommand(deviceId);
+  private refreshDeviceCommand(deviceId: string, scope: CommandScope) {
+    return this.commandTracker.getCommand(deviceId, scope);
   }
 
   private observeCommandTelemetry(
@@ -2222,9 +2224,10 @@ export class DeviceRegistryService implements OnModuleInit {
     values: Record<string, number | boolean | string | null>,
     observedAt: string,
     evidenceCommandId: string | null,
+    scope: CommandScope,
     reason?: string,
   ): void {
-    this.commandTracker.observeTelemetry(deviceId, values, observedAt, evidenceCommandId, reason);
+    this.commandTracker.observeTelemetry(deviceId, values, observedAt, evidenceCommandId, scope, reason);
   }
 }
 

@@ -334,6 +334,8 @@ export interface DeviceExecutionActor {
 import type { ExecutionDiagnosis } from './investigation/device-execution-diagnosis';
 
 export interface DeviceExecutionTrace {
+  tenantId: string;
+  siteId: string;
   id: string;
   commandId: string;
   deviceId: string;

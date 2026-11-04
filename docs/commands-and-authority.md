@@ -57,6 +57,12 @@ The authenticated Portal action controller now derives the requesting actor from
 
 This changes **attribution, not authority**: site selection, enrollment, component permission and route validation remain separate required checks. Direct service callers that do not supply an actor still use the command tracker's system fallback; assistant and automation identity are not established by this change. The trace and installation-event storage are **not** a durable tamper-evident user audit ledger. Runtime/device validation remains outstanding.
 
+### Scoped command state (M1.4c — locally unverified)
+
+Command state and execution traces now use the tenant/site/device identity, rather than a bare logical device ID. Pending commands receive ownership from the enrolled `RegisteredDevice` in the control service; accepted telemetry must carry its own trusted scope to verify or change a command. Portal execution traces are filtered by the authorized site, including when logical IDs are reused. The tracker requires explicit ownership for command creation, state lookup, and trace listing; scope-less calls fail type checking rather than silently selecting the Home installation.
+
+This is an in-memory runtime correction, not a durable or tamper-evident audit ledger. Publication and failure callbacks still correlate by the unique command ID and device ID, and observation ingress scope authority must be verified separately. Focused tests, API typecheck, documentation build and physical behavior must be validated in the target checkout before this change is accepted.
+
 ## Related references
 
 - [Portal authentication](portal-authentication.md)

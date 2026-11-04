@@ -137,7 +137,7 @@ export class PortalStateService {
         memory: this.observation.getAll(),
         health: this.health.getAll(),
       }),
-      executionTraces: this.deviceRegistry.getExecutionTraces(),
+      executionTraces: this.deviceRegistry.getExecutionTraces(activeSite),
       networkZones: this.lanDiscovery.getZones(),
       networkDevices: this.lanDiscovery.getLastScan(),
       systems: registry.systems,
