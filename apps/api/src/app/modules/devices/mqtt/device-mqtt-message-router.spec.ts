@@ -199,6 +199,31 @@ describe('DeviceMqttMessageRouter', () => {
     expect(observation.getDevice(deviceId)).toBeNull();
   });
 
+  it('uses stable source-sample evidence across equivalent Shelly MQTT JSON encodings', async () => {
+    const evidenceIds: string[] = [];
+    const runtime = {
+      ingestShellyMqttObservation: jest.fn().mockImplementation(async (input) => {
+        evidenceIds.push(input.evidenceId);
+        return { outcome: 'rejected', reasonCode: 'observation_policy_rejected' };
+      }),
+    };
+    const router = new DeviceMqttMessageRouter(
+      { getDevices: jest.fn().mockReturnValue([]) } as any,
+      new DeviceObservationService(), undefined, undefined, undefined, undefined, runtime as any,
+    );
+    const sample = { src: shellyId, method: 'NotifyStatus', params: {
+      ts: 1791676800, 'switch:0': { output: false, apower: 42 },
+    } };
+    await router.route({ topic: `${shellyId}/events/rpc`, payload: sample, payloadText: JSON.stringify(sample) });
+    await router.route({ topic: `${shellyId}/events/rpc`, payload: sample, payloadText: JSON.stringify(sample, null, 2) });
+    await router.route({ topic: `${shellyId}/events/rpc`, payload: {
+      ...sample, params: { ...sample.params, 'switch:0': { output: false, apower: 43 } },
+    }, payloadText: 'changed-reading' });
+    expect(evidenceIds).toHaveLength(3);
+    expect(evidenceIds[0]).toBe(evidenceIds[1]);
+    expect(evidenceIds[2]).not.toBe(evidenceIds[0]);
+  });
+
   it('projects only canonical measurements from real-shaped NotifyStatus and processes each switch separately', async () => {
     const topic = 'shelly/washer@other/events/rpc';
     const runtimeCalls: Array<{ componentKey: string; values: Record<string, unknown> }> = [];

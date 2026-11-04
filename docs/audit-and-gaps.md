@@ -22,6 +22,12 @@ This candidate **does not migrate, rewrite or delete legacy keys**, and does not
 
 ## Current device status and backlog (local `main` plus authenticated runtime evidence, 3 November 2026)
 
+## Transport simplification progress (4 November 2026)
+
+**T1.2b Mac regression evidence:** user reported 68/68 focused HTTP/Shelly tests passing, successful TypeScript typecheck and VitePress build. Broad Jest completed 1,664 passing tests and 29 skipped; two untracked personal-finance transfer scripts were discovered as test suites with zero tests. This is not an all-green unfiltered Jest run, and it does not prove hardware or deployment acceptance.
+
+**T1.3a candidate (not Mac-accepted):** move Shelly MQTT evidence-ID generation, canonical electrical-field admission and post-admission history capture from the generic MQTT router into `integrations/shelly/shelly-mqtt-observation.handler.ts`. Existing exact installation/site/field approval remains mandatory. The generic router retains one Shelly adapter dispatch. Source isolation does not yet select an effective HTTP/MQTT source per field, converge legacy history writers, or enable Shelly EM1 HTTP polling. Verify the current checkout, focused MQTT tests, typecheck and docs build before accepting.
+
 ## Architecture simplification checkpoint (candidate; not runtime-accepted)
 
 **T1.2b — proposed source refactor, not yet Mac-test-accepted or deployed (4 November 2026):**

@@ -27,13 +27,17 @@ flowchart TD
   subgraph push[MQTT push ingestion]
     Broker[MQTT broker] --> Subscriber[DeviceMqttIngestService<br/>durable subscriber or mosquitto_sub]
     Subscriber --> Router[DeviceMqttMessageRouter]
-    Router --> Shelly[Shelly / Energrid / legacy adapters]
+    Router --> Shelly[Shelly MQTT adapter]
+    Router --> OtherAdapters[Energrid / legacy adapters]
+    Shelly --> ShellyAdmission[Shelly integration MQTT handler]
+    ShellyAdmission --> HttpIngress
+    ShellyAdmission --> OptionalHistory[Electrical history after Core acceptance]
     Router --> Approved[Exact ApprovedMqttObservationRoute]
     Approved --> DirectStore[Observation state store directly<br/>normal configured route]
     Approved --> CommonIngress[Shared ingress<br/>identity-bound Lab route]
     CommonIngress --> State
     CommonIngress --> History
-    Shelly --> Legacy[DeviceObservationService memory<br/>and Registry projection]
+    OtherAdapters --> Legacy[DeviceObservationService memory<br/>and Registry projection]
     Legacy --> OptionalHistory[Optional TelemetryIngest capture]
   end
 
@@ -215,3 +219,21 @@ telemetry path (not an approved EM1 measurement ingestion route). The Shelly EM1
 `act_power` adapter, duplicate-path removal, and actual-device acceptance remain
 separate work, not consequences of this extraction. No hardware switching or
 deployment is part of T1.2b. Verify tests/build against the latest repo before commit.
+
+
+### T1.3a Shelly MQTT boundary (pending checkout verification)
+
+`DeviceMqttMessageRouter` dispatches MQTT messages to adapters. The Shelly-specific
+approved-observation and electrical-history logic is isolated in
+`integrations/shelly/shelly-mqtt-observation.handler.ts`: evidence IDs,
+canonical measurement filtering, per-field approved ingestion and post-admission
+history projection. It preserves the pre-existing fail-closed contract and does
+not grant enrollment or switching permission. Normal configured MQTT observation
+routes and other legacy adapters are unchanged. The generic router currently
+retains one transitional adapter-ID dispatch; this extraction does **not** unify
+HTTP/MQTT source selection or make an unapproved EM1 measurement active.
+
+An operator should distinguish: broker subscription (delivery), device profile
+(capability), installed source/field authority (admission), collection activity
+(runtime evidence), and separately approved control. These are presently
+independent; no single effective collection plan is enforced yet.

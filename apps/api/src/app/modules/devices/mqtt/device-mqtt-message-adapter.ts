@@ -1,5 +1,11 @@
 import type { PhysicalDeviceDiscovery } from '../enrollment/physical-device-inventory.repository';
 
+export interface DeviceMqttObservationAdmission {
+  deviceId?: string;
+  outcome: 'admitted' | 'rejected';
+  reasonCode?: string;
+}
+
 export interface DeviceMqttMessage {
   topic: string;
   payload: unknown;
