@@ -43,6 +43,8 @@ Do not call the current control trail a durable command audit. Device runtime co
 
 This means a restart can remove recent operational-log context, and the checked-in code does not establish a durable, user-attributed, tamper-evident command history. Treat a durable device-command audit ledger, its retention/access policy and integration with authenticated actor context as an open architecture gap before claiming regulated or safety-grade audit coverage.
 
+The in-memory execution trace now retains the actor supplied by its command caller rather than replacing it with a service identity; absent actor information still displays as a system action. This is **not** end-to-end authenticated actor attribution: some Portal control paths currently supply a placeholder `portal-installer` identity and others omit an actor. The authenticated principal must be propagated explicitly in a separate reviewed change before a trace is evidence of the requesting user. This is a source-level correction only, pending focused tests in a complete checkout.
+
 ## Related references
 
 - [Portal authentication](portal-authentication.md)

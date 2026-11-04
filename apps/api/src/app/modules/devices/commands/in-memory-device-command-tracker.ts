@@ -108,10 +108,9 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
       commandId: pending.id,
       deviceId,
 
-      actor: {
-        type: 'system',
-        name: 'Energrid Control Service',
-      },
+      actor: command.actor
+        ? { ...command.actor }
+        : { type: 'system', name: 'Energrid Control Service' },
 
       intent: command.message || 'Device command execution',
 
@@ -604,7 +603,7 @@ function publicExecutionTrace(
     commandId: trace.commandId,
     deviceId: trace.deviceId,
 
-    actor: trace.actor,
+    actor: { ...trace.actor },
 
     action: trace.action,
     expectedValues: { ...trace.expectedValues },

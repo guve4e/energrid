@@ -35,6 +35,29 @@ describe('device command lifecycle through the registry', () => {
     expect(current()).not.toHaveProperty('displayUntil');
   });
 
+  it('preserves the requesting actor in command evidence without exposing mutable state', () => {
+    const actor = { type: 'user' as const, id: 'operator-42', name: 'Operator' };
+    const command = registry.markDeviceCommandPending(deviceId, {
+      action: 'turn_on', expectedValues: { on: true }, actor,
+    });
+    const trace = registry.getLatestExecutionTrace(deviceId)!;
+    expect(trace.commandId).toBe(command.id);
+    expect(trace.actor).toEqual(actor);
+
+    actor.name = 'Changed by caller';
+    trace.actor.name = 'Changed by viewer';
+    expect(registry.getLatestExecutionTrace(deviceId)?.actor).toEqual({
+      type: 'user', id: 'operator-42', name: 'Operator',
+    });
+  });
+
+  it('keeps the system fallback when no caller identity was supplied', () => {
+    pending();
+    expect(registry.getLatestExecutionTrace(deviceId)?.actor).toEqual({
+      type: 'system', name: 'Energrid Control Service',
+    });
+  });
+
   it('rejects stale observations and evidence for a different command', () => {
     const command = pending();
     observe(true, command.id, new Date(start - 1).toISOString());
