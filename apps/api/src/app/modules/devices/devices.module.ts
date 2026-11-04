@@ -8,6 +8,8 @@ import { DeviceAssistantLightingService } from './device-assistant-lighting.serv
 import { DeviceDiagnosticsService } from './device-diagnostics.service'
 import { DeviceHttpPollService } from './device-http-poll.service'
 import { ShellyRouteResolver } from './shelly-route.resolver'
+import { ShellyOperationalCollectionService } from './integrations/shelly/shelly-operational-collection.service'
+import { EnergridEspHttpCollectionService } from './integrations/energrid/energrid-esp-http-collection.service'
 import {
   DeviceLanDiscoveryService,
   DeviceLanNetworkEvidenceCollector,
@@ -46,6 +48,8 @@ import { EnergridHttpIdentityAdapter } from './adapters/outbound/network/energri
     MqttEvidenceDiscoveryService,
     MqttBrokerAttributionService,
     ShellyRouteResolver,
+    ShellyOperationalCollectionService,
+    EnergridEspHttpCollectionService,
     DeviceHttpPollService,
     DeviceLanNetworkEvidenceCollector,
     NmapNetworkEvidenceAdapter,

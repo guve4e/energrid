@@ -24,6 +24,9 @@ This candidate **does not migrate, rewrite or delete legacy keys**, and does not
 
 ## Architecture simplification checkpoint (candidate; not runtime-accepted)
 
+**T1.2b — proposed source refactor, not yet Mac-test-accepted or deployed (4 November 2026):**
+The HTTP poller delegates manufacturer-specific ESP8266 identity, measurement and diagnostics collection to the Energrid integration, and Shelly local/one-shot status and SSH/Lab observer supervision to the Shelly integration. The existing Portal one-shot entry point remains a compatibility delegate. Current adapter-driver selection and a legacy Shelly HTTP telemetry writer still require a later explicit collection-binding consolidation; EM1 power is not implemented by this refactor. The patch was syntax-checked and the remote-worker admission logic smoke-tested in isolation, not validated by full application tests or physical hardware. Do not mark complete until applied, reviewed and tested on the developer's current checkout.
+
 The proposed site-local command-executor extraction moves physical `Switch.Set` transport and its exact command-grant/observer/scope revalidation out of LAN discovery. `DeviceControlService` still owns command lifecycle and readback, and still obtains the installed execution target through `DeviceHttpPollService`. This is **not** complete route-resolver separation, and it does not change the Kitchen Plus 1 blocker or establish additional live hardware acceptance. Until applicable tests and builds pass on the complete checkout and the diff is reviewed, this remains a candidate refactor, not a completed milestone.
 
 

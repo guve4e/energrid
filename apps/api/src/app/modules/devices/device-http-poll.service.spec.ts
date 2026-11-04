@@ -1,4 +1,4 @@
-import { buildFirmwareDiagnosticCollectionContext, DeviceHttpPollService } from './device-http-poll.service'
+import { buildFirmwareDiagnosticCollectionContext, DeviceHttpPollService, selectScheduledHttpCollection } from './device-http-poll.service'
 import { DeviceRegistryService } from './device-registry.service'
 import type { NetworkDiscoveryZone, RegisteredDevice } from './device-registry.types'
 import type { KnownNetworkDevice } from './device-discovery-memory.store'
@@ -43,6 +43,37 @@ describe('DeviceHttpPollService', () => {
   afterEach(() => {
     process.env = originalEnv
     global.fetch = originalFetch
+  })
+
+  it('selects scheduled HTTP reads separately from MQTT and Shelly switch observations', () => {
+    const makeDevice = (
+      id: string, driver: string, protocol: string, configured: boolean, trustStatus = 'approved',
+    ) => ({
+      id, tenantId: 'tenant-demo', siteId: 'site-home', kind: 'physical', trustStatus,
+      adapter: { driver, protocol, configured, target: 'http://192.168.1.10/status' },
+    }) as unknown as RegisteredDevice
+    const esp = makeDevice('device:upstream-lan:esp8266:324864', 'energrid-esp8266', 'http', false)
+    const generic = makeDevice('generic-1', 'http-json-sensor', 'http', true)
+    const unconfigured = makeDevice('generic-unconfigured', 'http-json-sensor', 'http', false)
+    const mqttSwitch = makeDevice('shellypro2pm-ec6260888084:switch:0', 'shelly-discovered', 'mqtt', true)
+    const httpSwitch = makeDevice('shellypro2pm-ec6260888084:switch:1', 'shelly-lan', 'http', true)
+    const em = makeDevice('shellyproem50-8c4f00dbd258:em1:0', 'shelly-lan', 'http', true)
+    const unapproved = makeDevice('shellyplus1-78ee4ccf4b54:switch:0', 'shelly-discovered', 'mqtt', true, 'discovered')
+
+    const work = selectScheduledHttpCollection([esp, generic, unconfigured, mqttSwitch, httpSwitch, em, unapproved])
+    expect(work.httpDevices.map(device => device.id)).toEqual([esp.id, generic.id, httpSwitch.id, em.id])
+    expect(work.shellySwitches.map(device => device.id)).toEqual([mqttSwitch.id, httpSwitch.id])
+    // An EM1 installation may still be selected by the legacy generic HTTP
+    // branch, but must never be scheduled for Switch.GetStatus or switching.
+    expect(work.shellySwitches).not.toContain(em)
+  })
+
+  it('reads registered devices once per HTTP scheduling cycle', async () => {
+    const registry = { getDevices: jest.fn().mockReturnValue([]) }
+    const poller = new DeviceHttpPollService(registry as unknown as DeviceRegistryService)
+    await poller.pollOnce()
+    expect(registry.getDevices).toHaveBeenCalledTimes(1)
+    expect(registry.getDevices).toHaveBeenCalledWith(true)
   })
 
   it('polls approved HTTP devices into live registry state', async () => {

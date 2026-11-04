@@ -62,7 +62,14 @@ The diagram intentionally separates **collection** from **discovery** and **cont
 
 `DeviceHttpPollService` owns the one application-level HTTP timer. `HOME_HTTP_POLL_ENABLED` enables it; `HOME_HTTP_POLL_INTERVAL_MS` defaults to 5 seconds (minimum accepted value 500 ms). Each cycle enumerates approved installations across sites, selects configured HTTP targets and invokes the appropriate branch. It runs once immediately at module startup and clears its interval during module destruction.
 
-The service uses a process-local `polling` flag to skip a timer tick while the previous full cycle is still running. It does **not** cap device-level concurrency: eligible devices are collected with `Promise.all`. There is no per-device plan, retry schedule, exponential backoff or jitter. A failed request is normally observed again on a later interval. The default HTTP timeout is 2 seconds (`HOME_HTTP_POLL_TIMEOUT_MS`, with a 250 ms minimum).
+The service uses a process-local `polling` flag to skip a timer tick while the previous full cycle is still running. It does **not** cap device-level concurrency: eligible devices are collected with `Promise.all`. There is no per-device retry schedule, exponential backoff or jitter. A failed request is normally observed again on a later interval. The default HTTP timeout is 2 seconds (`HOME_HTTP_POLL_TIMEOUT_MS`, with a 250 ms minimum).
+
+`selectScheduledHttpCollection()` now makes the two HTTP scheduling lists explicit in one pure, tested function. An approved configured HTTP adapter (or the special Energrid ESP8266 identity-aware adapter) can be selected for the HTTP read; an approved physical Shelly **switch** component can independently be selected for identity-verified operational `Switch.GetStatus`, even when its advertised adapter protocol is MQTT. This selection is only a **candidate schedule**, never source approval or control permission. MQTT subscriptions are configured independently; one device can use multiple transports for different fields. The poller obtains one inventory snapshot per cycle.
+
+The **T1.2a boundary extraction** moves Shelly switch candidate matching and the bounded, identity-checked local `Shelly.GetDeviceInfo` / `Switch.GetStatus` read into `adapters/outbound/network/shelly-switch-collection.adapter.ts`. It does not grant observation authority: `ShellyRouteResolver` still establishes a site-owned endpoint before the adapter is called, and the caller still owns registry projection and observer reachability. JSON response-size handling is shared through a transport helper, not duplicated in the device adapter. The API poller still supervises remote Shelly observers and has a legacy generic `shelly-lan` HTTP branch; T1.2a **does not** enable EM1 power collection or make transport choice entirely binding-driven. This is a staged extraction, not completion of the transport simplification.
+
+
+**Known EM limitation:** `em1:N` is no longer offered to the switch-only operational collector, which cannot decode it. A configured `shelly-lan` EM1 target may still reach the older generic HTTP branch, but that branch currently uses `parseShellySwitchStatus()` and rejects its power response. This change does not implement EM1 measurement ingestion. It requires a separate EM1 parser and a checked source/field binding into the authorized observation ingress; do not treat HTTP collection eligibility as proof of readable power.
 
 ### Shelly read-only operational status
 
@@ -187,3 +194,24 @@ Per-capability intervals and a distributed worker/gateway lease/partition model 
 - [Nmap adapter](../apps/api/src/app/modules/devices/adapters/outbound/network/nmap-network-evidence.adapter.ts)
 - [Portal scan authorization](../apps/api/src/app/modules/portal/portal.controller.ts)
 - [Shelly HTTP control adapter](../apps/api/src/app/modules/devices/adapters/outbound/shelly-http-control.ts)
+
+### T1.2b Device-specific HTTP collection boundaries (local refactor, pending runtime validation)
+
+The generic `DeviceHttpPollService` delegates firmware-specific ESP8266 identity,
+sampling and diagnostics to `integrations/energrid/EnergridEspHttpCollectionService`.
+It also delegates read-only Shelly status polling, legacy
+HTTP handling, one-shot operator status reads, and remote observer supervision to
+`integrations/shelly/ShellyOperationalCollectionService` and its
+`ShellyRemoteObserverSupervisor`. The existing
+`ShellyRouteResolver` still owns installation/site/endpoint validation; the existing
+registry observation and reachability writers are unchanged. The generic poller
+retains compatibility delegation methods for existing Portal callers. It does not
+parse Shelly RPC or ESP8266 payloads or manage remote Shelly worker sessions.
+
+**Not complete:** The scheduler still contains a transitional device-driver dispatch;
+HTTP/MQTT binding selection and observation authority are not yet one declarative
+policy. The legacy `shelly-lan` polling route continues to use its existing registry
+telemetry path (not an approved EM1 measurement ingestion route). The Shelly EM1
+`act_power` adapter, duplicate-path removal, and actual-device acceptance remain
+separate work, not consequences of this extraction. No hardware switching or
+deployment is part of T1.2b. Verify tests/build against the latest repo before commit.

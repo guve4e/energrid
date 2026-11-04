@@ -1,4 +1,4 @@
-import { DeviceHttpPollService } from './device-http-poll.service'
+import { ShellyRemoteObserverSupervisor } from './integrations/shelly/shelly-remote-observer.supervisor'
 import type { RegisteredDevice } from './device-registry.types'
 
 const deviceId = 'shellyplus1-8813bfcdc8bc:switch:0'
@@ -33,7 +33,7 @@ function setup() {
     ingestDeviceTelemetry: jest.fn(),
     recordObserverReachability: jest.fn(),
   }
-  const poller = new DeviceHttpPollService(registry as never)
+  const poller = new ShellyRemoteObserverSupervisor(registry as never, {} as never)
   const logger = (poller as any).logger
   const log = jest.spyOn(logger, 'log').mockImplementation(() => undefined)
   const warn = jest.spyOn(logger, 'warn').mockImplementation(() => undefined)

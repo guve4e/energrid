@@ -75,7 +75,7 @@ function requireSavedSiteLocalEvidence(fixture: ReturnType<typeof setup>) {
 }
 
 function loggerSpies(poller: DeviceHttpPollService) {
-  const logger = (poller as unknown as { logger: { log: (...args: unknown[]) => void; error: (...args: unknown[]) => void } }).logger
+  const logger = (poller as unknown as { shelly: { logger: { log: (...args: unknown[]) => void; error: (...args: unknown[]) => void } } }).shelly.logger
   const log = jest.spyOn(logger, 'log').mockImplementation(() => undefined)
   const error = jest.spyOn(logger, 'error').mockImplementation(() => undefined)
   return {
