@@ -1,5 +1,11 @@
 # Documentation audit and remaining gaps
 
+### M1.4d candidate — scoped installation/proposal persistence (test verification pending)
+
+`DeviceInstallationStore` writes new installations under `installation-v2:<encoded tenant>:<encoded site>:<encoded device>` and new proposals under `installation-proposal-v2:<encoded tenant>:<encoded site>:<encoded proposal id>`. All installation/proposal reads require explicit tenant/site scope; the store does not accept site-only lookup. Legacy reads use their embedded tenant/site ownership and never infer missing ownership. All-site bootstrap retains a versioned record in preference to its legacy copy. New proposal decisions must hide older pending legacy copies.
+
+This candidate **does not migrate, rewrite or delete legacy keys**, and does not address unscoped commissioning event keys or the Portal's event endpoint. Before rollout: inspect an offline LevelDB copy for missing ownership and duplicate/conflicting legacy records, back up the live store, validate restart and older-version rollback constraints, then run the full tests. Reverting application code after v2 writes would not expose those writes to an older binary; a backup alone is not a lossless rollback after subsequent writes. No live DB, deployment, or hardware validation has occurred.
+
 ## M1.4 — Tenant/site/device identity corrections (in progress, not yet accepted)
 
 **M1.4a committed (`bb970a7`):** the registry's all-site inventory previously deduplicated by `device.id` alone. It now uses the existing encoded tenant/site/device key to retain distinct devices across sites and tenants while still preferring the higher-priority record *within the same scope*. A regression test constructs identical logical IDs across three scopes. The operator reported focused Jest, TypeScript and docs checks green before commit.

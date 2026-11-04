@@ -64,7 +64,7 @@ describe('approved Shelly MQTT observation ingress', () => {
     expect(result).toMatchObject({ outcome: 'rejected', reasonCode: 'observation_authority_missing' });
     expect(h.registry.projectApprovedObservation).not.toHaveBeenCalled();
     expect(h.enrollment.find).not.toHaveBeenCalled();
-    expect(h.installations.get).toHaveBeenCalledWith(h.siteId, h.deviceId);
+    expect(h.installations.get).toHaveBeenCalledWith({ tenantId: h.tenantId, siteId: h.siteId }, h.deviceId);
   });
 
   it('rejects malformed supported measurements explicitly without converting them to zero', async () => {
@@ -98,7 +98,7 @@ describe('approved Shelly MQTT observation ingress', () => {
     expect(first).toMatchObject({ outcome: 'processed', accepted: true, deviceId: h.deviceId, scope: { tenantId: h.tenantId, siteId: h.siteId } });
     expect(duplicate).toMatchObject({ outcome: 'processed', accepted: false, reason: 'duplicate_evidence' });
     expect(h.registry.projectApprovedObservation).toHaveBeenCalledTimes(1);
-    expect(h.installations.get).toHaveBeenCalledWith(h.siteId, h.deviceId);
+    expect(h.installations.get).toHaveBeenCalledWith({ tenantId: h.tenantId, siteId: h.siteId }, h.deviceId);
   });
 
   it('rejects a supported but unapproved field for lack of authority', async () => {
@@ -170,7 +170,7 @@ describe('approved Shelly MQTT observation ingress', () => {
       values: { power: 12 }, evidenceId: 'lab-evidence',
     });
     expect(result).toMatchObject({ outcome: 'processed', accepted: true, scope: { tenantId: 'tenant-lab', siteId: 'site-lab' } });
-    expect(h.installations.get).toHaveBeenCalledWith('site-lab', h.deviceId);
+    expect(h.installations.get).toHaveBeenCalledWith({ tenantId: 'tenant-lab', siteId: 'site-lab' }, h.deviceId);
   });
 
   it('admits only separately approved switch energy counters through the enrolled site binding', async () => {
@@ -182,7 +182,7 @@ describe('approved Shelly MQTT observation ingress', () => {
     });
     expect(result).toMatchObject({ outcome: 'processed', accepted: true, deviceId: h.deviceId,
       scope: { tenantId: h.tenantId, siteId: h.siteId } });
-    expect(h.installations.get).toHaveBeenCalledWith(h.siteId, h.deviceId);
+    expect(h.installations.get).toHaveBeenCalledWith({ tenantId: h.tenantId, siteId: h.siteId }, h.deviceId);
     expect(h.registry.projectApprovedObservation).toHaveBeenCalledWith(expect.objectContaining({
       deviceId: h.deviceId, values: { energy_import_total: 0.6 },
     }));
@@ -197,7 +197,7 @@ describe('approved Shelly MQTT observation ingress', () => {
     });
     expect(result).toMatchObject({ outcome: 'processed', accepted: true,
       scope: { tenantId: h.tenantId, siteId: h.siteId } });
-    expect(h.installations.get).toHaveBeenCalledWith(h.siteId, h.deviceId);
+    expect(h.installations.get).toHaveBeenCalledWith({ tenantId: h.tenantId, siteId: h.siteId }, h.deviceId);
   });
 
   it('accepts a separately approved source binding after reconciling an existing MQTT-enrolled component', async () => {

@@ -361,7 +361,7 @@ describe('one-shot authorized Shelly status observation', () => {
     expect(fixture.registry.ingestDeviceTelemetry).not.toHaveBeenCalled()
     expect(fixture.registry.ingestDeviceStatus).not.toHaveBeenCalled()
     expect(fixture.registry.recordObserverReachability).toHaveBeenCalledTimes(1)
-    expect(fixture.registry.recordObserverReachability).toHaveBeenCalledWith(deviceId, expect.objectContaining({ status: 'unreachable' }))
+    expect(fixture.registry.recordObserverReachability).toHaveBeenCalledWith(deviceId, expect.objectContaining({ status: 'unreachable' }), expect.objectContaining(ownership))
   })
 
   it.each([true, false])('writes only the canonical output=%s through the shared registry writer', async output => {
@@ -380,7 +380,7 @@ describe('one-shot authorized Shelly status observation', () => {
     expect(fixture.registry.recordObserverReachability).toHaveBeenCalledWith(deviceId, expect.objectContaining({
       status: 'reachable', targetIpAddress: '172.30.250.13', networkScopeId: zone.id,
       observer: expect.objectContaining({ id: 'virtual-lab-observer', host: '192.168.1.138' }),
-    }))
+    }), expect.objectContaining(ownership))
     expect(fixture.remote).toHaveBeenCalledWith(zone.id, '172.30.250.13', physicalId, ['switch:0'], expect.any(AbortSignal))
     expect(fixture.registry.ingestDeviceTelemetry.mock.calls[0][0]).not.toHaveProperty('control')
     expect(fixture.registry.ingestDeviceTelemetry.mock.calls[0][0]).not.toHaveProperty('observationAuthority')

@@ -120,7 +120,7 @@ export class ApprovedMqttObservationRoute {
       if (!approved) continue;
 
       const installation = await this.installations.get(
-        scope.siteId,
+        scope,
         binding.deviceId,
       );
 
@@ -229,7 +229,7 @@ export class ApprovedMqttObservationRoute {
     // Registry state alone is not proof of approval.
     // Require an explicit, persisted installation.
     const installation = await this.installations.get(
-      scope.siteId,
+      scope,
       binding.deviceId,
     );
 

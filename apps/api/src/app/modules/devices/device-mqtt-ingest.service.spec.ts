@@ -279,6 +279,7 @@ describe('DeviceMqttIngestService', () => {
     const service = createIngestService(registry);
 
     registry.markDeviceCommandPending('kitchen.light.island.led', {
+      scope: { tenantId: 'valentin', siteId: 'boyana-home' },
       action: 'turn_on',
       expectedValues: { on: true },
       ttlMs: 5000,
@@ -329,6 +330,7 @@ describe('DeviceMqttIngestService', () => {
     const service = createIngestService(registry);
 
     registry.markDeviceCommandPending('kitchen.light.island.led', {
+      scope: { tenantId: 'valentin', siteId: 'boyana-home' },
       action: 'turn_on',
       expectedValues: { on: true },
       ttlMs: 5000,
@@ -383,6 +385,7 @@ describe('DeviceMqttIngestService', () => {
     const service = createIngestService(registry);
 
     registry.markDeviceCommandPending('kitchen.light.island.led', {
+      scope: { tenantId: 'valentin', siteId: 'boyana-home' },
       action: 'turn_on',
       expectedValues: { on: true },
       ttlMs: 5000,

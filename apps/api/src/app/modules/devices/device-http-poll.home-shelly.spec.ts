@@ -125,7 +125,7 @@ describe('authorized Home Shelly operational observation', () => {
     expect(fixture.registry.recordObserverReachability).toHaveBeenCalledWith(deviceId, expect.objectContaining({
       status: 'reachable', targetIpAddress: '192.168.7.39', networkScopeId: 'eero-lan',
       observer: expect.objectContaining({ id: observer.id, host: observer.host, localScopes: [expect.objectContaining({ interfaceName: 'en0' })] }),
-    }))
+    }), expect.objectContaining(owner))
     expect(fixture.registry.ingestDeviceTelemetry).toHaveBeenCalledWith(expect.objectContaining({
       deviceId, tenantId: owner.tenantId, siteId: owner.siteId, values: { on: false },
       state: expect.objectContaining({ source: `site-local-http-rpc:${observer.id}`, status: 'online', values: { on: false } }),
@@ -470,7 +470,7 @@ describe('authorized Home Shelly operational observation', () => {
     expect(global.fetch).toHaveBeenCalledTimes(1)
     expect(fixture.registry.ingestDeviceTelemetry).not.toHaveBeenCalled()
     expect(fixture.registry.recordObserverReachability).toHaveBeenCalledWith(deviceId,
-      expect.objectContaining({ status: 'unreachable', reason: 'Error' }))
+      expect.objectContaining({ status: 'unreachable', reason: 'Error' }), expect.objectContaining(owner))
   })
 
   it('uses the resolved Home route for one read-only identity and switch status observation', async () => {
@@ -500,7 +500,7 @@ describe('authorized Home Shelly operational observation', () => {
     global.fetch = jest.fn().mockRejectedValue(new Error('connection refused')) as unknown as typeof fetch
     await fixture.poller.pollOnce()
     expect(fixture.registry.recordObserverReachability).toHaveBeenCalledWith(deviceId,
-      expect.objectContaining({ status: 'unreachable' }))
+      expect.objectContaining({ status: 'unreachable' }), expect.objectContaining(owner))
     expect(fixture.registry.ingestDeviceStatus).not.toHaveBeenCalled()
     expect(fixture.registry.ingestDeviceTelemetry).not.toHaveBeenCalled()
 

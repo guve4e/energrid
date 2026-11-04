@@ -213,7 +213,7 @@ export class ApprovedMqttObservationRuntime
     const device = matchingDevices[0];
     const scope = { tenantId: device.tenantId, siteId: device.siteId };
     if (!this.ingress) return rejected('observation_authority_missing');
-    const installation = await this.installations.get(scope.siteId, deviceId);
+    const installation = await this.installations.get(scope, deviceId);
     if (installation?.observationAuthority?.broker !== configuredShellyMqttBroker()) {
       return rejected('observation_authority_missing');
     }
@@ -268,7 +268,7 @@ export class ApprovedMqttObservationRuntime
       const enrollment = await this.enrollment.find({ ...scope, deviceId });
       if (!enrollment || enrollment.status !== 'enrolled') return null;
     }
-    const installation = await this.installations.get(scope.siteId, deviceId);
+    const installation = await this.installations.get(scope, deviceId);
     if (!installation || installation.schemaVersion !== 1 ||
       installation.device.id !== deviceId || installation.device.tenantId !== scope.tenantId ||
       installation.device.siteId !== scope.siteId || installation.device.trustStatus !== 'approved') return null;

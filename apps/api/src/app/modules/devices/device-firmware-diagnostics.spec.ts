@@ -161,6 +161,7 @@ describe('firmware diagnostics', () => {
   it('exposes typed Core statistics and recovery correlation through the scoped history adapter', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'energrid-fw-query-'));
     const store = new DeviceFirmwareDiagnosticsService(directory, { expectedIntervalMs: 60_000 });
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-26T12:00:00.000Z'));
     const firstAt = '2026-10-25T20:00:00.000Z';
     const failedAt = '2026-10-25T20:01:00.000Z';
     const recoveredAt = '2026-10-25T20:02:00.000Z';
@@ -190,6 +191,7 @@ describe('firmware diagnostics', () => {
       expect((await store.queryHistory(scope, { granularity: 'hourly', from: firstAt,
         to: '2026-10-25T21:00:00.000Z' }, [])).analysis?.devices).toEqual([]);
     } finally {
+      clock.mockRestore();
       await store.onModuleDestroy();
       await rm(directory, { recursive: true, force: true });
     }
@@ -214,6 +216,7 @@ describe('firmware diagnostics', () => {
   it('creates idempotent UTC summaries with gauge extrema, weighted counts, missing coverage, and boot-scoped counters', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'energrid-health-summary-'));
     const store = new DeviceFirmwareDiagnosticsService(directory, { expectedIntervalMs: 60_000 });
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-26T12:00:00.000Z'));
     try {
       await store.record(scope, deviceId, 'esp8266:324864', sample({
         memory: { freeHeapBytes: 20_000, heapFragmentationPct: null, largestFreeBlockBytes: 15_000 },
@@ -248,6 +251,7 @@ describe('firmware diagnostics', () => {
       expect((await store.queryHistory({ ...scope, siteId: 'site-device-lab' }, { granularity: 'hourly', ...range })).records).toEqual([]);
       expect((await store.queryHistory(scope, { deviceId, granularity: 'raw', ...range })).records).toHaveLength(2);
     } finally {
+      clock.mockRestore();
       await store.onModuleDestroy();
       await rm(directory, { recursive: true, force: true });
     }

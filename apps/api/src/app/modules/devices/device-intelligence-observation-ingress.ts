@@ -134,7 +134,7 @@ export class DeviceIntelligenceObservationIngress {
     }
 
     const installation = await this.installations.get(
-      scope.siteId,
+      scope,
       deviceId,
     );
 

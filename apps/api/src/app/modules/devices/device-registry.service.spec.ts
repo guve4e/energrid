@@ -8,6 +8,43 @@ describe('DeviceRegistryService', () => {
     expect(unobserved.length).toBeGreaterThan(0);
     expect(unobserved.every(d => d.state.status === 'unknown')).toBe(true);
   });
+  it('quarantines ownerless legacy installations during startup rather than assigning the default tenant', async () => {
+    const owned = {
+      schemaVersion: 1 as const,
+      device: {
+        id: 'owned-installed-sensor', tenantId: 'tenant-demo', siteId: 'site-home',
+        displayName: 'Owned sensor', kind: 'physical', zoneId: 'hall', zoneName: 'Hall',
+        trustStatus: 'approved',
+        adapter: { protocol: 'http', transport: 'http', driver: 'energrid-esp8266', target: '192.0.2.10', configured: true },
+        capabilities: [{ kind: 'temperature', actions: ['read'] }],
+        state: { values: {}, observedAt: null, status: 'unknown' },
+      },
+      physicalOutcome: { status: 'not_confirmed', confirmedAt: null, confirmedBy: null },
+      updatedAt: '2026-11-04T10:00:00.000Z',
+    };
+    const unowned = {
+      ...owned,
+      device: { ...owned.device, id: 'ownerless-legacy-sensor', tenantId: undefined },
+    };
+    const store = { listAll: jest.fn(async () => [unowned, owned]) };
+
+    const registry = new DeviceRegistryService(undefined, store as any);
+    await registry.ensureInstallationsLoaded();
+    const imported = registry.getDevices(true);
+    expect(imported).toContainEqual(expect.objectContaining({
+      id: 'owned-installed-sensor', tenantId: 'tenant-demo', siteId: 'site-home',
+    }));
+    expect(imported.some(device => device.id === 'ownerless-legacy-sensor')).toBe(false);
+
+    const enrollment = { list: jest.fn(async () => [
+      { deviceId: 'owned-installed-sensor', status: 'enrolled' },
+    ]) };
+    const registryWithEnrollment = new DeviceRegistryService(undefined, store as any, enrollment as any);
+    await registryWithEnrollment.ensureInstallationsLoaded();
+    expect(enrollment.list).toHaveBeenCalledTimes(1);
+    expect(enrollment.list).toHaveBeenCalledWith({ tenantId: 'tenant-demo', siteId: 'site-home' });
+  });
+
   it('keeps verified measurement support separate from observation authorization', () => {
     process.env.HOME_APPROVED_DEVICES_JSON = JSON.stringify({ devices: [{
       deviceId: 'sensor-device', protocol: 'http', driver: 'energrid-esp8266',

@@ -336,7 +336,10 @@ describe('site-scoped Shelly enrollment reconciliation', () => {
     }));
     const store = {
       listAll: jest.fn().mockImplementation(async () => [...records.values()]),
-      get: jest.fn().mockImplementation(async (siteId: string, id: string) => records.get(`${siteId}:${id}`) || null),
+      get: jest.fn().mockImplementation(async (requestedScope: { tenantId: string; siteId: string }, id: string) =>
+        requestedScope.tenantId === 'tenant-demo'
+          ? records.get(`${requestedScope.siteId}:${id}`) || null
+          : null),
       save: jest.fn().mockImplementation(async (next: any) => { records.set(`${next.device.siteId}:${next.device.id}`, next); }),
       append: jest.fn().mockResolvedValue(undefined),
     };

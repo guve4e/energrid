@@ -34,8 +34,13 @@ function harness(options: {
     getDevices: jest.fn(() => records.map(record => record.device)),
   };
   const store = {
-    get: jest.fn(async (_siteId: string, id: string) => records.find(record => record.device.id === id) ?? null),
-    list: jest.fn(async (siteId: string) => records.filter(record => record.device.siteId === siteId)),
+    get: jest.fn(async (requestedScope: typeof scope, id: string) =>
+      records.find(record => record.device.id === id &&
+        record.device.tenantId === requestedScope.tenantId &&
+        record.device.siteId === requestedScope.siteId) ?? null),
+    list: jest.fn(async (requestedScope: typeof scope) =>
+      records.filter(record => record.device.tenantId === requestedScope.tenantId &&
+        record.device.siteId === requestedScope.siteId)),
   };
   const enrollment = { find: jest.fn(async () => ({ status: 'enrolled' })) };
   const reader = { read: jest.fn(async () => options.state === undefined ? ({

@@ -58,7 +58,7 @@ describe('remote site-local Shelly observations', () => {
     }))
     expect(fixture.registry.recordObserverReachability).toHaveBeenCalledWith(deviceId,
       expect.objectContaining({ status: 'reachable', targetIpAddress: '192.168.1.219', networkScopeId: 'upstream-lan',
-        observer: expect.objectContaining({ id: observer.id, host: 'pi', platform: 'linux' }) }))
+        observer: expect.objectContaining({ id: observer.id, host: 'pi', platform: 'linux' }) }), expect.objectContaining(owner))
     expect(fixture.log).toHaveBeenCalledWith(expect.stringContaining('"outcome":"submitted_to_canonical_writer"'))
     const payload = fixture.registry.ingestDeviceTelemetry.mock.calls[0][0]
     expect(payload.values).toEqual({ on: output })
@@ -99,7 +99,7 @@ describe('remote site-local Shelly observations', () => {
 
     expect(fixture.registry.ingestDeviceTelemetry).not.toHaveBeenCalled()
     expect(fixture.registry.recordObserverReachability).toHaveBeenCalledWith(deviceId,
-      expect.objectContaining({ status: 'unreachable', reason: 'rpc_unavailable' }))
+      expect.objectContaining({ status: 'unreachable', reason: 'rpc_unavailable' }), expect.objectContaining(owner))
     expect(fixture.warn).toHaveBeenCalledWith(expect.stringContaining('"outcome":"observer_failure"'))
     expect(fixture.warn).toHaveBeenCalledWith(expect.stringContaining('"observerId":"pi-upstream-bathroom"'))
   })

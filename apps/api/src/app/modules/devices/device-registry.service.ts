@@ -228,7 +228,13 @@ export class DeviceRegistryService implements OnModuleInit {
 
   private async loadInstallations(): Promise<void> {
     if (!this.installationStore) return;
-    const records = await this.installationStore.listAll();
+    // listAll() includes ownerless legacy records for offline inventory. They
+    // must never enter the runtime registry or be assigned a default owner.
+    const records = (await this.installationStore.listAll()).filter(({ device }) =>
+      typeof device.tenantId === 'string' && device.tenantId.trim().length > 0 &&
+      typeof device.siteId === 'string' && device.siteId.trim().length > 0 &&
+      typeof device.id === 'string' && device.id.trim().length > 0,
+    );
     const owners = new Map(records.map(record => [`${record.device.tenantId}:${record.device.siteId}`, {
       tenantId: record.device.tenantId, siteId: record.device.siteId,
     }]));

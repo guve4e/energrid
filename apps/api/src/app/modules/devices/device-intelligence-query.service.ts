@@ -62,7 +62,7 @@ export class DeviceIntelligenceQueryService {
       ) continue;
 
       const installation = await this.installations.get(
-        scope.siteId,
+        scope,
         device.id,
       );
 
@@ -113,7 +113,7 @@ export class DeviceIntelligenceQueryService {
       return { status: 'not_found' as const };
     }
 
-    const installations = await this.installations.list(scope.siteId);
+    const installations = await this.installations.list(scope);
 
     const scoped = installations.filter(record =>
       record.device.tenantId === scope.tenantId &&
@@ -177,7 +177,7 @@ export class DeviceIntelligenceQueryService {
       return { status: 'invalid_request' as const };
     }
 
-    const records = await this.installations.list(scope.siteId);
+    const records = await this.installations.list(scope);
 
     const scoped = records.filter(record =>
       record.schemaVersion === 1 &&
@@ -261,7 +261,7 @@ export class DeviceIntelligenceQueryService {
       return preview;
 
     const installation = await this.installations.get(
-      scope.siteId,
+      scope,
       preview.deviceId,
     );
 
@@ -366,7 +366,7 @@ export class DeviceIntelligenceQueryService {
     if (enrollment?.status !== 'enrolled') return [];
 
     const installation = await this.installations.get(
-      scope.siteId,
+      scope,
       deviceId,
     );
 
@@ -378,7 +378,7 @@ export class DeviceIntelligenceQueryService {
     ) return [];
 
     const proposals =
-      await this.installations.listDeviceProposals(scope.siteId, deviceId);
+      await this.installations.listDeviceProposals(scope, deviceId);
 
     return proposals.filter(proposal =>
       proposal.tenantId === scope.tenantId &&
@@ -402,7 +402,7 @@ export class DeviceIntelligenceQueryService {
     ) return { status: 'invalid_request' as const };
 
     const proposal = await this.installations.getProposal(
-      scope.siteId,
+      scope,
       proposalId,
     );
 
@@ -422,7 +422,7 @@ export class DeviceIntelligenceQueryService {
 
     try {
       const latest = await this.installations.getProposal(
-        scope.siteId,
+        scope,
         proposalId,
       );
 
@@ -488,7 +488,7 @@ export class DeviceIntelligenceQueryService {
         return { status: 'not_enrolled' as const };
 
       const installation = await this.installations.get(
-        scope.siteId,
+        scope,
         expectedDeviceId,
       );
 
@@ -617,7 +617,7 @@ export class DeviceIntelligenceQueryService {
       };
     }
 
-    const installation = await this.installations.get(scope.siteId, described.deviceId);
+    const installation = await this.installations.get(scope, described.deviceId);
     const enrollment = await this.enrollment.find({
       tenantId: scope.tenantId,
       siteId: scope.siteId,
@@ -729,7 +729,7 @@ export class DeviceIntelligenceQueryService {
     const devices = await this.listDevices(scope);
     if (!devices.length) return { status: 'not_found' as const };
     const approvedIds = new Set(devices.map(device => device.deviceId));
-    const installations = await this.installations.list(scope.siteId);
+    const installations = await this.installations.list(scope);
     const matches = installations.filter(record =>
       record.schemaVersion === 1 &&
       record.device.tenantId === scope.tenantId &&

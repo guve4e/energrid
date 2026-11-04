@@ -289,7 +289,7 @@ describe('DeviceMqttMessageRouter', () => {
       expect(result?.observationAdmissions).toEqual([expect.objectContaining({
         outcome: 'rejected', reasonCode: 'observation_authority_missing',
       })]);
-      expect(installations.get).toHaveBeenCalledWith('site-a', deviceId);
+      expect(installations.get).toHaveBeenCalledWith({ tenantId: 'tenant-a', siteId: 'site-a' }, deviceId);
       expect(registry.projectApprovedObservation).not.toHaveBeenCalled();
     } finally {
       await runtime?.onModuleDestroy();

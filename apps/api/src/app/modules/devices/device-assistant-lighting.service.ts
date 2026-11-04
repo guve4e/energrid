@@ -138,7 +138,7 @@ export class DeviceAssistantLightingService {
 
     const installationStart = performance.now();
     const installation = await this.installations.get(
-      scope.siteId,
+      scope,
       deviceId,
     );
     const installationMs = performance.now() - installationStart;
