@@ -64,6 +64,41 @@ describe('weather data quality and decisions', () => {
     expect(result.confidence).toBe('single-source');
     expect(result.radarSummary).toMatchObject({ status: 'unavailable', nearestCell: null, eta: null });
   });
+  it('does not call a short seven-hour rain forecast a dry 24-hour period', () => {
+    const result = intelligence.analyze(snapshot(), null, null);
+    expect(result.severity).toBe('normal'); // The short-term risk assessment remains independent.
+    expect(result.rain).toMatchObject({
+      duration: 'unknown', assessedHours: 12, totalMm: null, litersPerSquareMeter: null,
+      maxHourlyMm: null, maxRainChance: null, startsAt: null, endsAt: null,
+    });
+    expect(result.rain.summary).toContain('cannot be classified as dry');
+    expect(result.today.rainTotalMm).toBeNull();
+  });
+  it('requires 24 contiguous valid rain hours before reporting no rain', () => {
+    const s = snapshot();
+    s.hourly = Array.from({ length: 24 }, (_, i) => ({
+      ...s.hourly[0], time: new Date(Math.floor(now / HOUR_MS) * HOUR_MS + i * HOUR_MS).toISOString(),
+    }));
+    expect(intelligence.analyze(s, null, null).rain).toMatchObject({
+      duration: 'none', assessedHours: 24, totalMm: 0, maxHourlyMm: 0,
+    });
+    s.hourly[12].precipitationMm = null;
+    expect(intelligence.analyze(s, null, null).rain).toMatchObject({
+      duration: 'unknown', assessedHours: 12, totalMm: null,
+    });
+    s.hourly[12].precipitationMm = 0;
+    s.hourly[9].rainChance = null;
+    expect(intelligence.analyze(s, null, null).rain.duration).toBe('unknown');
+    s.hourly[9].rainChance = 0;
+    s.hourly[5].time = s.hourly[4].time;
+    expect(intelligence.analyze(s, null, null).rain.duration).toBe('unknown');
+  });
+  it('keeps stale-provider rain values unavailable, not zero', () => {
+    const s = snapshot();
+    s.availability = 'unavailable';
+    const result = intelligence.analyze(s, null, null);
+    expect(result.rain).toMatchObject({ duration: 'unknown', totalMm: null, maxHourlyMm: null });
+  });
   it('summarizes rain as millimeters and liters per square meter', () => {
     const s = snapshot();
     s.hourly = Array.from({ length: 24 }, (_, i) => ({

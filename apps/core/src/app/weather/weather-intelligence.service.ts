@@ -116,7 +116,7 @@ export class WeatherIntelligenceService {
       tempMin: today?.tempMin ?? null,
       windMaxKmh: today?.windMaxKmh ?? this.max(hourly.map((h: any) => h.windKmh)),
       gustMaxKmh: today?.gustMaxKmh ?? this.max(hourly.map((h: any) => h.gustKmh)),
-      rainTotalMm: today?.rainTotalMm ?? 0,
+      rainTotalMm: today?.rainTotalMm ?? null,
       rainChanceMax: today?.rainChanceMax ?? this.max(hourly.map((h: any) => h.rainChance)),
     };
   }

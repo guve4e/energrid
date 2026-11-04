@@ -54,6 +54,27 @@ const provider = new FixtureWeatherInvestigatorProvider();
 const evidence = (data: WeatherSnapshot) =>
   buildWeatherEvidence(data, 'site-a', baseTime);
 
+function candidateFinding(
+  data: ReturnType<typeof evidence>,
+  index: number,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    eventType: 'rain',
+    startsAt: data.hours[index].time,
+    endsAt: new Date(Date.parse(data.hours[index].time) + 3_600_000).toISOString(),
+    location: data.location,
+    severity: 'low',
+    confidence: 'low',
+    uncertainty: 'Прогнозата може да се промени.',
+    evidenceRefs: [data.hours[index].id],
+    consequences: [],
+    preparation: [],
+    bulgarianExplanation: 'Възможен дъжд.',
+    ...overrides,
+  };
+}
+
 describe('weather investigator evidence and fixture provider', () => {
   it('normalizes hourly provider data and bounds the evidence horizon to 72 hours', () => {
     const normalized = evidence(snapshot());
@@ -172,6 +193,79 @@ describe('weather investigator evidence and fixture provider', () => {
         normalized,
       ),
     ).toThrow('official warning');
+  });
+
+  it('rejects forecast evidence cited for a different event hour', () => {
+    const data = evidence(snapshot({ 1: { rainChance: 80, precipitationMm: 0.1 } }));
+    const future = candidateFinding(data, 48, {
+      severity: 'severe',
+      evidenceRefs: [data.hours[1].id],
+    });
+    expect(() => validateWeatherFindings([future], data)).toThrow(/outside|missing|uncited/);
+  });
+
+  it('accepts supported low rain but rejects inflated severity and confidence', () => {
+    const data = evidence(snapshot({ 12: { rainChance: 80, precipitationMm: 3 } }));
+    const finding = candidateFinding(data, 12);
+    expect(validateWeatherFindings([finding], data)).toHaveLength(1);
+    expect(() => validateWeatherFindings([
+      { ...finding, severity: 'high' },
+    ], data)).toThrow(/severity/);
+    expect(() => validateWeatherFindings([
+      { ...finding, confidence: 'high' },
+    ], data)).toThrow(/confidence/);
+  });
+
+  it('validates wind severity against the cited gust rather than the model claim', () => {
+    const data = evidence(snapshot({
+      6: { gustKmh: 58 },
+      7: { gustKmh: 75 },
+    }));
+    const moderate = candidateFinding(data, 6, { eventType: 'wind', severity: 'moderate' });
+    expect(validateWeatherFindings([moderate], data)).toHaveLength(1);
+    expect(() => validateWeatherFindings([
+      { ...moderate, severity: 'high' },
+    ], data)).toThrow(/severity/);
+    expect(validateWeatherFindings([
+      candidateFinding(data, 7, { eventType: 'wind', severity: 'high' }),
+    ], data)).toHaveLength(1);
+  });
+
+  it('rejects uncited, unsupported or missing hours within a claimed event', () => {
+    const data = evidence(snapshot({
+      10: { rainChance: 80, precipitationMm: 3 },
+      12: { rainChance: 75, precipitationMm: 2 },
+    }));
+    const span = candidateFinding(data, 10, {
+      endsAt: new Date(Date.parse(data.hours[12].time) + 3_600_000).toISOString(),
+      evidenceRefs: [data.hours[10].id, data.hours[12].id],
+    });
+    expect(() => validateWeatherFindings([span], data)).toThrow(/missing|uncited/);
+  });
+
+  it('separates non-contiguous forecast events in the offline fixture', async () => {
+    const data = evidence(snapshot({
+      10: { rainChance: 80, precipitationMm: 3 },
+      12: { rainChance: 75, precipitationMm: 2 },
+    }));
+    const rain = (await provider.investigate(data, null)).findings.filter(
+      (finding) => finding.eventType === 'rain',
+    );
+    expect(rain).toHaveLength(2);
+    expect(rain.map((finding) => finding.startsAt)).toEqual([
+      data.hours[10].time, data.hours[12].time,
+    ]);
+  });
+
+  it('rejects official warning claims even if an unverified alert flag is injected', () => {
+    const data = evidence(snapshot({ 5: { weatherCode: 95 } }));
+    data.alertsAvailable = true;
+    data.alerts = [{ text: 'unverified alert text' }];
+    expect(() => validateWeatherFindings([
+      candidateFinding(data, 5, {
+        eventType: 'official_warning', severity: 'severe',
+      }),
+    ], data)).toThrow(/official warning/);
   });
 
   it('keeps findings separate for sites at different locations', async () => {

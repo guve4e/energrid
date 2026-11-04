@@ -1,6 +1,7 @@
 import { WeatherSnapshot } from './weather-data-quality';
 import {
   FixtureWeatherInvestigatorProvider,
+  WeatherEvidenceSnapshot,
   WeatherInvestigatorProvider,
 } from './weather-investigator';
 import { WeatherInvestigatorService } from './weather-investigator.service';
@@ -100,6 +101,49 @@ function setup(provider?: WeatherInvestigatorProvider) {
   };
 }
 
+/** A fixed future UTC date within the investigator's 72h forecast horizon. */
+function futureSameDayIndex(): number {
+  return 48 - new Date().getUTCHours();
+}
+
+function rainEpisodeProvider(
+  ranges: Array<[number, number]>,
+): WeatherInvestigatorProvider {
+  return {
+    id: 'controlled-rain',
+    async investigate(evidence: WeatherEvidenceSnapshot) {
+      return {
+        findings: ranges.map(([first, last]) => ({
+          eventType: 'rain' as const,
+          startsAt: evidence.hours[first].time,
+          endsAt: new Date(
+            Date.parse(evidence.hours[last].time) + 3_600_000,
+          ).toISOString(),
+          location: evidence.location,
+          severity: 'low' as const,
+          confidence: 'low' as const,
+          uncertainty: 'Възможен дъжд.',
+          evidenceRefs: evidence.hours.slice(first, last + 1).map((hour) => hour.id),
+          consequences: [],
+          preparation: [],
+          bulgarianExplanation: 'Прогноза за дъжд.',
+        })),
+        summary: 'Контролирана прогноза.',
+        model: 'test-model',
+      };
+    },
+  };
+}
+
+function rainSnapshot(indices: number[]): WeatherSnapshot {
+  const result = snapshot('Vidin', 43.9916, 22.8728);
+  for (const index of indices) {
+    result.hourly[index].precipitationMm = 3;
+    result.hourly[index].rainChance = 80;
+  }
+  return result;
+}
+
 describe('weather investigator persistence and recovery policy', () => {
   const original = process.env;
   afterEach(() => {
@@ -143,6 +187,107 @@ describe('weather investigator persistence and recovery policy', () => {
     expect(two.createdOrUpdated).toBe(0);
     expect(first.client.release).toHaveBeenCalled();
     expect(second.client.release).toHaveBeenCalled();
+  });
+
+  it('persists two separate rain episodes on the same UTC day with different keys', async () => {
+    process.env = { ...original };
+    const start = futureSameDayIndex();
+    const { service, client, weather } = setup(rainEpisodeProvider([
+      [start, start], [start + 2, start + 2],
+    ]));
+    weather.getSnapshotForLocation.mockResolvedValue(
+      rainSnapshot([start, start + 2]),
+    );
+
+    const outcome = await service.run('site-a', 'tenant-a');
+    const writes = client.query.mock.calls.filter(([sql]) =>
+      String(sql).includes('INSERT INTO weather_investigation_findings'),
+    );
+    expect(outcome.createdOrUpdated).toBe(2);
+    expect(writes).toHaveLength(2);
+    const keys = writes.map(([, args]) => String(args?.[3]));
+    expect(keys[0]).not.toBe(keys[1]);
+    expect(keys[0].slice(0, 15)).toBe(keys[1].slice(0, 15));
+    expect(keys.every((key) => key.startsWith('rain:'))).toBe(true);
+  });
+
+  it('preserves the previous identity when a forecast episode shifts but overlaps', async () => {
+    process.env = { ...original };
+    const start = futureSameDayIndex();
+    const { service, client, weather } = setup(
+      rainEpisodeProvider([[start + 1, start + 2]]),
+    );
+    const data = rainSnapshot([start + 1, start + 2]);
+    weather.getSnapshotForLocation.mockResolvedValue(data);
+    const legacyKey = `rain:${data.hourly[start].time!.slice(0, 10)}`;
+    const baseQuery = client.query.getMockImplementation()!;
+    client.query.mockImplementation(async (sql, args = []) => {
+      if (String(sql).includes('SELECT stable_key AS "stableKey"')) {
+        return {
+          rows: [{
+            stableKey: legacyKey,
+            eventType: 'rain',
+            location: 'Vidin',
+            startsAt: new Date(data.hourly[start].time!),
+            endsAt: new Date(Date.parse(data.hourly[start + 1].time!) + 3_600_000),
+          }],
+          rowCount: 1,
+        };
+      }
+      return baseQuery(sql, args);
+    });
+
+    await service.run('site-a', 'tenant-a');
+    const write = client.query.mock.calls.find(([sql]) =>
+      String(sql).includes('INSERT INTO weather_investigation_findings'),
+    );
+    expect(write?.[1]?.[3]).toBe(legacyKey);
+  });
+
+  it('does not recycle an old same-day event key for a separate later episode', async () => {
+    process.env = { ...original };
+    const start = futureSameDayIndex();
+    const { service, client, weather } = setup(
+      rainEpisodeProvider([[start + 2, start + 2]]),
+    );
+    const data = rainSnapshot([start + 2]);
+    weather.getSnapshotForLocation.mockResolvedValue(data);
+    const legacyKey = `rain:${data.hourly[start].time!.slice(0, 10)}`;
+    const baseQuery = client.query.getMockImplementation()!;
+    client.query.mockImplementation(async (sql, args = []) => {
+      if (String(sql).includes('SELECT stable_key AS "stableKey"')) {
+        return {
+          rows: [{
+            stableKey: legacyKey,
+            eventType: 'rain',
+            location: 'Vidin',
+            startsAt: data.hourly[start].time,
+            endsAt: data.hourly[start + 1].time,
+          }],
+          rowCount: 1,
+        };
+      }
+      return baseQuery(sql, args);
+    });
+
+    await service.run('site-a', 'tenant-a');
+    const write = client.query.mock.calls.find(([sql]) =>
+      String(sql).includes('INSERT INTO weather_investigation_findings'),
+    );
+    expect(write?.[1]?.[3]).not.toBe(legacyKey);
+    expect(String(write?.[1]?.[3])).toContain(data.hourly[start + 2].time);
+  });
+
+  it('does not fabricate delivery times and does not prune referenced evidence', async () => {
+    process.env = { ...original };
+    const { service, client } = setup();
+    await service.run('site-a', 'tenant-a');
+    const sql = client.query.mock.calls.map(([statement]) => String(statement));
+    const write = sql.find((statement) => statement.includes('INSERT INTO weather_investigation_findings'))!;
+    expect(write).not.toContain('first_notified_at');
+    const prune = sql.find((statement) => statement.includes('DELETE FROM weather_investigation_snapshots'))!;
+    expect(prune).toContain('NOT EXISTS');
+    expect(prune).toContain('f.evidence_snapshot_id=s.id');
   });
 
   it('falls back safely when a configured investigator returns malformed findings', async () => {

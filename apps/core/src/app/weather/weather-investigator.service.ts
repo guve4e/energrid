@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { Pool } from 'pg';
 import { PG_POOL } from '../db.module';
 import { WeatherProviderService } from './weather-provider.service';
+import type { WeatherFinding } from './weather-investigator.types';
 import { assessWeather } from './weather-data-quality';
 import {
   buildWeatherEvidence,
@@ -9,6 +10,55 @@ import {
   validateWeatherFindings,
   WeatherInvestigatorProvider,
 } from './weather-investigator';
+
+/** Persisted rows are the identity anchors for the same forecast episode across runs. */
+interface PersistedWeatherEvent {
+  stableKey: string;
+  eventType: string;
+  location: string;
+  startsAt: Date | string;
+  endsAt: Date | string;
+}
+
+/**
+ * A forecast's start hour is unique within an event type; a calendar date is not.
+ * Once persisted, the key is retained when later forecasts shift an overlapping
+ * event's boundaries. Never reinterpret separate non-overlapping episodes as one.
+ */
+function findingStableKey(
+  finding: WeatherFinding,
+  previous: readonly PersistedWeatherEvent[],
+  claimed: ReadonlySet<string>,
+): string {
+  const start = Date.parse(finding.startsAt);
+  const end = Date.parse(finding.endsAt);
+  let best: PersistedWeatherEvent | undefined;
+  let bestOverlap = 0;
+  let bestStartDifference = Number.POSITIVE_INFINITY;
+  for (const candidate of previous) {
+    if (
+      candidate.eventType !== finding.eventType ||
+      candidate.location !== finding.location ||
+      claimed.has(candidate.stableKey)
+    ) {
+      continue;
+    }
+    const oldStart = new Date(candidate.startsAt).getTime();
+    const oldEnd = new Date(candidate.endsAt).getTime();
+    const overlap = Math.min(end, oldEnd) - Math.max(start, oldStart);
+    if (overlap <= 0) continue;
+    const distance = Math.abs(start - oldStart);
+    if (
+      overlap > bestOverlap ||
+      (overlap === bestOverlap && distance < bestStartDifference)
+    ) {
+      best = candidate;
+      bestOverlap = overlap;
+      bestStartDifference = distance;
+    }
+  }
+  return best?.stableKey ?? `${finding.eventType}:${new Date(start).toISOString()}`;
+}
 
 export const WEATHER_INVESTIGATOR_PROVIDER = 'WEATHER_INVESTIGATOR_PROVIDER';
 export interface WeatherSiteLocation {
@@ -93,9 +143,19 @@ export class WeatherInvestigatorService {
         ],
       );
       const snapshotId = saved.rows[0].id as string;
+      // Retain evidence still referenced by an existing finding. The foreign key
+      // must never turn routine snapshot pruning into an investigation outage.
       await client.query(
-        `DELETE FROM weather_investigation_snapshots WHERE tenant_id=$1 AND site_id=$2
-        AND id NOT IN (SELECT id FROM weather_investigation_snapshots WHERE tenant_id=$1 AND site_id=$2 ORDER BY created_at DESC LIMIT 48)`,
+        `DELETE FROM weather_investigation_snapshots s
+        WHERE s.tenant_id=$1 AND s.site_id=$2
+          AND s.id NOT IN (
+            SELECT id FROM weather_investigation_snapshots
+            WHERE tenant_id=$1 AND site_id=$2 ORDER BY created_at DESC, id DESC LIMIT 48
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM weather_investigation_findings f
+            WHERE f.evidence_snapshot_id=s.id
+          )`,
         [tenantId, siteId],
       );
       let analysis: Awaited<
@@ -114,6 +174,24 @@ export class WeatherInvestigatorService {
         analysis = await this.fallback.investigate(evidence, previous);
         analysis.summary = `Използвана е детерминистична резервна оценка (${this.investigator.id} е недостъпен или върна невалиден резултат).`;
       }
+      const existing = await client.query(
+        `SELECT stable_key AS "stableKey", event_type AS "eventType", location,
+          starts_at AS "startsAt", ends_at AS "endsAt"
+        FROM weather_investigation_findings
+        WHERE tenant_id=$1 AND site_id=$2
+          AND ends_at > $3::timestamptz AND starts_at < $4::timestamptz
+        ORDER BY starts_at, id`,
+        [
+          tenantId,
+          siteId,
+          evidence.hours[0].time,
+          new Date(
+            Date.parse(evidence.hours[evidence.hours.length - 1].time) + 3_600_000,
+          ).toISOString(),
+        ],
+      );
+      const priorEvents = existing.rows as PersistedWeatherEvent[];
+      const claimedKeys = new Set<string>();
       let savedFindings = 0;
       for (const finding of analysis.findings) {
         if (
@@ -121,13 +199,16 @@ export class WeatherInvestigatorService {
           Date.parse(finding.endsAt) <= Date.now()
         )
           continue;
-        const stableKey = `${finding.eventType}:${finding.startsAt.slice(0, 10)}`;
+        const stableKey = findingStableKey(finding, priorEvents, claimedKeys);
+        // A single investigation must not overwrite the same episode twice.
+        if (claimedKeys.has(stableKey)) continue;
+        claimedKeys.add(stableKey);
         const findingProvider = analysis.inferenceProvider ?? activeProvider.id;
         const result = await client.query(
           `INSERT INTO weather_investigation_findings
           (tenant_id,site_id,event_type,stable_key,starts_at,ends_at,location,severity,confidence,uncertainty,
-           evidence_refs,consequences,preparation,explanation_bg,reasoning_summary,evidence_snapshot_id,provider,model,first_notified_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14,$15,$16,$17,$18,now())
+           evidence_refs,consequences,preparation,explanation_bg,reasoning_summary,evidence_snapshot_id,provider,model)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14,$15,$16,$17,$18)
           ON CONFLICT (tenant_id,site_id,stable_key) DO UPDATE SET
             starts_at=EXCLUDED.starts_at,ends_at=EXCLUDED.ends_at,severity=EXCLUDED.severity,
             confidence=EXCLUDED.confidence,uncertainty=EXCLUDED.uncertainty,evidence_refs=EXCLUDED.evidence_refs,
@@ -138,10 +219,6 @@ export class WeatherInvestigatorService {
               (CASE EXCLUDED.severity WHEN 'low' THEN 1 WHEN 'moderate' THEN 2 WHEN 'high' THEN 3 ELSE 4 END) >
               (CASE weather_investigation_findings.severity WHEN 'low' THEN 1 WHEN 'moderate' THEN 2 WHEN 'high' THEN 3 ELSE 4 END)
               THEN 'prepared' ELSE weather_investigation_findings.notification_state END,
-            first_notified_at=CASE WHEN weather_investigation_findings.notification_state='acknowledged' AND
-              (CASE EXCLUDED.severity WHEN 'low' THEN 1 WHEN 'moderate' THEN 2 WHEN 'high' THEN 3 ELSE 4 END) >
-              (CASE weather_investigation_findings.severity WHEN 'low' THEN 1 WHEN 'moderate' THEN 2 WHEN 'high' THEN 3 ELSE 4 END)
-              THEN now() ELSE weather_investigation_findings.first_notified_at END,
             last_updated_at=now()
           WHERE weather_investigation_findings.notification_state='prepared' OR
             (weather_investigation_findings.notification_state='acknowledged' AND
@@ -170,6 +247,17 @@ export class WeatherInvestigatorService {
           ],
         );
         if (result.rowCount) savedFindings++;
+        // Newly created events can also be matched within this same run;
+        // claimedKeys prevents two findings from updating the same row.
+        if (!priorEvents.some((row) => row.stableKey === stableKey)) {
+          priorEvents.push({
+            stableKey,
+            eventType: finding.eventType,
+            location: finding.location,
+            startsAt: finding.startsAt,
+            endsAt: finding.endsAt,
+          });
+        }
       }
       return {
         status: 'completed',

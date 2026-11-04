@@ -143,6 +143,46 @@ const validEvents: WeatherEventType[] = [
   'official_warning',
 ];
 const validSeverity = ['low', 'moderate', 'high', 'severe'] as const;
+const severityRank: Record<WeatherFinding['severity'], number> = {
+  low: 1,
+  moderate: 2,
+  high: 3,
+  severe: 4,
+};
+const hourMs = 3_600_000;
+type EvidenceHour = WeatherEvidenceSnapshot['hours'][number];
+
+/** Conservative forecast-only limits, not calibrated warning thresholds. */
+function supportedForecastSeverity(
+  eventType: WeatherEventType,
+  hour: EvidenceHour,
+  uncertainty: string,
+): WeatherFinding['severity'] | null {
+  switch (eventType) {
+    case 'rain':
+      return (hour.rainProbabilityPercent ?? 0) >= 30 &&
+        (hour.precipitationMm ?? 0) > 0 ? 'low' : null;
+    case 'snow':
+      return [71, 73, 75, 77, 85, 86].includes(hour.weatherCode ?? -1)
+        ? 'moderate' : null;
+    case 'freeze':
+      return hour.temperatureC !== null && hour.temperatureC <= 0
+        ? 'moderate' : null;
+    case 'wind': {
+      const wind = hour.gustKmh ?? hour.windKmh;
+      return wind !== null && wind >= 70 ? 'high'
+        : wind !== null && wind >= 50 ? 'moderate' : null;
+    }
+    case 'thunderstorm':
+      return [95, 96, 99].includes(hour.weatherCode ?? -1) ? 'high' : null;
+    case 'hail':
+      return [96, 99].includes(hour.weatherCode ?? -1) &&
+        /възмож|потенциал|несигур/iu.test(uncertainty) ? 'moderate' : null;
+    // There is no normalized, authoritative alert evidence contract yet.
+    case 'official_warning':
+      return null;
+  }
+}
 
 export function validateWeatherFindings(
   raw: unknown,
@@ -183,34 +223,50 @@ export function validateWeatherFindings(
         'Finding failed schema, location, forecast-window, or evidence validation',
       );
     }
-    if (finding.eventType === 'official_warning' && !evidence.alertsAvailable) {
-      throw new Error(
-        'A finding cannot claim an official warning when alert coverage is unavailable',
-      );
+    if (finding.eventType === 'official_warning') {
+      throw new Error('An official warning requires verified authoritative alert evidence');
     }
-    const cited = (refs as string[]).map((id) => evidence.hours.find((hour) => hour.id === id)!);
-    const supported = cited.some((hour) => {
-      switch (finding.eventType) {
-        case 'rain': return (hour.rainProbabilityPercent ?? 0) >= 30 && (hour.precipitationMm ?? 0) > 0;
-        case 'snow': return [71, 73, 75, 77, 85, 86].includes(hour.weatherCode ?? -1);
-        case 'freeze': return hour.temperatureC !== null && hour.temperatureC <= 0;
-        case 'wind': return (hour.gustKmh ?? hour.windKmh ?? 0) >= 50;
-        case 'thunderstorm': return [95, 96, 99].includes(hour.weatherCode ?? -1);
-        // Open-Meteo codes 96/99 indicate thunderstorms with hail; evidence does not
-        // establish hail size or certainty, so only a cautious potential-hail finding is accepted.
-        case 'hail': return [96, 99].includes(hour.weatherCode ?? -1) && /възмож|потенциал|несигур/iu.test(String(finding.uncertainty));
-        case 'official_warning': return evidence.alertsAvailable && evidence.alerts.length > 0;
-        default: return false;
+    // These uncalibrated forecasts do not justify medium/high confidence labels.
+    if (finding.confidence !== 'low') {
+      throw new Error('Forecast confidence is not calibrated for elevated claims');
+    }
+    const citedIds = new Set(refs as string[]);
+    if (citedIds.size !== refs.length) {
+      throw new Error('Finding contains duplicate evidence references');
+    }
+    const overlappingHours = evidence.hours
+      .filter((hour) => {
+        const time = Date.parse(hour.time);
+        return Number.isFinite(time) && time < end && time + hourMs > start;
+      })
+      .sort((a, b) => Date.parse(a.time) - Date.parse(b.time));
+    // Every hour in the claimed interval must be both cited and supportive.
+    // An absent hour is unknown, not evidence that the event persists.
+    let coveredUntil = start;
+    for (const hour of overlappingHours) {
+      const time = Date.parse(hour.time);
+      if (time > coveredUntil || !citedIds.has(hour.id)) {
+        throw new Error('Finding event window has missing or uncited forecast evidence');
       }
-    });
-    if (!supported) throw new Error('Finding is not supported by the cited weather measurements');
+      const supportedSeverity = supportedForecastSeverity(
+        finding.eventType as WeatherEventType,
+        hour,
+        finding.uncertainty as string,
+      );
+      if (!supportedSeverity ||
+        severityRank[finding.severity as WeatherFinding['severity']] > severityRank[supportedSeverity]) {
+        throw new Error('Finding severity is not supported by cited weather measurements');
+      }
+      coveredUntil = Math.max(coveredUntil, time + hourMs);
+    }
+    if (coveredUntil < end ||
+      (refs as string[]).some((id) => !overlappingHours.some((hour) => hour.id === id))) {
+      throw new Error('Finding evidence lies outside or does not cover its event window');
+    }
     const narrative = [finding.uncertainty, finding.bulgarianExplanation, ...(Array.isArray(finding.consequences) ? finding.consequences : []), ...(Array.isArray(finding.preparation) ? finding.preparation : [])].join(' ')
       .replace(/(?:не е|няма) официално предупреждение/giu, '');
     if (finding.eventType !== 'official_warning' && /официалн\w*\s+предупрежден/iu.test(narrative))
       throw new Error('A forecast finding cannot be described as an official weather warning');
-    if (finding.eventType === 'official_warning' && !evidence.alertsAvailable) {
-      throw new Error('A finding cannot claim an official warning when alert coverage is unavailable');
-    }
     return finding as unknown as WeatherFinding;
   });
 }
@@ -274,29 +330,41 @@ export class FixtureWeatherInvestigatorProvider
       },
     ];
     for (const group of groups) {
-      const matched = evidence.hours.filter(group.match);
-      if (!matched.length) continue;
-      const refs = matched.map((hour) => hour.id);
-      findings.push({
-        eventType: group.eventType,
-        startsAt: matched[0].time,
-        endsAt: new Date(
-          Date.parse(matched[matched.length - 1].time) + 3_600_000,
-        ).toISOString(),
-        location: evidence.location,
-        severity: group.severity,
-        confidence: 'low',
-        uncertainty:
-          group.eventType === 'hail'
-            ? 'Възможна градушка е само несигурна индикация от кода на прогнозата; размерът и реалното настъпване не са потвърдени.'
-            : 'Офлайн тестова оценка по наличната прогноза; не е калибрирана и не е официално предупреждение.',
-        evidenceRefs: refs,
-        consequences: [
-          'Възможно е временно въздействие върху дома и външното оборудване.',
-        ],
-        preparation: ['Провери прогнозата и подходящата защита на дома.'],
-        bulgarianExplanation: `Прогнозата за ${evidence.location}: ${group.text}. Провери прогнозата отново преди събитието.`,
-      });
+      // Separate non-contiguous occurrences instead of claiming an unobserved span.
+      let eventHours: EvidenceHour[] = [];
+      const appendEvent = () => {
+        if (!eventHours.length) return;
+        findings.push({
+          eventType: group.eventType,
+          startsAt: eventHours[0].time,
+          endsAt: new Date(
+            Date.parse(eventHours[eventHours.length - 1].time) + hourMs,
+          ).toISOString(),
+          location: evidence.location,
+          severity: group.severity,
+          confidence: 'low',
+          uncertainty:
+            group.eventType === 'hail'
+              ? 'Възможна градушка е само несигурна индикация от кода на прогнозата; размерът и реалното настъпване не са потвърдени.'
+              : 'Офлайн тестова оценка по наличната прогноза; не е калибрирана и не е официално предупреждение.',
+          evidenceRefs: eventHours.map((hour) => hour.id),
+          consequences: [
+            'Възможно е временно въздействие върху дома и външното оборудване.',
+          ],
+          preparation: ['Провери прогнозата и подходящата защита на дома.'],
+          bulgarianExplanation: `Прогнозата за ${evidence.location}: ${group.text}. Провери прогнозата отново преди събитието.`,
+        });
+        eventHours = [];
+      };
+      for (const hour of evidence.hours) {
+        const last = eventHours[eventHours.length - 1];
+        if (last && Date.parse(hour.time) !== Date.parse(last.time) + hourMs) {
+          appendEvent();
+        }
+        if (group.match(hour)) eventHours.push(hour);
+        else appendEvent();
+      }
+      appendEvent();
     }
     return {
       findings: validateWeatherFindings(findings, evidence),

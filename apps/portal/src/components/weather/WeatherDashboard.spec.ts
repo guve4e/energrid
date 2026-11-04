@@ -35,6 +35,23 @@ function responsesWithRiver(river: object) {
   }));
 }
 describe('weather page', () => {
+  it('shows incomplete rainfall coverage and does not display a fabricated zero total', async () => {
+    vi.stubGlobal('fetch', responses(undefined, {
+      ...forecast,
+      intelligence: { ...forecast.intelligence, rain: {
+        duration: 'unknown', headline: 'Incomplete 24-hour rain outlook',
+        summary: 'Only 12 of 24 consecutive forecast hours have valid rain data.',
+        totalMm: null, litersPerSquareMeter: null, maxHourlyMm: null,
+        maxRainChance: null, wetHours: 0, assessedHours: 12, startsAt: null, endsAt: null,
+      } },
+    }));
+    wrapper = mount(WeatherDashboard, { props: { apiBase: '', accessToken: 'test' } });
+    await flushPromises();
+    expect(wrapper.get('.rain-card').text()).toContain('Rain-data coverage');
+    expect(wrapper.get('.rain-card').text()).toContain('12/24 hours');
+    expect(wrapper.get('.rain-card').text()).toContain('— mm');
+    expect(wrapper.get('.rain-card').text()).not.toContain('0.0 mm');
+  });
   it('shows source disagreement and awaits observations instead of inventing accuracy', async () => {
     vi.stubGlobal('fetch', responses());
     wrapper = mount(WeatherDashboard, { props: { apiBase: '', accessToken: 'test' } });

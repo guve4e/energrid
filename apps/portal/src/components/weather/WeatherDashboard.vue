@@ -19,8 +19,8 @@ interface Dashboard {
   dataQuality: { status: string };
 }
 interface RainAssessment {
-  duration: string; headline: string; summary: string; totalMm: number; litersPerSquareMeter: number;
-  maxHourlyMm: number; maxRainChance: number; wetHours: number; assessedHours: number;
+  duration: string; headline: string; summary: string; totalMm: number | null; litersPerSquareMeter: number | null;
+  maxHourlyMm: number | null; maxRainChance: number | null; wetHours: number; assessedHours: number;
   startsAt: string | null; endsAt: string | null;
 }
 interface WeatherScore {
@@ -237,7 +237,8 @@ onBeforeUnmount(() => { disposed = true; controller?.abort(); if (timer) clearIn
         </div>
         <div class="rain-grid">
           <article><span>Total</span><strong>{{ number(dashboard.intelligence.rain.totalMm) }} mm</strong><small>{{ number(dashboard.intelligence.rain.litersPerSquareMeter) }} L/m²</small></article>
-          <article><span>Wet hours</span><strong>{{ dashboard.intelligence.rain.wetHours }}/{{ dashboard.intelligence.rain.assessedHours }}</strong><small>{{ label(dashboard.intelligence.rain.duration) }}</small></article>
+          <article v-if="dashboard.intelligence.rain.duration === 'unknown'"><span>Rain-data coverage</span><strong>{{ dashboard.intelligence.rain.assessedHours }}/24 hours</strong><small>Incomplete forecast</small></article>
+          <article v-else><span>Wet hours</span><strong>{{ dashboard.intelligence.rain.wetHours }}/{{ dashboard.intelligence.rain.assessedHours }}</strong><small>{{ label(dashboard.intelligence.rain.duration) }}</small></article>
           <article><span>Peak hour</span><strong>{{ number(dashboard.intelligence.rain.maxHourlyMm) }} mm</strong><small>{{ number(dashboard.intelligence.rain.maxRainChance, 0) }}% max chance</small></article>
           <article><span>Window</span><strong>{{ hour(dashboard.intelligence.rain.startsAt) }}</strong><small>to {{ hour(dashboard.intelligence.rain.endsAt) }}</small></article>
         </div>

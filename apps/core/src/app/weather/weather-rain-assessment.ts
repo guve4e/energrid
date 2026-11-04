@@ -1,25 +1,42 @@
-import { forecastWindow, WeatherSnapshot } from './weather-data-quality';
+import { forecastWindow, HOUR_MS, WeatherHour, WeatherSnapshot } from './weather-data-quality';
 
-export type RainDuration = 'none' | 'passing' | 'intermittent' | 'prolonged' | 'all-day';
+export type RainDuration = 'unknown' | 'none' | 'passing' | 'intermittent' | 'prolonged' | 'all-day';
 
 export interface RainAssessment {
   duration: RainDuration;
   headline: string;
   summary: string;
-  totalMm: number;
-  litersPerSquareMeter: number;
-  maxHourlyMm: number;
-  maxRainChance: number;
+  totalMm: number | null;
+  litersPerSquareMeter: number | null;
+  maxHourlyMm: number | null;
+  maxRainChance: number | null;
   wetHours: number;
   assessedHours: number;
   startsAt: string | null;
   endsAt: string | null;
 }
 
+const WINDOW_HOURS = 24;
 const rainCodes = new Set([51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99]);
 
 export function assessRain(snapshot: WeatherSnapshot): RainAssessment {
-  const hours = forecastWindow(snapshot).slice(0, 24);
+  const now = Date.now();
+  const hours = forecastWindow(snapshot, now).slice(0, WINDOW_HOURS);
+  const windowStart = Math.floor(now / HOUR_MS) * HOUR_MS;
+  // A seven-hour risk forecast can be usable while its 24-hour rainfall outlook is not.
+  // Require every expected hourly slot; missing data must never become a zero-rain claim.
+  const assessedHours = hours.findIndex((hour, index) =>
+    Date.parse(hour.time ?? '') !== windowStart + index * HOUR_MS || !hasRainData(hour));
+  const consecutiveHours = assessedHours === -1 ? hours.length : assessedHours;
+  if (consecutiveHours !== WINDOW_HOURS || hours.length !== WINDOW_HOURS) {
+    return {
+      ...unavailableRainAssessment(),
+      headline: 'Incomplete 24-hour rain outlook',
+      summary: `Only ${consecutiveHours} of 24 consecutive forecast hours have valid rain data. The next 24 hours cannot be classified as dry.`,
+      assessedHours: consecutiveHours,
+    };
+  }
+
   const wetHours = hours.filter(isWetHour);
   const totalMm = sum(hours.map((hour) => hour.precipitationMm));
   const maxHourlyMm = max(hours.map((hour) => hour.precipitationMm));
@@ -43,13 +60,13 @@ export function assessRain(snapshot: WeatherSnapshot): RainAssessment {
 
 export function unavailableRainAssessment(): RainAssessment {
   return {
-    duration: 'none',
+    duration: 'unknown',
     headline: 'Rain assessment unavailable',
     summary: 'Rain data is missing or stale.',
-    totalMm: 0,
-    litersPerSquareMeter: 0,
-    maxHourlyMm: 0,
-    maxRainChance: 0,
+    totalMm: null,
+    litersPerSquareMeter: null,
+    maxHourlyMm: null,
+    maxRainChance: null,
     wetHours: 0,
     assessedHours: 0,
     startsAt: null,
@@ -57,13 +74,17 @@ export function unavailableRainAssessment(): RainAssessment {
   };
 }
 
-function isWetHour(hour: { precipitationMm: number | null; rainChance: number | null; weatherCode: number | null }): boolean {
-  return (hour.precipitationMm ?? 0) >= 0.1 ||
-    (hour.rainChance ?? 0) >= 50 ||
+function hasRainData(hour: WeatherHour): boolean {
+  return Number.isFinite(hour.precipitationMm) && hour.precipitationMm! >= 0 &&
+    Number.isFinite(hour.rainChance) && hour.rainChance! >= 0 && hour.rainChance! <= 100;
+}
+
+function isWetHour(hour: WeatherHour): boolean {
+  return hour.precipitationMm! >= 0.1 || hour.rainChance! >= 50 ||
     rainCodes.has(hour.weatherCode ?? -1);
 }
 
-function rainDuration(wetHours: number, assessedHours: number): RainDuration {
+function rainDuration(wetHours: number, assessedHours: number): Exclude<RainDuration, 'unknown'> {
   if (!wetHours) return 'none';
   if (wetHours <= 2) return 'passing';
   if (assessedHours >= 18 && wetHours / assessedHours >= 0.75) return 'all-day';
@@ -71,7 +92,7 @@ function rainDuration(wetHours: number, assessedHours: number): RainDuration {
   return 'intermittent';
 }
 
-function rainHeadline(duration: RainDuration): string {
+function rainHeadline(duration: Exclude<RainDuration, 'unknown'>): string {
   return ({
     none: 'No meaningful rain expected',
     passing: 'Passing rain possible',
@@ -81,7 +102,7 @@ function rainHeadline(duration: RainDuration): string {
   })[duration];
 }
 
-function rainSummary(duration: RainDuration, totalMm: number, wetHours: number, assessedHours: number): string {
+function rainSummary(duration: Exclude<RainDuration, 'unknown'>, totalMm: number, wetHours: number, assessedHours: number): string {
   if (duration === 'none') return 'No measurable rain is expected in the next 24 hours.';
   const amount = `${round(totalMm)} mm (${round(totalMm)} L/m²)`;
   return `${amount} over ${wetHours} of ${assessedHours} forecast hours.`;
