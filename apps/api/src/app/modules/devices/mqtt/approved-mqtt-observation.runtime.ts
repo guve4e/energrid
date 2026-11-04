@@ -300,6 +300,56 @@ export class ApprovedMqttObservationRuntime
     return Object.keys(fields).length ? { ...state, fields } : null;
   }
 
+  /**
+   * Read-only inspection of persisted field/source authority. The resolver is
+   * the same one used by trusted ingress; this method never grants authority.
+   * These records do NOT prove a subscriber/poller is running, that a broker is
+   * connected, or that a network route is reachable.
+   */
+  async inspectPersistedObservationAuthority(
+    scope: { tenantId: string; siteId: string },
+    deviceId: string,
+  ): Promise<{
+    status: 'device_not_approved' | 'device_not_enrolled' | 'installation_not_approved' | 'installation_approved';
+    sources: Array<{ sourceId: string; selector: string; fields: string[] }>;
+  }> {
+    const empty = (status: 'device_not_approved' | 'device_not_enrolled' | 'installation_not_approved') =>
+      ({ status, sources: [] });
+
+    await this.registry.ensureInstallationsLoaded();
+    const matching = this.registry.getDevices(true).filter(candidate =>
+      candidate.id === deviceId && candidate.tenantId === scope.tenantId &&
+      candidate.siteId === scope.siteId && candidate.kind === 'physical' &&
+      candidate.trustStatus === 'approved');
+    if (matching.length !== 1) return empty('device_not_approved');
+
+    const enrolled = await this.enrollment.find({ ...scope, deviceId });
+    if (!enrolled || enrolled.status !== 'enrolled') return empty('device_not_enrolled');
+
+    const installation = await this.installations.get(scope, deviceId);
+    if (!installation || installation.schemaVersion !== 1 ||
+      installation.device.id !== deviceId ||
+      installation.device.tenantId !== scope.tenantId ||
+      installation.device.siteId !== scope.siteId ||
+      installation.device.trustStatus !== 'approved') {
+      return empty('installation_not_approved');
+    }
+
+    const sources = (installation.observationAuthority?.bindings ?? [])
+      .flatMap(binding => {
+        const authority = resolveInstallationObservationAuthority(
+          installation, binding.sourceId, binding.selector,
+        );
+        return authority ? [{
+          sourceId: authority.binding.sourceId,
+          selector: authority.binding.selector,
+          fields: Object.keys(authority.binding.fields).sort(),
+        }] : [];
+      })
+      .sort((a, b) => a.sourceId.localeCompare(b.sourceId) || a.selector.localeCompare(b.selector));
+    return { status: 'installation_approved', sources };
+  }
+
   async onModuleDestroy(): Promise<void> {
     await this.store?.close();
   }

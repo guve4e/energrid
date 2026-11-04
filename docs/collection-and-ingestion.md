@@ -237,3 +237,31 @@ An operator should distinguish: broker subscription (delivery), device profile
 (capability), installed source/field authority (admission), collection activity
 (runtime evidence), and separately approved control. These are presently
 independent; no single effective collection plan is enforced yet.
+
+### T1.3b — Read-only collection decision inspection (local patch; runtime unverified)
+
+No new coordinator, persistence model, device-profile behavior or source-approval
+mechanism is introduced. `explainScheduledHttpCollection(device)` exposes the
+**existing** HTTP scheduler candidate decisions and their reason codes; the
+scheduler calls this same function, so an explanation cannot diverge from the
+selection rule. Separate results for normal HTTP reads and authorized Shelly
+operational switch reads make possible duplicate candidates visible without
+silently dropping either behavior.
+
+`ApprovedMqttObservationRuntime.inspectPersistedObservationAuthority(scope,
+deviceId)` checks the same tenant/site, approved physical device, enrollment,
+installation and field/source resolver requirements used by observation ingress.
+It reports the *effective persisted field mapping* for each source/selector,
+not the requested adapter protocol. An installation may allow more than one
+source for the same field: inspection reports each without inventing priority.
+
+**Important limits:** An HTTP candidate is not an authorized observation; an
+installed field binding does not prove HTTP polling or MQTT delivery is active.
+Neither method checks current subscriber connection, broker origin, observer
+route, fresh measurements or safe switching authorization. Shelly MQTT still
+has additional integration-specific identity/broker validation. No Portal
+endpoint is wired by this patch; the methods provide a tested internal read-only
+inspection seam. Future operator diagnostics must combine these existing facts
+with *actual runtime* evidence, without calling the result an active collection
+plan prematurely. Generic HTTP telemetry bypass, normal configured MQTT
+history divergence, and EM1 power adapter limitations remain open.

@@ -189,11 +189,32 @@ function isHttpTarget(value: string | undefined): value is string {
 }
 
 /**
- * Decide which approved devices the scheduled HTTP collector may attempt.
- * This does not authorize a measurement or command: the selected collector must
- * still verify endpoint, identity, installation and observation authority.
- * MQTT subscription configuration is independent of this HTTP schedule.
+ * Explain the EXISTING HTTP candidate rules without authorizing collection.
+ * MQTT delivery, installation field authority, observer reachability and control
+ * are separate decisions. Keep these reasons and the scheduler in one place.
  */
+export function explainScheduledHttpCollection(device: RegisteredDevice): {
+  httpRead: { selected: boolean; reason: string }
+  operationalStatusRead: { selected: boolean; reason: string }
+} {
+  const httpRead = device.trustStatus !== 'approved'
+    ? { selected: false, reason: 'device_not_approved' }
+    : device.adapter.protocol !== 'http'
+      ? { selected: false, reason: 'adapter_not_http' }
+      : !device.adapter.configured && device.adapter.driver !== 'energrid-esp8266'
+        ? { selected: false, reason: 'adapter_not_configured' }
+        : device.adapter.driver !== 'shelly-lan' && !isHttpTarget(device.adapter.target)
+          ? { selected: false, reason: 'http_target_missing' }
+          : { selected: true, reason: 'scheduled_http_candidate' }
+
+  const operationalStatusRead = isShellySwitchCollectionCandidate(device)
+    ? { selected: true, reason: 'identity_checked_switch_candidate' }
+    : { selected: false, reason: 'no_operational_switch_collector' }
+
+  return { httpRead, operationalStatusRead }
+}
+
+/** These are candidates only; the integrations must still verify authority. */
 export function selectScheduledHttpCollection(devices: ReadonlyArray<RegisteredDevice>): {
   httpDevices: RegisteredDevice[]
   shellySwitches: RegisteredDevice[]
@@ -201,17 +222,9 @@ export function selectScheduledHttpCollection(devices: ReadonlyArray<RegisteredD
   const httpDevices: RegisteredDevice[] = []
   const shellySwitches: RegisteredDevice[] = []
   for (const device of devices) {
-    if (device.trustStatus !== 'approved') continue
-    // ESP8266 installations are intentionally `configured: false` until their
-    // separate source/field observation approval is resolved by Core ingress.
-    if ((device.adapter.configured || device.adapter.driver === 'energrid-esp8266') &&
-        device.adapter.protocol === 'http' &&
-        (device.adapter.driver === 'shelly-lan' || isHttpTarget(device.adapter.target))) {
-      httpDevices.push(device)
-    }
-    // This collector reads Switch.GetStatus only. EM1 is a measurement profile,
-    // not a relay-status profile; it needs its own authorized data adapter.
-    if (isShellySwitchCollectionCandidate(device)) shellySwitches.push(device)
+    const decision = explainScheduledHttpCollection(device)
+    if (decision.httpRead.selected) httpDevices.push(device)
+    if (decision.operationalStatusRead.selected) shellySwitches.push(device)
   }
   return { httpDevices, shellySwitches }
 }
