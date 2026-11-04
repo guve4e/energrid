@@ -61,9 +61,12 @@ describe('DeviceControlService', () => {
       },
     ]);
 
-    const service = new DeviceControlService(new DeviceRegistryService(), activeEnrollment);
+    const registry = new DeviceRegistryService();
+    const service = new DeviceControlService(registry, activeEnrollment);
+    const actor = { type: 'user' as const, id: 'operator-42', name: 'Operator' };
 
-    const result = await service.execute('kitchen.island.light', 'turn_on');
+    const result = await service.execute('kitchen.island.light', 'turn_on', actor);
+    expect(registry.getLatestExecutionTrace('kitchen.island.light')?.actor).toEqual(actor);
 
     expect(result).toEqual(
       expect.objectContaining({

@@ -916,14 +916,18 @@ export class PortalController {
     @Req() request: DeviceProxyRequest,
   ) {
     assertPortalAdministrator(request)
+    const principal = request.user
+    if (!principal?.userId)
+      throw new UnauthorizedException('Authenticated user identity is required for device control.')
+    const actor = { type: 'user' as const, id: principal.userId, name: principal.name }
     await this.deviceRegistry.persistInstallationEvent(deviceId, 'command', {
       action: body?.action || '',
       stage: 'requested',
       status: 'requested',
-    })
+    }, principal.userId)
     let result: Awaited<ReturnType<DeviceControlService['execute']>>
     try {
-      result = await this.deviceControl.execute(deviceId, body?.action)
+      result = await this.deviceControl.execute(deviceId, body?.action, actor)
     } catch (error) {
       await this.deviceRegistry.persistInstallationEvent(deviceId, 'command', {
         action: body?.action || '',
@@ -931,7 +935,7 @@ export class PortalController {
         status: 'failed',
         failureType: error instanceof Error ? error.name : 'UnknownError',
         message: 'The command did not complete successfully.',
-      })
+      }, principal.userId)
       throw error
     }
     await this.deviceRegistry.persistInstallationEvent(deviceId, 'command', {
@@ -941,7 +945,7 @@ export class PortalController {
       adapter: result.adapter,
       commandId: result.command?.id || '',
       message: result.message,
-    })
+    }, principal.userId)
     return result
   }
 

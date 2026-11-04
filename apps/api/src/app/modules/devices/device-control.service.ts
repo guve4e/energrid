@@ -11,6 +11,7 @@ import {
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DeviceRegistryService } from './device-registry.service';
+import type { CommandRequest } from './commands/device-command-tracker';
 import { configuredPortalSite } from '../portal/portal-site-context';
 import {
   parseDeviceControlBinding,
@@ -79,6 +80,7 @@ export class DeviceControlService {
   async execute(
     deviceId: string,
     action: DeviceCapabilityAction | string | undefined,
+    actor?: CommandRequest['actor'],
   ): Promise<DeviceActionResult> {
     if (!action) throw new BadRequestException('Missing device action.');
     if (!isDeviceAction(action)) {
@@ -124,7 +126,7 @@ export class DeviceControlService {
     const enrollmentProblem = await this.enrollmentProblem(device, new Set());
     if (enrollmentProblem) throw new ForbiddenException(enrollmentProblem);
 
-    return this.executeBinarySwitch(device, action === 'turn_on', action);
+    return this.executeBinarySwitch(device, action === 'turn_on', action, actor);
   }
 
   private async enrollmentProblem(
@@ -192,9 +194,10 @@ export class DeviceControlService {
     device: RegisteredDevice,
     on: boolean,
     action: DeviceCapabilityAction,
+    actor?: CommandRequest['actor'],
   ): Promise<DeviceActionResult> {
     if (device.memberDeviceIds?.length) {
-      return this.executeMemberSwitches(device, on, action);
+      return this.executeMemberSwitches(device, on, action, actor);
     }
 
     if (device.adapter.protocol === 'simulated') {
@@ -223,7 +226,7 @@ export class DeviceControlService {
       }
       this.activeShellyCommands.add(device.id);
       try {
-        return await this.executeResolvedShellySwitch(device, on, action, binding);
+        return await this.executeResolvedShellySwitch(device, on, action, binding, actor);
       } finally {
         this.activeShellyCommands.delete(device.id);
       }
@@ -232,9 +235,9 @@ export class DeviceControlService {
     // site-owned LAN identity. The new scope resolver applies to Shelly-LAN
     // installations; it must not invent a LAN route for MQTT-native devices.
     if (binding.kind === 'generic-mqtt')
-      return this.executeGenericMqttSwitch(device, on, action, binding.topic);
+      return this.executeGenericMqttSwitch(device, on, action, binding.topic, actor);
     if (binding.kind === 'shelly-mqtt' || binding.kind === 'shelly-http')
-      return this.executeShellyRpc(device, on, action, binding);
+      return this.executeShellyRpc(device, on, action, binding, actor);
     throw new ForbiddenException('This Shelly switch permission has no eligible authorized execution scope.');
   }
 
@@ -244,6 +247,7 @@ export class DeviceControlService {
     on: boolean,
     action: DeviceCapabilityAction,
     binding: Extract<DeviceControlBinding, { kind: 'shelly-switch' | 'shelly-virtual-lab' | 'shelly-http' | 'shelly-mqtt' }>,
+    actor?: CommandRequest['actor'],
   ): Promise<DeviceActionResult> {
     if (!this.routes)
       throw new ServiceUnavailableException('Scope-authorized Shelly control is unavailable.')
@@ -270,7 +274,7 @@ export class DeviceControlService {
       const command = this.registry.markDeviceCommandPending(device.id, {
         action, expectedValues: { on }, ttlMs: virtualLabCommandAckTtlMs,
         message: `Requesting ${action} through the separately authorized site-local Shelly route.`,
-        actor: { type: 'user', id: 'portal-installer', name: 'Portal installer' },
+        actor,
       })
       try {
         const result = await this.siteLocalCommands.execute({
@@ -343,7 +347,7 @@ export class DeviceControlService {
         baseUrl: `http://${target.ipAddress}`,
         ...(binding.kind === 'shelly-http' && binding.credentialRef ? { credentialRef: binding.credentialRef } : {}),
       }
-      return this.executeShellyRpc(device, on, action, route)
+      return this.executeShellyRpc(device, on, action, route, actor)
     }
     if (target.zone.collectionSource !== 'virtual-lab') {
       throw new ForbiddenException('No authorized Shelly execution transport is configured for this network scope.')
@@ -355,7 +359,7 @@ export class DeviceControlService {
       action, expectedValues: { on },
       ttlMs: virtualLabCommandAckTtlMs,
       message: `Requesting ${action} through the resolved site-authorized Shelly route.`,
-      actor: { type: 'user', id: 'portal-installer', name: 'Portal installer' },
+      actor,
     })
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 22_000)
@@ -416,12 +420,13 @@ export class DeviceControlService {
     device: RegisteredDevice,
     on: boolean,
     action: DeviceCapabilityAction,
+    actor?: CommandRequest['actor'],
   ): Promise<DeviceActionResult> {
     const members = [...new Set(device.memberDeviceIds!)].map(
       (id) => this.findDevice(id)!,
     );
     const results = await Promise.all(
-      members.map((member) => this.executeBinarySwitch(member, on, action)),
+      members.map((member) => this.executeBinarySwitch(member, on, action, actor)),
     );
     const failed = results.filter((result) => result.status === 'failed');
     const pending = results.filter((result) => result.status === 'pending');
@@ -459,6 +464,7 @@ export class DeviceControlService {
       DeviceControlBinding,
       { kind: 'shelly-mqtt' | 'shelly-http' }
     >,
+    actor?: CommandRequest['actor'],
   ): Promise<DeviceActionResult> {
     const transport = binding.kind === 'shelly-http' ? 'http' : 'mqtt';
     const topic =
@@ -480,6 +486,7 @@ export class DeviceControlService {
       action,
       expectedValues: { on },
       message: `Publishing Shelly ${action}; waiting for telemetry.`,
+      actor,
     });
 
     try {
@@ -541,11 +548,13 @@ export class DeviceControlService {
     on: boolean,
     action: DeviceCapabilityAction,
     topic: string,
+    actor?: CommandRequest['actor'],
   ): Promise<DeviceActionResult> {
     const command = this.registry.markDeviceCommandPending(device.id, {
       action,
       expectedValues: { on },
       message: `Publishing ${action}; waiting for telemetry.`,
+      actor,
     });
 
     const payload = JSON.stringify({

@@ -63,6 +63,13 @@ describe('Virtual Lab Shelly control authorization and confirmation', () => {
     expect(device.assistantEnabled).toBe(false);
   });
 
+  it('forwards authenticated actor identity to the virtual-lab execution trace', async () => {
+    const fixture = setup()
+    const actor = { type: 'user' as const, id: 'operator-42', name: 'Operator' }
+    await runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, 'turn_on', actor))
+    expect(fixture.registry.markDeviceCommandPending).toHaveBeenCalledWith(deviceId, expect.objectContaining({ actor }))
+  })
+
   it('uses the same production resolver for a transport-independent component permission', async () => {
     const permission = { kind: 'shelly-switch' as const, enabled: true, physicalId, channel: 0 };
     const fixture = setup({

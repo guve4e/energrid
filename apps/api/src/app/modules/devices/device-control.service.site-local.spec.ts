@@ -61,6 +61,13 @@ describe('site-local Shelly manual control', () => {
     }))
   })
 
+  it('forwards the supplied authenticated actor into site-local command evidence', async () => {
+    const fixture = setup(result(true))
+    const actor = { type: 'user' as const, id: 'operator-42', name: 'Operator' }
+    await runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, 'turn_on', actor))
+    expect(fixture.registry.markDeviceCommandPending).toHaveBeenCalledWith(deviceId, expect.objectContaining({ actor }))
+  })
+
   it('uses the authorized site-local route instead of a stale legacy HTTP URL', async () => {
     const fixture = setup(result(true))
     const legacyDevice: RegisteredDevice = {

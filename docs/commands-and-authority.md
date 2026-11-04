@@ -49,7 +49,13 @@ Do not call the current control trail a durable command audit. Device runtime co
 
 This means a restart can remove recent operational-log context, and the checked-in code does not establish a durable, user-attributed, tamper-evident command history. Treat a durable device-command audit ledger, its retention/access policy and integration with authenticated actor context as an open architecture gap before claiming regulated or safety-grade audit coverage.
 
-The in-memory execution trace now retains the actor supplied by its command caller rather than replacing it with a service identity; absent actor information still displays as a system action. This is **not** end-to-end authenticated actor attribution: some Portal control paths currently supply a placeholder `portal-installer` identity and others omit an actor. The authenticated principal must be propagated explicitly in a separate reviewed change before a trace is evidence of the requesting user. This is a source-level correction only, pending focused tests in a complete checkout.
+The in-memory execution trace retains the caller-supplied actor rather than replacing it with a service identity; absent actor information still displays as a system action. M1.1 was verified by 13 focused command-lifecycle tests, the API typecheck and the documentation build. M1.3 extends this to authenticated Portal commands, but other callers may still lack an attributable identity, and physical runtime behavior remains unverified.
+
+## M1.3 Portal command attribution (source-level, verification pending)
+
+The authenticated Portal action controller now derives the requesting actor from the JWT-authenticated server-side principal, not browser-supplied command fields. The stable `userId` reaches command traces for the site-local, Virtual Lab, HTTP and MQTT switching paths and is supplied as the actor for the Portal installation-event records. Unauthenticated or malformed principals are rejected before a command is recorded or attempted. Group control forwards the same actor to member commands.
+
+This changes **attribution, not authority**: site selection, enrollment, component permission and route validation remain separate required checks. Direct service callers that do not supply an actor still use the command tracker's system fallback; assistant and automation identity are not established by this change. The trace and installation-event storage are **not** a durable tamper-evident user audit ledger. Runtime/device validation remains outstanding.
 
 ## Related references
 

@@ -757,16 +757,28 @@ describe('portal control configuration authorization', () => {
 
   it('records command evidence after the control service returns', async () => {
     const { controller, execute, persistInstallationEvent } = setup();
-    await controller.executeDeviceAction('relay', { action: 'turn_on' }, {
+    await controller.executeDeviceAction('relay', {
+      action: 'turn_on', actor: { type: 'user', id: 'forged-browser-user' },
+    } as never, {
       method: 'POST', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 },
     });
-    expect(execute).toHaveBeenCalledWith('relay', 'turn_on');
+    expect(execute).toHaveBeenCalledWith('relay', 'turn_on', {
+      type: 'user', id: 'test-user', name: 'Admin',
+    });
     expect(persistInstallationEvent.mock.calls).toEqual([
-      ['relay', 'command', expect.objectContaining({ action: 'turn_on', stage: 'requested' })],
+      ['relay', 'command', expect.objectContaining({ action: 'turn_on', stage: 'requested' }), 'test-user'],
       ['relay', 'command', expect.objectContaining({
         action: 'turn_on', stage: 'result', status: 'acked', commandId: 'command-1',
-      })],
+      }), 'test-user'],
     ]);
+  });
+  it('rejects an admin-like request missing a trustworthy principal ID before any command evidence or execution', async () => {
+    const { controller, execute, persistInstallationEvent } = setup();
+    await expect(controller.executeDeviceAction('relay', { action: 'turn_on' }, {
+      method: 'POST', url: '/', headers: {}, user: { role: 'admin', name: 'Admin' },
+    } as never)).rejects.toThrow(UnauthorizedException);
+    expect(execute).not.toHaveBeenCalled();
+    expect(persistInstallationEvent).not.toHaveBeenCalled();
   });
   it('records a failed result when control rejects a command', async () => {
     const { controller, execute, persistInstallationEvent } = setup();
@@ -776,6 +788,6 @@ describe('portal control configuration authorization', () => {
     })).rejects.toThrow('route is unavailable');
     expect(persistInstallationEvent).toHaveBeenLastCalledWith('relay', 'command', expect.objectContaining({
       stage: 'result', status: 'failed', failureType: 'Error',
-    }));
+    }), 'test-user');
   });
 });
