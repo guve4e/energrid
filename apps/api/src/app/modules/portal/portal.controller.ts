@@ -1239,10 +1239,17 @@ export class PortalController {
     @Req() request: DeviceProxyRequest,
   ) {
     assertPortalAdministrator(request)
-    const device = this.deviceRegistry.getDevices().find((item) => item.id === deviceId)
-    if (!device || device.trustStatus !== 'approved')
+    if (!request.user || !this.portalSites)
+      throw new UnauthorizedException('Portal site authorization is unavailable.')
+    const scope = await this.portalSites.forPrincipal(request.user)
+    await this.deviceRegistry.ensureInstallationsLoaded()
+    const device = this.deviceRegistry.getDevices(true).find(item =>
+      item.id === deviceId && item.tenantId === scope.tenantId &&
+      item.siteId === scope.siteId && item.trustStatus === 'approved',
+    )
+    if (!device)
       throw new NotFoundException(`Approved device ${deviceId} was not found.`)
-    return { deviceId, events: await this.deviceRegistry.getInstallationEvents(deviceId) }
+    return { deviceId, events: await this.deviceRegistry.getInstallationEvents(scope, deviceId) }
   }
 
   @Post('discovery/:deviceId/block')

@@ -51,6 +51,8 @@ export interface DeviceInstallationChangeProposal {
 }
 
 export interface DeviceInstallationEvent {
+  tenantId: string;
+  siteId: string;
   id: string;
   deviceId: string;
   kind: 'approved' | 'observation_authority_approved' | 'control_configured' | 'installation_details_saved' | 'command' | 'physical_outcome_confirmed' | 'shelly_identity_evidence_reconciled';
@@ -261,20 +263,31 @@ export class DeviceInstallationStore implements OnModuleInit, OnModuleDestroy {
   }
 
   async append(event: DeviceInstallationEvent): Promise<void> {
+    const scope = { tenantId: event.tenantId, siteId: event.siteId };
+    assertScope(scope);
+    if (!event.deviceId?.trim() || !event.id?.trim()) {
+      throw new Error('Installation event device and ID are required.');
+    }
     await this.ensureOpen();
-    await this.db.put(`event:${event.deviceId}:${event.id}`, event);
+    await this.db.put(`${scopedEventPrefix(scope, event.deviceId)}${enc(event.id)}`, event);
   }
 
-  async events(deviceId: string, limit = 100): Promise<DeviceInstallationEvent[]> {
+  /** Historical device-ID-only events remain intact for offline ownership review. */
+  async events(scope: InstallationScope, deviceId: string, limit = 100): Promise<DeviceInstallationEvent[]> {
+    assertScope(scope);
+    if (!deviceId?.trim()) return [];
     await this.ensureOpen();
     const items: DeviceInstallationEvent[] = [];
+    const prefix = scopedEventPrefix(scope, deviceId);
     for await (const [, value] of this.db.iterator({
-      gte: `event:${deviceId}:`,
-      lt: `event:${deviceId}:\uffff`,
+      gte: prefix,
+      lt: `${prefix}\uffff`,
       reverse: true,
       limit: Math.min(500, Math.max(1, Math.floor(limit))),
     })) {
-      if (isInstallationEvent(value)) items.push(value);
+      if (isInstallationEvent(value) &&
+          value.tenantId === scope.tenantId && value.siteId === scope.siteId &&
+          value.deviceId === deviceId) items.push(value);
     }
     return items;
   }
@@ -309,6 +322,10 @@ function scopedInstallationPrefix(scope: InstallationScope): string {
 
 function scopedInstallationKey(scope: InstallationScope, deviceId: string): string {
   return `${scopedInstallationPrefix(scope)}${enc(deviceId)}`;
+}
+
+function scopedEventPrefix(scope: InstallationScope, deviceId: string): string {
+  return `event-v2:${enc(scope.tenantId)}:${enc(scope.siteId)}:${enc(deviceId)}:`;
 }
 
 function legacyInstallationKey(siteId: string, deviceId: string): string {
@@ -380,7 +397,8 @@ function isInstallationRecord(value: unknown): value is DeviceInstallationRecord
 function isInstallationEvent(value: unknown): value is DeviceInstallationEvent {
   if (!value || typeof value !== 'object') return false;
   const event = value as Partial<DeviceInstallationEvent>;
-  return typeof event.id === 'string' && typeof event.deviceId === 'string' &&
+  return typeof event.tenantId === 'string' && typeof event.siteId === 'string' &&
+    typeof event.id === 'string' && typeof event.deviceId === 'string' &&
     typeof event.kind === 'string' && typeof event.occurredAt === 'string' &&
     typeof event.actor === 'string' && !!event.evidence;
 }

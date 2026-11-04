@@ -66,6 +66,7 @@ describe('DeviceInstallationStore', () => {
       ['2026-10-16T10:01:00.000Z-b', 'command'],
     ] as const) {
       await store.append({
+        ...home,
         id,
         deviceId: 'relay',
         kind,
@@ -75,9 +76,71 @@ describe('DeviceInstallationStore', () => {
       });
     }
 
-    await expect(store.events('relay', 1)).resolves.toEqual([
+    await expect(store.events(home, 'relay', 1)).resolves.toEqual([
       expect.objectContaining({ kind: 'command' }),
     ]);
+  });
+
+  it('keeps identical commissioning device and event IDs isolated across tenant/site scopes and restart', async () => {
+    const a = { tenantId: 'tenant-a', siteId: 'site-shared' };
+    const b = { tenantId: 'tenant-b', siteId: 'site-shared' };
+    const c = { tenantId: 'tenant-a', siteId: 'site-other' };
+    for (const scope of [a, b, c]) {
+      await store.append({
+        ...scope,
+        deviceId: 'relay-1',
+        id: '2026-11-04T10:00:00.000Z-shared',
+        kind: 'approved',
+        occurredAt: '2026-11-04T10:00:00.000Z',
+        actor: scope.siteId,
+        evidence: { tenantId: scope.tenantId },
+      });
+    }
+    for (const scope of [a, b, c]) {
+      await expect(store.events(scope, 'relay-1')).resolves.toEqual([
+        expect.objectContaining({ tenantId: scope.tenantId, siteId: scope.siteId }),
+      ]);
+    }
+    await expect(store.events(a, 'other-relay')).resolves.toEqual([]);
+    await store.onModuleDestroy();
+    store = new DeviceInstallationStore(directory);
+    await expect(store.events(b, 'relay-1')).resolves.toEqual([
+      expect.objectContaining({ tenantId: 'tenant-b', siteId: 'site-shared' }),
+    ]);
+  });
+
+  it('retains ambiguous legacy commissioning events but never exposes them through scoped reads', async () => {
+    await store.onModuleDestroy();
+    const db = new ClassicLevel<string, unknown>(directory, { valueEncoding: 'json' });
+    await db.open();
+    await db.put('event:relay-1:2026-10-16T10:00:00.000Z-old', {
+      id: '2026-10-16T10:00:00.000Z-old', deviceId: 'relay-1',
+      kind: 'command', occurredAt: '2026-10-16T10:00:00.000Z',
+      actor: 'unknown', evidence: { action: 'turn_on' },
+    });
+    await db.close();
+    store = new DeviceInstallationStore(directory);
+    const a = { tenantId: 'tenant-a', siteId: 'site-shared' };
+    await expect(store.events(a, 'relay-1')).resolves.toEqual([]);
+    await store.append({ ...a, id: '2026-11-04T10:00:00.000Z-new', deviceId: 'relay-1',
+      kind: 'command', occurredAt: '2026-11-04T10:00:00.000Z',
+      actor: 'operator', evidence: { action: 'turn_off' } });
+    await expect(store.events(a, 'relay-1')).resolves.toHaveLength(1);
+    await store.onModuleDestroy();
+    const original = new ClassicLevel<string, unknown>(directory, { valueEncoding: 'json' });
+    await original.open();
+    await expect(original.get('event:relay-1:2026-10-16T10:00:00.000Z-old')).resolves.toEqual(
+      expect.objectContaining({ actor: 'unknown' }),
+    );
+    await original.close();
+    store = new DeviceInstallationStore(directory);
+  });
+
+  it('rejects event writes without explicit ownership', async () => {
+    await expect(store.append({
+      tenantId: '', siteId: 'site-home', id: 'evt', deviceId: 'relay',
+      kind: 'command', occurredAt: new Date().toISOString(), actor: 'operator', evidence: {},
+    })).rejects.toThrow('Installation tenant and site are required');
   });
 
   it('does not overwrite installations when tenants reuse a site ID and device ID', async () => {

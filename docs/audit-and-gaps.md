@@ -1,5 +1,11 @@
 # Documentation audit and remaining gaps
 
+### M1.4e — scoped commissioning-event persistence (locally validated, not deployed)
+
+New commissioning events use `event-v2:<encoded tenant>:<encoded site>:<encoded device>:<encoded event id>` and require explicit ownership. Scoped readers return only exact tenant/site/device matches. The Portal commissioning-event endpoint resolves its authorized site from the authenticated principal and checks the device in that scope before reading history. The registry rejects ambiguous device-ID-only event writes; callers with trusted ownership can supply it explicitly. Legacy `event:<device id>:<event id>` records are preserved but **not** exposed through scoped reads or automatically assigned to any site; offline inventory and a reviewed migration are still required. This is not a durable, tamper-evident audit ledger.
+
+**Scope limitation:** other legacy Portal commissioning mutation routes still resolve devices by ID alone; this change does not make them tenant-isolated. Run the focused storage, Portal, and registry tests, API typecheck, and broad regression suite before acceptance. No live LevelDB migration or deployment is included.
+
 ### M1.4d candidate — scoped installation/proposal persistence (test verification pending)
 
 `DeviceInstallationStore` writes new installations under `installation-v2:<encoded tenant>:<encoded site>:<encoded device>` and new proposals under `installation-proposal-v2:<encoded tenant>:<encoded site>:<encoded proposal id>`. All installation/proposal reads require explicit tenant/site scope; the store does not accept site-only lookup. Legacy reads use their embedded tenant/site ownership and never infer missing ownership. All-site bootstrap retains a versioned record in preference to its legacy copy. New proposal decisions must hide older pending legacy copies.

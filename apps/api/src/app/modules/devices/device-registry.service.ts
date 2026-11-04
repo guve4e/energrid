@@ -19,7 +19,7 @@ import { OperationalLogService } from './operational-log.service';
 import { DEVICE_COMMAND_TRACKER, type DeviceCommandTracker, type CommandRequest, type CommandPublication, type CommandScope } from './commands/device-command-tracker';
 import { createDeviceCommandTracker } from './commands/device-command-tracker.provider';
 import { DeviceInstallationStore } from './device-installation.store';
-import type { DeviceInstallationRecord } from './device-installation.store';
+import type { DeviceInstallationRecord, InstallationScope } from './device-installation.store';
 import { energridHttpObservationApproval, isEnergridHttpObservationApproval } from './adapters/inbound/energrid/energrid-http-observation-approval';
 import { configuredShellyMqttBroker, isShellyMqttObservationApproval, shellyMqttObservationApproval, SHELLY_MQTT_OBSERVATION_SOURCE } from './adapters/inbound/shelly/shelly-mqtt-observation-approval';
 import type { DeviceEnrollmentStatus } from '@energrid/domain-devices';
@@ -639,7 +639,7 @@ export class DeviceRegistryService implements OnModuleInit {
     if (initialApproval)
       await this.persistInstallationEvent(device.id, 'approved', {
         physicalId: String(device.metadata?.physicalId || device.adapter.target || ''),
-      });
+      }, 'portal-installer', { tenantId: device.tenantId, siteId: device.siteId });
   }
 
   async persistInstallationEvent(
@@ -647,10 +647,21 @@ export class DeviceRegistryService implements OnModuleInit {
     kind: 'approved' | 'observation_authority_approved' | 'control_configured' | 'installation_details_saved' | 'command' | 'physical_outcome_confirmed' | 'shelly_identity_evidence_reconciled',
     evidence: Record<string, string | number | boolean | null>,
     actor = 'portal-installer',
+    requestedScope?: InstallationScope,
   ): Promise<void> {
     if (!this.installationStore)
       throw new Error('Local device storage is unavailable.');
+    const matches = [...this.persistedInstallations.values()].filter(record =>
+      record.device.id === deviceId &&
+      (!requestedScope || (record.device.tenantId === requestedScope.tenantId && record.device.siteId === requestedScope.siteId)),
+    );
+    if (matches.length !== 1) {
+      throw new Error('Commissioning event requires one verified installation owner.');
+    }
+    const { tenantId, siteId } = matches[0].device;
     await this.installationStore.append({
+      tenantId,
+      siteId,
       id: `${new Date().toISOString()}-${Math.random().toString(36).slice(2, 10)}`,
       deviceId,
       kind,
@@ -705,6 +716,7 @@ export class DeviceRegistryService implements OnModuleInit {
     await this.installationStore!.save(updated);
     this.persistedInstallations.set(key, updated);
     await this.installationStore!.append({
+      tenantId, siteId,
       id: `${new Date().toISOString()}-${Math.random().toString(36).slice(2, 10)}`,
       deviceId,
       kind: 'observation_authority_approved',
@@ -863,7 +875,7 @@ export class DeviceRegistryService implements OnModuleInit {
       await this.persistInstallationEvent(deviceId, 'shelly_identity_evidence_reconciled', {
         physicalId, component, observerId: input.observerId, scanId: input.evidenceScanId,
         ipAddress: input.ipAddress, verifiedMeasurementFields: [...new Set(input.verifiedMeasurementFields)].join(','),
-      }, 'portal-admin');
+      }, 'portal-admin', { tenantId, siteId });
       return updated;
     } catch (error) {
       this.liveApprovedDeviceConfigs.set(key, previous);
@@ -1029,6 +1041,7 @@ export class DeviceRegistryService implements OnModuleInit {
       });
     }
     await this.installationStore.append({
+      tenantId, siteId,
       id: `${new Date().toISOString()}-${Math.random().toString(36).slice(2, 10)}`,
       deviceId,
       kind: 'observation_authority_approved',
@@ -1061,7 +1074,7 @@ export class DeviceRegistryService implements OnModuleInit {
     this.persistedInstallations.set(key, updated);
     await this.persistInstallationEvent(deviceId, 'physical_outcome_confirmed', {
       confirmedAt,
-    });
+    }, 'portal-installer', { tenantId: updated.device.tenantId, siteId: updated.device.siteId });
     return this.getDevices().find((device) => device.id === deviceId)!;
   }
 
@@ -1125,8 +1138,8 @@ export class DeviceRegistryService implements OnModuleInit {
     }
   }
 
-  getInstallationEvents(deviceId: string) {
-    return this.installationStore?.events(deviceId) || Promise.resolve([]);
+  getInstallationEvents(scope: InstallationScope, deviceId: string) {
+    return this.installationStore?.events(scope, deviceId) || Promise.resolve([]);
   }
 
   getAvailableDeviceIds(): string[] {
