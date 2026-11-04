@@ -44,10 +44,7 @@ import {
 import { ApiExcludeController } from '@nestjs/swagger'
 import { filter, interval, map, merge, of } from 'rxjs'
 import { DeviceAiInvestigationService } from '../llm/device-ai-investigation.service'
-import { NetworkEndpointInvestigatorService } from '../llm/network-endpoint-investigator.service'
 import { LlmGatewayService } from '../llm/llm-gateway.service'
-import { ReadOnlyHttpIdentityProbe } from '../llm/read-only-http-identity-probe'
-import { NetworkEndpointIdentityRefresh } from '../llm/network-endpoint-identity-refresh'
 import type { DeviceInvestigationScope } from '../llm/device-investigation-history.store'
 import { DeviceInvestigationWorkflowService } from '../llm/device-investigation-workflow.service'
 import { DeviceControlService } from '../devices/device-control.service'
@@ -167,12 +164,6 @@ export class PortalController {
     private readonly physicalInventory?: PhysicalDeviceInventoryService,
     @Optional()
     private readonly deviceHttpPoll?: DeviceHttpPollService,
-    @Optional()
-    private readonly networkEndpointInvestigator?: NetworkEndpointInvestigatorService,
-    @Optional()
-    private readonly networkEndpointProbe?: ReadOnlyHttpIdentityProbe,
-    @Optional()
-    private readonly networkEndpointIdentityRefresh?: NetworkEndpointIdentityRefresh,
     @Optional()
     private readonly installerNotesLlm?: LlmGatewayService,
     @Optional()
@@ -910,90 +901,6 @@ export class PortalController {
       [device],
       body?.cloudDataConsent === true,
     )
-  }
-
-  @Post('network/snapshots/:scanId/scopes/:scopeId/endpoints/:ipAddress/:endpointId/investigate')
-  async investigateSnapshotEndpoint(
-    @Param('scanId') scanId: string,
-    @Param('scopeId') scopeId: string,
-    @Param('ipAddress') ipAddress: string,
-    @Param('endpointId') endpointId: string,
-    @Body() body: { cloudDataConsent?: unknown },
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-    if (!this.networkEndpointInvestigator) {
-      throw new ServiceUnavailableException('Network endpoint investigation is unavailable')
-    }
-    const ownership = this.discoveryOwner().ownership
-    const snapshot = await this.discoveryMemory.getSnapshot(scanId, ownership)
-    if (!snapshot) throw new NotFoundException('Network discovery snapshot was not found')
-    const target = snapshot.endpoints.find(endpoint =>
-      endpoint.networkZoneId === scopeId && endpoint.ipAddress === ipAddress && endpoint.id === endpointId,
-    )
-    if (!target) throw new NotFoundException('Endpoint was not found in the selected snapshot')
-    if (energridDiscoveryCandidate(target)) {
-      throw new ConflictException('Recognized Energrid devices use first-party identity and enrollment; LLM investigation is disabled.')
-    }
-    const history = await this.discoveryMemory.listSnapshots(ownership, 50)
-    return this.networkEndpointInvestigator.investigate(
-      snapshot,
-      { scopeId, ipAddress, endpointId },
-      body?.cloudDataConsent === true,
-      history.filter(item => item.scanId !== snapshot.scanId),
-    )
-  }
-
-  @Post('network/snapshots/:scanId/scopes/:scopeId/endpoints/:ipAddress/:endpointId/probe-http')
-  async probeSnapshotEndpointHttp(
-    @Param('scanId') scanId: string,
-    @Param('scopeId') scopeId: string,
-    @Param('ipAddress') ipAddress: string,
-    @Param('endpointId') endpointId: string,
-    @Body() body: { approved?: unknown; refreshId?: unknown },
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-    if (!this.networkEndpointProbe) throw new ServiceUnavailableException('Read-only endpoint investigation is unavailable')
-    const snapshot = await this.discoveryMemory.getSnapshot(scanId, this.discoveryOwner().ownership)
-    if (!snapshot) throw new NotFoundException('Network discovery snapshot was not found')
-    const target = snapshot.endpoints.find(endpoint =>
-      endpoint.networkZoneId === scopeId && endpoint.ipAddress === ipAddress && endpoint.id === endpointId,
-    )
-    if (!target) throw new NotFoundException('Endpoint was not found in the selected snapshot')
-    if (body?.approved !== true) return this.networkEndpointProbe.run(target, this.lanDiscovery.getZones(), false)
-    if (typeof body.refreshId !== 'string' || !this.networkEndpointIdentityRefresh) {
-      return { outcome: 'rejected' as const, reasonCode: 'fresh_identity_verification_required' }
-    }
-    const refreshedTarget = this.networkEndpointIdentityRefresh.consumeVerifiedRefresh(
-      body.refreshId,
-      target,
-      this.lanDiscovery.getZones(),
-    )
-    if (!refreshedTarget) {
-      return { outcome: 'rejected' as const, reasonCode: 'fresh_identity_verification_required' }
-    }
-    return this.networkEndpointProbe.run(refreshedTarget, this.lanDiscovery.getZones(), true)
-  }
-
-  @Post('network/snapshots/:scanId/scopes/:scopeId/endpoints/:ipAddress/:endpointId/refresh-identity')
-  async refreshSnapshotEndpointIdentity(
-    @Param('scanId') scanId: string,
-    @Param('scopeId') scopeId: string,
-    @Param('ipAddress') ipAddress: string,
-    @Param('endpointId') endpointId: string,
-    @Body() body: { approved?: unknown },
-    @Req() request: DeviceProxyRequest,
-  ) {
-    assertPortalAdministrator(request)
-    if (!this.networkEndpointIdentityRefresh) throw new ServiceUnavailableException('Targeted identity refresh is unavailable')
-    const snapshot = await this.discoveryMemory.getSnapshot(scanId, this.discoveryOwner().ownership)
-    if (!snapshot) throw new NotFoundException('Network discovery snapshot was not found')
-    const target = snapshot.endpoints.find(endpoint =>
-      endpoint.networkZoneId === scopeId && endpoint.ipAddress === ipAddress && endpoint.id === endpointId,
-    )
-    if (!target) throw new NotFoundException('Endpoint was not found in the selected snapshot')
-    return this.networkEndpointIdentityRefresh.refresh(target, this.lanDiscovery.getZones(), body?.approved === true)
   }
 
   @Post('network/:deviceId/investigations/:investigationId/actions/:proposalId/execute')
