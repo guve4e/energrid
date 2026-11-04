@@ -3,7 +3,7 @@ import type { ExecutionDiagnosis } from './device-execution-diagnosis';
 
 export class DeviceExecutionInvestigator {
   investigate(
-    trace: Pick<DeviceExecutionTrace, 'outcome' | 'deviceId'>,
+    trace: Pick<DeviceExecutionTrace, 'outcome' | 'deviceId'> & { stages?: DeviceExecutionTrace['stages'] },
   ): ExecutionDiagnosis {
     switch (trace.outcome) {
       case 'running':
@@ -107,13 +107,20 @@ export class DeviceExecutionInvestigator {
   }
 
   private failed(
-    trace: Pick<DeviceExecutionTrace, 'deviceId'>,
+    trace: Pick<DeviceExecutionTrace, 'deviceId'> & { stages?: DeviceExecutionTrace['stages'] },
   ): ExecutionDiagnosis {
+    const failureStage = trace.stages?.at(-1)?.stage;
+    const isMismatch = failureStage === 'mismatched';
+    const isPreWrite = failureStage === 'pre_write_failed';
     return {
-      category: 'transport_failure',
-      stage: 'transport',
-      confidence: 0.9,
-      summary: 'Execution failed before successful reconciliation.',
+      category: isMismatch ? 'verification_failed' : isPreWrite ? 'unknown' : 'transport_failure',
+      stage: isMismatch ? 'verification' : isPreWrite ? 'command' : 'transport',
+      confidence: isPreWrite ? 1 : 0.9,
+      summary: isMismatch
+        ? 'Fresh device readback did not match the requested state.'
+        : isPreWrite
+          ? 'Execution was rejected before the device write was attempted.'
+          : 'Command transport failed before successful reconciliation.',
       evidence: [
         {
           label: 'Device',

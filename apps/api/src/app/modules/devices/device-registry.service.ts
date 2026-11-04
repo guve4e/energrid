@@ -2167,8 +2167,8 @@ export class DeviceRegistryService implements OnModuleInit {
     return this.commandTracker.getLatestExecutionTrace(deviceId);
   }
 
-  markDeviceCommandFailed(deviceId: string, command: Pick<CommandRequest, 'action' | 'expectedValues' | 'message'>) {
-    return this.commandTracker.markDeviceCommandFailed(deviceId, command);
+  markDeviceCommandFailed(deviceId: string, commandId: string, reason: 'pre_write' | 'readback_mismatch', message: string) {
+    return this.commandTracker.markDeviceCommandFailed(deviceId, commandId, reason, message);
   }
 
   private withLiveState(device: RegisteredDevice): RegisteredDevice {

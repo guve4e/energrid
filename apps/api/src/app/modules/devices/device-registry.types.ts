@@ -306,6 +306,7 @@ export type DeviceExecutionStageName =
   | 'mismatched'
   | 'stale'
   | 'transport_failed'
+  | 'pre_write_failed'
   | 'timed_out'
   | 'drifted'
   | 'superseded';

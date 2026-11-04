@@ -103,7 +103,7 @@ describe('site-local Shelly manual control', () => {
     const response = await runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, 'turn_on'))
     expect(response.status).toBe('failed')
     expect(fixture.registry.ingestDeviceTelemetry).toHaveBeenCalledWith(expect.objectContaining({ values: { on: false } }))
-    expect(fixture.registry.markDeviceCommandFailed).toHaveBeenCalled()
+    expect(fixture.registry.markDeviceCommandFailed).toHaveBeenCalledWith(deviceId, 'cmd-1', 'readback_mismatch', expect.stringContaining('readback'))
   })
 
   it('does not record a command as published when identity validation fails before a write', async () => {
@@ -113,7 +113,7 @@ describe('site-local Shelly manual control', () => {
     const response = await runWithAuthorizedPortalSite(site, () => fixture.service.execute(deviceId, 'turn_off'))
     expect(response.status).toBe('failed')
     expect(fixture.registry.markDeviceCommandPublished).not.toHaveBeenCalled()
-    expect(fixture.registry.markDeviceCommandFailed).toHaveBeenCalled()
+    expect(fixture.registry.markDeviceCommandFailed).toHaveBeenCalledWith(deviceId, 'cmd-1', 'pre_write', expect.stringContaining('could not be confirmed'))
     expect(fixture.registry.ingestDeviceTelemetry).not.toHaveBeenCalled()
   })
 

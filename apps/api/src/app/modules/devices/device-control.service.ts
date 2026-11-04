@@ -291,7 +291,7 @@ export class DeviceControlService {
         if (!readback) {
           const uncertain = result.writeAttempted
           const message = 'The site-local Shelly command could not be confirmed with fresh matching identity, component, and status evidence.'
-          if (!uncertain) this.registry.markDeviceCommandFailed(device.id, { action, expectedValues: { on }, message })
+          if (!uncertain) this.registry.markDeviceCommandFailed(device.id, command.id, 'pre_write', message)
           return { deviceId: device.id, action, status: uncertain ? 'pending' : 'failed', adapter: 'http',
             message: uncertain ? `${message} Check the device state before retrying.` : message,
             affectedDeviceIds: uncertain ? [device.id] : [], command: this.findDevice(device.id)?.state.command || command }
@@ -315,9 +315,10 @@ export class DeviceControlService {
           observer: { id: target.siteLocalObserver.id, host: target.siteLocalObserver.host, platform: 'docker', localScopes: [] },
         })
         const settledCommand = confirmed ? (this.findDevice(device.id)?.state.command || command) :
-          this.registry.markDeviceCommandFailed(device.id, {
-            action, expectedValues: { on }, message: `Shelly switch readback was ${values.on ? 'ON' : 'OFF'}, not the requested state.`,
-          })
+          (this.registry.markDeviceCommandFailed(
+            device.id, command.id, 'readback_mismatch',
+            `Shelly switch readback was ${values.on ? 'ON' : 'OFF'}, not the requested state.`,
+          ) || this.findDevice(device.id)?.state.command || command)
         return { deviceId: device.id, action, status: confirmed ? 'success' : 'failed', adapter: 'http',
           message: confirmed ? `Switch:${target.channel} ${on ? 'ON' : 'OFF'} confirmed by a fresh Shelly status read.`
             : `The Shelly reported ${values.on ? 'ON' : 'OFF'} after the ${on ? 'ON' : 'OFF'} request.`,
@@ -327,7 +328,7 @@ export class DeviceControlService {
         const message = uncertain
           ? 'The site-local command may have reached the Shelly, but fresh readback was not received. Check the current state before retrying.'
           : error instanceof Error ? error.message : 'The site-local Shelly command failed before execution.'
-        if (!uncertain) this.registry.markDeviceCommandFailed(device.id, { action, expectedValues: { on }, message })
+        if (!uncertain) this.registry.markDeviceCommandFailed(device.id, command.id, 'pre_write', message)
         return { deviceId: device.id, action, status: uncertain ? 'pending' : 'failed', adapter: 'http',
           message, affectedDeviceIds: uncertain ? [device.id] : [], command: this.findDevice(device.id)?.state.command || command }
       }
@@ -521,11 +522,7 @@ export class DeviceControlService {
         message,
       );
 
-      const failedCommand = this.registry.markDeviceCommandFailed(device.id, {
-        action,
-        expectedValues: { on },
-        message,
-      });
+      const failedCommand = this.findDevice(device.id)?.state.command || command;
 
       return {
         deviceId: device.id,
@@ -586,11 +583,7 @@ export class DeviceControlService {
         message,
       );
 
-      const failedCommand = this.registry.markDeviceCommandFailed(device.id, {
-        action,
-        expectedValues: { on },
-        message,
-      });
+      const failedCommand = this.findDevice(device.id)?.state.command || command;
 
       return {
         deviceId: device.id,

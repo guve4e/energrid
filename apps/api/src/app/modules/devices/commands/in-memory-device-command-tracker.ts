@@ -24,6 +24,7 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
   >();
 
   private readonly latestCommandIdByDeviceId = new Map<string, string>();
+  private commandSequence = 0;
 
   constructor(
     private readonly clock: CommandClock,
@@ -82,7 +83,7 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
     }
 
     const pending = {
-      id: `${deviceId}:${command.action}:${now}`,
+      id: `${deviceId}:${command.action}:${now}:${++this.commandSequence}`,
       action: command.action,
       status: 'pending' as const,
       requestedAt,
@@ -190,16 +191,25 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
     const trace = this.executionTraceByCommandId.get(commandId);
     if (!trace || trace.deviceId !== deviceId) return null;
 
-    const now = new Date(this.clock.now()).toISOString();
+    // A late transport callback must never change a newer (or acknowledged) command.
+    const command = this.commandByDeviceId.get(deviceId);
+    if (
+      trace.outcome !== 'running' ||
+      !command ||
+      command.id !== commandId ||
+      command.status !== 'pending'
+    ) return publicExecutionTrace(trace);
 
+    const now = this.clock.now();
+    const observedAt = new Date(now).toISOString();
     appendTraceStage(trace, {
       stage: 'transport_failed',
       status: 'failed',
-      observedAt: now,
+      observedAt,
       message,
     });
-
-    this.completeExecutionTrace(trace, 'failed', now);
+    this.failCurrentCommand(deviceId, command, message, now);
+    this.completeExecutionTrace(trace, 'failed', observedAt);
     return publicExecutionTrace(trace);
   }
 
@@ -227,20 +237,40 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
 
   markDeviceCommandFailed(
     deviceId: string,
-    command: {
-      action: NonNullable<RegisteredDeviceState['command']>['action'];
-      expectedValues: Record<string, number | boolean | string | null>;
-      message?: string;
-    },
-  ): NonNullable<RegisteredDeviceState['command']> {
+    commandId: string,
+    reason: 'pre_write' | 'readback_mismatch',
+    message: string,
+  ): NonNullable<RegisteredDeviceState['command']> | null {
+    const command = this.commandByDeviceId.get(deviceId);
+    const trace = this.executionTraceByCommandId.get(commandId);
+    if (
+      !command || command.id !== commandId || command.status !== 'pending' ||
+      !trace || trace.deviceId !== deviceId || trace.outcome !== 'running'
+    ) return null;
+
     const now = this.clock.now();
+    const observedAt = new Date(now).toISOString();
+    appendTraceStage(trace, {
+      stage: reason === 'pre_write' ? 'pre_write_failed' : 'mismatched',
+      status: 'failed',
+      observedAt,
+      message,
+    });
+    const failed = this.failCurrentCommand(deviceId, command, message, now);
+    this.completeExecutionTrace(trace, 'failed', observedAt);
+    return commandForState(failed);
+  }
+
+  private failCurrentCommand(
+    deviceId: string,
+    command: NonNullable<RegisteredDeviceState['command']> & { expiresAt: number; displayUntil: number },
+    message: string,
+    now: number,
+  ): NonNullable<RegisteredDeviceState['command']> & { expiresAt: number; displayUntil: number } {
     const failed = {
-      id: `${deviceId}:${command.action}:${now}`,
-      action: command.action,
+      ...command,
       status: 'failed' as const,
-      requestedAt: new Date(now).toISOString(),
-      expectedValues: command.expectedValues,
-      message: command.message,
+      message,
       expiresAt: now,
       displayUntil: now + 30000,
     };
@@ -249,15 +279,16 @@ export class InMemoryDeviceCommandTracker implements DeviceCommandTracker {
       level: 'error',
       source: 'device-control',
       event: 'command.failed',
-      message: `${deviceId} ${command.action} failed: ${command.message || 'unknown error'}`,
+      message: `${deviceId} ${command.action} failed: ${message}`,
       deviceId,
       status: 'failed',
       details: {
+        commandId: command.id,
         action: command.action,
         expected: JSON.stringify(command.expectedValues),
       },
     });
-    return commandForState(failed);
+    return failed;
   }
 
   observeTelemetry(

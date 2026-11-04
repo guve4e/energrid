@@ -129,11 +129,64 @@ describe('device command lifecycle through the registry', () => {
   it('keeps transport failure diagnosis and failed display state', () => {
     const command = pending();
     registry.markDeviceCommandTransportFailed(deviceId, command.id, 'transport unavailable');
-    registry.markDeviceCommandFailed(deviceId, { action: 'turn_on', expectedValues: { on: true }, message: 'transport unavailable' });
-    expect(current()?.status).toBe('failed');
+    expect(current()).toMatchObject({ id: command.id, status: 'failed', requestedAt: command.requestedAt });
+    expect(registry.getLatestExecutionTrace(deviceId)?.commandId).toBe(command.id);
     expect(registry.getLatestExecutionTrace(deviceId)).toMatchObject({ outcome: 'failed', diagnosis: { category: 'transport_failure' } });
     jest.setSystemTime(start + 30001);
     expect(current()).toBeUndefined();
+  });
+
+  it('preserves command ID when the authorized write fails before dispatch', () => {
+    const command = pending();
+    const failed = registry.markDeviceCommandFailed(deviceId, command.id, 'pre_write', 'identity check failed');
+    expect(failed).toMatchObject({ id: command.id, status: 'failed', requestedAt: command.requestedAt });
+    expect(registry.getLatestExecutionTrace(deviceId)).toMatchObject({
+      commandId: command.id, outcome: 'failed', diagnosis: { category: 'unknown', stage: 'command' },
+    });
+    expect(registry.getLatestExecutionTrace(deviceId)?.stages.at(-1)?.stage).toBe('pre_write_failed');
+    expect(log.recent().filter(e => e.event === 'command.failed')).toHaveLength(1);
+  });
+
+  it('classifies a mismatched fresh readback as verification failure, not transport failure', () => {
+    const command = pending();
+    registry.markDeviceCommandPublished(deviceId, command.id);
+    const failed = registry.markDeviceCommandFailed(deviceId, command.id, 'readback_mismatch', 'readback OFF');
+    expect(failed?.id).toBe(command.id);
+    expect(registry.getLatestExecutionTrace(deviceId)).toMatchObject({
+      commandId: command.id, outcome: 'failed', diagnosis: { category: 'verification_failed', stage: 'verification' },
+    });
+    expect(registry.getLatestExecutionTrace(deviceId)?.stages.at(-1)?.stage).toBe('mismatched');
+  });
+
+  it('assigns unique command IDs when consecutive requests share the same millisecond', () => {
+    const first = pending();
+    const second = pending(false);
+    expect(second.id).not.toBe(first.id);
+    expect(current()).toMatchObject({ id: second.id, status: 'pending' });
+    expect(registry.getExecutionTraces().find(t => t.commandId === first.id)?.outcome).toBe('superseded');
+  });
+
+  it('does not let a late failure from a superseded command overwrite the current command', () => {
+    const first = pending();
+    jest.setSystemTime(start + 1);
+    const second = pending(false);
+    expect(registry.markDeviceCommandFailed(deviceId, first.id, 'pre_write', 'late error')).toBeNull();
+    registry.markDeviceCommandTransportFailed(deviceId, first.id, 'late network error');
+    expect(current()).toMatchObject({ id: second.id, status: 'pending' });
+    const oldTrace = registry.getExecutionTraces().find(t => t.commandId === first.id);
+    expect(oldTrace?.outcome).toBe('superseded');
+    expect(oldTrace?.stages.some(s => s.stage === 'transport_failed')).toBe(false);
+    expect(log.recent().filter(e => e.event === 'command.failed')).toHaveLength(0);
+  });
+
+  it('rejects a failure for the wrong device and cannot fail an already acknowledged command', () => {
+    const command = pending();
+    expect(registry.markDeviceCommandFailed('other', command.id, 'pre_write', 'wrong device')).toBeNull();
+    observe(true, command.id);
+    expect(registry.markDeviceCommandFailed(deviceId, command.id, 'pre_write', 'late error')).toBeNull();
+    registry.markDeviceCommandTransportFailed(deviceId, command.id, 'late error');
+    expect(current()).toMatchObject({ id: command.id, status: 'acked' });
+    expect(registry.getLatestExecutionTrace(deviceId)?.outcome).toBe('running');
   });
 
   it('ignores publication evidence for unknown commands or another device', () => {

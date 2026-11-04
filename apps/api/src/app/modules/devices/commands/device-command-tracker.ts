@@ -23,7 +23,7 @@ export interface CommandEventSink {
   record(entry: Omit<OperationalLogEntry, 'id' | 'observedAt'>): unknown;
 }
 export interface ExecutionDiagnosisProvider {
-  investigate(trace: Pick<DeviceExecutionTrace, 'outcome' | 'deviceId'>): ExecutionDiagnosis;
+  investigate(trace: Pick<DeviceExecutionTrace, 'outcome' | 'deviceId'> & { stages?: DeviceExecutionTrace['stages'] }): ExecutionDiagnosis;
 }
 
 /** Registry-facing contract. Publication is not acknowledgement; observation drives verification. */
@@ -31,7 +31,7 @@ export interface DeviceCommandTracker {
   markDeviceCommandPending(deviceId: string, command: CommandRequest): DeviceCommand;
   markDeviceCommandPublished(deviceId: string, commandId: string, evidence?: CommandPublication): DeviceExecutionTrace | null;
   markDeviceCommandTransportFailed(deviceId: string, commandId: string, message: string): DeviceExecutionTrace | null;
-  markDeviceCommandFailed(deviceId: string, command: Pick<CommandRequest, 'action' | 'expectedValues' | 'message'>): DeviceCommand;
+  markDeviceCommandFailed(deviceId: string, commandId: string, reason: 'pre_write' | 'readback_mismatch', message: string): DeviceCommand | null;
   getCommand(deviceId: string): DeviceCommand | undefined;
   getExecutionTraces(limit?: number): DeviceExecutionTrace[];
   getLatestExecutionTrace(deviceId: string): DeviceExecutionTrace | null;
