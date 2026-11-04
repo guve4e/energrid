@@ -14,6 +14,8 @@ import { PortalDeviceTelemetryController } from './portal-device-telemetry.contr
 import { PortalMqttDiagnosticsController } from './portal-mqtt-diagnostics.controller'
 import { PortalNetworkDiscoveryReadController } from './portal-network-discovery-read.controller'
 import { PortalNetworkDiscoveryScanController } from './portal-network-discovery-scan.controller'
+import { PortalSiteLocalShellyEvidenceController } from './portal-site-local-shelly-evidence.controller'
+import { PortalSiteLocalShellyEvidenceWorkflow } from './portal-site-local-shelly-evidence.workflow'
 import { PortalDeviceProxyService } from './portal-device-proxy.service'
 import { PortalStateService } from './portal-state.service'
 import { DeviceOnboardingService } from './device-onboarding.service'
@@ -31,8 +33,9 @@ import { PortalSiteContextInterceptor } from './portal-site-context.interceptor'
 
 @Module({
   imports: [DevicesModule, DeviceEnrollmentModule, HouseIntelligenceModule, TelemetryModule],
-  controllers: [PortalController, PortalDeviceTelemetryController, PortalMqttDiagnosticsController, PortalNetworkDiscoveryReadController, PortalNetworkDiscoveryScanController, PortalWeatherController, WeatherInferenceController],
+  controllers: [PortalController, PortalDeviceTelemetryController, PortalMqttDiagnosticsController, PortalNetworkDiscoveryReadController, PortalNetworkDiscoveryScanController, PortalSiteLocalShellyEvidenceController, PortalWeatherController, WeatherInferenceController],
   providers: [
+    PortalSiteLocalShellyEvidenceWorkflow,
     PortalStateService,
     PortalDeviceProxyService,
     DeviceOnboardingService,

@@ -1,6 +1,6 @@
 import { DeviceRegistryService } from './device-registry.service';
 import { findExactShellyInventoryAssignment } from '../portal/site-local-shelly-inventory-match';
-import { PortalController } from '../portal/portal.controller';
+import { PortalSiteLocalShellyEvidenceWorkflow } from '../portal/portal-site-local-shelly-evidence.workflow';
 import type { PhysicalDeviceInventoryRecord } from './enrollment/physical-device-inventory.repository';
 import { configuredShellyMqttBroker } from './adapters/inbound/shelly/shelly-mqtt-observation-approval';
 import { shellyPro2PmNotifyStatusFixture } from './adapters/inbound/shelly/__fixtures__/shelly-pro2pm-notifystatus.fixture';
@@ -233,12 +233,11 @@ describe('site-scoped Shelly enrollment reconciliation', () => {
       completedAt: '2026-10-27T09:39:36.000Z', ownership: { tenantId: 'tenant-demo', siteId: 'site-home' },
       collector: { host: 'pi' }, scopes: [{ id: 'upstream-lan', cidr: '192.168.1.0/24' }], endpoints: [endpoint],
     } as any;
-    const controller = new PortalController(
-      {} as any, {} as any, {} as any, {} as any, registry,
-      {} as any, {} as any, {} as any, {} as any,
-      undefined, undefined, { list: jest.fn().mockResolvedValue([inventory]) } as any,
+    const workflow = new PortalSiteLocalShellyEvidenceWorkflow(
+      {} as any, registry, {} as any,
+      { list: jest.fn().mockResolvedValue([inventory]) } as any,
     );
-    const review = await (controller as any).buildSiteLocalShellyReview(
+    const review = await (workflow as any).buildSiteLocalShellyReview(
       snapshot, snapshot.ownership, 'pi-housenet', endpoint, 'Home', false,
     );
     expect(review.reconciliationProposals).toHaveLength(2);

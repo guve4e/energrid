@@ -3,7 +3,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DeviceDiscoveryMemoryStore } from '../devices/device-discovery-memory.store'
-import { PortalController } from './portal.controller'
+import { PortalSiteLocalShellyEvidenceController } from './portal-site-local-shelly-evidence.controller'
+import { PortalSiteLocalShellyEvidenceWorkflow } from './portal-site-local-shelly-evidence.workflow'
 import type { PhysicalDeviceInventoryRecord } from '../devices/enrollment/physical-device-inventory.repository'
 
 const owner = { tenantId: 'tenant-demo', siteId: 'site-home' }
@@ -97,12 +98,11 @@ describe('site-local Shelly reconciliation HTTP workflow', () => {
     }
     const directory = await mkdtemp(join(tmpdir(), 'energrid-site-local-reconcile-'))
     const memory = new DeviceDiscoveryMemoryStore(directory)
-    const controller = Object.assign(Object.create(PortalController.prototype), {
-      deviceRegistry: registry,
-      discoveryMemory: memory,
-      physicalInventory,
-      lanDiscovery: { getZones: () => [{ id: 'upstream-lan', name: 'Upstream LAN', cidr: '192.168.1.0/24', collectionSource: 'local' }] },
-    }) as PortalController
+    const workflow = new PortalSiteLocalShellyEvidenceWorkflow(
+      { getZones: () => [{ id: 'upstream-lan', name: 'Upstream LAN', cidr: '192.168.1.0/24', collectionSource: 'local' }] } as any,
+      registry as any, memory, physicalInventory as any,
+    )
+    const controller = new PortalSiteLocalShellyEvidenceController(workflow)
     const request = { user: { role: 'admin' } }
     const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       try {
@@ -143,6 +143,14 @@ describe('site-local Shelly reconciliation HTTP workflow', () => {
       expect(imported.reconciliationProposals).toEqual([expect.objectContaining({
         deviceId: logicalId, component, physicalInventoryId,
       })])
+
+      // A validated report ID is immutable: a second submission must not create a
+      // second snapshot or modify physical identity/reconciliation authority.
+      const duplicateResponse = await fetch(`${baseUrl}/portal/network/site-local-shelly-evidence`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(report),
+      })
+      expect(duplicateResponse.status).toBe(409)
+      expect(registry.reconcileShellyIdentityEvidence).not.toHaveBeenCalled()
 
       const persisted = await memory.getSnapshot(imported.scanId, owner)
       expect(persisted).toMatchObject({ ownership: owner, collector: { host: 'pi' }, scopes: [{ id: 'upstream-lan', cidr: observer.cidr }] })
