@@ -202,25 +202,24 @@ describe('one-shot authorized Shelly status observation', () => {
       .rejects.toThrow('outside the configured network scope')
   })
 
-  it('uses the same canonical status projection for the direct local HTTP poll path', async () => {
+  it('does not use legacy HTTP when the verified switch route is unavailable', async () => {
     const fixture = setup()
     const localDevice = {
       ...device,
       adapter: { ...device.adapter, target: 'http://192.168.1.166/rpc/Switch.GetStatus?id=0' },
       metadata: { ...device.metadata, ipAddress: '192.168.1.166', networkScope: 'home-observer:upstream-lan' },
     }
-    const localZone: NetworkDiscoveryZone = { id: 'upstream-lan', cidr: '192.168.1.0/24', seedIps: [] }
     fixture.registry.getDevices.mockReturnValue([localDevice])
-    fixture.lan.getConfiguredZone.mockImplementation((id: string) => id === localZone.id ? localZone : undefined)
+    jest.spyOn(fixture.routes, 'resolveAuthorizedLocalShellyStatusTarget').mockResolvedValue(null)
+    jest.spyOn(fixture.poller as any, 'refreshRemoteShellyObservers').mockResolvedValue(undefined)
     const fetch = jest.spyOn(global, 'fetch').mockResolvedValue({
       ok: true, json: async () => ({ id: 0, output: true }),
     } as Response)
     try {
       await fixture.poller.pollOnce()
-      expect(fetch).toHaveBeenCalledWith(localDevice.adapter.target, expect.objectContaining({ headers: { Accept: 'application/json' } }))
-      expect(fixture.registry.ingestDeviceTelemetry).toHaveBeenCalledWith(expect.objectContaining({
-        deviceId, values: { on: true }, state: expect.objectContaining({ values: { on: true }, source: 'http-poll', status: 'online' }),
-      }))
+      expect(fetch).not.toHaveBeenCalled()
+      expect(fixture.registry.ingestDeviceTelemetry).not.toHaveBeenCalled()
+      expect(fixture.registry.ingestDeviceStatus).not.toHaveBeenCalled()
     } finally {
       fetch.mockRestore()
     }
@@ -259,27 +258,49 @@ describe('one-shot authorized Shelly status observation', () => {
     }
   })
 
-  it('continues direct polling for a Shelly assigned to a configured local scope', async () => {
+  it('uses verified identity and status RPC for a locally assigned Shelly switch', async () => {
     const fixture = setup()
     const localZone: NetworkDiscoveryZone = { id: 'upstream-lan', cidr: '192.168.1.0/24', seedIps: [] }
+    const ipAddress = '192.168.1.166'
     const localDevice = {
       ...device,
-      adapter: { ...device.adapter, target: 'http://192.168.1.166/rpc/Switch.GetStatus?id=0' },
-      metadata: { ...device.metadata, networkScope: 'home-observer:upstream-lan' },
+      adapter: { ...device.adapter, target: `http://${ipAddress}/rpc/Switch.GetStatus?id=0` },
+      metadata: { ...device.metadata, ipAddress, networkScope: 'home-observer:upstream-lan' },
     }
     fixture.registry.getDevices.mockReturnValue([localDevice])
-    fixture.lan.getConfiguredZone.mockImplementation((id: string) => id === localZone.id ? localZone : undefined)
-    const fetch = jest.spyOn(global, 'fetch').mockResolvedValue({
-      ok: true, json: async () => ({ id: 0, output: true }),
-    } as Response)
+    const resolveTarget = jest.spyOn(fixture.routes, 'resolveAuthorizedLocalShellyStatusTarget').mockResolvedValue({
+      ipAddress, physicalId, component: 'switch:0', channel: 0,
+      zone: localZone, interfaceAddress: '192.168.1.10',
+      observer: {
+        id: 'mac-eero-en0', host: 'localhost', tenantId: ownership.tenantId, siteId: ownership.siteId,
+        scopeId: localZone.id, cidr: localZone.cidr, interfaceName: 'en0',
+        expectedDeviceIds: [physicalId], expectedComponentKeys: ['switch:0'],
+      },
+    } as never)
+    jest.spyOn(fixture.poller as any, 'refreshRemoteShellyObservers').mockResolvedValue(undefined)
+    const fetch = jest.spyOn(global, 'fetch').mockImplementation(async (url) => ({
+      status: 200,
+      json: async () => String(url).endsWith('/rpc/Shelly.GetDeviceInfo')
+        ? { id: physicalId, gen: 2 }
+        : { id: 0, output: true },
+    } as Response))
 
     try {
       await fixture.poller.pollOnce()
-      expect(fixture.lan.getConfiguredZone).toHaveBeenCalledWith('upstream-lan')
-      expect(fetch).toHaveBeenCalledWith(localDevice.adapter.target, expect.any(Object))
+      expect(resolveTarget).toHaveBeenCalledWith(localDevice, undefined)
+      expect(fetch).toHaveBeenCalledTimes(2)
+      expect(fetch).toHaveBeenCalledWith(`http://${ipAddress}/rpc/Shelly.GetDeviceInfo`,
+        expect.objectContaining({ redirect: 'manual' }))
+      expect(fetch).toHaveBeenCalledWith(`http://${ipAddress}/rpc/Switch.GetStatus?id=0`,
+        expect.objectContaining({ redirect: 'manual' }))
+      expect(fixture.registry.ingestDeviceTelemetry).toHaveBeenCalledTimes(1)
       expect(fixture.registry.ingestDeviceTelemetry).toHaveBeenCalledWith(expect.objectContaining({
         deviceId, values: { on: true },
+        state: expect.objectContaining({ values: { on: true }, source: 'site-local-http-rpc:mac-eero-en0' }),
       }))
+      expect(fixture.registry.recordObserverReachability).toHaveBeenCalledWith(deviceId,
+        expect.objectContaining({ status: 'reachable', networkScopeId: 'upstream-lan' }), ownership)
+      expect(fixture.registry.ingestDeviceStatus).not.toHaveBeenCalled()
     } finally {
       fetch.mockRestore()
     }

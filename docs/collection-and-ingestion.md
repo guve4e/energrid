@@ -245,8 +245,13 @@ mechanism is introduced. `explainScheduledHttpCollection(device)` exposes the
 **existing** HTTP scheduler candidate decisions and their reason codes; the
 scheduler calls this same function, so an explanation cannot diverge from the
 selection rule. Separate results for normal HTTP reads and authorized Shelly
-operational switch reads make possible duplicate candidates visible without
-silently dropping either behavior.
+operational switch reads expose route selection. An approved switch previously
+eligible for both collectors is now scheduled only for the identity-verified
+operational route; the HTTP decision reports
+`covered_by_operational_status_read`. A rejected operational read does **not**
+fall back to legacy `http-poll` telemetry. This removes duplicate scheduled
+reads and fail-open legacy state writes for that overlap; it does not assert
+that an operational route is authorized or reachable.
 
 `ApprovedMqttObservationRuntime.inspectPersistedObservationAuthority(scope,
 deviceId)` checks the same tenant/site, approved physical device, enrollment,
@@ -263,5 +268,8 @@ has additional integration-specific identity/broker validation. No Portal
 endpoint is wired by this patch; the methods provide a tested internal read-only
 inspection seam. Future operator diagnostics must combine these existing facts
 with *actual runtime* evidence, without calling the result an active collection
-plan prematurely. Generic HTTP telemetry bypass, normal configured MQTT
-history divergence, and EM1 power adapter limitations remain open.
+plan prematurely. Legacy Shelly HTTP reads may still run for other installations
+(including EM1, whose switch-only legacy parser cannot decode power). Generic
+HTTP telemetry bypass, normal configured MQTT history divergence, and EM1 power
+adapter limitations remain open. Remote/local operational observer scheduling
+and cross-process collection duplication have not been changed.

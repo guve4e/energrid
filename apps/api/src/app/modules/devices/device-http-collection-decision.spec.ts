@@ -42,13 +42,29 @@ describe('scheduled HTTP collection explanations', () => {
       httpRead: { selected: false, reason: 'adapter_not_http' },
       operationalStatusRead: { selected: true, reason: 'identity_checked_switch_candidate' },
     })
-    // Preserve and expose the current overlap instead of silently changing behavior.
-    expect(explainScheduledHttpCollection(shellyHttp).httpRead.selected).toBe(true)
-    expect(explainScheduledHttpCollection(shellyHttp).operationalStatusRead.selected).toBe(true)
+    // An approved HTTP switch uses only the identity-verified operational route.
+    // A failure there must never trigger unverified legacy HTTP state ingestion.
+    expect(explainScheduledHttpCollection(shellyHttp)).toEqual({
+      httpRead: { selected: false, reason: 'covered_by_operational_status_read' },
+      operationalStatusRead: { selected: true, reason: 'identity_checked_switch_candidate' },
+    })
+    expect(scheduled.httpDevices).not.toContain(shellyHttp)
+    expect(scheduled.shellySwitches).toContain(shellyHttp)
     // Legacy EM1 HTTP eligibility does not imply the existing parser understands EM1.
     expect(explainScheduledHttpCollection(em).httpRead.selected).toBe(true)
     expect(explainScheduledHttpCollection(em).operationalStatusRead.selected).toBe(false)
     expect(explainScheduledHttpCollection(blocked).httpRead.reason).toBe('device_not_approved')
+  })
+
+  it('does not send unapproved switch candidates to either path', () => {
+    const unapprovedSwitch = device({
+      id: 'shellypro2pm-ec6260888084:switch:0',
+      driver: 'shelly-lan', trustStatus: 'discovered',
+    })
+    expect(explainScheduledHttpCollection(unapprovedSwitch)).toEqual({
+      httpRead: { selected: false, reason: 'device_not_approved' },
+      operationalStatusRead: { selected: false, reason: 'no_operational_switch_collector' },
+    })
   })
 
   it('distinguishes a missing HTTP target from an unconfigured adapter', () => {

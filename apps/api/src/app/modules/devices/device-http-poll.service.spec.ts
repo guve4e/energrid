@@ -61,11 +61,40 @@ describe('DeviceHttpPollService', () => {
     const unapproved = makeDevice('shellyplus1-78ee4ccf4b54:switch:0', 'shelly-discovered', 'mqtt', true, 'discovered')
 
     const work = selectScheduledHttpCollection([esp, generic, unconfigured, mqttSwitch, httpSwitch, em, unapproved])
-    expect(work.httpDevices.map(device => device.id)).toEqual([esp.id, generic.id, httpSwitch.id, em.id])
+    expect(work.httpDevices.map(device => device.id)).toEqual([esp.id, generic.id, em.id])
+    expect(work.httpDevices).not.toContain(httpSwitch)
     expect(work.shellySwitches.map(device => device.id)).toEqual([mqttSwitch.id, httpSwitch.id])
     // An EM1 installation may still be selected by the legacy generic HTTP
     // branch, but must never be scheduled for Switch.GetStatus or switching.
     expect(work.shellySwitches).not.toContain(em)
+  })
+
+  it('does not fall back to legacy HTTP telemetry when verified switch collection rejects', async () => {
+    const device = {
+      id: 'shellypro2pm-ec6260888084:switch:0',
+      tenantId: 'tenant-demo', siteId: 'site-home', kind: 'physical', trustStatus: 'approved',
+      adapter: { driver: 'shelly-lan', protocol: 'http', configured: true,
+        target: 'http://192.168.7.39/rpc/Switch.GetStatus?id=0' },
+    } as unknown as RegisteredDevice
+    const registry = { getDevices: jest.fn().mockReturnValue([device]) }
+    const shelly = {
+      pollLegacyShellyHttp: jest.fn(),
+      pollAuthorizedLocalShellyStatus: jest.fn().mockResolvedValue(null),
+      refreshRemoteShellyObservers: jest.fn().mockResolvedValue(undefined),
+      stop: jest.fn(),
+    }
+    const poller = new DeviceHttpPollService(
+      registry as unknown as DeviceRegistryService,
+      undefined, undefined, undefined, undefined, undefined, undefined,
+      shelly as never,
+    )
+
+    await poller.pollOnce()
+
+    expect(shelly.pollAuthorizedLocalShellyStatus).toHaveBeenCalledTimes(1)
+    expect(shelly.pollAuthorizedLocalShellyStatus).toHaveBeenCalledWith(device)
+    expect(shelly.refreshRemoteShellyObservers).toHaveBeenCalledWith([device])
+    expect(shelly.pollLegacyShellyHttp).not.toHaveBeenCalled()
   })
 
   it('reads registered devices once per HTTP scheduling cycle', async () => {

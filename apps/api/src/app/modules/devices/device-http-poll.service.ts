@@ -197,7 +197,11 @@ export function explainScheduledHttpCollection(device: RegisteredDevice): {
   httpRead: { selected: boolean; reason: string }
   operationalStatusRead: { selected: boolean; reason: string }
 } {
-  const httpRead = device.trustStatus !== 'approved'
+  const operationalStatusRead = isShellySwitchCollectionCandidate(device)
+    ? { selected: true, reason: 'identity_checked_switch_candidate' }
+    : { selected: false, reason: 'no_operational_switch_collector' }
+
+  const eligibleHttpRead = device.trustStatus !== 'approved'
     ? { selected: false, reason: 'device_not_approved' }
     : device.adapter.protocol !== 'http'
       ? { selected: false, reason: 'adapter_not_http' }
@@ -207,9 +211,12 @@ export function explainScheduledHttpCollection(device: RegisteredDevice): {
           ? { selected: false, reason: 'http_target_missing' }
           : { selected: true, reason: 'scheduled_http_candidate' }
 
-  const operationalStatusRead = isShellySwitchCollectionCandidate(device)
-    ? { selected: true, reason: 'identity_checked_switch_candidate' }
-    : { selected: false, reason: 'no_operational_switch_collector' }
+  // One switch must not be read by both the identity-verified operational route
+  // and the legacy HTTP route. Never fall back to the weaker route when the
+  // operational reader rejects an endpoint, identity, scope or component.
+  const httpRead = eligibleHttpRead.selected && operationalStatusRead.selected
+    ? { selected: false, reason: 'covered_by_operational_status_read' }
+    : eligibleHttpRead
 
   return { httpRead, operationalStatusRead }
 }
