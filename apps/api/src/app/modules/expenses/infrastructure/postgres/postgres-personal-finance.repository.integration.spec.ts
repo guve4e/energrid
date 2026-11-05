@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
+import { ExpenseVersionConflictError } from '../../application/ports/personal-finance.repository';
 import type { ExpenseImportRow } from '../../application/ports/personal-finance.repository';
 import { PostgresPersonalFinanceRepository } from './postgres-personal-finance.repository';
 
@@ -70,7 +71,7 @@ describePostgres('Postgres Personal Finance repository integration', () => {
     await repository.importExpenses(owner, owner, [original, untouchedLegacy]);
     const expenses = await repository.queryExpenses(owner, { limit: 10 });
     const legacyExpense = expenses.find((expense) => expense.legacyRecordId === original.legacyRecordId)!;
-    const linked = await repository.updateExpense(owner, owner, legacyExpense.id, { ...original, category: 'Food', categoryId: root.id });
+    const linked = await repository.updateExpense(owner, owner, legacyExpense.id, { ...original, category: 'Food', categoryId: root.id }, legacyExpense.revision);
     expect(linked).toMatchObject({ category: 'Food', categoryId: root.id });
     const legacyFreeText = expenses.find((expense) => expense.legacyRecordId === untouchedLegacy.legacyRecordId)!;
     const renamed = await repository.renameCategory(owner, owner, root.id, { name: 'Dining', description: 'Restaurants', parentId: null });
@@ -245,6 +246,33 @@ describePostgres('Postgres Personal Finance repository integration', () => {
     expect(events.rows.map((event) => event.event_type)).toEqual(expect.arrayContaining(['receipt.attached_to_expense', 'receipt.document_deleted']));
   });
 
+  it('rejects overlapping edits using the same revision without modifying items or audit history', async () => {
+    const owner = await account();
+    const sourceId = randomUUID();
+    const originalInput = row(sourceId, { items: [{ description: 'Original', productCode: null, quantity: '1', unit: 'item', unitPrice: '135.6', discount: '0', tax: '0', lineTotal: '135.6', currency: 'BGN', taxIncluded: false }] });
+    await repository.importExpenses(owner, owner, [originalInput]);
+    const original = (await repository.queryExpenses(owner, { limit: 1 }))[0];
+    const writeA = { ...originalInput, description: 'First edit', items: [{ ...originalInput.items[0], description: 'First item' }] };
+    const writeB = { ...originalInput, description: 'Stale edit', items: [{ ...originalInput.items[0], description: 'Stale item' }] };
+    const results = await Promise.allSettled([
+      repository.updateExpense(owner, owner, original.id, writeA, original.revision),
+      repository.updateExpense(owner, owner, original.id, writeB, original.revision),
+    ]);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    const rejected = results.find((result) => result.status === 'rejected') as PromiseRejectedResult;
+    expect(rejected.reason).toBeInstanceOf(ExpenseVersionConflictError);
+    const stored = await repository.getExpense(owner, original.id);
+    expect(stored?.revision).toBe(original.revision + 1);
+    expect(stored?.items).toHaveLength(1);
+    const approvedDescription = stored?.description;
+    expect(stored?.items[0].description).toBe(approvedDescription === 'First edit' ? 'First item' : 'Stale item');
+    const events = await pool.query<{ event_type: string }>(
+      'SELECT event_type FROM personal_finance.provenance_events WHERE account_id=$1 AND expense_id=$2 ORDER BY occurred_at,id', [owner, original.id],
+    );
+    expect(events.rows.filter((event) => event.event_type === 'expense.updated')).toHaveLength(1);
+  });
+
   it('audits edits and soft deletion, and keeps deleted expenses out of reports', async () => {
     const owner = await account();
     const sourceId = randomUUID();
@@ -253,7 +281,7 @@ describePostgres('Postgres Personal Finance repository integration', () => {
     const edited = await repository.updateExpense(owner, owner, original.id, row(sourceId, {
       amount: '136.1', amountEur: '69.5875', description: 'Nissan fuel', category: 'Auto', liters: '53.8',
       fx: { rate: '1.95583', convention: 'currency_units_per_eur', source: 'legacy-import', effectiveAt: null, provider: null },
-    }));
+    }), original.revision);
     expect(edited?.description).toBe('Nissan fuel');
     expect(edited?.confirmedBy).toBe(original.confirmedBy);
     expect(edited?.confirmedAt).toBe(original.confirmedAt);

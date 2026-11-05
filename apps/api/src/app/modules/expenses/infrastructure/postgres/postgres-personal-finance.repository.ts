@@ -3,12 +3,13 @@ import type { Pool, PoolClient, QueryResultRow } from 'pg';
 import { addDecimal, compareDecimal, decimalString, financeDecimal, roundDecimal } from '../../domain/decimal';
 import { currencyMinorUnits, euroValue, normalizeMerchantName, reconcileItemsAgainstTotal } from '../../domain/expense-rules';
 import type { ExpenseDraft, ExpenseDraftProposal, ExpenseItem, ExpenseQuery, ExpenseRecord, ExpenseSource, ExpenseSourceKind, FinanceCategory, ReceiptMetadata, SpendingSummary } from '../../domain/personal-finance.types';
+import { ExpenseVersionConflictError } from '../../application/ports/personal-finance.repository';
 import type { CategoryWrite, ExpenseDraftReviewWrite, ExpenseImportRow, ExpenseWrite, PersonalFinanceRepository, ReceiptReextractionWrite } from '../../application/ports/personal-finance.repository';
 
 export const PERSONAL_FINANCE_POOL = Symbol('PERSONAL_FINANCE_POOL');
 
 type ExpenseRow = QueryResultRow & {
-  id: string; account_id: string; expense_date: Date | string; amount: string; currency: string; amount_eur: string | null;
+  id: string; account_id: string; revision: number; expense_date: Date | string; amount: string; currency: string; amount_eur: string | null;
   fx_rate: string | null; fx_rate_convention: string | null; fx_source: string | null; fx_effective_at: Date | string | null;
   fx_provider: string | null; merchant_id: string | null; merchant_name: string | null; category: string; description: string;
   tags: string[]; liters: string | null; source_kind: ExpenseSourceKind; source_id: string | null; legacy_record_id: string | null;
@@ -161,23 +162,25 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
     return (await this.attachExpenseItems(accountId, result.rows))[0] ?? null;
   }
 
-  async updateExpense(accountId: string, actorId: string, expenseId: string, input: ExpenseWrite): Promise<ExpenseRecord | null> {
+  async updateExpense(accountId: string, actorId: string, expenseId: string, input: ExpenseWrite, expectedRevision: number): Promise<ExpenseRecord | null> {
     return this.transaction(async (client) => {
-      const before = await this.getExpenseWithClient(client, accountId, expenseId);
+      const before = await this.getExpenseWithClient(client, accountId, expenseId, true);
       if (!before) return null;
+      if (before.revision !== expectedRevision) throw new ExpenseVersionConflictError();
       const effectiveInput = await this.applyActiveCategory(client, accountId, input, Boolean(before.categoryId && before.categoryId === input.categoryId));
       const converted = euroValue(effectiveInput.amount, effectiveInput.currency, effectiveInput.amountEur, effectiveInput.fx);
       const merchantId = await this.resolveMerchant(client, accountId, effectiveInput.merchantName);
-      await client.query(
+      const updated = await client.query(
         `UPDATE personal_finance.expenses SET expense_date=$3,amount=$4,currency=$5,amount_eur=$6,
           fx_rate=$7,fx_rate_convention=$8,fx_source=$9,fx_effective_at=$10,fx_provider=$11,
           merchant_id=$12,merchant_name=$13,category=$14,description=$15,tags=$16,liters=$17,category_id=$18,
-          updated_at=now()
-         WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL`,
+          revision=revision+1,updated_at=now()
+         WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL AND revision=$19 RETURNING id`,
         [accountId, expenseId, effectiveInput.date, effectiveInput.amount, effectiveInput.currency, converted.amountEur, effectiveInput.fx?.rate ?? null,
           effectiveInput.fx?.convention ?? null, effectiveInput.fx?.source ?? null, effectiveInput.fx?.effectiveAt ?? null, effectiveInput.fx?.provider ?? null,
-          merchantId, effectiveInput.merchantName, effectiveInput.category, effectiveInput.description, effectiveInput.tags, effectiveInput.liters, effectiveInput.categoryId ?? null],
+          merchantId, effectiveInput.merchantName, effectiveInput.category, effectiveInput.description, effectiveInput.tags, effectiveInput.liters, effectiveInput.categoryId ?? null, expectedRevision],
       );
+      if (!updated.rows[0]) throw new ExpenseVersionConflictError();
       await client.query('DELETE FROM personal_finance.expense_items WHERE account_id=$1 AND expense_id=$2', [accountId, expenseId]);
       await this.insertItems(client, accountId, expenseId, effectiveInput.items);
       await this.insertEvent(client, accountId, { kind: before.sourceKind, id: before.sourceId, provider: effectiveInput.source.provider, model: effectiveInput.source.model }, 'expense.updated', {
@@ -191,7 +194,7 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
 
   async deleteExpense(accountId: string, actorId: string, expenseId: string): Promise<boolean> {
     return this.transaction(async (client) => {
-      const before = await this.getExpenseWithClient(client, accountId, expenseId);
+      const before = await this.getExpenseWithClient(client, accountId, expenseId, true);
       if (!before) return false;
       const result = await client.query(
         'UPDATE personal_finance.expenses SET deleted_at=now(),updated_at=now() WHERE account_id=$1 AND id=$2 AND deleted_at IS NULL RETURNING id',
@@ -621,8 +624,8 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
     return rows.map((row) => mapExpense(row, grouped.get(row.id) ?? []));
   }
 
-  private async getExpenseWithClient(client: Pick<Pool, 'query'> | PoolClient, accountId: string, id: string): Promise<ExpenseRecord | null> {
-    const result = await client.query<ExpenseRow>('SELECT e.*,COALESCE(c.name,e.category) AS category FROM personal_finance.expenses e LEFT JOIN personal_finance.categories c ON c.account_id=e.account_id AND c.id=e.category_id WHERE e.account_id=$1 AND e.id=$2 AND e.deleted_at IS NULL', [accountId, id]);
+  private async getExpenseWithClient(client: Pick<Pool, 'query'> | PoolClient, accountId: string, id: string, lock = false): Promise<ExpenseRecord | null> {
+    const result = await client.query<ExpenseRow>(`SELECT e.*,COALESCE(c.name,e.category) AS category FROM personal_finance.expenses e LEFT JOIN personal_finance.categories c ON c.account_id=e.account_id AND c.id=e.category_id WHERE e.account_id=$1 AND e.id=$2 AND e.deleted_at IS NULL${lock ? ' FOR UPDATE OF e' : ''}`, [accountId, id]);
     if (!result.rows[0]) return null;
     const items = await client.query<ItemRow>('SELECT * FROM personal_finance.expense_items WHERE account_id=$1 AND expense_id=$2 ORDER BY id', [accountId, id]);
     return mapExpense(result.rows[0], items.rows.map(mapItem));
@@ -713,7 +716,7 @@ export class PostgresPersonalFinanceRepository implements PersonalFinanceReposit
 
 function mapExpense(row: ExpenseRow, items: ExpenseItem[]): ExpenseRecord {
   return {
-    id: row.id, accountId: row.account_id, date: isoDate(row.expense_date), amount: decimalString(row.amount), currency: row.currency.trim(),
+    id: row.id, accountId: row.account_id, revision: row.revision, date: isoDate(row.expense_date), amount: decimalString(row.amount), currency: row.currency.trim(),
     amountEur: row.amount_eur === null ? null : decimalString(row.amount_eur),
     fx: row.fx_rate ? { rate: decimalString(row.fx_rate), convention: 'currency_units_per_eur', source: row.fx_source ?? 'unknown', effectiveAt: row.fx_effective_at ? isoTimestamp(row.fx_effective_at) : null, provider: row.fx_provider } : null,
     merchantId: row.merchant_id, merchantName: row.merchant_name, category: row.category, categoryId: row.category_id ?? null, description: row.description, tags: row.tags ?? [], items,

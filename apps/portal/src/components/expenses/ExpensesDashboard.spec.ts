@@ -388,6 +388,18 @@ describe('Personal Finance V2 Portal cutover', () => {
     expect(JSON.parse(String(createCalls[1]?.init?.body))).toMatchObject({ category: 'Groceries', categoryId: 'category-groceries', liters: null });
   });
 
+  it('submits the originally loaded revision when editing an expense', async () => {
+    const { calls } = setup({ records: [{ id: 'expense-1', revision: 7, date: '2026-10-01', amount: '12.50', currency: 'EUR', amountEur: '12.50', category: 'Groceries', categoryId: 'category-groceries', description: 'Milk', tags: [], liters: null }] });
+    await flushPromises();
+    await wrapper!.get('button[aria-label="Edit Milk"]').trigger('click');
+    await wrapper!.get('input[placeholder="Merchant or what you bought"]').setValue('Milk and bread');
+    await wrapper!.get('.expense-modal form').trigger('submit');
+    await flushPromises();
+    const request = calls.find(({ url, init }) => url.endsWith('/personal-finance/expenses/expense-1') && init?.method === 'PATCH');
+    expect(request).toBeTruthy();
+    expect(JSON.parse(String(request!.init!.body))).toMatchObject({ expectedRevision: 7, description: 'Milk and bread' });
+  });
+
   it('uses month, calendar-year, and all-history scopes for transactions and summaries', async () => {
     const { calls } = setup();
     await flushPromises();

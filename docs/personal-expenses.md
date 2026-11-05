@@ -6,6 +6,10 @@ Personal Expenses is an account-scoped feature in the Energrid Portal. It stores
 
 The `/personal-finance` account-scoped API and Assistant use PostgreSQL as the sole active transaction store. The obsolete `/personal-expenses` LevelDB HTTP API and its runtime storage/capture services have been retired. Its text proposal parser is local and provider-independent; proposals remain drafts until an authenticated user confirms them. Receipt Intelligence can extract a JPEG or PNG after the signed-in user explicitly opts in to cloud processing. Extraction creates a review-required draft; it does not create an expense until the user reviews and confirms it. Payment integrations remain out of scope. Account-scoped assistant expense tools are registered through the HouseAgent integration.
 
+## Concurrent expense edits (M6)
+
+`ExpenseRecord.revision` is a database-backed optimistic-lock token. Every expense PATCH must supply `expectedRevision` from the record originally displayed to the editor. PostgreSQL locks the expense row, rejects a stale revision with HTTP 409 before touching line items or audit history, and increments the revision exactly once on a successful update. Refresh the expense and reapply edits after a conflict. The migration adds `personal_finance.expenses.revision`, initialized to 1 for existing expenses. Apply this migration before deploying the new API/Portal code.
+
 ## Record and currency behavior
 
 V2 keeps original amount and currency separately from EUR amount and FX provenance. Decimal operations use base-10 integer arithmetic and PostgreSQL `numeric(38,18)`; values outside that exact storage range are rejected before persistence. Computed EUR values are rounded to cents using ties-to-even. Imported EUR amounts and FX provenance are preserved as supplied. Historical BGN records without a stored EUR amount or FX rate remain unconverted and are excluded from EUR totals; the importer does not invent an exchange rate. New expenses are restricted to EUR and USD. Currency values use three-letter ISO 4217 codes, with currency-aware minor-unit precision for item totals.

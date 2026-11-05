@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, Header, HttpException, NotFoundException, Param, Patch, Post, Query, Req, StreamableFile, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { BadRequestException, Body, ConflictException, Controller, Delete, Get, Header, HttpException, NotFoundException, Param, Patch, Post, Query, Req, StreamableFile, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { AccessJwtGuard, requirePrincipal } from '../auth/auth.guard';
 import type { AuthenticatedRequest } from '../auth/auth.types';
@@ -7,6 +7,7 @@ import { ReceiptIntelligenceApplication } from './application/receipt-intelligen
 import { compareDecimal, decimalString, financeDecimal } from './domain/decimal';
 import { euroValue, normalizeCurrency } from './domain/expense-rules';
 import type { ExpenseItem, ExpenseQuery, ExpenseRecord, ExpenseSourceKind } from './domain/personal-finance.types';
+import { ExpenseVersionConflictError } from './application/ports/personal-finance.repository';
 import type { ExpenseDraftReviewWrite, ExpenseImportRow, ExpenseWrite } from './application/ports/personal-finance.repository';
 
 @Controller('personal-finance')
@@ -166,12 +167,19 @@ export class PersonalFinanceController {
   async update(@Param('id') id: string, @Body() body: unknown, @Req() request: AuthenticatedRequest) {
     const actorId = requirePrincipal(request).userId;
     try {
+      const revision = body && typeof body === 'object' && !Array.isArray(body)
+        ? (body as Record<string, unknown>).expectedRevision : undefined;
+      if (!Number.isSafeInteger(revision) || Number(revision) < 1) throw new BadRequestException('expectedRevision must be a positive integer');
       const old = await this.finance.getExpense(actorId, id);
       if (!old) throw new NotFoundException('Expense not found');
-      const updated = await this.finance.updateExpense(actorId, actorId, id, normalizeExpenseBody(body, old));
+      const updated = await this.finance.updateExpense(actorId, actorId, id, normalizeExpenseBody(body, old), revision as number);
       if (!updated) throw new NotFoundException('Expense not found');
       return { expense: updated };
-    } catch (error) { if (error instanceof NotFoundException) throw error; throw new BadRequestException(message(error)); }
+    } catch (error) {
+      if (error instanceof ExpenseVersionConflictError) throw new ConflictException(error.message);
+      if (error instanceof HttpException) throw error;
+      throw new BadRequestException(message(error));
+    }
   }
 
   @Delete('expenses/:id')

@@ -10,6 +10,10 @@ import type {
 } from '../../domain/personal-finance.types';
 import type { ReceiptExtractionV1 } from '../../domain/receipt-extraction.types';
 
+export class ExpenseVersionConflictError extends Error {
+  constructor() { super('Expense changed since it was loaded. Reload before saving.'); this.name = 'ExpenseVersionConflictError'; }
+}
+
 export interface ExpenseWrite {
   date: string;
   amount: string;
@@ -68,7 +72,7 @@ export interface PersonalFinanceRepository {
   archiveCategory(accountId: string, actorId: string, categoryId: string): Promise<FinanceCategory | null>;
   queryExpenses(accountId: string, query: ExpenseQuery): Promise<ExpenseRecord[]>;
   getExpense(accountId: string, expenseId: string): Promise<ExpenseRecord | null>;
-  updateExpense(accountId: string, actorId: string, expenseId: string, input: ExpenseWrite): Promise<ExpenseRecord | null>;
+  updateExpense(accountId: string, actorId: string, expenseId: string, input: ExpenseWrite, expectedRevision: number): Promise<ExpenseRecord | null>;
   deleteExpense(accountId: string, actorId: string, expenseId: string): Promise<boolean>;
   findImportedLegacyIds(accountId: string, ids: readonly string[]): Promise<string[]>;
   createExpense(accountId: string, actorId: string, input: ExpenseWrite): Promise<ExpenseRecord>;

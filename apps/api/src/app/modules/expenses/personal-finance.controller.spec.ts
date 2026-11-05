@@ -1,8 +1,9 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ConflictException } from '@nestjs/common';
 import { PersonalFinanceController, normalizeV2Import } from './personal-finance.controller';
 import type { ReceiptIntelligenceApplication } from './application/receipt-intelligence.application';
 import type { PersonalFinanceApplication } from './application/personal-finance.application';
 import type { ExpenseRecord } from './domain/personal-finance.types';
+import { ExpenseVersionConflictError } from './application/ports/personal-finance.repository';
 
 describe('Personal Finance historical import normalization', () => {
   it('retains legacy Mongo money and FX values as exact decimals', () => {
@@ -113,7 +114,7 @@ describe('receipt re-extraction route', () => {
 describe('Personal Finance expense partial updates', () => {
   const request = { user: { userId: 'account-a' } } as any;
   const existing: ExpenseRecord = {
-    id: 'expense-1', accountId: 'account-a', date: '2025-01-03',
+    id: 'expense-1', accountId: 'account-a', revision: 3, date: '2025-01-03',
     amount: '135.6', currency: 'BGN', amountEur: '69.33117909020723',
     fx: { rate: '1.95583', convention: 'currency_units_per_eur', source: 'legacy-import', effectiveAt: '2025-01-03', provider: null },
     merchantId: null, merchantName: 'Fuel station', category: 'Fuel', categoryId: 'category-1',
@@ -134,42 +135,56 @@ describe('Personal Finance expense partial updates', () => {
 
   it('preserves all financial and fuel fields when only the description changes', async () => {
     const { controller, finance } = controllerFor();
-    await expect(controller.update(existing.id, { description: 'New description' }, request))
+    await expect(controller.update(existing.id, { description: 'New description', expectedRevision: existing.revision }, request))
       .resolves.toEqual({ expense: existing });
     expect(finance.updateExpense).toHaveBeenCalledWith('account-a', 'account-a', existing.id, expect.objectContaining({
       description: 'New description', amount: existing.amount, amountEur: existing.amountEur,
       currency: existing.currency, fx: existing.fx, liters: existing.liters,
       categoryId: existing.categoryId, items: existing.items,
       source: { kind: existing.sourceKind, id: existing.sourceId },
-    }));
+    }), existing.revision);
   });
 
   it('preserves imported EUR values even when the source has no FX rate', async () => {
     const record = { ...existing, fx: null };
     const { controller, finance } = controllerFor(record);
-    await controller.update(record.id, { category: 'Transport' }, request);
+    await controller.update(record.id, { category: 'Transport', expectedRevision: record.revision }, request);
     expect(finance.updateExpense).toHaveBeenCalledWith('account-a', 'account-a', record.id, expect.objectContaining({
       amount: record.amount, amountEur: record.amountEur, fx: null, liters: record.liters,
-    }));
+    }), record.revision);
   });
 
   it('recalculates converted EUR only for changed financial values and records user FX corrections', async () => {
     const record = { ...existing, amount: '20', currency: 'USD', amountEur: '10',
       fx: { ...existing.fx!, rate: '2', source: 'provider-import' } };
     const { controller, finance } = controllerFor(record);
-    await controller.update(record.id, { amount: '30', fxRate: '1.5' }, request);
+    await controller.update(record.id, { amount: '30', fxRate: '1.5', expectedRevision: record.revision }, request);
     expect(finance.updateExpense).toHaveBeenCalledWith('account-a', 'account-a', record.id, expect.objectContaining({
       amount: '30', amountEur: '20', liters: record.liters,
       fx: expect.objectContaining({ rate: '1.5', source: 'user-entered', provider: null, effectiveAt: null }),
-    }));
+    }), record.revision);
   });
 
   it('clears fuel volume and FX only when explicitly requested', async () => {
     const { controller, finance } = controllerFor();
-    await controller.update(existing.id, { liters: null, fxRate: null }, request);
+    await controller.update(existing.id, { liters: null, fxRate: null, expectedRevision: existing.revision }, request);
     expect(finance.updateExpense).toHaveBeenCalledWith('account-a', 'account-a', existing.id, expect.objectContaining({
       amount: existing.amount, liters: null, fx: null, amountEur: null,
-    }));
+    }), existing.revision);
+  });
+
+  it('requires a positive revision for edits, without calling the repository', async () => {
+    const { controller, finance } = controllerFor();
+    await expect(controller.update(existing.id, { description: 'Attempt without version' }, request)).rejects.toBeInstanceOf(BadRequestException);
+    await expect(controller.update(existing.id, { description: 'Invalid', expectedRevision: 0 }, request)).rejects.toBeInstanceOf(BadRequestException);
+    expect(finance.updateExpense).not.toHaveBeenCalled();
+  });
+
+  it('returns HTTP 409 for stale edits rather than accepting a lost update', async () => {
+    const { controller, finance } = controllerFor();
+    (finance.updateExpense as jest.Mock).mockRejectedValue(new ExpenseVersionConflictError());
+    await expect(controller.update(existing.id, { description: 'Stale', expectedRevision: existing.revision }, request))
+      .rejects.toBeInstanceOf(ConflictException);
   });
 
   it('still requires an amount for a newly created expense', async () => {

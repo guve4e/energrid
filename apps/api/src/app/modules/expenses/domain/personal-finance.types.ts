@@ -81,6 +81,8 @@ export interface ReceiptMetadata {
 
 export interface ExpenseRecord {
   id: string;
+  /** Monotonic optimistic-lock revision, not a wall-clock timestamp. */
+  revision: number;
   accountId: string;
   date: string;
   amount: string;

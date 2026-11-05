@@ -4,6 +4,7 @@ import { authFetch } from '../../auth/auth-client';
 
 type Expense = {
   id: string;
+  revision: number;
   date: string;
   amount: string;
   currency: string;
@@ -37,6 +38,7 @@ const error = ref('');
 const busy = ref(false);
 const addOpen = ref(false);
 const editingId = ref<string | null>(null);
+const editingRevision = ref<number | null>(null);
 const month = ref(localMonth());
 const transactionScope = ref<'month' | 'year' | 'all'>('all');
 const chartEndMonth = ref(month.value);
@@ -514,6 +516,7 @@ async function saveExpense() {
           date: form.date,
           amount: form.amount,
           currency: form.currency,
+          ...(editingId.value ? { expectedRevision: editingRevision.value } : {}),
           ...(form.currency !== 'EUR' && form.fxRate
             ? { fxRate: form.fxRate }
             : {}),
@@ -588,6 +591,7 @@ function openAdd() {
 
 function openEdit(item: Expense) {
   editingId.value = item.id;
+  editingRevision.value = item.revision;
   originalCategory.value = item.category;
   Object.assign(form, {
     date: item.date,
@@ -621,6 +625,7 @@ async function deleteExpense(item: Expense) {
 
 function resetForm() {
   editingId.value = null;
+  editingRevision.value = null;
   originalCategory.value = null;
   Object.assign(form, {
     date: localDate(),

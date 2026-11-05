@@ -102,9 +102,9 @@ export class PersonalFinanceApplication {
     return this.repository.createExpense(accountId, actorId, normalized);
   }
 
-  async updateExpense(accountId: string, actorId: string, expenseId: string, input: ExpenseWrite) {
+  async updateExpense(accountId: string, actorId: string, expenseId: string, input: ExpenseWrite, expectedRevision: number) {
     this.assertOwner(accountId, actorId);
-    return this.repository.updateExpense(accountId, actorId, expenseId, normalizeExpenseWrite(input));
+    return this.repository.updateExpense(accountId, actorId, expenseId, normalizeExpenseWrite(input), expectedRevision);
   }
 
   async deleteExpense(accountId: string, actorId: string, expenseId: string) {

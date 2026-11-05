@@ -1,5 +1,6 @@
 import type { Pool } from 'pg';
 import { isoDate, itemTotalWithIncludedAdjustments, PostgresPersonalFinanceRepository } from './postgres-personal-finance.repository';
+import { ExpenseVersionConflictError } from '../../application/ports/personal-finance.repository';
 import type { ExpenseImportRow } from '../../application/ports/personal-finance.repository';
 
 function importRow(overrides: Partial<ExpenseImportRow> = {}): ExpenseImportRow {
@@ -64,6 +65,30 @@ describe('PostgresPersonalFinanceRepository safety boundaries', () => {
     const monthlyQuery = query.mock.calls.find(([sql]) => sql.includes('to_char(expense_date'));
     expect(monthlyQuery?.[0]).toContain('account_id=$1');
     expect(monthlyQuery?.[1]).toEqual(['account-a']);
+  });
+
+  it('locks the expense and rejects a stale revision before changing items or audit history', async () => {
+    const statements: string[] = [];
+    const existing = {
+      id: 'expense-1', account_id: 'account-a', revision: 3, expense_date: '2026-10-01', amount: '10', currency: 'EUR', amount_eur: '10',
+      fx_rate: null, fx_source: null, fx_effective_at: null, fx_provider: null, merchant_id: null, merchant_name: null,
+      category: 'Groceries', category_id: null, description: 'Original', tags: [], liters: null, source_kind: 'manual',
+      source_id: 'source-1', legacy_record_id: null, source_created_at: null, source_updated_at: null,
+      confirmed_by: 'account-a', confirmed_at: '2026-10-01T00:00:00Z', created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z',
+    };
+    const client = {
+      query: jest.fn(async (sql: string) => {
+        statements.push(sql);
+        if (sql.includes('FROM personal_finance.expenses e LEFT JOIN personal_finance.categories c')) return { rows: [existing] };
+        return { rows: [] };
+      }), release: jest.fn(),
+    };
+    const repo = new PostgresPersonalFinanceRepository({ connect: jest.fn().mockResolvedValue(client) } as unknown as Pool);
+    await expect(repo.updateExpense('account-a', 'account-a', 'expense-1', importRow(), 2)).rejects.toBeInstanceOf(ExpenseVersionConflictError);
+    expect(statements.some((sql) => sql.includes('FOR UPDATE OF e'))).toBe(true);
+    expect(statements.some((sql) => sql.startsWith('UPDATE personal_finance.expenses'))).toBe(false);
+    expect(statements.some((sql) => sql.startsWith('DELETE FROM personal_finance.expense_items'))).toBe(false);
+    expect(statements).toContain('ROLLBACK');
   });
 
   it('rolls back an import batch when a related line item fails', async () => {
