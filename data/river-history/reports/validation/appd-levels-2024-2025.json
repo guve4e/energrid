@@ -1,0 +1,66 @@
+{
+  "method": "Independent pdftotext -raw scan of printed date and H column; form-feed separators normalized as whitespace; reconcile by calendar date.",
+  "documents": [
+    {
+      "station": "novo-selo",
+      "year": 2024,
+      "pdf": "data/river-history/raw/novo-selo/novo-selo-2024.pdf",
+      "pdfRows": 366,
+      "csvRows": 366,
+      "matchedDates": 366,
+      "missingPdfDates": [],
+      "missingCsvDates": [],
+      "duplicatePdfDates": 0,
+      "unexpectedPdfDates": [],
+      "levelDiscrepancies": [],
+      "negativeLevels": {}
+    },
+    {
+      "station": "novo-selo",
+      "year": 2025,
+      "pdf": "data/river-history/raw/novo-selo/novo-selo-2025.pdf",
+      "pdfRows": 365,
+      "csvRows": 365,
+      "matchedDates": 365,
+      "missingPdfDates": [],
+      "missingCsvDates": [],
+      "duplicatePdfDates": 0,
+      "unexpectedPdfDates": [],
+      "levelDiscrepancies": [],
+      "negativeLevels": {
+        "2025-07-07": -2.0,
+        "2025-07-08": -9.0,
+        "2025-07-09": -12.0,
+        "2025-07-10": -9.0
+      }
+    },
+    {
+      "station": "lom",
+      "year": 2024,
+      "pdf": "data/river-history/raw/lom/lom-2024.pdf",
+      "pdfRows": 366,
+      "csvRows": 366,
+      "matchedDates": 366,
+      "missingPdfDates": [],
+      "missingCsvDates": [],
+      "duplicatePdfDates": 0,
+      "unexpectedPdfDates": [],
+      "levelDiscrepancies": [],
+      "negativeLevels": {}
+    },
+    {
+      "station": "lom",
+      "year": 2025,
+      "pdf": "data/river-history/raw/lom/lom-2025.pdf",
+      "pdfRows": 365,
+      "csvRows": 365,
+      "matchedDates": 365,
+      "missingPdfDates": [],
+      "missingCsvDates": [],
+      "duplicatePdfDates": 0,
+      "unexpectedPdfDates": [],
+      "levelDiscrepancies": [],
+      "negativeLevels": {}
+    }
+  ]
+}

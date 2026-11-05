@@ -1,5 +1,15 @@
 # River source observation evidence (M1b candidate)
 
+## M2.1 offline APPD daily-data experiment (verified 5 November 2026)
+
+The offline files in `data/river-history/raw/{novo-selo,lom}/` contain the official APPD daily PDFs for 2024 and 2025. The extraction CLI is `apps/core/scripts/river-history/extract-appd-annual.py`; it retains the APPD open-data URL, document year, station, river kilometre, gauge-zero elevation and datum, calendar date, daily mean water level (cm), discharge (m³/s) and temperature (°C). Blank metric values remain blank. Negative levels are valid relative to gauge zero; no observation timestamp is inferred.
+
+Independent reconciliation scans the PDF text with `pdftotext -raw`, normalizes form-feed page separators, reads the printed date and H (cm) column, and compares every date/value to the extracted level CSV. The report is `data/river-history/reports/validation/appd-levels-2024-2025.json`: Novo Selo and Lom each have 366/366 dates in leap-year 2024 and 365/365 in 2025; zero duplicate dates, missing dates, or level mismatches across 1,462 rows. Four negative Novo Selo readings on 7–10 July 2025 (−2, −9, −12, −9 cm) match the source PDF. The PDF states Novo Selo km 833.600, gauge zero −26.75 m and Baltic Sea–Kronstadt datum; Lom km 743.300, gauge zero +22.65 m and the same datum. Source URLs point to APPD's open-data page. Discharge/temperature are extracted from the same rows when present; the reconciliation report specifically checks the level column.
+
+The isolated baseline report is `data/river-history/reports/validation/lom-persistence-2025.json`. It uses 2024 as development history and evaluates every target date from 2025-01-01 through 2025-12-31. For target date *t* and horizon *h*, prediction is the level dated *t−h*; thus only information dated no later than the forecast origin is used. The complete 2024 series supplies the origins for the first two January targets; all 365 dates are scored at both horizons. At +1 day, MAE is 12.0356 cm (rising 149 / 14.1342 cm; falling 202 / 11.3218 cm; unchanged 14 / 0.0000 cm). At +2 days, MAE is 21.8822 cm (rising 149 / 25.5101 cm; falling 202 / 20.2277 cm; unchanged 14 / 7.1429 cm). Direction is classified from the actual target-day change versus the preceding day; these subsets are descriptive evaluation, not predictor inputs.
+
+APPD's annual daily tables do not establish when a reading was published or first became available. The availability assumption is therefore hypothetical, and these retrospective scores are **not real-time operational accuracy**. The data supports a reproducible next-stage offline investigation, but not a claim of operational forecast readiness or a production forecast change.
+
 **Status:** prepared source change; database migration and end-to-end collection are **not yet verified or deployed**. Do not run the full Core migration backlog on the Pi or another shared database for this milestone.
 
 ## The two distinct records

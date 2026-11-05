@@ -1,0 +1,46 @@
+{
+  "developmentYear": 2024,
+  "developmentDates": 366,
+  "evaluationYear": 2025,
+  "evaluationDates": 365,
+  "evaluationWindow": "All dates 2025-01-01 through 2025-12-31 with the required prior observation available, including development-year observations as forecast origins for the first horizon days.",
+  "forecastAssumption": "At the start of target calendar date t, the latest published daily value is from t-horizon; actual APPD publication latency is unknown, so scores are not operational accuracy.",
+  "horizons": {
+    "1": {
+      "all": {
+        "n": 365,
+        "maeCm": 12.0356
+      },
+      "rising": {
+        "n": 149,
+        "maeCm": 14.1342
+      },
+      "falling": {
+        "n": 202,
+        "maeCm": 11.3218
+      },
+      "unchanged": {
+        "n": 14,
+        "maeCm": 0.0
+      }
+    },
+    "2": {
+      "all": {
+        "n": 365,
+        "maeCm": 21.8822
+      },
+      "rising": {
+        "n": 149,
+        "maeCm": 25.5101
+      },
+      "falling": {
+        "n": 202,
+        "maeCm": 20.2277
+      },
+      "unchanged": {
+        "n": 14,
+        "maeCm": 7.1429
+      }
+    }
+  }
+}
