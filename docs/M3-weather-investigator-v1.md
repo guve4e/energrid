@@ -9,6 +9,8 @@ ENERGRID_LAB_MODE=true
 WEATHER_INVESTIGATOR_ENABLED=true
 WEATHER_INVESTIGATOR_INTERVAL_MINUTES=60
 WEATHER_INVESTIGATOR_API_TOKEN=<same-random-local-token-in-api-and-core>
+WEATHER_INVESTIGATOR_TENANT_ID=<authorized-lab-tenant-id>
+WEATHER_INVESTIGATOR_SITE_ID=<authorized-lab-site-id>
 ```
 
 To use the existing provider-independent API LLM gateway in Mac LAB, additionally set these values only in the LAB processes. `WEATHER_INVESTIGATOR_SITE_ID` is the locally scoped site key; the opaque ID is a random non-customer identifier used for inference and must be at least eight characters. The API consent map must contain exactly that opaque ID for the one authorized LAB site. Other sites remain disabled unless explicitly added.
@@ -31,7 +33,9 @@ Configure each installation in the Core environment with site ID, tenant ID, dis
 WEATHER_SITE_LOCATIONS_JSON='{"site-id":{"tenantId":"tenant-id","siteId":"site-id","location":"Vidin","latitude":43.9916,"longitude":22.8728}}'
 ```
 
-If no map entry exists, the existing Core location is used (`WEATHER_LOCATION`, `WEATHER_LATITUDE`, `WEATHER_LONGITUDE`, defaulting to Vidin). Invalid coordinates fall back to those defaults.
+**Fail-closed site identity (Patch 06):** The shared Core LAB token is restricted to the one exact `WEATHER_INVESTIGATOR_TENANT_ID` / `WEATHER_INVESTIGATOR_SITE_ID` pair configured in Core. All Investigator HTTP endpoints require both identifiers explicitly and reject other pairs, even if the caller has the bridge token. This is a **single-site LAB constraint**, not general multi-tenant identity or production-ready RBAC. The Portal administrator bridge and existing assistant pass their server-resolved scope; those scopes must match Core configuration.
+
+For investigation runs, a matching, valid `WEATHER_SITE_LOCATIONS_JSON` entry is mandatory. Missing, malformed, mismatched, or out-of-range site coordinates reject the run **before a provider fetch, DB lock or write**. There is no fallback to the default Vidin coordinates. The scheduler also requires this map entry for its configured LAB site. Configuring only the token is insufficient.
 
 Before applying the migration, verify the Core PostgreSQL host and database identify the isolated Mac LAB database (loopback host and a dedicated LAB database). Never run the migration against the Pi or the shared `energrid` database. Then run the additive migration and start the existing Core, API and Portal services:
 

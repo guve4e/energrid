@@ -144,6 +144,11 @@ function rainSnapshot(indices: number[]): WeatherSnapshot {
   return result;
 }
 
+const TEST_SITE_LOCATIONS = JSON.stringify({
+  'site-a': { tenantId: 'tenant-a', siteId: 'site-a', location: 'Vidin', latitude: 43.9916, longitude: 22.8728 },
+  'site-b': { tenantId: 'tenant-b', siteId: 'site-b', location: 'Sofia', latitude: 42.6977, longitude: 23.3219 },
+});
+
 describe('weather investigator persistence and recovery policy', () => {
   it('projects site-scoped persisted evidence without a live provider call', async () => {
     const { service, pool, weather } = setup();
@@ -165,7 +170,7 @@ describe('weather investigator persistence and recovery policy', () => {
   });
 
   it('deduplicates repeated evaluations across service restarts', async () => {
-    process.env = { ...original, ENERGRID_LAB_MODE: 'true' };
+    process.env = { ...original, ENERGRID_LAB_MODE: 'true', WEATHER_SITE_LOCATIONS_JSON: TEST_SITE_LOCATIONS };
     const first = setup();
     const second = setup();
     // A shared database uniqueness index is modeled by the stable key supplied to INSERT.
@@ -204,7 +209,7 @@ describe('weather investigator persistence and recovery policy', () => {
   });
 
   it('persists two separate rain episodes on the same UTC day with different keys', async () => {
-    process.env = { ...original };
+    process.env = { ...original, WEATHER_SITE_LOCATIONS_JSON: TEST_SITE_LOCATIONS };
     const start = futureSameDayIndex();
     const { service, client, weather } = setup(rainEpisodeProvider([
       [start, start], [start + 2, start + 2],
@@ -226,7 +231,7 @@ describe('weather investigator persistence and recovery policy', () => {
   });
 
   it('preserves the previous identity when a forecast episode shifts but overlaps', async () => {
-    process.env = { ...original };
+    process.env = { ...original, WEATHER_SITE_LOCATIONS_JSON: TEST_SITE_LOCATIONS };
     const start = futureSameDayIndex();
     const { service, client, weather } = setup(
       rainEpisodeProvider([[start + 1, start + 2]]),
@@ -259,7 +264,7 @@ describe('weather investigator persistence and recovery policy', () => {
   });
 
   it('does not recycle an old same-day event key for a separate later episode', async () => {
-    process.env = { ...original };
+    process.env = { ...original, WEATHER_SITE_LOCATIONS_JSON: TEST_SITE_LOCATIONS };
     const start = futureSameDayIndex();
     const { service, client, weather } = setup(
       rainEpisodeProvider([[start + 2, start + 2]]),
@@ -293,7 +298,7 @@ describe('weather investigator persistence and recovery policy', () => {
   });
 
   it('does not fabricate delivery times and does not prune referenced evidence', async () => {
-    process.env = { ...original };
+    process.env = { ...original, WEATHER_SITE_LOCATIONS_JSON: TEST_SITE_LOCATIONS };
     const { service, client } = setup();
     await service.run('site-a', 'tenant-a');
     const sql = client.query.mock.calls.map(([statement]) => String(statement));
@@ -305,7 +310,7 @@ describe('weather investigator persistence and recovery policy', () => {
   });
 
   it('falls back safely when a configured investigator returns malformed findings', async () => {
-    process.env = { ...original };
+    process.env = { ...original, WEATHER_SITE_LOCATIONS_JSON: TEST_SITE_LOCATIONS };
     const broken = {
       id: 'test-llm',
       investigate: async () => ({
@@ -326,7 +331,7 @@ describe('weather investigator persistence and recovery policy', () => {
   });
 
   it('uses the deterministic fallback when the configured investigator is unavailable', async () => {
-    process.env = { ...original };
+    process.env = { ...original, WEATHER_SITE_LOCATIONS_JSON: TEST_SITE_LOCATIONS };
     const unavailable = {
       id: 'test-llm',
       investigate: async () => { throw new Error('provider unavailable'); },
@@ -374,7 +379,7 @@ describe('weather investigator persistence and recovery policy', () => {
   });
 
   it('does not persist stale forecasts', async () => {
-    process.env = { ...original };
+    process.env = { ...original, WEATHER_SITE_LOCATIONS_JSON: TEST_SITE_LOCATIONS };
     const { service, client, weather } = setup();
     weather.getSnapshotForLocation.mockResolvedValue(
       snapshot('Vidin', 43.9916, 22.8728, '2026-01-01T00:00:00.000Z'),
@@ -387,4 +392,27 @@ describe('weather investigator persistence and recovery policy', () => {
       ),
     ).toBe(false);
   });
+  it('refuses an unknown site instead of querying weather for the default location', async () => {
+    process.env = { ...original, WEATHER_SITE_LOCATIONS_JSON: TEST_SITE_LOCATIONS };
+    const { service, pool, weather } = setup();
+    await expect(service.run('unlisted-site', 'tenant-a'))
+      .rejects.toThrow('Weather site location is not configured');
+    expect(pool.connect).not.toHaveBeenCalled();
+    expect(weather.getSnapshotForLocation).not.toHaveBeenCalled();
+  });
+
+  it('refuses mismatched tenants, malformed coordinates and invalid location JSON', async () => {
+    process.env = { ...original, WEATHER_SITE_LOCATIONS_JSON: TEST_SITE_LOCATIONS };
+    const { service, pool, weather } = setup();
+    await expect(service.run('site-a', 'tenant-b')).rejects.toThrow('Weather site location is not configured');
+    process.env.WEATHER_SITE_LOCATIONS_JSON = JSON.stringify({
+      'site-a': { tenantId: 'tenant-a', siteId: 'site-a', location: 'Vidin', latitude: 100, longitude: 22.8728 },
+    });
+    await expect(service.run('site-a', 'tenant-a')).rejects.toThrow('Weather site location is not configured');
+    process.env.WEATHER_SITE_LOCATIONS_JSON = '{invalid';
+    await expect(service.run('site-a', 'tenant-a')).rejects.toThrow('Invalid WEATHER_SITE_LOCATIONS_JSON');
+    expect(pool.connect).not.toHaveBeenCalled();
+    expect(weather.getSnapshotForLocation).not.toHaveBeenCalled();
+  });
+
 });

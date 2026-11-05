@@ -88,6 +88,9 @@ export class WeatherInvestigatorService {
       throw new Error('Weather investigation is disabled');
     if (!/^[\w.-]{1,120}$/.test(siteId) || !/^[\w.-]{1,120}$/.test(tenantId))
       throw new Error('Invalid tenant or site scope');
+    // Resolve the explicit site mapping before any DB lock, provider request or write.
+    // An unknown site must never inherit another site's coordinates.
+    const location = this.siteLocation(siteId, tenantId);
     const client = await this.pool.connect();
     const lockKey = `weather-investigator:${tenantId}:${siteId}`;
     let locked = false;
@@ -98,7 +101,6 @@ export class WeatherInvestigatorService {
       );
       locked = lock.rows[0]?.locked === true;
       if (!locked) return { status: 'already-running', findings: [] };
-      const location = this.siteLocation(siteId, tenantId);
       const snapshot = await this.weather.getSnapshotForLocation(
         location,
         'icon_seamless',
@@ -352,33 +354,40 @@ export class WeatherInvestigatorService {
   }
 
   private siteLocation(siteId: string, tenantId: string): WeatherSiteLocation {
-    const defaultLocation = this.weather.getDefaultLocation();
+    let configured: unknown;
     try {
-      const configured = JSON.parse(
-        process.env.WEATHER_SITE_LOCATIONS_JSON || '{}',
-      ) as Record<string, Partial<WeatherSiteLocation>>;
-      const entry = configured[siteId];
-      if (
-        entry &&
-        entry.tenantId === tenantId &&
-        entry.siteId === siteId &&
-        typeof entry.location === 'string' &&
-        Number.isFinite(entry.latitude) &&
-        Number.isFinite(entry.longitude) &&
-        Math.abs(entry.latitude!) <= 90 &&
-        Math.abs(entry.longitude!) <= 180
-      ) {
-        return entry as WeatherSiteLocation;
-      }
+      configured = JSON.parse(process.env.WEATHER_SITE_LOCATIONS_JSON || '{}');
     } catch {
-      /* A bad optional location map falls back to the configured LAB location. */
+      throw new Error('Invalid WEATHER_SITE_LOCATIONS_JSON configuration');
     }
+    if (!configured || typeof configured !== 'object' || Array.isArray(configured))
+      throw new Error('Invalid WEATHER_SITE_LOCATIONS_JSON configuration');
+
+    const entry = Object.prototype.hasOwnProperty.call(configured, siteId)
+      ? (configured as Record<string, unknown>)[siteId]
+      : undefined;
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry))
+      throw new Error('Weather site location is not configured for this scope');
+    const site = entry as Partial<WeatherSiteLocation>;
+    if (
+      site.tenantId !== tenantId ||
+      site.siteId !== siteId ||
+      typeof site.location !== 'string' ||
+      !site.location.trim() ||
+      typeof site.latitude !== 'number' ||
+      typeof site.longitude !== 'number' ||
+      !Number.isFinite(site.latitude) ||
+      !Number.isFinite(site.longitude) ||
+      Math.abs(site.latitude) > 90 ||
+      Math.abs(site.longitude) > 180
+    )
+      throw new Error('Weather site location is not configured for this scope');
     return {
       tenantId,
       siteId,
-      location: defaultLocation.location,
-      latitude: defaultLocation.latitude,
-      longitude: defaultLocation.longitude,
+      location: site.location.trim(),
+      latitude: site.latitude,
+      longitude: site.longitude,
     };
   }
 }

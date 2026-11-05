@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Body,
   Controller,
   Get,
@@ -24,7 +25,8 @@ export class WeatherInvestigatorController {
     @Query('tenantId') tenantId?: string,
   ) {
     this.authorize(authorization);
-    return this.investigator.list(siteId, tenantId);
+    const scope = this.requireLabScope(siteId, tenantId);
+    return this.investigator.list(scope.siteId, scope.tenantId);
   }
 
   @Get('context')
@@ -34,7 +36,8 @@ export class WeatherInvestigatorController {
     @Query('tenantId') tenantId?: string,
   ) {
     this.authorize(authorization);
-    return this.investigator.context(siteId, tenantId);
+    const scope = this.requireLabScope(siteId, tenantId);
+    return this.investigator.context(scope.siteId, scope.tenantId);
   }
 
   @Get('read-model')
@@ -44,11 +47,8 @@ export class WeatherInvestigatorController {
     @Query('tenantId') tenantId?: string,
   ) {
     this.authorize(authorization);
-    // Never silently default to the LAB site in a site-scoped read boundary.
-    if (!siteId || !tenantId ||
-        !/^[\w.-]{1,120}$/.test(siteId) || !/^[\w.-]{1,120}$/.test(tenantId))
-      throw new BadRequestException('Explicit tenant and site are required');
-    return this.investigator.readModel(siteId, tenantId);
+    const scope = this.requireLabScope(siteId, tenantId);
+    return this.investigator.readModel(scope.siteId, scope.tenantId);
   }
 
   @Post('run')
@@ -57,12 +57,9 @@ export class WeatherInvestigatorController {
     @Body() body: { siteId?: string; tenantId?: string },
   ) {
     this.authorize(authorization);
-    if (process.env.ENERGRID_LAB_MODE !== 'true')
-      throw new ServiceUnavailableException(
-        'Manual weather investigation is available only in LAB mode',
-      );
+    const scope = this.requireLabScope(body?.siteId, body?.tenantId);
     try {
-      return await this.investigator.run(body?.siteId, body?.tenantId);
+      return await this.investigator.run(scope.siteId, scope.tenantId);
     } catch {
       throw new ServiceUnavailableException(
         'Weather investigation could not complete. Check forecast availability and LAB storage.',
@@ -77,16 +74,41 @@ export class WeatherInvestigatorController {
     @Body() body: { action?: unknown; siteId?: string; tenantId?: string },
   ) {
     this.authorize(authorization);
+    const scope = this.requireLabScope(body?.siteId, body?.tenantId);
     if (body?.action !== 'acknowledged' && body?.action !== 'dismissed')
-      throw new ServiceUnavailableException(
-        'Action must be acknowledged or dismissed',
-      );
+      throw new BadRequestException('Action must be acknowledged or dismissed');
     return this.investigator.acknowledge(
       id,
       body.action,
-      body.siteId,
-      body.tenantId,
+      scope.siteId,
+      scope.tenantId,
     );
+  }
+
+  /**
+   * The shared LAB bridge credential is valid for exactly one configured
+   * tenant/site pair. A request parameter is not proof of tenant authority.
+   * Future multi-site access requires site-bound authenticated principals.
+   */
+  private requireLabScope(
+    siteId?: string,
+    tenantId?: string,
+  ): { siteId: string; tenantId: string } {
+    if (
+      typeof siteId !== 'string' ||
+      typeof tenantId !== 'string' ||
+      !/^[\w.-]{1,120}$/.test(siteId) ||
+      !/^[\w.-]{1,120}$/.test(tenantId)
+    )
+      throw new BadRequestException('Explicit valid tenant and site are required');
+
+    const allowedSite = process.env.WEATHER_INVESTIGATOR_SITE_ID?.trim();
+    const allowedTenant = process.env.WEATHER_INVESTIGATOR_TENANT_ID?.trim();
+    if (!allowedSite || !allowedTenant)
+      throw new ServiceUnavailableException('Weather LAB scope is not configured');
+    if (siteId !== allowedSite || tenantId !== allowedTenant)
+      throw new ForbiddenException('Weather scope is not authorized');
+    return { siteId, tenantId };
   }
 
   private authorize(authorization?: string) {
