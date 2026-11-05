@@ -87,7 +87,6 @@ export { assertPortalAdministrator } from './portal-authorization'
 import { AccessJwtGuard, PublicRoute, RequireRoles, RoleGuard } from '../auth/auth.guard'
 import { AuthConfig } from '../auth/auth-config'
 import { PortalDeviceMeasurementsService } from './portal-device-measurements.service'
-import { WeatherAssistantQueryService } from './weather-assistant-query.service'
 import { PortalSiteService, portalSiteProjection } from './portal-site.service'
 
 function projectEnergridCandidateIdentity(device: RegisteredDevice) {
@@ -164,8 +163,6 @@ export class PortalController {
     private readonly installerNotesLlm?: LlmGatewayService,
     @Optional()
     private readonly authConfig?: AuthConfig,
-    @Optional()
-    private readonly weatherAssistant?: WeatherAssistantQueryService,
     private readonly portalSites?: PortalSiteService,
     @Optional()
     private readonly shellyRoutes?: ShellyRouteResolver,
@@ -246,9 +243,6 @@ export class PortalController {
       principal: request.user!,
       ...(typeof body.conversationId === 'string' ? { conversationId: body.conversationId } : {}),
     };
-    const weatherReply = await this.weatherAssistant?.answer(scope, message);
-    if (weatherReply) return { reply: weatherReply, conversationId: `weather:${site.id}` };
-
     const trace = new InteractionTraceSession(
       scope,
       'chat',

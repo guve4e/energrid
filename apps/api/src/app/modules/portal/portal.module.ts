@@ -27,7 +27,6 @@ import { PortalWeatherController } from './portal-weather.controller'
 import { PortalDeviceMeasurementsService } from './portal-device-measurements.service'
 import { PortalDeviceElectricalMeasurementsService } from './portal-device-electrical-measurements.service'
 import { TelemetryModule } from '../telemetry/telemetry.module'
-import { WeatherAssistantQueryService } from './weather-assistant-query.service'
 import { WeatherInferenceController } from './weather-inference.controller'
 import { WeatherInferenceService } from './weather-inference.service'
 import { PortalSiteService } from './portal-site.service'
@@ -59,7 +58,6 @@ import { PortalSiteContextInterceptor } from './portal-site-context.interceptor'
     DeviceInvestigationHistoryStore,
     PortalDeviceMeasurementsService,
     PortalDeviceElectricalMeasurementsService,
-    WeatherAssistantQueryService,
     WeatherInferenceService,
     PortalSiteService,
     { provide: APP_INTERCEPTOR, useClass: PortalSiteContextInterceptor },

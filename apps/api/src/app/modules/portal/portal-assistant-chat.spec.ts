@@ -30,6 +30,18 @@ describe('Portal assistant chat identity propagation', () => {
     expect(result).toMatchObject({ reply: 'Ready', conversationId: 'house-conversation' });
   });
 
+  it('keeps weather questions in the same authenticated assistant conversation', async () => {
+    const { controller, principal, talk } = setup();
+    const response = await controller.chatWithEnergrid(
+      { message: 'Енергрид, ще вали ли утре?', conversationId: 'previous-house-conversation' },
+      { method: 'POST', originalUrl: '/portal/assistant/chat', headers: {}, user: principal },
+    );
+    expect(talk).toHaveBeenCalledWith(expect.objectContaining({
+      tenantId: 'tenant', siteId: 'site', principal, conversationId: 'previous-house-conversation',
+    }), 'Енергрид, ще вали ли утре?');
+    expect(response.conversationId).toBe('house-conversation');
+  });
+
   it('rejects malformed conversation handles before calling the assistant', async () => {
     const { controller, talk } = setup();
     await expect(controller.chatWithEnergrid(

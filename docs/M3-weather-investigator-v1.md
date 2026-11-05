@@ -96,3 +96,27 @@ The version-1 projection reports site scope, generation time, `available | parti
 **Local verification (4 November 2026):** Core read-model/investigator tests passed **21/21**; API Portal weather bridge/assistant tests passed **8/8**. Core and API typechecks were reported green. No migration was introduced. This does not verify production deployment, multi-tenant enforcement, runtime provider health or notifications.
 
 **Open gates:** The shared Core investigator token does not bind a caller to a specific tenant/site; the unknown-site-to-default-location fallback remains; typed LLM tool registration, official warnings, calibrated severity and production notification policy/delivery are not implemented. Do not expose this LAB read-model as a production alert authority without those controls.
+
+## Patch 07 — Read-only Weather assistant tools (local acceptance, 5 November 2026)
+
+The authenticated House Agent uses `weather_get_forecast` (6 or 24 hours) and
+`weather_get_findings` through the existing versioned, site-scoped Weather Core
+read model. The old Portal weather keyword shortcut is replaced by the ordinary
+assistant conversation. These tools cannot select another tenant/site, call
+upstream providers, issue device commands, or deliver notifications.
+
+**Local verification:** Focused API tests and TypeScript checks were reported
+passing after applying the source patch. On 5 November 2026 the local
+`energrid_auth_local` PostgreSQL database received the two Weather Investigator
+migrations. A manual LAB investigation returned HTTP 201 / `completed` with a
+saved forecast and zero findings (zero findings is not an error). The Portal
+assistant subsequently returned a Bulgarian six-hour rainfall answer with
+Open-Meteo / `icon_seamless` source, captured-at timestamp, hourly precipitation
+and probability data, and explicitly unavailable official warnings. This
+confirms a working local user-facing evidence path, not production acceptance.
+
+**Open:** End-to-end tool-call tracing, unattended scheduled refresh/recovery,
+production tenant authorization and ingress, official warning ingestion,
+notification outbox/delivery, and user-facing Markdown/time-zone formatting.
+The production Pi database and public deployment were not migrated or changed
+as part of this local acceptance.

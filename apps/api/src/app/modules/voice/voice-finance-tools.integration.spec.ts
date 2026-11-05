@@ -35,6 +35,7 @@ describe('Voice finance tool execution path', () => {
     const adapter = new LettaHouseAgentAdapter(
       {} as never, {} as never, {} as never, {} as never, {} as never,
       { read: jest.fn() } as never, financeTools,
+      { tools: jest.fn().mockReturnValue([]) } as never,
     );
     (adapter as any).agentFor = jest.fn().mockResolvedValue('voice-agent');
     const client = (adapter as any).client;

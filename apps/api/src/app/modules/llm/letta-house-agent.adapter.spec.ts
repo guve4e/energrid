@@ -22,6 +22,8 @@ describe('LettaHouseAgentAdapter measurement tools', () => {
     const adapter = new LettaHouseAgentAdapter(
       {} as never, {} as never, {} as never, intelligence as never, {} as never,
       { read: jest.fn() } as never,
+      { tools: jest.fn().mockReturnValue([]) } as never,
+      { tools: jest.fn().mockReturnValue([]) } as never,
     );
     const tools = (adapter as any).deviceTools(scope) as Array<any>;
     const roomTool = tools.find(tool => tool.name === 'read_room_measurement');
@@ -44,6 +46,8 @@ describe('LettaHouseAgentAdapter measurement tools', () => {
     const adapter = new LettaHouseAgentAdapter(
       {} as never, {} as never, {} as never, intelligence as never, {} as never,
       { read: jest.fn() } as never,
+      { tools: jest.fn().mockReturnValue([]) } as never,
+      { tools: jest.fn().mockReturnValue([]) } as never,
     );
     const tool = (adapter as any).deviceTools({ tenantId: 'tenant-demo', siteId: 'site-home' })
       .find((item: any) => item.name === 'read_room_measurement');
@@ -58,6 +62,8 @@ describe('LettaHouseAgentAdapter measurement tools', () => {
     const deviceHealth = { read: jest.fn().mockResolvedValue(health) };
     const adapter = new LettaHouseAgentAdapter(
       {} as never, {} as never, {} as never, {} as never, {} as never, deviceHealth as never,
+      { tools: jest.fn().mockReturnValue([]) } as never,
+      { tools: jest.fn().mockReturnValue([]) } as never,
     );
     const tool = (adapter as any).deviceTools(scope).find((item: any) => item.name === 'read_device_health_history');
     expect(tool.parameters.properties.range.enum).toEqual(['1h', '24h', '7d', '30d']);
@@ -70,11 +76,41 @@ describe('LettaHouseAgentAdapter measurement tools', () => {
     expect(deviceHealth.read).toHaveBeenCalledTimes(1);
   });
 
+  it('registers scoped read-only weather tools in the same strict assistant session', async () => {
+    const weatherTool = {
+      name: 'weather_get_forecast', execute: jest.fn().mockResolvedValue({ details: { status: 'stale' } }),
+    };
+    const weatherTools = { tools: jest.fn().mockReturnValue([weatherTool]) };
+    const adapter = new LettaHouseAgentAdapter(
+      {} as never, {} as never, {} as never, {} as never, {} as never,
+      { read: jest.fn() } as never,
+      { tools: jest.fn().mockReturnValue([]) } as never,
+      weatherTools as never,
+    );
+    (adapter as any).agentFor = jest.fn().mockResolvedValue('agent-weather');
+    const client = (adapter as any).client;
+    client.resumeSession.mockReturnValue({
+      send: jest.fn(), close: jest.fn(),
+      stream: async function* () { yield { type: 'result', success: true, result: 'Нямам актуални данни.', conversationId: 'weather-conversation' }; },
+    });
+    const scope = { tenantId: 'tenant-a', siteId: 'site-a' };
+    await adapter.talk(scope, 'Енергрид, ще вали ли утре?');
+    const options = client.resumeSession.mock.calls[0][1];
+    expect(weatherTools.tools).toHaveBeenCalledWith(scope);
+    expect(options.allowedTools).toContain('weather_get_forecast');
+    expect(options.tools.map((tool: any) => tool.name)).toContain('weather_get_forecast');
+    await expect(options.canUseTool('weather_get_forecast')).resolves.toMatchObject({ behavior: 'allow' });
+    await expect(options.canUseTool('unknown_weather_write')).resolves.toMatchObject({ behavior: 'deny' });
+    expect(options.permissionMode).toBe('strict');
+  });
+
   it('keeps follow-up turns in the same site conversation and exposes the requested range on each turn', async () => {
     const scope = { tenantId: 'tenant-demo', siteId: 'site-home' };
     const deviceHealth = { read: jest.fn().mockResolvedValue({ status: 'available' }) };
     const adapter = new LettaHouseAgentAdapter(
       {} as never, {} as never, {} as never, {} as never, {} as never, deviceHealth as never,
+      { tools: jest.fn().mockReturnValue([]) } as never,
+      { tools: jest.fn().mockReturnValue([]) } as never,
     );
     (adapter as any).agentFor = jest.fn().mockResolvedValue('agent-home');
     const sent: string[] = [];
@@ -109,6 +145,7 @@ describe('LettaHouseAgentAdapter measurement tools', () => {
     const adapter = new LettaHouseAgentAdapter(
       {} as never, {} as never, {} as never, {} as never, {} as never,
       { read: jest.fn() } as never, financeTools as never,
+      { tools: jest.fn().mockReturnValue([]) } as never,
     );
     (adapter as any).agentFor = jest.fn().mockResolvedValue('agent-account-a');
     const client = (adapter as any).client;
@@ -145,6 +182,7 @@ describe('LettaHouseAgentAdapter measurement tools', () => {
     const adapter = new LettaHouseAgentAdapter(
       {} as never, {} as never, {} as never, {} as never, {} as never,
       { read: jest.fn() } as never, financeTools as never,
+      { tools: jest.fn().mockReturnValue([]) } as never,
     );
     (adapter as any).agentFor = jest.fn().mockResolvedValue('agent-account-a');
     (adapter as any).conversations.set('expired-handle', {
@@ -174,6 +212,7 @@ describe('LettaHouseAgentAdapter measurement tools', () => {
     const adapter = new LettaHouseAgentAdapter(
       {} as never, {} as never, {} as never, {} as never, {} as never,
       { read: jest.fn() } as never,
+      { tools: jest.fn().mockReturnValue([]) } as never,
       { tools: jest.fn().mockReturnValue([]) } as never,
     );
     (adapter as any).agentFor = jest.fn().mockResolvedValue('agent-local-account-a');
