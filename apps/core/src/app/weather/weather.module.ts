@@ -10,6 +10,7 @@ import { DanubePortalProviderService } from './river/danube-portal-provider.serv
 import { RiverIntelligenceService } from './river/river-intelligence.service';
 import { RiverService } from './river/river.service';
 import { RiverHistoryService } from './river/river-history.service';
+import { RiverSourceObservationStore } from './river/river-source-observation.store';
 import { RiverCollectorService } from './river/river-collector.service';
 import { RiverController } from './river/river.controller';
 import { RiverStationNormalizerService } from './river/river-station-normalizer.service';
@@ -67,6 +68,7 @@ import { DwdForecastTileService } from './dwd-forecast-tile.service';
     RiverIntelligenceService,
     RiverService,
     RiverHistoryService,
+    RiverSourceObservationStore,
     RiverCollectorService,
     RiverStationNormalizerService,
     RiverSchedulerService,

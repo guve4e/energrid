@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { AppdDanubeProviderService } from './appd-danube-provider.service';
 import { DanubePortalProviderService } from './danube-portal-provider.service';
 import { RiverHistoryService } from './river-history.service';
+import { RiverSourceObservationStore } from './river-source-observation.store';
 
 @Injectable()
 export class RiverCollectorService {
@@ -11,6 +12,7 @@ export class RiverCollectorService {
     private readonly appd: AppdDanubeProviderService,
     private readonly danubePortal: DanubePortalProviderService,
     private readonly history: RiverHistoryService,
+    private readonly sourceObservations: RiverSourceObservationStore,
   ) {}
 
   async collectNow() {
@@ -19,6 +21,10 @@ export class RiverCollectorService {
 
     const allStations = [...appdStations, ...portalStations];
 
+    // Opt in after the source-evidence migration is verified on this database.
+    const sourceEvidence = process.env.RIVER_SOURCE_EVIDENCE_ENABLED === 'true'
+      ? await this.sourceObservations.record(allStations)
+      : { status: 'disabled' as const };
     const saved = await this.history.saveReadings(allStations);
 
     this.logger.log(
@@ -30,6 +36,7 @@ export class RiverCollectorService {
       fetched: allStations.length,
       processed: saved.processed,
       skippedUnverified: saved.skippedUnverified,
+      sourceEvidence,
       providers: {
         appd: appdStations.length,
         danubePortal: portalStations.length,

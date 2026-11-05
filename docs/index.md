@@ -51,6 +51,7 @@ These documents predate the handbook and remain useful for narrower topics. Read
 - [Estimator assistant integration](estimator-assistant-integration.md)
 - [Residential template](residential-template.md)
 - [Forecast verification](forecast-verification.md)
+- [River source evidence (M1b candidate)](river-source-evidence.md)
 - [Weather Investigator V1](M3-weather-investigator-v1.md)
 - [Voice local STT](voice-local-stt.md)
 - [Voice Pi/browser deployment](voice-pi-browser-deploy.md)
