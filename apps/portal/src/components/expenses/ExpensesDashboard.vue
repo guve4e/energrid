@@ -22,14 +22,13 @@ type SpendingSummaryView = {
   dailyAverage: string | null;
   transactionCount: number;
   excludedUnconvertedCount: number;
-  legacyCoverage: string;
   byCategory: Array<{ category: string; total: string; count: number }>;
   byMonth: Array<{ month: string; total: string; count: number }>;
 };
 type FinanceCategory = { id: string; name: string; description: string | null; parentId: string | null; status: 'active' | 'archived' };
 const props = defineProps<{ apiBase: string; accessToken: string }>();
 const expenses = ref<Expense[]>([]);
-const emptySummary = (): SpendingSummaryView => ({ total: '0', dailyAverage: null, transactionCount: 0, excludedUnconvertedCount: 0, legacyCoverage: 'leveldb-available', byCategory: [], byMonth: [] });
+const emptySummary = (): SpendingSummaryView => ({ total: '0', dailyAverage: null, transactionCount: 0, excludedUnconvertedCount: 0, byCategory: [], byMonth: [] });
 const summary = ref<SpendingSummaryView>(emptySummary());
 const yearSummary = ref<SpendingSummaryView>(emptySummary());
 const allHistorySummary = ref<SpendingSummaryView>(emptySummary());
@@ -706,9 +705,6 @@ onBeforeUnmount(() => {
       >
     </div>
 
-    <div v-if="displaySummary.legacyCoverage === 'leveldb-unavailable'" class="expense-legacy-warning" role="status">
-      Older LevelDB expenses could not be loaded. These totals may be incomplete; PostgreSQL records remain available.
-    </div>
 
     <div class="expense-metrics">
       <article class="expense-metric expense-metric--featured">
@@ -1413,16 +1409,6 @@ onBeforeUnmount(() => {
 .expense-muted {
   color: #8b9998;
   font-size: 11px;
-}
-.expense-legacy-warning {
-  background: #fff5e6;
-  border: 1px solid #ead3a8;
-  border-radius: 9px;
-  color: #75531c;
-  font-size: 12px;
-  line-height: 1.45;
-  margin-bottom: 12px;
-  padding: 10px 13px;
 }
 .expense-metrics {
   display: grid;

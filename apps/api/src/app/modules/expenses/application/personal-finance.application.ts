@@ -1,5 +1,5 @@
 import { assertNewExpenseCurrency, normalizeCurrency, normalizeMerchantName, validateDraftProposal, validateExpenseItem } from '../domain/expense-rules';
-import { compareDecimal, decimalString, financeDecimal } from '../domain/decimal';
+import { compareDecimal, decimalString, divideDecimalByInteger, financeDecimal } from '../domain/decimal';
 import type { ExpenseDraftProposal, ExpenseQuery, ExpenseSource, ExpenseSourceKind, FinanceActorContext } from '../domain/personal-finance.types';
 import type { ExpenseTextExtractionPort } from './ports/expense-extraction.port';
 import type { CategoryWrite, ExpenseImportRow, ExpenseWrite, PersonalFinanceRepository } from './ports/personal-finance.repository';
@@ -127,9 +127,11 @@ export class PersonalFinanceApplication {
     return this.repository.queryExpenses(command.accountId, command.query);
   }
 
-  summarizeSpending(command: QueryExpensesCommand) {
+  async summarizeSpending(command: QueryExpensesCommand) {
     this.validateQuery(command.query);
-    return this.repository.summarize(command.accountId, command.query);
+    const summary = await this.repository.summarize(command.accountId, command.query);
+    const days = monthlyPaceDays(command.query.fromDate, command.query.toDate);
+    return { ...summary, dailyAverage: days ? divideDecimalByInteger(summary.total, days, 2) : null };
   }
 
   addReceiptMetadata(accountId: string, draftId: string, receipt: Parameters<PersonalFinanceRepository['addReceiptMetadata']>[2]) {
@@ -202,4 +204,14 @@ function normalizeSource(source: ExpenseSource): ExpenseSource {
     model: source.model?.trim().slice(0, 160) || null,
     contentHash: source.contentHash?.trim().slice(0, 128) || null,
   };
+}
+
+/** Calendar-month daily pace; non-month ranges intentionally have no pace figure. */
+function monthlyPaceDays(fromDate?: string, toDate?: string): number | null {
+  if (!fromDate || !toDate || !/^\d{4}-\d{2}-01$/.test(fromDate) || !/^\d{4}-\d{2}-\d{2}$/.test(toDate)) return null;
+  const [year, month] = fromDate.split('-').map(Number);
+  if (month < 1 || month > 12 || toDate !== new Date(Date.UTC(year, month, 0)).toISOString().slice(0, 10)) return null;
+  const now = new Date();
+  if (now.getFullYear() === year && now.getMonth() + 1 === month) return now.getDate();
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
 }

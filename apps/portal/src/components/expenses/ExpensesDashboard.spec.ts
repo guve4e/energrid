@@ -10,8 +10,8 @@ function jsonResponse(body: unknown, ok = true, status = 200) {
   return { ok, status, text: async () => JSON.stringify(body) };
 }
 
-function setup(options: { incomplete?: boolean; records?: unknown[]; byMonth?: Array<{ month: string; total: string; count: number }> } = {}) {
-  const { incomplete = false, records = [], byMonth = [
+function setup(options: { records?: unknown[]; byMonth?: Array<{ month: string; total: string; count: number }> } = {}) {
+  const { records = [], byMonth = [
     { month: '2025-01', total: '50.00', count: 2 },
     { month: '2025-02', total: '0', count: 0 },
     { month: '2025-03', total: '15.00', count: 1 },
@@ -31,11 +31,11 @@ function setup(options: { incomplete?: boolean; records?: unknown[]; byMonth?: A
     if (url.endsWith('/expenses/import')) return jsonResponse({ imported: 1, duplicates: 0 });
     if (url.endsWith('/personal-finance/categories')) return jsonResponse({ categories: [{ id: 'category-groceries', name: 'Groceries', status: 'active' }, { id: 'category-fuel', name: 'Fuel', status: 'active' }] });
     if (url.includes('/personal-finance/expenses')) return jsonResponse({ expenses: records });
-    if (url === '/personal-finance/summary') return jsonResponse({ total: '407.77997734979664', dailyAverage: null, transactionCount: 1, excludedUnconvertedCount: 0, legacyCoverage: incomplete ? 'leveldb-unavailable' : 'leveldb-available', byCategory: [{ category: 'Historical', total: '1.25', count: 1 }], byMonth });
+    if (url === '/personal-finance/summary') return jsonResponse({ total: '407.77997734979664', dailyAverage: null, transactionCount: 1, excludedUnconvertedCount: 0, byCategory: [{ category: 'Historical', total: '1.25', count: 1 }], byMonth });
     if (url.includes('/personal-finance/summary')) {
       const date = new URL(`http://finance.local${url}`).searchParams.get('fromDate');
-      if (date === '2026-04-01') return jsonResponse({ total: '0', dailyAverage: '0', transactionCount: 0, excludedUnconvertedCount: 0, legacyCoverage: 'leveldb-available', byCategory: [] });
-      return jsonResponse({ total: '407.77997734979664', dailyAverage: '13.15', transactionCount: 1, excludedUnconvertedCount: 0, legacyCoverage: incomplete ? 'leveldb-unavailable' : 'leveldb-available', byCategory: [{ category: 'Groceries', total: '407.77997734979664', count: 1 }] });
+      if (date === '2026-04-01') return jsonResponse({ total: '0', dailyAverage: '0', transactionCount: 0, excludedUnconvertedCount: 0, byCategory: [] });
+      return jsonResponse({ total: '407.77997734979664', dailyAverage: '13.15', transactionCount: 1, excludedUnconvertedCount: 0, byCategory: [{ category: 'Groceries', total: '407.77997734979664', count: 1 }] });
     }
     return jsonResponse({});
   }));
@@ -341,12 +341,6 @@ describe('Personal Finance V2 Portal cutover', () => {
     expect(wrapper!.get('[aria-label="Transaction pages"]').text()).toContain('Showing 101–120 of 120');
   });
 
-  it('warns when totals omit unavailable LevelDB history', async () => {
-    setup({ incomplete: true });
-    await flushPromises();
-    expect(wrapper!.get('[role="status"]').text()).toContain('LevelDB expenses could not be loaded');
-  });
-
   it('keeps the dashboard free of capture and historical-import promotions', async () => {
     const { calls } = setup();
     await flushPromises();
@@ -396,6 +390,8 @@ describe('Personal Finance V2 Portal cutover', () => {
 
   it('uses month, calendar-year, and all-history scopes for transactions and summaries', async () => {
     const { calls } = setup();
+    await flushPromises();
+    await wrapper!.get('input[type="month"]').setValue('2026-10');
     await flushPromises();
     const scope = wrapper!.get('select[aria-label="Transaction date range"]');
     expect(scope.text()).toContain('Selected year');

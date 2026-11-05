@@ -114,3 +114,25 @@ describe('PersonalFinanceApplication', () => {
     expect(repo.importExpenses).toHaveBeenCalledWith('account-1', 'account-1', [expect.objectContaining({ currency: 'BGN' })]);
   });
 });
+
+describe('PostgreSQL-only Finance summaries', () => {
+  it('preserves repository totals and computes a calendar-month daily pace with exact decimal arithmetic', async () => {
+    const repo = repository();
+    repo.summarize.mockResolvedValue({
+      currency: 'EUR', total: '17.80', transactionCount: 2, excludedUnconvertedCount: 0,
+      fromDate: '2025-01-01', toDate: '2025-01-31', byMonth: [], byCategory: [], byMerchant: [], byProduct: [],
+    });
+    const app = new PersonalFinanceApplication(repo, new LocalExpenseTextExtractor());
+    await expect(app.summarizeSpending({ accountId: 'account-a', query: { fromDate: '2025-01-01', toDate: '2025-01-31' } }))
+      .resolves.toMatchObject({ total: '17.80', transactionCount: 2, dailyAverage: '0.57' });
+    expect(repo.summarize).toHaveBeenCalledWith('account-a', { fromDate: '2025-01-01', toDate: '2025-01-31' });
+    await expect(app.summarizeSpending({ accountId: 'account-a', query: {} })).resolves.toHaveProperty('dailyAverage', null);
+  });
+
+  it('rejects invalid PostgreSQL query limits before asking the repository', async () => {
+    const repo = repository();
+    const app = new PersonalFinanceApplication(repo, new LocalExpenseTextExtractor());
+    expect(() => app.queryExpenses({ accountId: 'account-a', query: { limit: -1 } })).toThrow('limit');
+    expect(repo.queryExpenses).not.toHaveBeenCalled();
+  });
+});

@@ -1,8 +1,8 @@
-import { ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException } from '@nestjs/common';
 import { PersonalFinanceController, normalizeV2Import } from './personal-finance.controller';
 import type { ReceiptIntelligenceApplication } from './application/receipt-intelligence.application';
 import type { PersonalFinanceApplication } from './application/personal-finance.application';
-import type { PersonalExpenseStore } from './personal-expense.store';
+import type { ExpenseRecord } from './domain/personal-finance.types';
 
 describe('Personal Finance historical import normalization', () => {
   it('retains legacy Mongo money and FX values as exact decimals', () => {
@@ -43,124 +43,51 @@ describe('Personal Finance historical import normalization', () => {
     });
   });
 
-  it('keeps unmigrated LevelDB entries visible once and suppresses them after import', async () => {
-    const old = {
-      id: 'leveldb-1', legacyRecordId: 'legacy-source-1', date: '2025-01-03', amount: 135.6, currency: 'BGN',
-      amountEur: 69.33117909020723, fxRate: 1.95583, category: 'Fuel', description: 'Nissan', tags: ['petrol'], liters: 53.59,
-      createdAt: '2025-03-14T07:26:36.802Z', updatedAt: '2025-03-14T07:26:36.802Z',
-    };
-    const finance = {
-      queryExpenses: jest.fn().mockResolvedValue([]),
-      findImportedLegacyIds: jest.fn().mockResolvedValue([]),
-    } as unknown as PersonalFinanceApplication;
-    const legacy = { list: jest.fn().mockResolvedValue([old]) } as unknown as PersonalExpenseStore;
-    const controller = new PersonalFinanceController(finance, legacy, {} as any);
-    const request = { user: { userId: 'account-a' } } as any;
+  const request = { user: { userId: 'account-a' } } as any;
+  const raw = (id: string) => ({ _id: id, date: '2025-01-03', amount: '2.50', currency: 'EUR', category: 'Food', description: 'Groceries' });
 
-    expect((await controller.query({ limit: '100' }, request)).expenses).toMatchObject([
-      { id: 'leveldb-1', date: '2025-01-03', amount: '135.6', currency: 'BGN', amountEur: '69.33117909020723', fx: { rate: '1.95583' }, category: 'Fuel', description: 'Nissan', tags: ['petrol'], liters: '53.59', legacyRecordId: 'legacy-source-1', legacyReadOnly: true },
-    ]);
-    (finance.findImportedLegacyIds as jest.Mock).mockResolvedValue(['legacy-source-1']);
-    expect((await controller.query({ limit: '100' }, request)).expenses).toEqual([]);
+  it('returns only PostgreSQL records and passes pagination filters to the application', async () => {
+    const rows = [{ id: 'pg-1', date: '2025-01-03', amount: '12.00' }];
+    const finance = { queryExpenses: jest.fn().mockResolvedValue(rows) } as unknown as PersonalFinanceApplication;
+    const controller = new PersonalFinanceController(finance, {} as never);
+    await expect(controller.query({ limit: '50', categoryId: 'food-id', before: '2025-02-01' }, request))
+      .resolves.toEqual({ expenses: rows });
+    expect(finance.queryExpenses).toHaveBeenCalledWith({ accountId: 'account-a', query: expect.objectContaining({
+      limit: 50, categoryId: 'food-id', before: '2025-02-01',
+    }) });
   });
 
-  it('previews source duplicates across LevelDB and PostgreSQL before confirmation', async () => {
-    const finance = {
-      findImportedLegacyIds: jest.fn().mockResolvedValue(['pg-duplicate']),
-    } as unknown as PersonalFinanceApplication;
-    const legacy = { list: jest.fn().mockResolvedValue([{ legacyRecordId: 'leveldb-duplicate' }]) } as unknown as PersonalExpenseStore;
-    const controller = new PersonalFinanceController(finance, legacy, {} as any);
-    const request = { user: { userId: 'account-a' } } as any;
-    const raw = (id: string) => ({ _id: id, date: '2025-01-03', amount: '2.50', currency: 'EUR', category: 'Food', description: 'Groceries' });
-    const preview = await controller.previewImport({ records: [raw('leveldb-duplicate'), raw('pg-duplicate'), raw('new-source')] }, request);
+  it('reads the same account-scoped summary as the Assistant without a legacy bridge', async () => {
+    const summary = { currency: 'EUR', total: '12.30', transactionCount: 2, excludedUnconvertedCount: 0,
+      dailyAverage: '0.40', byMonth: [{ month: '2025-01', total: '12.30', count: 2 }], byCategory: [], byMerchant: [], byProduct: [] };
+    const finance = { summarizeSpending: jest.fn().mockResolvedValue(summary) } as unknown as PersonalFinanceApplication;
+    const controller = new PersonalFinanceController(finance, {} as never);
+    await expect(controller.summary({ fromDate: '2025-01-01', toDate: '2025-01-31' }, request)).resolves.toEqual(summary);
+    expect(finance.summarizeSpending).toHaveBeenCalledWith({ accountId: 'account-a', query: {
+      fromDate: '2025-01-01', toDate: '2025-01-31',
+    } });
+  });
+
+  it('previews duplicates only against PostgreSQL and within the incoming batch', async () => {
+    const finance = { findImportedLegacyIds: jest.fn().mockResolvedValue(['pg-duplicate']) } as unknown as PersonalFinanceApplication;
+    const controller = new PersonalFinanceController(finance, {} as never);
+    const preview = await controller.previewImport({ records: [raw('pg-duplicate'), raw('new-source'), raw('new-source')] }, request);
     expect(preview).toMatchObject({ total: 3, valid: 1, duplicates: 2, errors: [] });
     expect(preview.records[0].source.id).toBe('mongo:mono.expenses:new-source');
+    expect(finance.findImportedLegacyIds).toHaveBeenCalledWith('account-a', expect.arrayContaining(['pg-duplicate', 'new-source']));
   });
 
-  it('rechecks both stores at import confirmation to avoid stale-preview duplicates', async () => {
+  it('rechecks PostgreSQL at commit time and never reimports an existing source', async () => {
     const finance = {
       findImportedLegacyIds: jest.fn().mockResolvedValue(['pg-duplicate']),
       importExpenses: jest.fn().mockResolvedValue({ imported: 1, duplicates: 0 }),
     } as unknown as PersonalFinanceApplication;
-    const legacy = { list: jest.fn().mockResolvedValue([{ legacyRecordId: 'leveldb-duplicate' }]) } as unknown as PersonalExpenseStore;
-    const controller = new PersonalFinanceController(finance, legacy, {} as any);
-    const request = { user: { userId: 'account-a' } } as any;
-    const raw = (id: string) => ({ _id: id, date: '2025-01-03', amount: '2.50', currency: 'EUR', category: 'Food', description: 'Groceries' });
-    const result = await controller.import({ records: [raw('leveldb-duplicate'), raw('pg-duplicate'), raw('new-source')] }, request);
+    const controller = new PersonalFinanceController(finance, {} as never);
+    const result = await controller.import({ records: [raw('pg-duplicate'), raw('new-source'), raw('new-source')] }, request);
     expect(result).toEqual({ imported: 1, duplicates: 2 });
-    expect((finance.importExpenses as jest.Mock).mock.calls[0][2]).toHaveLength(1);
-  });
-
-  it('keeps PostgreSQL expenses queryable while marking LevelDB coverage unavailable', async () => {
-    const postgresExpense = { id: 'pg-1', date: '2026-10-01', amount: '12.00' };
-    const finance = {
-      queryExpenses: jest.fn().mockResolvedValue([postgresExpense]),
-      findImportedLegacyIds: jest.fn().mockResolvedValue([]),
-    } as unknown as PersonalFinanceApplication;
-    const legacy = { list: jest.fn().mockRejectedValue(new Error('Database is not open')) } as unknown as PersonalExpenseStore;
-    const controller = new PersonalFinanceController(finance, legacy, {} as any);
-
-    await expect(controller.query({}, { user: { userId: 'account-a' } } as any)).resolves.toMatchObject({
-      expenses: [postgresExpense],
-      legacyCoverage: 'leveldb-unavailable',
-    });
-  });
-
-  it('marks PostgreSQL summaries incomplete when LevelDB is unavailable', async () => {
-    const finance = {
-      summarizeSpending: jest.fn().mockResolvedValue({
-        total: '12.00', transactionCount: 1, excludedUnconvertedCount: 0, byCategory: [],
-      }),
-      findImportedLegacyIds: jest.fn().mockResolvedValue([]),
-    } as unknown as PersonalFinanceApplication;
-    const legacy = { list: jest.fn().mockRejectedValue(new Error('Database is not open')) } as unknown as PersonalExpenseStore;
-    const controller = new PersonalFinanceController(finance, legacy, {} as any);
-
-    await expect(controller.summary({}, { user: { userId: 'account-a' } } as any)).resolves.toMatchObject({
-      total: '12.00', transactionCount: 1, legacyCoverage: 'leveldb-unavailable',
-    });
-  });
-
-  it('orders the combined category summary by exact EUR total for the dashboard', async () => {
-    const finance = {
-      summarizeSpending: jest.fn().mockResolvedValue({
-        total: '15', transactionCount: 2, excludedUnconvertedCount: 0,
-        byMonth: [{ month: '2025-01', total: '15', count: 2 }],
-        byCategory: [
-          { category: 'Groceries', total: '10', count: 1 },
-          { category: 'Fuel', total: '5', count: 1 },
-        ],
-      }),
-      findImportedLegacyIds: jest.fn().mockResolvedValue([]),
-    } as unknown as PersonalFinanceApplication;
-    const legacy = { list: jest.fn().mockResolvedValue([
-      { legacyRecordId: 'legacy-1', date: '2025-01-03', amountEur: '15', category: 'Fuel' },
-    ]) } as unknown as PersonalExpenseStore;
-    const controller = new PersonalFinanceController(finance, legacy, {} as any);
-
-    await expect(controller.summary({ fromDate: '2025-01-01', toDate: '2025-01-31' }, { user: { userId: 'account-a' } } as any)).resolves.toMatchObject({
-      total: '30', dailyAverage: '0.97',
-      byMonth: [{ month: '2025-01', total: '30', count: 3 }],
-      byCategory: [
-        { category: 'Fuel', total: '20', count: 2 },
-        { category: 'Groceries', total: '10', count: 1 },
-      ],
-    });
-  });
-
-  it('fails closed on import duplicate checks when LevelDB is unavailable', async () => {
-    const finance = {
-      findImportedLegacyIds: jest.fn(),
-      importExpenses: jest.fn(),
-    } as unknown as PersonalFinanceApplication;
-    const legacy = { list: jest.fn().mockRejectedValue(new Error('Database is not open')) } as unknown as PersonalExpenseStore;
-    const controller = new PersonalFinanceController(finance, legacy, {} as any);
-    const request = { user: { userId: 'account-a' } } as any;
-    const records = [{ _id: 'source-1', date: '2025-01-03', amount: '2.50', currency: 'EUR', category: 'Food', description: 'Groceries' }];
-
-    await expect(controller.previewImport({ records }, request)).rejects.toBeInstanceOf(ServiceUnavailableException);
-    await expect(controller.import({ records }, request)).rejects.toBeInstanceOf(ServiceUnavailableException);
-    expect(finance.importExpenses).not.toHaveBeenCalled();
+    expect(finance.importExpenses).toHaveBeenCalledWith('account-a', 'account-a', [expect.objectContaining({
+      legacyRecordId: 'new-source', source: expect.objectContaining({ id: 'mongo:mono.expenses:new-source' }),
+    })]);
   });
 });
 
@@ -171,7 +98,7 @@ describe('receipt re-extraction route', () => {
       receipt: { id: 'receipt-1', storageKey: 'private/account/file.jpg' },
       reconciliation: { matched: false }, extractionDiagnostics: { modelItemCount: 3 },
     }) } as unknown as ReceiptIntelligenceApplication;
-    const controller = new PersonalFinanceController({} as any, {} as any, receipts);
+    const controller = new PersonalFinanceController({} as any, receipts);
     const request = { user: { userId: 'account-a' } } as any;
     await expect(controller.reextractReceipt('receipt-1', false, request)).rejects.toThrow(/explicitly consent/i);
     const result = await controller.reextractReceipt('receipt-1', true, request);
@@ -179,5 +106,76 @@ describe('receipt re-extraction route', () => {
     expect(result.receipt).not.toHaveProperty('storageKey');
     expect(result.draft.receipts[0]).not.toHaveProperty('storageKey');
     expect((receipts.reextract as jest.Mock)).toHaveBeenCalledWith({ accountId: 'account-a', actorId: 'account-a' }, 'receipt-1', true);
+  });
+});
+
+
+describe('Personal Finance expense partial updates', () => {
+  const request = { user: { userId: 'account-a' } } as any;
+  const existing: ExpenseRecord = {
+    id: 'expense-1', accountId: 'account-a', date: '2025-01-03',
+    amount: '135.6', currency: 'BGN', amountEur: '69.33117909020723',
+    fx: { rate: '1.95583', convention: 'currency_units_per_eur', source: 'legacy-import', effectiveAt: '2025-01-03', provider: null },
+    merchantId: null, merchantName: 'Fuel station', category: 'Fuel', categoryId: 'category-1',
+    description: 'Old description', tags: ['car'], items: [], liters: '53.59',
+    sourceKind: 'legacy-mongo', sourceId: 'mongo:mono.expenses:expense-1',
+    createdAt: '2025-01-03T12:00:00.000Z', updatedAt: '2025-01-03T12:00:00.000Z',
+    confirmedBy: 'account-a', confirmedAt: '2025-01-03T12:00:00.000Z',
+  };
+
+  function controllerFor(record: ExpenseRecord = existing) {
+    const finance = {
+      getExpense: jest.fn().mockResolvedValue(record),
+      updateExpense: jest.fn().mockResolvedValue(record),
+      createExpense: jest.fn(),
+    } as unknown as PersonalFinanceApplication;
+    return { controller: new PersonalFinanceController(finance, {} as ReceiptIntelligenceApplication), finance };
+  }
+
+  it('preserves all financial and fuel fields when only the description changes', async () => {
+    const { controller, finance } = controllerFor();
+    await expect(controller.update(existing.id, { description: 'New description' }, request))
+      .resolves.toEqual({ expense: existing });
+    expect(finance.updateExpense).toHaveBeenCalledWith('account-a', 'account-a', existing.id, expect.objectContaining({
+      description: 'New description', amount: existing.amount, amountEur: existing.amountEur,
+      currency: existing.currency, fx: existing.fx, liters: existing.liters,
+      categoryId: existing.categoryId, items: existing.items,
+      source: { kind: existing.sourceKind, id: existing.sourceId },
+    }));
+  });
+
+  it('preserves imported EUR values even when the source has no FX rate', async () => {
+    const record = { ...existing, fx: null };
+    const { controller, finance } = controllerFor(record);
+    await controller.update(record.id, { category: 'Transport' }, request);
+    expect(finance.updateExpense).toHaveBeenCalledWith('account-a', 'account-a', record.id, expect.objectContaining({
+      amount: record.amount, amountEur: record.amountEur, fx: null, liters: record.liters,
+    }));
+  });
+
+  it('recalculates converted EUR only for changed financial values and records user FX corrections', async () => {
+    const record = { ...existing, amount: '20', currency: 'USD', amountEur: '10',
+      fx: { ...existing.fx!, rate: '2', source: 'provider-import' } };
+    const { controller, finance } = controllerFor(record);
+    await controller.update(record.id, { amount: '30', fxRate: '1.5' }, request);
+    expect(finance.updateExpense).toHaveBeenCalledWith('account-a', 'account-a', record.id, expect.objectContaining({
+      amount: '30', amountEur: '20', liters: record.liters,
+      fx: expect.objectContaining({ rate: '1.5', source: 'user-entered', provider: null, effectiveAt: null }),
+    }));
+  });
+
+  it('clears fuel volume and FX only when explicitly requested', async () => {
+    const { controller, finance } = controllerFor();
+    await controller.update(existing.id, { liters: null, fxRate: null }, request);
+    expect(finance.updateExpense).toHaveBeenCalledWith('account-a', 'account-a', existing.id, expect.objectContaining({
+      amount: existing.amount, liters: null, fx: null, amountEur: null,
+    }));
+  });
+
+  it('still requires an amount for a newly created expense', async () => {
+    const { controller, finance } = controllerFor();
+    await expect(controller.create({ date: '2026-11-05', description: 'Missing amount' }, request))
+      .rejects.toBeInstanceOf(BadRequestException);
+    expect(finance.createExpense).not.toHaveBeenCalled();
   });
 });

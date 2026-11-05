@@ -1,9 +1,6 @@
 import { Inject, Module, OnModuleDestroy } from '@nestjs/common';
 import { Pool } from 'pg';
-import { PersonalExpensesController } from './personal-expenses.controller';
 import { PersonalFinanceController } from './personal-finance.controller';
-import { PersonalExpenseStore } from './personal-expense.store';
-import { PersonalExpenseCaptureService } from './personal-expense-capture.service';
 import { PersonalFinanceApplication } from './application/personal-finance.application';
 import { ReceiptIntelligenceApplication } from './application/receipt-intelligence.application';
 import { PERSONAL_FINANCE_REPOSITORY, type PersonalFinanceRepository } from './application/ports/personal-finance.repository';
@@ -43,7 +40,7 @@ function createPersonalFinancePool(): Pool {
 }
 
 @Module({
-  controllers: [PersonalExpensesController, PersonalFinanceController],
+  controllers: [PersonalFinanceController],
   providers: [
     { provide: PERSONAL_FINANCE_POOL, useFactory: createPersonalFinancePool },
     { provide: PERSONAL_FINANCE_REPOSITORY, inject: [PERSONAL_FINANCE_POOL], useFactory: (pool: Pool) => new PostgresPersonalFinanceRepository(pool) },
@@ -69,8 +66,6 @@ function createPersonalFinancePool(): Pool {
       inject: [PERSONAL_FINANCE_REPOSITORY, DOCUMENT_UNDERSTANDING, PRIVATE_RECEIPT_STORAGE, PersonalFinanceApplication],
       useFactory: (repository: PersonalFinanceRepository, understanding: DocumentUnderstandingPort, storage: PrivateReceiptStoragePort, finance: PersonalFinanceApplication) => new ReceiptIntelligenceApplication(repository, understanding, storage, finance),
     },
-    PersonalExpenseStore,
-    PersonalExpenseCaptureService,
     OpenAiDeviceLlmProvider,
     {
       provide: LlmGatewayService,

@@ -36,7 +36,7 @@ These documents predate the handbook and remain useful for narrower topics. Read
 
 - [One-command Pi deployment](one-command-pi-deployment.md)
 - [Portal authentication](portal-authentication.md)
-- [Personal expenses](personal-expenses.md): account-scoped spending, local persistence and legacy JSON import.
+- [Personal expenses](personal-expenses.md): account-scoped spending, PostgreSQL persistence and historical import.
 - [Portal Cloudflare / Pi deployment](portal-cloudflare-pi-deploy.md)
 - [Mac LAB persistence](mac-lab-persistence.md)
 - [API docs and OpenAPI](api-docs.md)

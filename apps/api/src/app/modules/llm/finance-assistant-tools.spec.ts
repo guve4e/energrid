@@ -107,7 +107,7 @@ describe('FinanceAssistantTools', () => {
   it('returns backend-calculated totals unchanged', async () => {
     const { finance, make } = setup();
     const expected = await tool(make('account-a', 'Compare spending by category.'), 'finance.summarize_spending').execute('call-1', {});
-    expect(textResult(expected)).toEqual(await finance.summarizeSpending.mock.results[0].value);
+    expect(textResult(expected)).toEqual(await (finance.summarizeSpending as jest.Mock).mock.results[0].value);
     expect(finance.summarizeSpending).toHaveBeenCalledWith({ accountId: 'account-a', query: {} });
   });
 });

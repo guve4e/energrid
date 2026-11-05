@@ -124,7 +124,7 @@ export class FinanceAssistantTools {
       {
         name: 'finance.summarize_spending',
         label: 'Summarize spending',
-        description: 'Get backend-calculated EUR totals, transaction counts, category, merchant and product breakdowns for the signed-in user. Use for how much, category comparisons, monthly totals, and trends. Never calculate or alter totals yourself.',
+        description: 'Get backend-calculated EUR totals, transaction counts and breakdowns for the signed-in user from PostgreSQL. Product breakdowns include itemized purchases only. Never calculate or alter totals yourself.',
         parameters: {
           type: 'object', properties: {
             fromDate: { type: 'string', description: 'Inclusive YYYY-MM-DD lower bound.' },
