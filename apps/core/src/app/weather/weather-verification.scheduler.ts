@@ -7,6 +7,7 @@ import { compareWeather } from './weather-comparison';
 import { WeatherDailyVerificationService } from './weather-daily-verification.service';
 import { WeatherObservationCollector } from './weather-observation-collector.service';
 import { weatherObservationMode, weatherObservationSource } from './weather-observations';
+import { WeatherCoordinates } from './weather-observations';
 
 @Injectable()
 export class WeatherVerificationScheduler implements OnModuleInit, OnModuleDestroy {
@@ -30,8 +31,11 @@ export class WeatherVerificationScheduler implements OnModuleInit, OnModuleDestr
   async runCycle() {
     if (this.running) return;
     this.running = true;
+    let coordinates: WeatherCoordinates | undefined;
+    let observationSource = weatherObservationSource();
     try {
       const snapshots = await Promise.all([this.provider.getSnapshot('icon_seamless'), this.provider.getSnapshot('ncep_gfs_seamless')]);
+      coordinates = snapshots[0]?.coordinates;
       const { selected } = compareWeather(snapshots, null, this.risk, this.intelligence);
       const recordings = await Promise.allSettled([
         this.verification.record(snapshots, selected.snapshot),
@@ -42,11 +46,14 @@ export class WeatherVerificationScheduler implements OnModuleInit, OnModuleDestr
       }
     } catch (error) { this.logger.warn(`Forecast recording unavailable: ${String(error)}`); }
     finally {
-      try { await this.observations.collect(); }
+      try {
+        const collection = await this.observations.collect(new Date(), coordinates);
+        if (collection.source) observationSource = collection.source;
+      }
       catch { this.logger.warn('Weather observation collection unavailable'); }
-      try { await this.verification.evaluate(); }
+      try { await this.verification.evaluate(observationSource); }
       catch (error) { this.logger.warn(`Forecast evaluation unavailable: ${String(error)}`); }
-      try { await this.daily.evaluate(weatherObservationSource(), weatherObservationMode()); }
+      try { await this.daily.evaluate(observationSource, weatherObservationMode()); }
       catch (error) { this.logger.warn(`Daily forecast evaluation unavailable: ${String(error)}`); }
       this.running = false;
     }

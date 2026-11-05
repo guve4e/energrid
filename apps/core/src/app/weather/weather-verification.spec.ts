@@ -59,14 +59,25 @@ describe('weather verification boundaries', () => {
     const provider = { getSnapshot: jest.fn(() => new Promise((_resolve, r) => { reject = r; })) };
     const verification = { record: jest.fn(), evaluate: jest.fn().mockResolvedValue({ evaluated: 0 }) };
     const daily = { record: jest.fn(), evaluate: jest.fn().mockResolvedValue({ evaluated: 0 }) };
-    const observations = { collect: jest.fn().mockResolvedValue({ status: 'configuration-required' }) };
+    const observations = {
+      collect: jest.fn().mockResolvedValue({
+        status: 'available',
+        source: 'meteostat:station-1@40.80000,-96.70000:hourly-end',
+      }),
+    };
     const scheduler = new WeatherVerificationScheduler(provider as never,new WeatherRiskEngine(),new WeatherIntelligenceService(),verification as never,daily as never,observations as never);
     const running = scheduler.runCycle(); await scheduler.runCycle();
     expect(provider.getSnapshot).toHaveBeenCalledTimes(2);
     reject(new Error('offline')); await running;
     expect(verification.evaluate).toHaveBeenCalledTimes(1);
+    expect(verification.evaluate).toHaveBeenCalledWith(
+      'meteostat:station-1@40.80000,-96.70000:hourly-end',
+    );
     expect(observations.collect).toHaveBeenCalledTimes(1);
-    expect(daily.evaluate).toHaveBeenCalledTimes(1);
+    expect(daily.evaluate).toHaveBeenCalledWith(
+      'meteostat:station-1@40.80000,-96.70000:hourly-end',
+      expect.any(String),
+    );
   });
 });
 
