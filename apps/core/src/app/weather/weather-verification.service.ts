@@ -93,7 +93,7 @@ export class WeatherVerificationService {
     return { recorded };
   }
 
-  async evaluate() {
+  async evaluate(source = weatherObservationSource()) {
     // Wait until the matching window closes. Join eligible observations before LIMIT,
     // so old unmatched forecasts cannot block newer ones with available observations.
     const due = await this.pool.query(`SELECT f.*, o.id AS observation_id, o.value AS observed_value
@@ -109,7 +109,7 @@ export class WeatherVerificationService {
       ) o ON true
       WHERE f.evaluated_at IS NULL AND f.target_at+interval '15 minutes'<=now()
         AND f.created_at<coalesce(f.window_start_at,f.target_at)
-      ORDER BY f.target_at,f.id LIMIT 500`, [weatherObservationSource()]);
+      ORDER BY f.target_at,f.id LIMIT 500`, [source]);
     let evaluated = 0;
     for (const row of due.rows) {
       const probability = row.metric === 'rain_probability';

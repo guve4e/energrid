@@ -4,10 +4,13 @@ import { dailyPeriodConfiguration } from './weather-station-daily';
 import { NIMH_RAIN_SOURCE } from './nimh-rain';
 
 export function weatherObservationMode(env = process.env): 'hourly' | 'daily' {
-  return env.WEATHER_OBSERVATION_PROVIDER === 'nimh' ||
-    env.METEOSTAT_GRANULARITY === 'daily'
-    ? 'daily'
-    : 'hourly';
+  if (env.WEATHER_OBSERVATION_PROVIDER === 'nimh') return 'daily';
+  if (
+    env.WEATHER_OBSERVATION_PROVIDER === 'meteostat' &&
+    !env.METEOSTAT_STATION_ID
+  )
+    return 'hourly';
+  return env.METEOSTAT_GRANULARITY === 'daily' ? 'daily' : 'hourly';
 }
 
 export function weatherObservationSource(env = process.env) {
@@ -34,6 +37,44 @@ export interface MeteostatHour {
   temp?: unknown;
   prcp?: unknown;
   wpgt?: unknown;
+}
+
+export interface WeatherCoordinates {
+  latitude: number;
+  longitude: number;
+}
+
+export function validWeatherCoordinates(
+  coordinates: WeatherCoordinates,
+): boolean {
+  return (
+    Number.isFinite(coordinates.latitude) &&
+    Math.abs(coordinates.latitude) <= 90 &&
+    Number.isFinite(coordinates.longitude) &&
+    Math.abs(coordinates.longitude) <= 180
+  );
+}
+
+export function weatherCoordinateKey(coordinates: WeatherCoordinates) {
+  return `${coordinates.latitude.toFixed(5)},${coordinates.longitude.toFixed(5)}`;
+}
+
+export function meteostatPrecipitationObservations(
+  rows: MeteostatHour[],
+  label: 'start' | 'end',
+  startAt: string,
+  endAt: string,
+) {
+  const start = Date.parse(startAt);
+  const end = Date.parse(endAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start)
+    throw new Error('Invalid precipitation observation interval');
+  return meteostatObservations(rows, label, new Date(end)).filter(
+    (observation) =>
+      observation.metric === 'precipitation_mm' &&
+      Date.parse(observation.windowStartAt!) >= start &&
+      Date.parse(observation.observedAt) <= end,
+  );
 }
 
 export function meteostatObservations(
@@ -88,12 +129,17 @@ export function meteostatObservations(
   return [...readings.values()];
 }
 
-export function stationDistanceKm(latitude: number, longitude: number) {
+export function stationDistanceKm(
+  latitude: number,
+  longitude: number,
+  targetLatitude: number,
+  targetLongitude: number,
+) {
   const radians = (n: number) => (n * Math.PI) / 180;
   const a =
-    Math.sin(radians(latitude - 43.9916) / 2) ** 2 +
+    Math.sin(radians(latitude - targetLatitude) / 2) ** 2 +
     Math.cos(radians(latitude)) *
-      Math.cos(radians(43.9916)) *
-      Math.sin(radians(longitude - 22.8728) / 2) ** 2;
+      Math.cos(radians(targetLatitude)) *
+      Math.sin(radians(longitude - targetLongitude) / 2) ** 2;
   return 6371 * 2 * Math.asin(Math.min(1, Math.sqrt(a)));
 }

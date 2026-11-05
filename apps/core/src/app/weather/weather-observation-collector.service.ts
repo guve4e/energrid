@@ -3,7 +3,11 @@ import { HOUR_MS } from './weather-data-quality';
 import {
   meteostatObservations,
   MeteostatHour,
+  meteostatPrecipitationObservations,
   stationDistanceKm,
+  validWeatherCoordinates,
+  weatherCoordinateKey,
+  WeatherCoordinates,
   weatherObservationSource,
   weatherObservationMode,
 } from './weather-observations';
@@ -35,8 +39,14 @@ interface Station {
   latitude: number;
   longitude: number;
   distanceKm: number;
+  reportedDistanceKm?: number;
+  country?: string;
+  region?: string;
+  timezone?: string;
+  identifiers?: unknown;
+  inventory?: unknown;
 }
-interface CollectionStatus {
+export interface CollectionStatus {
   status:
     | 'configuration-required'
     | 'ready'
@@ -45,7 +55,8 @@ interface CollectionStatus {
     | 'unavailable'
     | 'manual'
     | 'disabled'
-    | 'reporting-period-unverified';
+    | 'reporting-period-unverified'
+    | 'partial-coverage';
   source: string | null;
   note: string;
   station?: Station;
@@ -58,7 +69,28 @@ interface CollectionStatus {
   nextCollectionAt?: string;
   lastReportDate?: string | null;
   valueUnitStatus?: 'verified' | 'unverified';
+  coverage?: {
+    expectedHours: number;
+    observedHours: number;
+    missingHours: number;
+    complete: boolean;
+  };
+  attribution?: string;
+  targetCoordinates?: string;
 }
+
+export interface HourlyPrecipitationRequest {
+  latitude: number;
+  longitude: number;
+  metric: 'precipitation_mm';
+  startAt: string;
+  endAt: string;
+}
+
+const DEFAULT_NEARBY_STATION_LIMIT = 3;
+const MAX_NEARBY_STATION_LIMIT = 10;
+const DEFAULT_NEARBY_RADIUS_KM = 25;
+const MAX_NEARBY_RADIUS_KM = 200;
 
 @Injectable()
 export class WeatherObservationCollector {
@@ -116,6 +148,20 @@ export class WeatherObservationCollector {
       };
     }
     if (!source || !process.env.METEOSTAT_API_KEY) {
+      const nearbyReady =
+        !process.env.METEOSTAT_STATION_ID &&
+        !!process.env.METEOSTAT_API_KEY &&
+        (process.env.METEOSTAT_INTERVAL_LABEL === 'start' ||
+          process.env.METEOSTAT_INTERVAL_LABEL === 'end');
+      if (nearbyReady)
+        return this.last?.granularity === 'hourly'
+          ? this.last
+          : {
+              status: 'ready',
+              source: null,
+              granularity: 'hourly',
+              note: 'A forecast location will be used to discover nearby stations. Collection requires a verified interval label.',
+            };
       return {
         status: 'configuration-required',
         source: source || null,
@@ -123,7 +169,7 @@ export class WeatherObservationCollector {
         note:
           granularity === 'daily'
             ? 'Meteostat daily collection needs a server API key and a station ID. Model-filled data is disabled.'
-            : 'Meteostat needs a server API key, a station ID, and a verified hourly interval label. Model-filled data is disabled.',
+            : 'Meteostat needs a server API key, a station ID or forecast coordinates for nearby discovery, and a verified hourly interval label. Model-filled data is disabled.',
       };
     }
     return this.last?.source === source
@@ -152,7 +198,26 @@ export class WeatherObservationCollector {
     return response.json();
   }
 
-  async collect(now = new Date()): Promise<CollectionStatus> {
+  async collect(
+    now = new Date(),
+    target?: WeatherCoordinates,
+  ): Promise<CollectionStatus> {
+    if (
+      target &&
+      process.env.WEATHER_OBSERVATION_PROVIDER === 'meteostat' &&
+      !process.env.METEOSTAT_STATION_ID
+    ) {
+      const end = Math.floor(now.getTime() / HOUR_MS) * HOUR_MS;
+      return this.collectAtCoordinates(
+        {
+          ...target,
+          metric: 'precipitation_mm',
+          startAt: new Date(end - 14 * 24 * HOUR_MS).toISOString(),
+          endAt: new Date(end).toISOString(),
+        },
+        now,
+      );
+    }
     const status = this.status();
     if (
       status.status === 'configuration-required' ||
@@ -268,7 +333,14 @@ export class WeatherObservationCollector {
       ) {
         throw new Error('Invalid station metadata');
       }
-      const distanceKm = stationDistanceKm(latitude, longitude);
+      const [targetLatitude, targetLongitude] =
+        VIDIN_LOCATION.split(',').map(Number);
+      const distanceKm = stationDistanceKm(
+        latitude,
+        longitude,
+        targetLatitude,
+        targetLongitude,
+      );
       if (distanceKm > 25)
         throw new Error(
           'Station is outside the supported local comparison radius',
@@ -414,5 +486,310 @@ export class WeatherObservationCollector {
       }
     }
     return this.last;
+  }
+
+  async collectAtCoordinates(
+    request: HourlyPrecipitationRequest,
+    now = new Date(),
+  ): Promise<CollectionStatus> {
+    const { latitude, longitude, startAt, endAt } = request;
+    const label = process.env.METEOSTAT_INTERVAL_LABEL;
+    const start = Date.parse(startAt);
+    const end = Date.parse(endAt);
+    const expectedHours = (end - start) / HOUR_MS;
+    const validUtcHour = (value: string, timestamp: number) =>
+      /^\d{4}-\d{2}-\d{2}T\d{2}:00:00\.000Z$/.test(value) &&
+      Number.isFinite(timestamp) &&
+      timestamp % HOUR_MS === 0 &&
+      new Date(timestamp).toISOString() === value;
+    if (
+      process.env.WEATHER_OBSERVATION_PROVIDER !== 'meteostat' ||
+      process.env.WEATHER_OBSERVATION_COLLECTION_ENABLED !== 'true'
+    ) {
+      return {
+        status: 'disabled',
+        source: null,
+        granularity: 'hourly',
+        note: 'Coordinate-based Meteostat collection is disabled or not selected.',
+      };
+    }
+    if (
+      !process.env.METEOSTAT_API_KEY ||
+      (label !== 'start' && label !== 'end')
+    ) {
+      return {
+        status: 'configuration-required',
+        source: null,
+        granularity: 'hourly',
+        note: 'Meteostat needs an API key and an explicitly verified hourly interval label.',
+      };
+    }
+    if (
+      request.metric !== 'precipitation_mm' ||
+      !validWeatherCoordinates(request) ||
+      !validUtcHour(startAt, start) ||
+      !validUtcHour(endAt, end) ||
+      expectedHours < 1 ||
+      expectedHours > 30 * 24 ||
+      end > now.getTime() ||
+      start < now.getTime() - 30 * 24 * HOUR_MS
+    ) {
+      return {
+        status: 'unavailable',
+        source: null,
+        granularity: 'hourly',
+        note: 'Provide valid coordinates and a past, hour-aligned UTC interval of at most 30 days.',
+      };
+    }
+    const radiusKm = Number(
+      process.env.METEOSTAT_NEARBY_RADIUS_KM ?? DEFAULT_NEARBY_RADIUS_KM,
+    );
+    const stationLimit = Number(
+      process.env.METEOSTAT_NEARBY_STATION_LIMIT ??
+        DEFAULT_NEARBY_STATION_LIMIT,
+    );
+    if (
+      !Number.isFinite(radiusKm) ||
+      radiusKm < 1 ||
+      radiusKm > MAX_NEARBY_RADIUS_KM ||
+      !Number.isInteger(stationLimit) ||
+      stationLimit < 1 ||
+      stationLimit > MAX_NEARBY_STATION_LIMIT
+    ) {
+      return {
+        status: 'configuration-required',
+        source: null,
+        granularity: 'hourly',
+        note: `Set METEOSTAT_NEARBY_RADIUS_KM from 1 to ${MAX_NEARBY_RADIUS_KM} and METEOSTAT_NEARBY_STATION_LIMIT from 1 to ${MAX_NEARBY_STATION_LIMIT}.`,
+      };
+    }
+
+    const coordinateKey = weatherCoordinateKey(request);
+    const claimSource = `meteostat:nearby:${coordinateKey}:hourly-${label}`;
+    const base: CollectionStatus = {
+      status: 'ready',
+      source: claimSource,
+      granularity: 'hourly',
+      targetCoordinates: coordinateKey,
+      note: 'Searching nearby stations for actual precipitation observations; model substitution is disabled.',
+    };
+    try {
+      const claim = await this.stationDaily.claimCollection(claimSource, now);
+      if (!claim.claimed) {
+        const snapshot = claim.snapshot as Partial<CollectionStatus> | null;
+        return snapshot
+          ? { ...base, ...snapshot }
+          : {
+              ...base,
+              note: 'Collection was already attempted in the last 24 hours.',
+            };
+      }
+      const nearby = await this.request('nearby', {
+        lat: String(latitude),
+        lon: String(longitude),
+        radius: String(radiusKm * 1000),
+        limit: String(stationLimit),
+      });
+      if (!Array.isArray(nearby?.data) || nearby.data.length > stationLimit)
+        throw new Error('Invalid nearby station response');
+
+      const startDate = startAt.slice(0, 10);
+      const endDate = new Date(end - 1).toISOString().slice(0, 10);
+      const expected = expectedHours;
+      const candidates: Array<{
+        station: Station;
+        source: string;
+        observations: ReturnType<typeof meteostatPrecipitationObservations>;
+      }> = [];
+      let apiFailures = 0;
+      let unverifiedIntervalStations = 0;
+      let unverifiedStation: Station | undefined;
+      const verifiedStationIds = new Set(
+        (process.env.METEOSTAT_INTERVAL_VERIFIED_STATION_IDS ?? '')
+          .split(',')
+          .map((id) => id.trim())
+          .filter(Boolean),
+      );
+      const seenStationIds = new Set<string>();
+      for (const nearbyStation of nearby.data) {
+        if (
+          typeof nearbyStation?.id !== 'string' ||
+          !/^[A-Za-z0-9]{1,12}$/.test(nearbyStation.id) ||
+          typeof nearbyStation.distance !== 'number' ||
+          !Number.isFinite(nearbyStation.distance) ||
+          nearbyStation.distance < 0 ||
+          nearbyStation.distance > radiusKm * 1000
+        )
+          continue;
+        if (seenStationIds.has(nearbyStation.id)) continue;
+        seenStationIds.add(nearbyStation.id);
+        try {
+          const metadata = await this.request('meta', { id: nearbyStation.id });
+          const data = metadata?.data;
+          const stationLatitude = data?.location?.latitude;
+          const stationLongitude = data?.location?.longitude;
+          if (
+            data?.id !== nearbyStation.id ||
+            !validWeatherCoordinates({
+              latitude: stationLatitude,
+              longitude: stationLongitude,
+            })
+          )
+            continue;
+          const distanceKm = stationDistanceKm(
+            stationLatitude,
+            stationLongitude,
+            latitude,
+            longitude,
+          );
+          if (distanceKm > radiusKm) continue;
+          const inventory = data.inventory?.hourly;
+          if (
+            typeof inventory?.start !== 'string' ||
+            typeof inventory?.end !== 'string' ||
+            inventory.start > endDate ||
+            inventory.end < startDate
+          )
+            continue;
+          const station: Station = {
+            id: nearbyStation.id,
+            name: data.name?.en || nearbyStation.id,
+            latitude: stationLatitude,
+            longitude: stationLongitude,
+            distanceKm,
+            reportedDistanceKm: nearbyStation.distance / 1000,
+            country: data.country,
+            region: data.region,
+            timezone: data.timezone,
+            identifiers: data.identifiers ?? data.identifier,
+            inventory: data.inventory,
+          };
+          if (!verifiedStationIds.has(nearbyStation.id)) {
+            unverifiedIntervalStations++;
+            if (
+              !unverifiedStation ||
+              station.distanceKm < unverifiedStation.distanceKm
+            )
+              unverifiedStation = station;
+            continue;
+          }
+          const hourly = await this.request('hourly', {
+            station: nearbyStation.id,
+            start: startDate,
+            end: endDate,
+            tz: 'UTC',
+            model: 'false',
+            units: 'metric',
+          });
+          if (!Array.isArray(hourly?.data) || hourly.data.length > 31 * 24)
+            throw new Error('Invalid station data');
+          const observations = meteostatPrecipitationObservations(
+            hourly.data as MeteostatHour[],
+            label,
+            startAt,
+            endAt,
+          );
+          if (!observations.length) continue;
+          const source = `meteostat:${nearbyStation.id}@${stationLatitude.toFixed(5)},${stationLongitude.toFixed(5)}:hourly-${label}`;
+          candidates.push({
+            station,
+            source,
+            observations,
+          });
+        } catch {
+          apiFailures++;
+        }
+      }
+      candidates.sort(
+        (a, b) =>
+          b.observations.length - a.observations.length ||
+          a.station.distanceKm - b.station.distanceKm ||
+          a.station.id.localeCompare(b.station.id),
+      );
+      const selected = candidates[0];
+      if (!selected) {
+        const previous =
+          this.last?.targetCoordinates === coordinateKey
+            ? this.last
+            : undefined;
+        this.last = {
+          ...base,
+          status: unverifiedIntervalStations
+            ? 'reporting-period-unverified'
+            : 'unavailable',
+          source: previous?.source ?? claimSource,
+          lastSuccessAt: previous?.lastSuccessAt,
+          station: previous?.station ?? unverifiedStation,
+          lastAttemptAt: now.toISOString(),
+          note: unverifiedIntervalStations
+            ? `Station ${unverifiedStation?.id} at ${unverifiedStation?.distanceKm.toFixed(1)} km was found, but its hourly interval label is unverified. Add only individually verified station IDs to METEOSTAT_INTERVAL_VERIFIED_STATION_IDS.`
+            : apiFailures
+              ? 'Nearby station requests failed or returned no usable precipitation observations.'
+              : 'No nearby station has precipitation observations in the requested interval.',
+          attribution:
+            'Meteostat API; station source metadata was not available.',
+        };
+      } else {
+        const observations = selected.observations;
+        for (let index = 0; index < observations.length; index += 100) {
+          await this.verification.ingest(
+            selected.source,
+            coordinateKey,
+            observations.slice(index, index + 100),
+          );
+        }
+        const observedHours = observations.length;
+        this.last = {
+          status: observedHours === expected ? 'available' : 'partial-coverage',
+          source: selected.source,
+          targetCoordinates: coordinateKey,
+          station: selected.station,
+          granularity: 'hourly',
+          lastAttemptAt: now.toISOString(),
+          lastSuccessAt: now.toISOString(),
+          lastObservedAt:
+            observations
+              .map((observation) => observation.observedAt)
+              .sort()
+              .at(-1) ?? null,
+          availableMetrics: ['precipitation_mm'],
+          records: observedHours,
+          coverage: {
+            expectedHours: expected,
+            observedHours,
+            missingHours: expected - observedHours,
+            complete: observedHours === expected,
+          },
+          attribution:
+            'Meteostat API aggregation; original data provider is not identified in this response.',
+          note:
+            observedHours === expected
+              ? 'Actual station precipitation only; model substitution is disabled.'
+              : 'Only reported station values were stored. Missing hours remain missing; no station series were combined.',
+        };
+      }
+      await this.stationDaily.saveCollectionStatus(claimSource, this.last);
+      return this.last;
+    } catch {
+      const previous =
+        this.last?.targetCoordinates === coordinateKey ? this.last : undefined;
+      this.last = {
+        ...base,
+        status: 'unavailable',
+        source: previous?.source ?? claimSource,
+        station: previous?.station,
+        lastSuccessAt: previous?.lastSuccessAt,
+        lastAttemptAt: now.toISOString(),
+        note: 'Nearby station discovery or observation collection failed. Check Meteostat availability and station coverage.',
+        attribution:
+          'Meteostat API; station source metadata was not available.',
+      };
+      try {
+        await this.stationDaily.saveCollectionStatus(claimSource, this.last);
+      } catch {
+        /* Keep API failure status even if status persistence is unavailable. */
+      }
+      return this.last;
+    }
   }
 }

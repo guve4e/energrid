@@ -1,6 +1,10 @@
 import {
   meteostatObservations,
+  meteostatPrecipitationObservations,
   stationDistanceKm,
+  weatherCoordinateKey,
+  weatherObservationMode,
+  validWeatherCoordinates,
   weatherObservationSource,
 } from './weather-observations';
 import { WeatherObservationCollector } from './weather-observation-collector.service';
@@ -52,6 +56,15 @@ describe('observation normalization', () => {
         METEOSTAT_STATION_ID: '15502',
       }),
     ).toBe('');
+    expect(
+      weatherObservationMode({
+        WEATHER_OBSERVATION_PROVIDER: 'meteostat',
+        METEOSTAT_GRANULARITY: 'daily',
+      }),
+    ).toBe('hourly');
+    expect(
+      weatherObservationMode({ WEATHER_OBSERVATION_PROVIDER: 'nimh' }),
+    ).toBe('daily');
     expect(
       weatherObservationSource({
         WEATHER_OBSERVATION_PROVIDER: 'meteostat',
@@ -127,8 +140,50 @@ describe('observation normalization', () => {
     ).toThrow('Conflicting');
   });
   it('exposes the real station distance, rather than calling it a measurement at the house', () => {
-    expect(stationDistanceKm(43.9916, 22.8728)).toBe(0);
-    expect(stationDistanceKm(43.8167, 22.8833)).toBeCloseTo(19.47, 1);
+    expect(stationDistanceKm(43.9916, 22.8728, 43.9916, 22.8728)).toBe(0);
+    expect(stationDistanceKm(43.8167, 22.8833, 43.9916, 22.8728)).toBeCloseTo(
+      19.47,
+      1,
+    );
+    expect(stationDistanceKm(40.8, -96.7, 40.81, -96.7)).toBeCloseTo(1.11, 1);
+    expect(validWeatherCoordinates({ latitude: 40.8, longitude: -96.7 })).toBe(
+      true,
+    );
+    expect(validWeatherCoordinates({ latitude: 91, longitude: 0 })).toBe(false);
+    expect(weatherCoordinateKey({ latitude: 40.8, longitude: -96.7 })).toBe(
+      '40.80000,-96.70000',
+    );
+  });
+  it('keeps only actual precipitation within exact UTC windows and distinguishes zero from missing', () => {
+    const start = '2026-10-14T09:00:00.000Z';
+    const end = '2026-10-14T11:00:00.000Z';
+    expect(
+      meteostatPrecipitationObservations(
+        [
+          { time: '2026-10-14 09:00:00', prcp: 0 },
+          { time: '2026-10-14 10:00:00', prcp: null },
+          { time: '2026-10-14 10:00:00', prcp: 2 },
+          { time: '2026-10-14 11:00:00', prcp: 1 },
+          { time: '2026-10-14 08:00:00', prcp: 1 },
+        ],
+        'start',
+        start,
+        end,
+      ),
+    ).toEqual([
+      {
+        metric: 'precipitation_mm',
+        value: 0,
+        observedAt: '2026-10-14T10:00:00.000Z',
+        windowStartAt: start,
+      },
+      {
+        metric: 'precipitation_mm',
+        value: 2,
+        observedAt: end,
+        windowStartAt: '2026-10-14T10:00:00.000Z',
+      },
+    ]);
   });
 });
 describe('automatic observation collection', () => {
