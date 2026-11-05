@@ -13,10 +13,37 @@ import {
 } from '@nestjs/common';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { WeatherInvestigatorService } from './weather-investigator.service';
+import { WeatherInvestigatorScheduler } from './weather-investigator.scheduler';
+import { buildWeatherInvestigatorReadiness } from './weather-investigator-readiness';
 
 @Controller('weather/investigator')
 export class WeatherInvestigatorController {
-  constructor(private readonly investigator: WeatherInvestigatorService) {}
+  constructor(
+    private readonly investigator: WeatherInvestigatorService,
+    private readonly scheduler: WeatherInvestigatorScheduler,
+  ) {}
+
+  @Get('health')
+  async health(
+    @Headers('authorization') authorization: string | undefined,
+    @Query('siteId') siteId?: string,
+    @Query('tenantId') tenantId?: string,
+  ) {
+    this.authorize(authorization);
+    const scope = this.requireLabScope(siteId, tenantId);
+    const schedule = this.scheduler.snapshot();
+    const issue = this.investigator.configurationIssue(scope.siteId, scope.tenantId);
+    if (issue) {
+      return buildWeatherInvestigatorReadiness(scope, schedule, issue, null, false);
+    }
+    try {
+      const model = await this.investigator.readModel(scope.siteId, scope.tenantId);
+      return buildWeatherInvestigatorReadiness(scope, schedule, null, model, false);
+    } catch {
+      // A missing table/connection is an operator health state, not a leaked SQL 500.
+      return buildWeatherInvestigatorReadiness(scope, schedule, null, null, true);
+    }
+  }
 
   @Get('findings')
   findings(

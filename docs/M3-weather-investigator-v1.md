@@ -46,7 +46,7 @@ pnpm api
 pnpm portal:local
 ```
 
-Sign in to the Portal and open **Weather**. Use **Run investigation** to run immediately. The investigation scheduler starts at Core boot and repeats every 60 minutes by default. The Portal refreshes persisted findings, where they can be acknowledged or dismissed. The Assistant answers weather questions in Bulgarian from the same site's saved evidence, including forecast capture time, provider/model and hourly evidence references.
+Sign in to the Portal and open **Weather**. Use **Run investigation** to run immediately. The investigation scheduler starts at Core boot and repeats every 15 minutes by default (configurable). The Portal refreshes persisted findings, where they can be acknowledged or dismissed. The Assistant answers weather questions in Bulgarian from the same site's saved evidence, including forecast capture time, provider/model and hourly evidence references.
 
 ## Data and policy
 
@@ -154,3 +154,38 @@ deployment is claimed for Patch 08. The shared observability instrumenter
 (`instrumentLocalTools`) was not in the selective review ZIP; end-to-end
 trace persistence, operator-facing Weather health, scheduled refresh/recovery,
 full site timezone policy, and notification delivery remain separate gates.
+
+## Patch 09 — Automatic Weather readiness (Core locally runtime-verified; not deployed)
+
+The existing `WeatherInvestigatorScheduler` remains the only owner of background LAB
+investigations. It starts an initial run when Core boots, retries temporary failures
+with bounded backoff, and schedules periodic refreshes (default 15 minutes, below
+the 30-minute read-model freshness limit; explicit intervals still apply). On shutdown,
+it cancels the next timer and never re-arms a timer after an in-flight run completes.
+No chat request causes a provider fetch, and no new worker, migration, or notification
+pipeline is introduced.
+
+A protected, scope-bound `GET /core/weather/investigator/health` projects the
+scheduler's **process-local** last attempt/outcome/next attempt alongside the
+persisted Weather V1 read model. It distinguishes ready, collecting, no snapshot,
+disabled, misconfigured, provider unavailable, collection failed, storage unavailable,
+partial and stale evidence. Configuration and database errors are presented as
+stable status codes: no secret, SQL exception, or coordinates are included. A fresh
+forecast is still required for assistant weather facts; health information does not
+change the read-model's authority or enable automated device commands.
+
+An existing, uncommitted admin-only Portal bridge and Weather page integration expose
+`GET /portal/weather/investigator/health` for the server-resolved tenant/site, and
+display the latest collection attempt, success, next scheduled attempt, source and
+coverage. Those API/Portal changes are outside the Core Patch 09 commit and remain
+uncommitted; the Core health endpoint is independently usable. A failure of this
+health call does not erase the independent dashboard. It is an operator diagnostic
+view, **not** an official weather-warning feed. LAB collection history is not durable
+across process restart; forecast evidence remains persisted in PostgreSQL.
+
+Core scheduler/controller/projection tests and an isolated single-process LAB
+startup, refresh, persistence and restart cycle passed. Focused Core tests, Core
+build and handbook build passed. A real upstream outage, multi-process scheduling,
+database-stall timeout behavior and production operation were not verified. The
+public DWD route, production authorization, notification delivery and provider-owned
+alert calibration remain separate work.

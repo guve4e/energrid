@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { Pool } from 'pg';
 import { PG_POOL } from '../db.module';
 import { WeatherProviderService } from './weather-provider.service';
+import type { WeatherConfigurationIssue } from './weather-investigator-readiness';
 import type { WeatherFinding } from './weather-investigator.types';
 import { buildWeatherReadModel, StoredWeatherFinding, StoredWeatherSnapshot } from './weather-read-model';
 import { assessWeather } from './weather-data-quality';
@@ -351,6 +352,21 @@ export class WeatherInvestigatorService {
     );
     if (!result.rowCount) return { status: 'not-found' };
     return { status: action, id };
+  }
+
+  /** Configuration readiness without leaking coordinates, credentials or raw JSON. */
+  configurationIssue(siteId: string, tenantId: string): WeatherConfigurationIssue {
+    if (process.env.ENERGRID_LAB_MODE !== 'true') return 'lab_disabled';
+    if (process.env.WEATHER_INVESTIGATOR_ENABLED !== 'true') return 'scheduler_disabled';
+    if (process.env.WEATHER_INVESTIGATOR_SITE_ID !== siteId ||
+        process.env.WEATHER_INVESTIGATOR_TENANT_ID !== tenantId)
+      return 'site_configuration_missing';
+    try {
+      this.siteLocation(siteId, tenantId);
+      return null;
+    } catch {
+      return 'site_configuration_missing';
+    }
   }
 
   private siteLocation(siteId: string, tenantId: string): WeatherSiteLocation {
