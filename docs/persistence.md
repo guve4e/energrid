@@ -86,7 +86,7 @@ There are additional short-lived in-memory structures, including the basic obser
 - Observation LevelDB writes batch state, decision, evidence deduplication and bounded decision retention. An uncertain LevelDB write poisons the store instance until reopened rather than continuing from ambiguous state.
 - Generic measurement outbox entries remain queued through PostgreSQL outages and replay after startup/on interval. Full or unavailable local durable admission returns an error to the source.
 - Firmware-health retention and migration happen as writes occur; startup does not destructively rewrite existing local records.
-- Personal finance V2 confirms a draft, its line items, receipt links and provenance in one transaction; imports also use one transaction per submitted batch. The legacy LevelDB expense store remains available to V2 reads during migration.
+- Personal finance V2 confirms a draft, its line items, receipt links and provenance in one transaction; imports also use one transaction per submitted batch. Finance expense reads use PostgreSQL exclusively; historical source identities and provenance remain preserved.
 
 ## Schema source of truth
 
