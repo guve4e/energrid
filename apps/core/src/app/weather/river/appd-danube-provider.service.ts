@@ -11,9 +11,13 @@ export class AppdDanubeProviderService {
     try {
       const html = await fetchRiverHtml(this.url);
       const rows = this.extractRows(html);
+      const fetchedAt = new Date().toISOString();
+      // The page gives a publication date, not a per-gauge measurement instant.
+      // Some values may still be from the previous day.
+      const sourceDate = html.match(/water levels on[^<]*?(\d{2}\.\d{2}\.\d{4})/i)?.[1] ?? null;
 
       return ['Novo Selo', 'Vidin', 'Lom', 'Oryahovo']
-        .map((station) => this.parseStationFromRows(rows, station))
+        .map((station) => this.parseStationFromRows(rows, station, fetchedAt, sourceDate))
         .filter((item): item is RiverStationReading => !!item);
     } catch (error) {
       this.logger.warn(`APPD river scrape failed: ${String(error)}`);
@@ -25,7 +29,9 @@ export class AppdDanubeProviderService {
     return [...html.matchAll(/<tr[^>]*>[\s\S]*?<\/tr>/gi)].map((m) => m[0]);
   }
 
-  private parseStationFromRows(rows: string[], station: string): RiverStationReading | null {
+  private parseStationFromRows(
+    rows: string[], station: string, fetchedAt: string, sourceDate: string | null,
+  ): RiverStationReading | null {
     const candidates = rows
       .map((row) => this.extractCells(row))
       .filter((cells) => cells[0]?.toLowerCase() === station.toLowerCase());
@@ -38,14 +44,18 @@ export class AppdDanubeProviderService {
 
     return {
       station,
-      elevationM: this.toNumber(cells[1]),
+      elevationM: null,
+      riverKm: this.toNumber(cells[1]),
       levelCm: this.toNumber(cells[2]),
       dischargeM3s: this.toNumber(cells[3]),
       difference24hCm: this.toNumber(cells[4]),
       trend: this.trendFromDifference(this.toNumber(cells[4])),
       waterTempC: this.toNumber(cells[5]),
       provider: 'appd-bg',
-      fetchedAt: new Date().toISOString(),
+      fetchedAt,
+      observedAt: null,
+      sourceReportedAt: sourceDate,
+      observationTimeBasis: sourceDate ? 'date-only' : 'unknown',
     };
   }
 

@@ -109,7 +109,7 @@ suite('forecast PostgreSQL integration', () => {
   });
   it('makes river recording immutable per hour and keeps real issue time', async () => {
     const recorder = new RiverForecastRecorderService(pool);
-    const input = { mainStation: { station:'Vidin',provider:'appd-bg',levelCm:100,fetchedAt:iso(-3) },
+    const input = { mainStation: { station:'Vidin',provider:'appd-bg',levelCm:100,fetchedAt:iso(0),observedAt:iso(-3),observationTimeBasis:'verified' },
       forecast: { projection: { next6h: { expectedCm:110 },next24h:{ expectedCm:120 } } } };
     expect((await recorder.recordDashboardForecasts(input)).recorded).toBe(2);
     input.forecast.projection.next6h.expectedCm = 999;

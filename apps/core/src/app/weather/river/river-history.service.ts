@@ -12,8 +12,21 @@ export class RiverHistoryService {
   ) {}
 
   async saveReadings(readings: RiverStationReading[]) {
+    let processed = 0;
+    let skippedUnverified = 0;
     for (const reading of readings) {
-      await this.pool.query(
+      // Never turn a successful HTTP poll into a new time-series observation.
+      // The legacy fetched_at column indexes observation time; a later schema
+      // migration will separate observed_at from fetched_at permanently.
+      const observedAt = reading.observedAt;
+      if (reading.observationTimeBasis !== 'verified' || !observedAt ||
+          !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(observedAt) ||
+          !Number.isFinite(Date.parse(observedAt)) ||
+          Date.parse(observedAt) > Date.now() + 5 * 60_000) {
+        skippedUnverified++;
+        continue;
+      }
+      const result = await this.pool.query(
         `
         INSERT INTO river_readings (
           station,
@@ -39,12 +52,13 @@ export class RiverHistoryService {
           reading.trend,
           reading.waterTempC,
           reading.elevationM,
-          reading.fetchedAt,
+          observedAt,
         ],
       );
+      processed += result.rowCount ?? 0;
     }
 
-    return { processed: readings.length };
+    return { processed, skippedUnverified };
   }
 
   async getRecent(station: string, limit = 48) {

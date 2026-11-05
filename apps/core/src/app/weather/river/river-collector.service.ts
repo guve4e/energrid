@@ -19,14 +19,17 @@ export class RiverCollectorService {
 
     const allStations = [...appdStations, ...portalStations];
 
-    await this.history.saveReadings(allStations);
+    const saved = await this.history.saveReadings(allStations);
 
     this.logger.log(
-      `Processed ${allStations.length} river readings: APPD=${appdStations.length}, DanubePortal=${portalStations.length}`,
+      `River source readings=${allStations.length}, stored=${saved.processed}, ` +
+      `without verified measurement time=${saved.skippedUnverified}`,
     );
 
     return {
-      processed: allStations.length,
+      fetched: allStations.length,
+      processed: saved.processed,
+      skippedUnverified: saved.skippedUnverified,
       providers: {
         appd: appdStations.length,
         danubePortal: portalStations.length,

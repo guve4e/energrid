@@ -1,5 +1,17 @@
 # Documentation audit and remaining gaps
 
+## M0 — Home authority and local Shelly evidence contract (5 November 2026)
+
+**Verified runtime distinction:** the local Mac API and Pi 5 API are separate instances with separate PostgreSQL databases, local observation/discovery stores, broker settings, and configured network scopes. Both can report `tenant-demo/site-home`; that label is not a replication contract. At the read-only comparison for this milestone, Mac had 10 active Home enrollments in its local databases while Pi 5 had 3 active Home enrollments in its production database. Shared protocol identities have different Physical Inventory IDs in those independent stores. No data was copied, and inventory IDs must not be transferred between environments. Pi `.6` is a separate host and is not the API authority. The Pi 5 remains the proposed Home site authority; this change does not migrate or deploy it.
+
+**Source correction (local, not runtime-accepted yet):** selected-device verification previously gathered fresh local Shelly RPC responses but saved only the legacy `http_rpc` claims. The EM1 read-route requires verified `http_identity` identity plus `site_local_http_rpc` observer/interface/component evidence, so it correctly rejected that incomplete record with `saved_identity_or_component_evidence_missing`. For enrolled devices, the Portal also could not offer refresh, and its “verified” projection did not enforce the 15-minute freshness contract. The verifier now requires the configured local observer to match tenant, site, scope, host, interface and directly attached CIDR; resolves the exact enrolled physical/component assignment; persists verified identity and component provenance through existing Discovery Memory and reconciliation writers; and carries a site-observer scan marker and completion time. The Portal exposes a refresh action only for an exact assigned enrolled Shelly and reports verification only while the persisted evidence remains fresh. No control or measurement permission is granted by verification. A separate regression confirms EM50 reconciliation preserves existing authority and does not add switching or power approval.
+
+**Runtime and approval status:** source tests cover the local authorized EM50 evidence path and stale UI projection. This milestone has not yet run the refreshed action against the physical EM50 through an authenticated live Portal, and no power-approval request has been submitted. The separate administrator approval for EM50 `em1:0` / `power` remains required before any electrical observation can be admitted. The last reported physical status value is historical and is not presented here as a current sample.
+
+**Site-authority foundation:** safe `.env.example` values and an administrator-only diagnostic report `ENERGRID_INSTANCE_ID` and `ENERGRID_INSTANCE_MODE` (`development-isolated`, `site-authority`, or `observer`). The diagnostic does not enforce ID uniqueness, authenticate an observer, transfer authority, or prove deployment. The current internal observation ingress must not be exposed to arbitrary observer payloads, and the existing operator-attested site-local evidence intake is not machine authentication. Secure observer-to-site-Core delivery remains a separate required boundary: authenticated observer identity, exact tenant/site/scope/device/component assignment, freshness, replay/ordering protection, and admission through the canonical writer. Do not work around this by widening scopes or trusting an operator report as machine evidence.
+
+**Next actions:** rebuild/restart only the local development API, use the existing authenticated Home Portal to refresh exact EM50 identity/component evidence, inspect the result without approving power, and keep Home production on Pi 5 untouched. Separately plan the smallest authenticated observer-to-authority boundary before moving Mac-observed Eero data into Pi-owned state. The historical M1–M3 entries below remain their own dated checkpoints and are not deployment claims.
+
 ### M1.4e — scoped commissioning-event persistence (locally validated, not deployed)
 
 New commissioning events use `event-v2:<encoded tenant>:<encoded site>:<encoded device>:<encoded event id>` and require explicit ownership. Scoped readers return only exact tenant/site/device matches. The Portal commissioning-event endpoint resolves its authorized site from the authenticated principal and checks the device in that scope before reading history. The registry rejects ambiguous device-ID-only event writes; callers with trusted ownership can supply it explicitly. Legacy `event:<device id>:<event id>` records are preserved but **not** exposed through scoped reads or automatically assigned to any site; offline inventory and a reviewed migration are still required. This is not a durable, tamper-evident audit ledger.
@@ -170,3 +182,25 @@ Operational health dashboard, unattended collection/recovery, shared trace
 persistence, per-site timezone mapping, official alert ingestion, production
 tenant authorization, and notification policy/outbox/delivery are not part of
 this patch. See `docs/M3-weather-investigator-v1.md` for the scoped contract.
+
+## Weather automatic readiness (Patch 09 — proposed, not deployed)
+
+Patch 09 keeps the existing Core investigator scheduler: startup collection, bounded
+failure retry, process-local diagnostics and a default refresh cadence of 15 minutes
+compatible with the 30-minute read-model freshness window. A LAB-token-protected,
+site-scoped Core health projection and administrator-only Portal bridge display
+config errors, upstream failure, storage failure, missing/partial/stale evidence,
+last attempt/success, and next refresh. No new migration, notification service or
+LLM provider fetch is introduced. Test and runtime verification are **pending**.
+The health state resets on Core restart; forecast evidence is still stored separately.
+The live LAB acceptance gate is Core restart -> automatic persisted forecast ->
+Weather operator health = ready -> assistant answers from stored evidence without
+pressing Run investigation. Do not claim this succeeds until observed.
+
+## River observation provenance — M1a source patch (5 November 2026; pending local verification)
+
+APPD's daily page date is **not** a per-station measurement instant; some readings may be the preceding day's. DanubePortal publishes local-looking per-gauge date/time strings without an explicit UTC offset. The adapters now preserve the reported date/time separately, record actual HTTP fetch time as `fetchedAt`, and set `observedAt=null`/an explicit unverified basis instead of manufacturing an exact UTC measurement time. APPD/DanubePortal river-kilometre metadata is **not** `elevationM`.
+
+The existing hourly `river_readings` writer refuses newly fetched observations without a verified observation instant. River forecast recording also refuses unverified source time; the live dashboard does not generate the local RiverForecastService projection, and its river intelligence status is explicitly unknown, for unverified current readings. This intentionally reduces prediction availability rather than inventing a time series. The existing stored rows have **not** been migrated or authenticated; historical trend, legacy forecast evaluation, region-derived daily propagation, and downstream/source datum integrity require separate follow-up work before trusted hydrological predictions.
+
+This is source/test code prepared against the 5 November Weather/River review archive. **Locally applied and focused verification passed:** 23/23 provenance, provider and verification tests; 25/25 River tests; Core typecheck and documentation build completed without reported errors. Not committed, deployed or verified against production river data. PostgreSQL integration and historical-record remediation remain outstanding. M1b must introduce separate durable `observed_at`, `fetched_at`, raw timestamp and station/datum metadata with isolated migration tests, verified per-provider time rules, and explicit handling of historical unverified records before collection into a reliable archive resumes.

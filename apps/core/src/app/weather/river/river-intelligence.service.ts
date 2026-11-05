@@ -25,6 +25,25 @@ export class RiverIntelligenceService {
       };
     }
 
+    if (mainStation.observationTimeBasis !== 'verified' || !mainStation.observedAt) {
+      return {
+        mainStation,
+        nearbyStations: normalizedStations.map((s) => s.bestReading).filter(Boolean),
+        intelligence: {
+          headline: 'River forecast unavailable: measurement time unverified',
+          navigationRisk: 'unknown',
+          boatRisk: 'unknown',
+          next24h: 'unknown',
+          confidence: 'low',
+          history: null,
+          reasons: [
+            'The source reports river level, but not a verified observation instant.',
+            'No timed trend or safety assessment can be inferred from fetch time.',
+          ],
+        },
+      };
+    }
+
     const predictiveStations = normalizedStations.filter(
       (s) => s.role === 'far-upstream' || s.role === 'upstream',
     );

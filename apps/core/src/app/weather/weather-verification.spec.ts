@@ -77,12 +77,12 @@ describe('river verification corrections', () => {
     try {
       const query = jest.fn().mockResolvedValue({ rowCount: 1 });
       const recorder = new RiverForecastRecorderService({ query } as never);
-      await recorder.recordDashboardForecasts({ mainStation: { station: 'Vidin',levelCm: 100,fetchedAt: '2026-09-24T06:00:00Z',provider: 'appd-bg' },
+      await recorder.recordDashboardForecasts({ mainStation: { station: 'Vidin',levelCm: 100,fetchedAt: '2026-09-24T10:00:00Z',observedAt: '2026-09-24T06:00:00Z',observationTimeBasis:'verified',provider: 'appd-bg' },
         forecast: { projection: { next6h: { expectedCm: 110 }, next24h: { expectedCm: 130 } } } });
       const args = query.mock.calls[0][1];
       expect(args[2].toISOString()).toBe('2026-09-24T10:20:00.000Z');
       expect(args[3].toISOString()).toBe('2026-09-24T16:20:00.000Z');
-      expect(JSON.parse(args[12]).sourceReading.fetchedAt).toBe('2026-09-24T06:00:00.000Z');
+      expect(JSON.parse(args[12]).sourceReading.observedAt).toBe('2026-09-24T06:00:00.000Z');
     } finally { jest.useRealTimers(); }
   });
   it('calls the river evaluator when collection fails', async () => {

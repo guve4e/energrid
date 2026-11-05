@@ -9,7 +9,15 @@ export interface RiverStationReading {
   trend: RiverTrend;
   waterTempC: number | null;
   provider: string;
+  /** When Energrid retrieved the source page; never the gauge measurement time. */
   fetchedAt: string;
+  /** Exact gauge measurement instant only when the source time zone is verified. */
+  observedAt: string | null;
+  /** Unmodified date/time text from the source (not an instant). */
+  sourceReportedAt: string | null;
+  observationTimeBasis: 'verified' | 'date-only' | 'timezone-unverified' | 'unknown';
+  /** Danube river kilometre; not gauge elevation or water level datum. */
+  riverKm: number | null;
 }
 
 export interface RiverIntelligence {

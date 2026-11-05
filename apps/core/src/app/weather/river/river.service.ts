@@ -88,6 +88,8 @@ export class RiverService {
       : [[], null];
 
     const regionalPropagationForecast =
+      novoSeloLive?.observationTimeBasis === 'verified' &&
+      lomLive?.observationTimeBasis === 'verified' &&
       novoSeloLive?.difference24hCm != null &&
       lomLive?.difference24hCm != null
         ? this.dailyPropagation.predict(
@@ -118,6 +120,8 @@ export class RiverService {
     const forecastResult =
       mainStation &&
       mainStation.levelCm != null &&
+      mainStation.observationTimeBasis === 'verified' &&
+      mainStation.observedAt != null &&
       history.length >= 2
         ? await this.riverForecast.generate({
             station: mainStation.station,

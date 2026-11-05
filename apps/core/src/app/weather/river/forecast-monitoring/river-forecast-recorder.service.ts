@@ -24,6 +24,8 @@ interface RiverForecastDashboard {
     dischargeM3s?: number | null;
     waterTempC?: number | null;
     provider?: string | null;
+    observedAt?: string | null;
+    observationTimeBasis?: 'verified' | 'date-only' | 'timezone-unverified' | 'unknown';
   } | null;
 
   forecast?: {
@@ -82,7 +84,11 @@ export class RiverForecastRecorderService {
       };
     }
 
-    const readingAt = new Date(main.fetchedAt);
+    if (main.observationTimeBasis !== 'verified' || !main.observedAt) {
+      return { recorded: 0, skipped: true, reason: 'unverified-observation-time' };
+    }
+
+    const readingAt = new Date(main.observedAt);
     // Forecast issue time is when it was made, never the timestamp of an older input.
     const issuedAt = new Date();
 
@@ -158,8 +164,9 @@ export class RiverForecastRecorderService {
 
         provider: main.provider ?? null,
 
-        fetchedAt: readingAt.toISOString(),
-        timestampBasis: 'provider-reported-or-fetch-time; not verified observation time',
+        observedAt: readingAt.toISOString(),
+        fetchedAt: main.fetchedAt,
+        timestampBasis: 'verified',
       },
 
       localForecast: {

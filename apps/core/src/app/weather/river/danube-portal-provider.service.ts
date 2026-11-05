@@ -11,9 +11,10 @@ export class DanubePortalProviderService {
     try {
       const html = await fetchRiverHtml(this.url);
       const rows = [...html.matchAll(/<tr[^>]*>[\s\S]*?<\/tr>/gi)].map((m) => m[0]);
+      const fetchedAt = new Date().toISOString();
 
       return rows
-        .map((row) => this.parseRow(row))
+        .map((row) => this.parseRow(row, fetchedAt))
         .filter((item): item is RiverStationReading => !!item)
         .filter((item) => this.isUsefulStation(item.station));
     } catch (error) {
@@ -22,7 +23,7 @@ export class DanubePortalProviderService {
     }
   }
 
-  private parseRow(row: string): RiverStationReading | null {
+  private parseRow(row: string, fetchedAt: string): RiverStationReading | null {
     const cells = [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map((match) =>
       this.cleanCell(match[1]),
     );
@@ -34,14 +35,15 @@ export class DanubePortalProviderService {
     const station = cells[0];
     const river = cells[1];
     const rkm = this.toNumber(cells[2]);
-    const fetchedAt = this.parseDate(cells[3]);
+    const sourceReportedAt = cells[3] || null;
     const levelCm = this.toNumber(cells[4]);
 
     if (!station || !river || levelCm == null) return null;
 
     return {
       station,
-      elevationM: rkm,
+      elevationM: null,
+      riverKm: rkm,
       levelCm,
       dischargeM3s: null,
       difference24hCm: null,
@@ -49,6 +51,10 @@ export class DanubePortalProviderService {
       waterTempC: null,
       provider: 'danubeportal',
       fetchedAt,
+      observedAt: null,
+      sourceReportedAt,
+      // The page's local date/time has no UTC offset or documented per-gauge zone.
+      observationTimeBasis: sourceReportedAt ? 'timezone-unverified' : 'unknown',
     };
   }
 
@@ -101,19 +107,4 @@ export class DanubePortalProviderService {
     return Number.isFinite(parsed) ? parsed : null;
   }
 
-  private parseDate(value?: string): string {
-    if (!value) return new Date().toISOString();
-
-    const cleaned = value.trim();
-
-    // DanubePortal usually gives: YYYY-MM-DD HH:mm
-    const match = cleaned.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})/);
-    if (match) {
-      // Store consistently; exact timezone source may vary by provider.
-      return new Date(`${match[1]}T${match[2]}:00Z`).toISOString();
-    }
-
-    const parsed = new Date(cleaned);
-    return Number.isNaN(parsed.getTime()) ? new Date().toISOString() : parsed.toISOString();
-  }
 }
