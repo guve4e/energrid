@@ -8,7 +8,17 @@ import {
 } from './weather-station-daily.service';
 import { WeatherObservationCollector } from './weather-observation-collector.service';
 import { WeatherDailyVerificationService } from './weather-daily-verification.service';
-import { weatherObservationSource } from './weather-observations';
+import {
+  weatherObservationMode,
+  weatherObservationSource,
+} from './weather-observations';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+  NIMH_RAIN_SOURCE,
+  nimhRainSourceUrl,
+  parseNimhRainCsv,
+} from './nimh-rain';
 
 const now = new Date('2026-10-15T19:30:00Z');
 const env = process.env;
@@ -191,6 +201,9 @@ describe('native daily observations', () => {
     expect(weatherObservationSource()).toBe(
       'meteostat:15502:daily-local-Europe-Sofia-v1',
     );
+    process.env.WEATHER_OBSERVATION_PROVIDER = 'nimh';
+    expect(weatherObservationMode()).toBe('daily');
+    expect(weatherObservationSource()).toBe(NIMH_RAIN_SOURCE);
   });
 });
 
@@ -237,6 +250,98 @@ describe('daily collection and quota protection', () => {
     expect(hourly.ingest).not.toHaveBeenCalled();
     expect(result.availableMetrics).not.toContain('gust_kmh');
     expect(JSON.stringify(result)).not.toContain('private-test-key');
+  });
+  it('collects only Vidin 1020 from bounded monthly NIMH CSVs and leaves daily reports unscored', async () => {
+    process.env = {
+      ...env,
+      WEATHER_OBSERVATION_PROVIDER: 'nimh',
+      WEATHER_OBSERVATION_COLLECTION_ENABLED: 'true',
+    };
+    const october = readFileSync(
+      join(__dirname, 'testdata/nimh-vidin-202610.csv'),
+      'utf8',
+    );
+    const novemberDays = 30;
+    const november = `, ,${Array.from({ length: novemberDays }, (_, i) => ` ${i + 1} `).join(',')}\n1020,Vidin,${Array(novemberDays).fill('').join(',')}\n`;
+    const requested: string[] = [];
+    const fetch = jest
+      .spyOn(global, 'fetch')
+      .mockImplementation(async (input) => {
+        const source = String(input);
+        requested.push(source);
+        return {
+          ok: true,
+          arrayBuffer: async () =>
+            new TextEncoder().encode(
+              source.includes('202610') ? october : november,
+            ).buffer,
+        } as Response;
+      });
+    const repository = store();
+    const hourly = { ingest: jest.fn() };
+    const result = await new WeatherObservationCollector(
+      hourly as never,
+      repository as never,
+    ).collect(new Date('2026-11-05T12:00:00Z'));
+    expect(result).toMatchObject({
+      status: 'reporting-period-unverified',
+      source: NIMH_RAIN_SOURCE,
+      granularity: 'daily',
+      valueUnitStatus: 'unverified',
+      availableMetrics: [],
+      records: 6,
+      lastObservedAt: null,
+    });
+    expect(requested).toEqual([
+      nimhRainSourceUrl(2026, 10),
+      nimhRainSourceUrl(2026, 11),
+    ]);
+    expect(repository.ingest).toHaveBeenCalledWith(
+      NIMH_RAIN_SOURCE,
+      '43.99160,22.87280',
+      expect.arrayContaining([
+        expect.objectContaining({
+          date: '2026-10-27',
+          value: 0,
+          periodBasis: 'unverified',
+          startsAt: null,
+        }),
+      ]),
+      { id: '1020', name: 'Vidin', provider: 'NIMH' },
+    );
+    expect(hourly.ingest).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+  it('labels a persisted NIMH collection snapshot as unit-unverified after restart', async () => {
+    process.env = {
+      ...env,
+      WEATHER_OBSERVATION_PROVIDER: 'nimh',
+      WEATHER_OBSERVATION_COLLECTION_ENABLED: 'true',
+    };
+    const repository = store();
+    repository.claimCollection.mockResolvedValue({
+      claimed: false,
+      snapshot: {
+        status: 'reporting-period-unverified',
+        source: NIMH_RAIN_SOURCE,
+        records: 10,
+        availableMetrics: ['precipitation_mm'],
+      },
+    });
+    const fetch = jest.spyOn(global, 'fetch');
+    const result = await new WeatherObservationCollector(
+      {} as never,
+      repository as never,
+    ).collect(new Date('2026-11-05T12:00:00Z'));
+    expect(result).toMatchObject({
+      source: NIMH_RAIN_SOURCE,
+      valueUnitStatus: 'unverified',
+      availableMetrics: [],
+      note: expect.stringContaining(
+        'numeric unit and reporting period are unverified',
+      ),
+    });
+    expect(fetch).not.toHaveBeenCalled();
   });
   it('restores the persisted attempt status after restart and makes no HTTP calls within the quota interval', async () => {
     configure();
@@ -359,6 +464,65 @@ describe('daily report storage and scoring', () => {
     expect(client.query).toHaveBeenLastCalledWith('COMMIT');
     expect(client.release).toHaveBeenCalled();
   });
+  it('keeps NIMH duplicates idempotent and rejects a later revised value', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-11-05T12:00:00Z'));
+    const fixture = readFileSync(
+      join(__dirname, 'testdata/nimh-vidin-202610.csv'),
+      'utf8',
+    );
+    const observation = parseNimhRainCsv(
+      fixture,
+      2026,
+      10,
+      'https://info.meteo.bg/openData/static/csvs/mosv_prec_202610.csv',
+      '2026-11-05T12:00:00Z',
+      new Date('2026-11-05T12:00:00Z'),
+    )[0];
+    let stored = false;
+    const client = {
+      query: jest.fn(async (sql: string) => {
+        if (sql.includes('INSERT')) {
+          if (stored) return { rowCount: 0 };
+          stored = true;
+          return { rowCount: 1 };
+        }
+        if (sql.includes('SELECT value')) return { rows: [{ value: 2 }] };
+        return { rowCount: 0 };
+      }),
+      release: jest.fn(),
+    };
+    const service = new WeatherStationDailyService({
+      connect: jest.fn().mockResolvedValue(client),
+    } as never);
+    const station = { id: '1020', name: 'Vidin', provider: 'NIMH' };
+    expect(
+      await service.ingest(NIMH_RAIN_SOURCE, 'site', [observation], station),
+    ).toEqual({ recorded: 1 });
+    const inserted = client.query.mock.calls.find(([sql]) =>
+      sql.includes('INSERT'),
+    )!;
+    expect(JSON.parse(inserted[1][10])).toMatchObject({
+      original: {
+        rawValue: '2.',
+        rawUnit: 'unverified',
+        numericUnitStatus: 'unverified',
+        dataStatus: 'preliminary-operational-unverified',
+      },
+    });
+    expect(
+      await service.ingest(NIMH_RAIN_SOURCE, 'site', [observation], station),
+    ).toEqual({ recorded: 0 });
+    await expect(
+      service.ingest(
+        NIMH_RAIN_SOURCE,
+        'site',
+        [{ ...observation, value: observation.value + 0.1 }],
+        station,
+      ),
+    ).rejects.toThrow(DAILY_REVISION_MESSAGE);
+    expect(client.query).toHaveBeenLastCalledWith('ROLLBACK');
+    expect(client.release).toHaveBeenCalledTimes(3);
+  });
   it('does not overwrite revised measurements and rolls the batch back', async () => {
     jest.useFakeTimers().setSystemTime(now);
     const client = {
@@ -401,6 +565,8 @@ describe('daily report storage and scoring', () => {
       "o.period_basis='local-calendar-day'",
     );
     expect(query.mock.calls[0][0]).toContain('o.starts_at=f.starts_at');
+    expect(query.mock.calls[0][0]).toContain('o.ends_at=f.ends_at');
+    expect(query.mock.calls[0][0]).toContain('o.timezone=f.timezone');
     expect(query.mock.calls[0][0]).toContain('f.created_at<f.starts_at');
     expect(query.mock.calls[1][1]).toEqual([
       2,
@@ -415,14 +581,20 @@ describe('daily report storage and scoring', () => {
       'station-daily-local-calendar-day',
     );
   });
-  it('keeps missing or unverified native reports unscored', async () => {
+  it('keeps NIMH reports with unverified units and periods unscored', async () => {
     const query = jest.fn().mockResolvedValue({ rows: [] });
     expect(
       await new WeatherDailyVerificationService({ query } as never).evaluate(
-        'station',
+        NIMH_RAIN_SOURCE,
         'daily',
       ),
     ).toEqual({ evaluated: 0 });
     expect(query).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls[0][0]).toContain(
+      "o.period_basis='local-calendar-day'",
+    );
+    expect(query.mock.calls[0][0]).toContain(
+      "o.source NOT LIKE 'nimh:%' OR o.source_snapshot->'original'->>'numericUnitStatus'='verified'",
+    );
   });
 });

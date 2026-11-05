@@ -103,6 +103,7 @@ export class WeatherDailyVerificationService {
       FROM weather_daily_forecasts f JOIN weather_station_daily_observations o
         ON o.location=f.location AND o.source=$1 AND o.report_date=f.target_date AND o.metric=f.metric
         AND o.period_basis='local-calendar-day' AND o.timezone=f.timezone
+        AND (o.source NOT LIKE 'nimh:%' OR o.source_snapshot->'original'->>'numericUnitStatus'='verified')
         AND o.starts_at=f.starts_at AND o.ends_at=f.ends_at AND length(trim(o.period_reference))>0
       WHERE f.evaluated_at IS NULL AND f.ends_at<=now() AND f.created_at<f.starts_at
       ORDER BY f.ends_at,f.id LIMIT 500`, [source]);

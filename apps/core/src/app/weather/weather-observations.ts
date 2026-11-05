@@ -1,12 +1,17 @@
 import { HOUR_MS } from './weather-data-quality';
 import type { WeatherObservation } from './weather-verification.service';
 import { dailyPeriodConfiguration } from './weather-station-daily';
+import { NIMH_RAIN_SOURCE } from './nimh-rain';
 
 export function weatherObservationMode(env = process.env): 'hourly' | 'daily' {
-  return env.METEOSTAT_GRANULARITY === 'daily' ? 'daily' : 'hourly';
+  return env.WEATHER_OBSERVATION_PROVIDER === 'nimh' ||
+    env.METEOSTAT_GRANULARITY === 'daily'
+    ? 'daily'
+    : 'hourly';
 }
 
 export function weatherObservationSource(env = process.env) {
+  if (env.WEATHER_OBSERVATION_PROVIDER === 'nimh') return NIMH_RAIN_SOURCE;
   if (env.WEATHER_OBSERVATION_PROVIDER === 'meteostat') {
     const station = env.METEOSTAT_STATION_ID ?? '';
     const label = env.METEOSTAT_INTERVAL_LABEL;

@@ -29,7 +29,7 @@ export interface StationDailyObservation {
   startsAt: string | null;
   endsAt: string | null;
   periodReference: string | null;
-  original: MeteostatDay;
+  original: unknown;
 }
 
 export function dailyPeriodConfiguration(env = process.env) {

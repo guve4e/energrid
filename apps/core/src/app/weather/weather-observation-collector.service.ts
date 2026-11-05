@@ -12,6 +12,11 @@ import {
   meteostatDailyObservations,
 } from './weather-station-daily';
 import {
+  NIMH_RAIN_SOURCE,
+  nimhRainSourceUrl,
+  parseNimhRainCsv,
+} from './nimh-rain';
+import {
   DAILY_REVISION_MESSAGE,
   WeatherStationDailyService,
 } from './weather-station-daily.service';
@@ -20,6 +25,9 @@ import {
   VIDIN_LOCATION,
   WeatherVerificationService,
 } from './weather-verification.service';
+
+const NIMH_UNIT_UNVERIFIED_NOTE =
+  'NIMH preliminary daily rain reports are stored with raw values and provenance. Their numeric unit and reporting period are unverified; no verified metric is exposed or scored.';
 
 interface Station {
   id: string;
@@ -49,6 +57,7 @@ interface CollectionStatus {
   granularity?: 'hourly' | 'daily';
   nextCollectionAt?: string;
   lastReportDate?: string | null;
+  valueUnitStatus?: 'verified' | 'unverified';
 }
 
 @Injectable()
@@ -61,6 +70,33 @@ export class WeatherObservationCollector {
 
   status(): CollectionStatus {
     const source = weatherObservationSource();
+    if (process.env.WEATHER_OBSERVATION_PROVIDER === 'nimh') {
+      if (process.env.WEATHER_OBSERVATION_COLLECTION_ENABLED !== 'true')
+        return {
+          status: 'disabled',
+          source,
+          granularity: 'daily',
+          note: 'NIMH daily rain collection is disabled. No station requests are made.',
+        };
+      const current: CollectionStatus =
+        this.last?.source === source
+          ? this.last
+          : {
+              status: 'ready',
+              source,
+              granularity: 'daily',
+              note: NIMH_UNIT_UNVERIFIED_NOTE,
+            };
+      return {
+        ...current,
+        availableMetrics: [],
+        valueUnitStatus: 'unverified',
+        note:
+          current.status === 'unavailable'
+            ? current.note
+            : NIMH_UNIT_UNVERIFIED_NOTE,
+      };
+    }
     if (process.env.WEATHER_OBSERVATION_PROVIDER !== 'meteostat') {
       return {
         status: source ? 'manual' : 'configuration-required',
@@ -132,12 +168,89 @@ export class WeatherObservationCollector {
         now,
       );
       if (!claim.claimed) {
-        this.last = claim.snapshot ??
-          this.last ?? {
-            ...status,
-            note: 'Collection already attempted in the last 24 hours. Waiting for the next daily cycle.',
+        const snapshot = claim.snapshot as
+          | Partial<CollectionStatus>
+          | null
+          | undefined;
+        this.last = snapshot
+          ? { ...status, ...snapshot }
+          : (this.last ?? {
+              ...status,
+              note: 'Collection already attempted in the last 24 hours. Waiting for the next daily cycle.',
+            });
+        if (status.source === NIMH_RAIN_SOURCE) {
+          this.last = {
+            ...this.last!,
+            availableMetrics: [],
+            valueUnitStatus: 'unverified',
+            note: NIMH_UNIT_UNVERIFIED_NOTE,
           };
+        }
         return this.last!;
+      }
+      if (status.source === NIMH_RAIN_SOURCE) {
+        const [year, month] = weatherDate(now).split('-').map(Number);
+        const months = [
+          new Date(Date.UTC(year, month - 2, 1)),
+          new Date(Date.UTC(year, month - 1, 1)),
+        ];
+        const observations = [];
+        for (const date of months) {
+          const sourceUrl = nimhRainSourceUrl(
+            date.getUTCFullYear(),
+            date.getUTCMonth() + 1,
+          );
+          const response = await fetch(sourceUrl, {
+            signal: AbortSignal.timeout(8000),
+            redirect: 'error',
+          });
+          if (!response.ok) throw new Error('NIMH rain request failed');
+          const bytes = await response.arrayBuffer();
+          if (bytes.byteLength > 100_000)
+            throw new Error('NIMH rain file is too large');
+          const csv = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+          observations.push(
+            ...parseNimhRainCsv(
+              csv,
+              date.getUTCFullYear(),
+              date.getUTCMonth() + 1,
+              sourceUrl,
+              new Date().toISOString(),
+              now,
+            ),
+          );
+        }
+        if (observations.length)
+          await this.stationDaily.ingest(
+            status.source,
+            VIDIN_LOCATION,
+            observations,
+            { id: '1020', name: 'Vidin', provider: 'NIMH' },
+          );
+        this.last = {
+          status: observations.length
+            ? 'reporting-period-unverified'
+            : 'no-observations',
+          source: status.source,
+          granularity: 'daily',
+          lastAttemptAt: now.toISOString(),
+          lastSuccessAt: now.toISOString(),
+          nextCollectionAt: new Date(
+            now.getTime() + 24 * HOUR_MS,
+          ).toISOString(),
+          lastObservedAt: null,
+          availableMetrics: [],
+          valueUnitStatus: 'unverified',
+          records: observations.length,
+          lastReportDate:
+            observations
+              .map((o) => o.date)
+              .sort()
+              .at(-1) ?? null,
+          note: NIMH_UNIT_UNVERIFIED_NOTE,
+        };
+        await this.stationDaily.saveCollectionStatus(status.source, this.last);
+        return this.last;
       }
       const stationId = process.env.METEOSTAT_STATION_ID!;
       const metadata = await this.request('meta', { id: stationId });
@@ -284,10 +397,15 @@ export class WeatherObservationCollector {
         lastSuccessAt,
         granularity,
         nextCollectionAt: new Date(now.getTime() + 24 * HOUR_MS).toISOString(),
+        ...(status.source === NIMH_RAIN_SOURCE
+          ? { availableMetrics: [], valueUnitStatus: 'unverified' as const }
+          : {}),
         note:
           error instanceof Error && error.message === DAILY_REVISION_MESSAGE
             ? DAILY_REVISION_MESSAGE
-            : 'Station collection failed. Check the server API key, station identity, distance (maximum 25 km), and observation availability. No missing data was replaced with zero.',
+            : status.source === NIMH_RAIN_SOURCE
+              ? 'NIMH collection failed. Check source availability, CSV structure, and station 1020 identity. Unit and period remain unverified; saved evidence is unscored.'
+              : 'Station collection failed. Check the server API key, station identity, distance (maximum 25 km), and observation availability. No missing data was replaced with zero.',
       };
       try {
         await this.stationDaily.saveCollectionStatus(status.source!, this.last);
