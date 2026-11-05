@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { assertNewExpenseCurrency, normalizeCurrency, validateDraftProposal, validateExpenseItem } from '../domain/expense-rules';
 import { addDecimal, compareDecimal, financeDecimal } from '../domain/decimal';
 import { reconcileReceiptExtraction, reconcileReceiptReview, validateReceiptExtraction } from '../domain/receipt-extraction';
-import type { ExpenseDraftProposal, ExpenseRecord, FinanceActorContext, ReceiptMetadata } from '../domain/personal-finance.types';
+import type { ExpenseDraft, ExpenseDraftProposal, ExpenseRecord, FinanceActorContext, ReceiptMetadata } from '../domain/personal-finance.types';
 import type { DocumentUnderstandingPort } from './ports/document-understanding.port';
 import type { PersonalFinanceRepository, ReceiptReextractionWrite } from './ports/personal-finance.repository';
 import type { PrivateReceiptStoragePort } from './ports/private-receipt-storage.port';
@@ -75,25 +75,41 @@ export class ReceiptIntelligenceApplication {
       parserProvider: result.provider, parserModel: result.model, extraction,
     };
     const sourceId = `receipt:sha256:${contentHash}`;
-    const proposal: ExpenseDraftProposal = validateDraftProposal({
-      date: extraction.date.value, amount, currency, merchantName: extraction.merchant.value,
-      category: categorized.category, description: extraction.merchant.value, tags: [],
-      items: toCompleteItems(extraction, currency ?? 'EUR', contentHash, categories), receipts: [metadata],
-      sourceKind: 'receipt', sourceId, extractionProvider: result.provider, extractionModel: result.model,
-    });
+    let proposal: ExpenseDraftProposal;
     try {
-      const draft = await this.repository.createDraft(context.accountId, context.actorId, proposal);
-      const receipt = draft.receipts.find((item) => item.contentHash === contentHash);
-      if (!receipt || receipt.storageKey !== storageKey) {
-        await this.storage.delete(context.accountId, storageKey);
-        return { duplicate: true, receipt: receipt ?? duplicate, draft, possibleMatches: [] as ExpenseRecord[], preview: receipt?.extraction ? this.preview(context, receipt.extraction) : null };
-      }
-      const possibleMatches = await this.findPossibleMatches(context.accountId, extraction);
-      return { duplicate: false, draft, possibleMatches, reconciliation, preview, extractionDiagnostics: diagnostics(result, modelItemCount, extraction, draft, receipt.id) };
+      proposal = validateDraftProposal({
+        date: extraction.date.value, amount, currency, merchantName: extraction.merchant.value,
+        category: categorized.category, description: extraction.merchant.value, tags: [],
+        items: toCompleteItems(extraction, currency ?? 'EUR', contentHash, categories), receipts: [metadata],
+        sourceKind: 'receipt', sourceId, extractionProvider: result.provider, extractionModel: result.model,
+      });
     } catch (error) {
+      // No database write has started; the new image is unreferenced.
       await this.storage.delete(context.accountId, storageKey).catch(() => undefined);
       throw error;
     }
+
+    let draft: ExpenseDraft;
+    try {
+      draft = await this.repository.createDraft(context.accountId, context.actorId, proposal);
+    } catch (error) {
+      // A failed COMMIT can still succeed after this call rejects. An absent read is not proof it cannot commit.
+      const persisted = await this.repository.findReceiptByHash(context.accountId, contentHash).catch(() => undefined);
+      if (persisted && persisted.storageKey !== storageKey) {
+        await this.storage.delete(context.accountId, storageKey).catch(() => undefined);
+      }
+      throw error;
+    }
+
+    const receipt = draft.receipts.find((item) => item.contentHash === contentHash);
+    if (!receipt) throw new Error('Persisted draft did not return its receipt; retry the upload to recover the draft');
+    if (receipt.storageKey !== storageKey) {
+      await this.storage.delete(context.accountId, storageKey);
+      return { duplicate: true, receipt, draft, possibleMatches: [] as ExpenseRecord[], preview: receipt.extraction ? this.preview(context, receipt.extraction) : null };
+    }
+    // Matching is advisory; a failure here must not roll back or delete an already committed receipt.
+    const possibleMatches = await this.findPossibleMatches(context.accountId, extraction);
+    return { duplicate: false, draft, possibleMatches, reconciliation, preview, extractionDiagnostics: diagnostics(result, modelItemCount, extraction, draft, receipt.id) };
   }
 
   async reextract(context: FinanceActorContext, receiptId: string, cloudDataConsent: boolean) {

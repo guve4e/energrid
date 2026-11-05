@@ -35,7 +35,13 @@ export class LocalPrivateReceiptStorageAdapter implements PrivateReceiptStorageP
   }
 
   async delete(accountId: string, storageKey: string): Promise<void> {
-    const file = await this.resolveOwnedFile(accountId, storageKey);
+    let file: string;
+    try {
+      file = await this.resolveOwnedFile(accountId, storageKey);
+    } catch (error) {
+      if (error instanceof NotFoundException) return;
+      throw error;
+    }
     try { await unlink(file); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   }
 
@@ -43,11 +49,11 @@ export class LocalPrivateReceiptStorageAdapter implements PrivateReceiptStorageP
     const segment = this.accountSegment(accountId);
     const parts = storageKey.split('/');
     if (parts.length !== 2 || parts[0] !== segment || !/^[0-9a-f-]{36}\.(jpg|png)$/.test(parts[1])) throw new ForbiddenException('Receipt does not belong to this account');
-    const directory = await realpath(join(this.root(), segment)).catch(() => { throw new NotFoundException('Receipt file not found'); });
-    const expectedRoot = await realpath(this.root()).catch(() => { throw new NotFoundException('Receipt file not found'); });
+    const directory = await realpath(join(this.root(), segment)).catch(rethrowUnlessMissing);
+    const expectedRoot = await realpath(this.root()).catch(rethrowUnlessMissing);
     if (!directory.startsWith(`${expectedRoot}${sep}`)) throw new ForbiddenException('Receipt storage path is invalid');
     const file = join(directory, parts[1]);
-    const info = await lstat(file).catch(() => { throw new NotFoundException('Receipt file not found'); });
+    const info = await lstat(file).catch(rethrowUnlessMissing);
     if (!info.isFile() || info.isSymbolicLink()) throw new ForbiddenException('Receipt file is not a regular private file');
     return file;
   }
@@ -56,4 +62,9 @@ export class LocalPrivateReceiptStorageAdapter implements PrivateReceiptStorageP
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) throw new ForbiddenException('Verified finance account ID is invalid');
     return value.toLowerCase();
   }
+}
+
+function rethrowUnlessMissing(error: unknown): never {
+  if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') throw new NotFoundException('Receipt file not found');
+  throw error;
 }

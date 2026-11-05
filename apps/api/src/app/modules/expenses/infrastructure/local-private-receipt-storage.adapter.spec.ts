@@ -1,4 +1,4 @@
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LocalPrivateReceiptStorageAdapter } from './local-private-receipt-storage.adapter';
@@ -22,5 +22,50 @@ describe('LocalPrivateReceiptStorageAdapter', () => {
     expect((await stat(join(root, accountA))).mode & 0o777).toBe(0o700);
     await storage.delete(accountA, key);
     await expect(storage.get(accountA, key)).rejects.toThrow();
+  });
+
+  it('accepts repeated deletion when the file or directories are missing', async () => {
+    const storage = new LocalPrivateReceiptStorageAdapter();
+    const key = await storage.put(accountA, 'image/png', new Uint8Array([1]));
+    await storage.delete(accountA, key);
+    await expect(storage.delete(accountA, key)).resolves.toBeUndefined();
+
+    await rm(join(root, accountA), { recursive: true, force: true });
+    await expect(storage.delete(accountA, key)).resolves.toBeUndefined();
+
+    await rm(root, { recursive: true, force: true });
+    await expect(storage.delete(accountA, key)).resolves.toBeUndefined();
+  });
+
+  it('rejects cross-account and invalid keys even when the file is absent', async () => {
+    const storage = new LocalPrivateReceiptStorageAdapter();
+    const key = await storage.put(accountA, 'image/jpeg', new Uint8Array([1]));
+    await storage.delete(accountA, key);
+
+    await expect(storage.delete(accountB, key)).rejects.toThrow('Receipt does not belong to this account');
+    await expect(storage.delete(accountA, `${accountA}/../outside.jpg`)).rejects.toThrow('Receipt does not belong to this account');
+  });
+
+  it('refuses to delete symlinks', async () => {
+    const storage = new LocalPrivateReceiptStorageAdapter();
+    const key = await storage.put(accountA, 'image/jpeg', new Uint8Array([1]));
+    const external = join(root, 'other-file.jpg');
+
+    await writeFile(external, 'keep');
+    await unlink(join(root, accountA, key.split('/')[1]));
+    await symlink(external, join(root, accountA, key.split('/')[1]));
+
+    await expect(storage.delete(accountA, key)).rejects.toThrow('not a regular private file');
+    expect(await readFile(external, 'utf8')).toBe('keep');
+  });
+
+  it('propagates filesystem errors other than ENOENT', async () => {
+    const storage = new LocalPrivateReceiptStorageAdapter();
+    const key = await storage.put(accountA, 'image/jpeg', new Uint8Array([1]));
+
+    await rm(join(root, accountA), { recursive: true, force: true });
+    await writeFile(join(root, accountA), 'not a directory');
+
+    await expect(storage.delete(accountA, key)).rejects.toMatchObject({ code: 'ENOTDIR' });
   });
 });

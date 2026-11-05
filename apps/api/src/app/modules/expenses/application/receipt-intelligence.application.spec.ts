@@ -22,7 +22,7 @@ describe('receipt intelligence application', () => {
       listCategories: jest.fn().mockResolvedValue(categories),
       findReceiptByHash: jest.fn().mockResolvedValue(null), createDraft: jest.fn().mockImplementation(async (_account, _actor, proposal) => ({ id: 'draft-1', accountId: 'account-a', status: 'proposed', ...proposal, receipts: [metadata(proposal.receipts[0].storageKey, proposal.receipts[0].contentHash, proposal.receipts[0].extraction)] })),
       getDraft: jest.fn(), findPossibleReceiptMatches: jest.fn().mockResolvedValue([]), getReceipt: jest.fn().mockResolvedValue(metadata()),
-      replaceReceiptExtraction: jest.fn(),
+      replaceReceiptExtraction: jest.fn(), markReceiptDocumentDeleted: jest.fn(),
       updateDraft: jest.fn(), attachReceiptToExpense: jest.fn(), reopenRejectedReceiptDraft: jest.fn(),
     } as any;
     const understanding = { extract: jest.fn().mockResolvedValue({ extraction, provider: 'test', model: 'vision' }) };
@@ -162,12 +162,136 @@ describe('receipt intelligence application', () => {
     expect(result.draft.status).toBe('proposed');
   });
 
-  it('cleans up the private image if transactional draft persistence fails', async () => {
+  it('deletes the unreferenced image when draft validation fails before persistence', async () => {
+    const { app, repository, storage, understanding } = setup();
+    understanding.extract.mockResolvedValue({ extraction: { ...extraction, total: field('0') }, provider: 'test', model: 'vision' });
+
+    await expect(app.extract(context, bytes, 'image/jpeg', true)).rejects.toThrow('amount must be greater than zero');
+
+    expect(storage.put).toHaveBeenCalledTimes(1);
+    expect(repository.createDraft).not.toHaveBeenCalled();
+    expect(storage.delete).toHaveBeenCalledWith('account-a', 'account-a/file.jpg');
+  });
+
+  it('keeps the image when a failed draft write has no confirmed persisted receipt', async () => {
     const { app, repository, storage } = setup();
     repository.createDraft.mockRejectedValue(new Error('database unavailable'));
     await expect(app.extract(context, bytes, 'image/jpeg', true)).rejects.toThrow('database unavailable');
     expect(storage.put).toHaveBeenCalledTimes(1);
+    expect(repository.findReceiptByHash).toHaveBeenCalledTimes(2);
+    expect(storage.delete).not.toHaveBeenCalled();
+  });
+
+  it('deletes only the unused image when a failed write resolves to a different persisted key', async () => {
+    const { app, repository, storage } = setup();
+    repository.createDraft.mockRejectedValue(new Error('write failed'));
+    repository.findReceiptByHash
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(metadata('account-a/existing.jpg'));
+
+    await expect(app.extract(context, bytes, 'image/jpeg', true)).rejects.toThrow('write failed');
+
+    expect(storage.delete).toHaveBeenCalledTimes(1);
     expect(storage.delete).toHaveBeenCalledWith('account-a', 'account-a/file.jpg');
+  });
+
+  it('keeps a committed draft image if the later possible-match lookup fails', async () => {
+    const { app, repository, storage } = setup();
+    repository.findPossibleReceiptMatches.mockRejectedValue(new Error('match lookup unavailable'));
+
+    await expect(app.extract(context, bytes, 'image/jpeg', true)).rejects.toThrow('match lookup unavailable');
+
+    expect(repository.createDraft).toHaveBeenCalledTimes(1);
+    expect(storage.delete).not.toHaveBeenCalled();
+
+    const contentHash = repository.createDraft.mock.calls[0][2].receipts[0].contentHash;
+    repository.findReceiptByHash.mockResolvedValueOnce(metadata('account-a/file.jpg', contentHash));
+    repository.getDraft.mockResolvedValue({ id: 'draft-1', status: 'needs_review', receipts: [metadata('account-a/file.jpg', contentHash)] });
+    const retry = await app.extract(context, bytes, 'image/jpeg', true);
+    expect(retry).toMatchObject({ duplicate: true, draft: { id: 'draft-1' } });
+    expect(repository.createDraft).toHaveBeenCalledTimes(1);
+    expect(storage.put).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a committed image when draft persistence returns an ambiguous error', async () => {
+    const { app, repository, storage } = setup();
+    repository.createDraft.mockRejectedValue(new Error('commit acknowledgement lost'));
+    repository.findReceiptByHash
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(metadata('account-a/file.jpg'));
+
+    await expect(app.extract(context, bytes, 'image/jpeg', true)).rejects.toThrow('commit acknowledgement lost');
+
+    expect(repository.findReceiptByHash).toHaveBeenCalledTimes(2);
+    expect(storage.delete).not.toHaveBeenCalled();
+  });
+
+  it('keeps the image if draft persistence outcome cannot be checked', async () => {
+    const { app, repository, storage } = setup();
+    repository.createDraft.mockRejectedValue(new Error('database unavailable'));
+    repository.findReceiptByHash
+      .mockResolvedValueOnce(null)
+      .mockRejectedValueOnce(new Error('database still unavailable'));
+
+    await expect(app.extract(context, bytes, 'image/jpeg', true)).rejects.toThrow('database unavailable');
+
+    expect(storage.delete).not.toHaveBeenCalled();
+  });
+
+  it('does not delete an image if the committed draft response omits its receipt', async () => {
+    const { app, repository, storage } = setup();
+    repository.createDraft.mockResolvedValue({ id: 'draft-1', receipts: [] });
+
+    await expect(app.extract(context, bytes, 'image/jpeg', true)).rejects.toThrow(/did not return its receipt/);
+
+    expect(storage.delete).not.toHaveBeenCalled();
+  });
+
+  it('removes only the unused image when another concurrent upload has already created the draft', async () => {
+    const { app, repository, storage } = setup();
+    repository.createDraft.mockImplementation(async (_account: string, _actor: string, proposal: any) => ({
+      id: 'draft-existing', receipts: [metadata('account-a/existing.jpg', proposal.receipts[0].contentHash)],
+    }));
+
+    const result = await app.extract(context, bytes, 'image/jpeg', true);
+
+    expect(result).toMatchObject({ duplicate: true, draft: { id: 'draft-existing' } });
+    expect(storage.delete).toHaveBeenCalledTimes(1);
+    expect(storage.delete).toHaveBeenCalledWith('account-a', 'account-a/file.jpg');
+  });
+
+  it('retries an already marked receipt deletion with account scope', async () => {
+    const { app, repository, storage } = setup();
+    const marked = { ...metadata(), documentDeletedAt: '2026-10-28T13:00:00.000Z' };
+    repository.markReceiptDocumentDeleted.mockResolvedValue(marked);
+
+    await expect(app.deleteImage(context, 'receipt-1')).resolves.toEqual(marked);
+    await expect(app.deleteImage(context, 'receipt-1')).resolves.toEqual(marked);
+
+    expect(repository.markReceiptDocumentDeleted).toHaveBeenCalledTimes(2);
+    expect(repository.markReceiptDocumentDeleted).toHaveBeenCalledWith('account-a', 'account-a', 'receipt-1');
+    expect(storage.delete).toHaveBeenCalledTimes(2);
+    expect(storage.delete).toHaveBeenCalledWith('account-a', 'account-a/file.jpg');
+  });
+
+  it('propagates storage failures so cleanup can be retried', async () => {
+    const { app, repository, storage } = setup();
+    const marked = { ...metadata(), documentDeletedAt: '2026-10-28T13:00:00.000Z' };
+    repository.markReceiptDocumentDeleted.mockResolvedValue(marked);
+    storage.delete.mockRejectedValueOnce(Object.assign(new Error('permission denied'), { code: 'EACCES' }));
+
+    await expect(app.deleteImage(context, 'receipt-1')).rejects.toThrow('permission denied');
+    await expect(app.deleteImage(context, 'receipt-1')).resolves.toEqual(marked);
+
+    expect(storage.delete).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not delete storage for an unknown account-scoped receipt', async () => {
+    const { app, repository, storage } = setup();
+    repository.markReceiptDocumentDeleted.mockResolvedValue(null);
+
+    await expect(app.deleteImage(context, 'missing-receipt')).resolves.toBeNull();
+    expect(storage.delete).not.toHaveBeenCalled();
   });
 
   it('does not return another account receipt content', async () => {
