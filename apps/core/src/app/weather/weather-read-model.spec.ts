@@ -40,7 +40,7 @@ describe('versioned LAB weather read model', () => {
     expect(result).toMatchObject({
       version: 1, scope, status: 'available', automationEligible: false,
       forecast: {
-        ageMinutes: 5,
+        ageMinutes: 5, timeZone: 'Europe/Sofia',
         coverage: { expectedHours: 24, validHours: 24, complete: true },
       },
       officialAlerts: { status: 'unsupported' },

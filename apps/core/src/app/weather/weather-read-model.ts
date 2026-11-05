@@ -1,4 +1,5 @@
 import type { WeatherEvidenceSnapshot } from './weather-investigator';
+import { WEATHER_TIMEZONE } from './weather-calendar';
 import type { WeatherEventType, WeatherSeverity } from './weather-investigator.types';
 
 const HOUR_MS = 3_600_000;
@@ -46,6 +47,8 @@ export interface WeatherReadModel {
     provider: string;
     model: string | null;
     location: string;
+    /** LAB forecast calendar timezone, provided by Core rather than inferred by the LLM. */
+    timeZone: string;
     ageMinutes: number | null;
     coverage: { expectedHours: 24; validHours: number; complete: boolean };
     hours: WeatherEvidenceSnapshot['hours'];
@@ -131,6 +134,7 @@ export function buildWeatherReadModel(
       provider: source.provider,
       model: source.model,
       location: source.location,
+      timeZone: WEATHER_TIMEZONE,
       ageMinutes: Math.max(0, Math.round(ageMs / 60_000)),
       coverage: { expectedHours: REQUIRED_HOURS, validHours, complete },
       hours: status === 'available' ? hours : [],

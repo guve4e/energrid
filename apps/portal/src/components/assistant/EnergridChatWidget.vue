@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { authFetch } from '../../auth/auth-client';
 import { nextTick, ref } from 'vue';
+import { assistantInlineSegments } from './assistant-inline-markup';
 
 const props = defineProps<{
   apiBase: string;
@@ -133,7 +134,7 @@ async function scrollToBottom() {
           <strong>Talk to your home.</strong>
           <p>Ask anything, explain something about your home, or just have a conversation.</p>
           <p class="energrid-chat-caveat">
-            Live sensors and network tools are not connected to this chat yet.
+            Answers use the tools available for your site. Unavailable evidence will be reported.
           </p>
         </div>
 
@@ -143,7 +144,14 @@ async function scrollToBottom() {
           :class="['energrid-chat-message', message.role]"
         >
           <small>{{ message.role === 'user' ? 'You' : 'Energrid' }}</small>
-          <p>{{ message.text }}</p>
+          <p v-if="message.role === 'assistant'">
+            <template v-for="(part, partIndex) in assistantInlineSegments(message.text)" :key="partIndex">
+              <strong v-if="part.kind === 'bold'">{{ part.text }}</strong>
+              <code v-else-if="part.kind === 'code'">{{ part.text }}</code>
+              <span v-else>{{ part.text }}</span>
+            </template>
+          </p>
+          <p v-else>{{ message.text }}</p>
         </article>
 
         <p v-if="busy" class="energrid-chat-working">Energrid is thinking…</p>
@@ -256,6 +264,13 @@ async function scrollToBottom() {
   margin: 6px 0 0;
   white-space: pre-wrap;
   line-height: 1.5;
+}
+.energrid-chat-message code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: #ffffff12;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  overflow-wrap: anywhere;
 }
 .energrid-chat-working { opacity: .65; }
 .energrid-chat-error {

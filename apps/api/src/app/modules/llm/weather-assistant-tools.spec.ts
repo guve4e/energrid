@@ -13,7 +13,7 @@ function evidence(overrides: Record<string, unknown> = {}) {
       capturedAt: new Date(now - 60_000).toISOString(),
       provider: 'open-meteo',
       model: 'icon_seamless',
-      location: 'Vidin',
+      location: 'Vidin', timeZone: 'Europe/Sofia',
       coverage: { expectedHours: 24, validHours: 24, complete: true },
       hours: Array.from({ length: 24 }, (_, i) => ({
         id: `hour:${i}`,
@@ -67,6 +67,11 @@ describe('LAB Weather assistant tools', () => {
     const reply = await tool.execute('request-a', { hours: 6 });
     expect(reply.details).toMatchObject({ status: 'available', horizonHours: 6, officialWarnings: 'unavailable', automationEligible: false });
     expect((reply.details as any).hours).toHaveLength(6);
+    expect((reply.details as any).timeZone).toBe('Europe/Sofia');
+    expect((reply.details as any).capturedAtLocal).toContain('11:14');
+    expect((reply.details as any).hours[0]).toMatchObject({
+      time: '2026-11-05T09:00:00.000Z', localTime: expect.stringContaining('11:00'),
+    });
     expect(String(fetch.mock.calls[0][0])).toContain('tenantId=tenant-a&siteId=site-a');
     expect(fetch.mock.calls[0][1]).toMatchObject({ headers: { authorization: 'Bearer lab-token' } });
   });
@@ -94,9 +99,9 @@ describe('LAB Weather assistant tools', () => {
   it('rejects a different tenant/site or unsupported contract version', async () => {
     const fetch = mockRead(evidence({ scope: { tenantId: 'tenant-b', siteId: 'site-a' } }));
     const tool = new WeatherAssistantTools().tools(scope)[0] as any;
-    expect((await tool.execute('a', {})).details).toMatchObject({ status: 'unavailable' });
+    expect((await tool.execute('a', {})).details).toMatchObject({ status: 'unavailable', reasonCode: 'scope_mismatch' });
     fetch.mockResolvedValue({ ok: true, json: async () => evidence({ version: 2 }) } as Response);
-    expect((await tool.execute('b', {})).details).toMatchObject({ status: 'unavailable' });
+    expect((await tool.execute('b', {})).details).toMatchObject({ status: 'unavailable', reasonCode: 'contract_mismatch' });
   });
 
   it('enforces freshness even when a malformed Core response says available', async () => {
@@ -122,14 +127,52 @@ describe('LAB Weather assistant tools', () => {
     const tool = new WeatherAssistantTools().tools(scope).find(tool => tool.name === 'weather_get_findings')! as any;
     const reply = await tool.execute('a', {});
     expect(reply.details).toMatchObject({ status: 'available', officialWarnings: 'unavailable', automationEligible: false });
-    expect((reply.details as any).findings).toEqual([expect.objectContaining({ eventType: 'rain', evidenceRefs: ['hour:3'] })]);
+    expect((reply.details as any).findings).toEqual([expect.objectContaining({
+      eventType: 'rain', evidenceRefs: ['hour:3'], startsAtLocal: expect.stringContaining('13:00'),
+    })]);
+  });
+
+
+  it('uses the Sofia daylight-saving offset in summer, not a hard-coded +2 hours', async () => {
+    const summerStart = Date.parse('2026-07-05T09:00:00.000Z');
+    const summerNow = summerStart + 15 * 60_000;
+    jest.setSystemTime(summerNow);
+    const body = evidence();
+    body.forecast.capturedAt = new Date(summerNow - 60_000).toISOString();
+    body.forecast.hours = body.forecast.hours.map((hour, index) => ({
+      ...hour, time: new Date(summerStart + index * 3_600_000).toISOString(),
+    }));
+    body.findings = [];
+    mockRead(body);
+    const reply = await (new WeatherAssistantTools().tools(scope)[0] as any).execute('summer', { hours: 6 });
+    expect(reply.details).toMatchObject({ status: 'available', timeZone: 'Europe/Sofia' });
+    expect(reply.details.hours[0].localTime).toContain('12:00');
+  });
+
+  it('reports bounded HTTP failure categories without exposing Core response bodies', async () => {
+    const fetch = jest.spyOn(global, 'fetch').mockResolvedValue({ status: 403, ok: false,
+      text: async () => 'sensitive backend response', } as Response);
+    const tool = new WeatherAssistantTools().tools(scope)[0] as any;
+    const forbidden = await tool.execute('forbidden', { hours: 6 });
+    expect(forbidden.details).toMatchObject({ status: 'unavailable', reasonCode: 'core_forbidden' });
+    expect(JSON.stringify(forbidden)).not.toContain('sensitive backend response');
+    fetch.mockRejectedValue(Object.assign(new Error('deadline exceeded'), { name: 'TimeoutError' }));
+    expect((await tool.execute('timeout', {})).details).toMatchObject({ reasonCode: 'core_timeout' });
+  });
+
+  it('does not mislabel a missing or invalid source timezone as Bulgarian local time', async () => {
+    mockRead(evidence({ forecast: { ...evidence().forecast, timeZone: 'not-an-iana-zone' } }));
+    const tool = new WeatherAssistantTools().tools(scope)[0] as any;
+    const reply = await tool.execute('timezone-fallback', { hours: 6 });
+    expect(reply.details).toMatchObject({ status: 'available', timeZone: 'UTC' });
+    expect(reply.details.hours[0].localTime).toContain('09:00');
   });
 
   it('fails closed when LAB mode, bridge token or upstream is unavailable', async () => {
     delete process.env.WEATHER_INVESTIGATOR_API_TOKEN;
     const fetch = jest.spyOn(global, 'fetch');
     const tool = new WeatherAssistantTools().tools(scope)[0] as any;
-    expect((await tool.execute('a', {})).details).toMatchObject({ status: 'unavailable' });
+    expect((await tool.execute('a', {})).details).toMatchObject({ status: 'unavailable', reasonCode: 'scope_or_token_missing' });
     expect(fetch).not.toHaveBeenCalled();
     process.env.WEATHER_INVESTIGATOR_API_TOKEN = 'lab-token';
     fetch.mockRejectedValue(new Error('network offline'));

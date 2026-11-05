@@ -120,3 +120,37 @@ production tenant authorization and ingress, official warning ingestion,
 notification outbox/delivery, and user-facing Markdown/time-zone formatting.
 The production Pi database and public deployment were not migrated or changed
 as part of this local acceptance.
+
+## Patch 08 — Assistant readability and Weather diagnostics (proposed; 5 November 2026)
+
+The LAB Weather read-model forecast adds a `timeZone` property sourced from
+Core's existing `WEATHER_TIMEZONE` (`Europe/Sofia`). The assistant tool keeps
+UTC ISO timestamps as canonical evidence and adds Bulgarian-local display
+labels (`capturedAtLocal`, `hours[].localTime`, and finding event-time labels).
+If an older Core omits the timezone or returns an invalid one, the tool labels
+its formatted times as `UTC`; it must not infer Sofia from the API or browser
+host timezone. **This is the existing Bulgarian Weather LAB policy, not yet
+per-site timezone configuration for international installations.**
+
+The two read-only Weather tools also expose bounded diagnostic `reasonCode`
+values on unavailable/stale/partial results, distinguishing Core HTTP
+unauthorized/forbidden/not-found, upstream timeout/connectivity, failed scope
+or contract verification, and incomplete/stale forecast evidence. Core response
+bodies, API tokens, site identifiers and transport exception details are not
+included in these diagnostics. This does not introduce an alert engine or
+change the authorization boundary.
+
+The Portal chat renders a deliberately limited **bold** and `inline code`
+subset of assistant formatting using escaped Vue text nodes rather than
+`v-html`. Other Markdown (including links) is still displayed literally.
+User messages remain plain text. The old welcome caveat claiming no connected
+tools is replaced with a capability-neutral statement.
+
+**Verification pending:** Apply on the Mac checkout based on committed
+`758bb5664fa608ac9a6c3b75bf6f63a0a3ab5755`; run the focused Core/API
+Jest and Portal Vitest suites, Core/API TypeScript checks, Portal build and
+documentation build. No live assistant acceptance, Pi migration, push or
+deployment is claimed for Patch 08. The shared observability instrumenter
+(`instrumentLocalTools`) was not in the selective review ZIP; end-to-end
+trace persistence, operator-facing Weather health, scheduled refresh/recovery,
+full site timezone policy, and notification delivery remain separate gates.
