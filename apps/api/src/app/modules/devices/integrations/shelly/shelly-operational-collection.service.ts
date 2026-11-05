@@ -9,11 +9,13 @@ import { DeviceDiscoveryMemoryStore } from '../../device-discovery-memory.store'
 import { DeviceLanDiscoveryService, ipInCidr } from '../../device-lan-discovery.service'
 import { PHYSICAL_DEVICE_INVENTORY_SERVICE } from '../../enrollment/physical-device-inventory.token'
 import type { PhysicalDeviceInventoryService } from '../../enrollment/physical-device-inventory.service'
-import { ShellyRouteResolver, type AuthorizedLocalShellyStatusTarget } from '../../shelly-route.resolver'
+import { ShellyRouteResolver, type AuthorizedLocalShellyStatusTarget, type ShellyReadRouteFailureCategory } from '../../shelly-route.resolver'
 import { parseShellySwitchStatus } from '../../adapters/inbound/shelly/shelly-switch-status'
 import { readOnlyShellyRpcDeviceInfoFromBody } from '../../adapters/inbound/shelly/read-only-shelly-rpc'
 import { readVerifiedShellySwitchStatus, shellySwitchStatusRpcUrl } from '../../adapters/outbound/network/shelly-switch-collection.adapter'
 import { ShellyRemoteObserverSupervisor, safeRemoteObserverError } from './shelly-remote-observer.supervisor'
+import { readVerifiedShellyEm1Status } from '../../adapters/outbound/network/shelly-em1-collection.adapter'
+import { isShellyHttpEm1Approval, shellyHttpEm1Approval, SHELLY_HTTP_EM1_SOURCE } from './shelly-http-em1-observation-approval'
 
 interface AcceptedShellyStatusObservation {
   output: boolean
@@ -152,6 +154,95 @@ export class ShellyOperationalCollectionService {
       clearTimeout(timeout)
     }
     return null
+  }
+
+  /** Shelly-specific eligibility. Storage and admission remain protocol-independent. */
+  async getHttpEm1PowerApproval(tenantId: string, siteId: string, deviceId: string) {
+    const current = await this.registry.getApprovedInstallation(tenantId, siteId, deviceId)
+    if (!current) return null
+    const { device, installation } = current
+    const physicalId = String(device.metadata?.physicalId || '')
+    const component = String(device.metadata?.component || '')
+    const channel = device.metadata?.channel
+    const directIdentity = device.metadata?.identityEvidenceSource === 'verified_shelly_http_rpc' &&
+      device.metadata?.componentEvidenceSource === 'verified_shelly_component_status_rpc'
+    const siteLocalIdentity = device.metadata?.identityEvidenceSource === 'verified_site_local_shelly_rpc' &&
+      device.metadata?.componentEvidenceSource === 'verified_site_local_shelly_rpc'
+    if (device.adapter.driver !== 'shelly-lan' || device.adapter.protocol !== 'http' || !device.adapter.configured ||
+        !(directIdentity || siteLocalIdentity) || !/^shelly[a-z0-9._-]{1,114}$/i.test(physicalId) ||
+        typeof channel !== 'number' || !Number.isInteger(channel) || channel < 0 || channel > 31 ||
+        component !== `em1:${channel}` || deviceId !== `${physicalId}:${component}` ||
+        !String(device.metadata?.verifiedMeasurementFields || '').split(',').includes('power') ||
+        device.metadata?.identityVerificationMethod !== 'GET /rpc/Shelly.GetDeviceInfo' ||
+        device.metadata?.componentVerificationMethod !== `EM1.GetStatus?id=${channel}`) return null
+    const expected = shellyHttpEm1Approval(deviceId)
+    const approved = isShellyHttpEm1Approval(installation.observationAuthority, deviceId)
+    return {
+      approved, approvalStatus: approved ? 'approved' as const :
+        installation.observationAuthority ? 'different_authority' as const : 'missing' as const,
+      sourceId: SHELLY_HTTP_EM1_SOURCE, selector: expected.bindings[0].selector,
+      endpoint: String(device.metadata?.ipAddress || ''),
+      networkScope: String(device.metadata?.networkScope || ''),
+      identityVerifiedAt: String(device.metadata?.identityVerifiedAt || ''),
+      componentVerifiedAt: String(device.metadata?.componentVerifiedAt || ''),
+      fields: [{ metric: 'power' as const, rawKey: 'power' as const, unit: 'W' as const, displayUnit: 'W' as const }],
+      installationUpdatedAt: installation.updatedAt,
+    }
+  }
+
+  /** Confirm a real site-owned EM1 read before recording administrator-approved power authority. */
+  async approveHttpEm1Power(input: {
+    tenantId: string; siteId: string; deviceId: string; actor: string; confirmedEndpoint: string;
+  }) {
+    const status = await this.getHttpEm1PowerApproval(input.tenantId, input.siteId, input.deviceId)
+    if (!status) return null
+    if (status.approved) return status
+    if (status.approvalStatus !== 'missing') {
+      throw new ConflictException('A different observation authority already exists; review it before replacement.')
+    }
+    const device = this.registry.getDevices(true).find(item =>
+      item.id === input.deviceId && item.tenantId === input.tenantId && item.siteId === input.siteId)
+    if (!device || !status.endpoint || status.endpoint !== input.confirmedEndpoint) {
+      throw new ConflictException('The EM1 endpoint differs from the reviewed installation.')
+    }
+    let routeFailure: ShellyReadRouteFailureCategory | undefined
+    const target = await this.routes.resolveAuthorizedLocalShellyEm1Target(
+      device, status.endpoint, category => { routeFailure = category },
+    )
+    if (!target || target.ipAddress !== input.confirmedEndpoint) {
+      const reasonCode = routeFailure || 'reviewed_endpoint_mismatch'
+      const action = em1RouteRemediation(reasonCode)
+      this.logger.warn(JSON.stringify({ event: 'shelly_http_em1_approval', outcome: 'rejected',
+        deviceId: input.deviceId, reasonCode }))
+      throw new ConflictException({
+        statusCode: 409,
+        error: 'Conflict',
+        code: reasonCode,
+        message: `EM1 power approval is blocked: ${reasonCode}. ${action}`,
+        action,
+      })
+    }
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), Math.min(httpPollTimeoutMs(), 2_500))
+    let reading: Awaited<ReturnType<typeof readVerifiedShellyEm1Status>>
+    try {
+      reading = await readVerifiedShellyEm1Status({
+        ipAddress: target.ipAddress, physicalId: target.physicalId,
+        component: target.component, channel: target.channel,
+      }, controller.signal)
+    } catch {
+      throw new BadGatewayException('Fresh Shelly identity and EM1 status verification failed; no approval was saved.')
+    } finally {
+      clearTimeout(timeout)
+    }
+    const saved = await this.registry.approveInstallationObservationAuthority({
+      tenantId: input.tenantId, siteId: input.siteId, deviceId: input.deviceId, actor: input.actor,
+      expectedUpdatedAt: status.installationUpdatedAt,
+      authority: shellyHttpEm1Approval(input.deviceId),
+      evidence: { sourceId: status.sourceId, selector: status.selector, fields: 'power',
+        ipAddress: target.ipAddress, verifiedAt: reading.observedAt },
+    })
+    return saved ? this.getHttpEm1PowerApproval(input.tenantId, input.siteId, input.deviceId) : null
   }
 
   /** Transitional wrapper for existing read-only poller tests and callers.
@@ -419,6 +510,41 @@ function safeDiagnosticToken(value: unknown, fallback: string): string {
   return typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(value)
     ? value
     : fallback
+}
+
+function em1RouteRemediation(reason: ShellyReadRouteFailureCategory | 'reviewed_endpoint_mismatch'): string {
+  switch (reason) {
+    case 'site_scope_authorization_missing':
+      return 'Authorize one Home observer for the installation scope, or reconcile the installation to an already authorized scope.'
+    case 'site_scope_authorization_ambiguous':
+      return 'Resolve the duplicate Home observer scope assignments before approving a source.'
+    case 'observer_identity_not_authorized':
+      return 'Add this verified physical Shelly identity to the authorized observer assignment.'
+    case 'observer_component_not_authorized':
+      return 'Add this exact EM1 component to the authorized observer assignment.'
+    case 'observer_assignment_ambiguous':
+      return 'Resolve duplicate observer assignments for this identity and component.'
+    case 'physical_inventory_assignment_mismatch':
+      return 'Reconcile the exact logical EM1 component assignment to its site-owned Physical Inventory record.'
+    case 'saved_identity_or_component_evidence_missing':
+      return 'Record fresh, authorized Shelly identity and EM1 component evidence through the site observer.'
+    case 'saved_endpoint_ambiguous':
+      return 'Reconcile the competing site-owned endpoints before approving a source.'
+    case 'observer_host_mismatch':
+    case 'observer_interface_scope_mismatch':
+      return 'Run this approval from the configured observer on its directly connected authorized interface.'
+    case 'observer_configuration_invalid':
+      return 'Correct the site observer configuration and retry the reviewed approval.'
+    case 'component_or_interface_not_explicitly_authorized':
+    case 'scope_not_authorized_for_local_observation':
+      return 'Authorize the exact component and its site network scope for read-only observation.'
+    case 'identity_or_component_binding_invalid':
+      return 'Reconcile the installed physical identity and EM1 component before approval.'
+    case 'observation_dependencies_or_enrollment_missing':
+      return 'Confirm the exact device is enrolled in this site and required inventory services are available.'
+    case 'reviewed_endpoint_mismatch':
+      return 'Reload the device review and confirm the currently saved endpoint.'
+  }
 }
 
 function isHttpTarget(value: string | undefined): value is string {

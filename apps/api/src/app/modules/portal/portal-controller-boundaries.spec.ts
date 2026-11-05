@@ -1,9 +1,11 @@
 import { NotFoundException, UnauthorizedException } from '@nestjs/common';
-import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA, SELF_DECLARED_DEPS_METADATA } from '@nestjs/common/constants';
 import { AccessJwtGuard, RoleGuard } from '../auth/auth.guard';
 import { PortalController } from './portal.controller';
 import { PortalDeviceTelemetryController } from './portal-device-telemetry.controller';
 import { PortalMqttDiagnosticsController } from './portal-mqtt-diagnostics.controller';
+import { DevicesModule } from '../devices/devices.module';
+import { ShellyOperationalCollectionService } from '../devices/integrations/shelly/shelly-operational-collection.service';
 
 const admin = { user: { userId: 'admin', role: 'admin', email: 'admin@example.test' }, headers: {} } as never;
 const anonymous = { headers: {} } as never;
@@ -35,6 +37,43 @@ describe('Portal controller boundary contracts', () => {
     expect(route(mqtt, 'getMqttBus')).toMatchObject({ path: 'bus/mqtt' });
     expect(route(mqtt, 'streamMqttBus')).toMatchObject({ path: 'bus/mqtt/events' });
     expect(route(mqtt, 'publishMqtt')).toMatchObject({ path: 'bus/mqtt/publish' });
+    expect(route(PortalController.prototype, 'getShellyHttpEm1Approval')).toMatchObject({
+      path: 'devices/:deviceId/shelly-http-em1-approval',
+    });
+    expect(route(PortalController.prototype, 'approveShellyHttpEm1')).toMatchObject({
+      path: 'devices/:deviceId/shelly-http-em1-approval',
+    });
+  });
+
+  it('injects the Shelly approval service through the Portal module boundary', () => {
+    const dependencies = Reflect.getMetadata(SELF_DECLARED_DEPS_METADATA, PortalController) || [];
+    expect(dependencies).toContainEqual({ index: 15, param: ShellyOperationalCollectionService });
+    expect(Reflect.getMetadata('exports', DevicesModule)).toContain(ShellyOperationalCollectionService);
+  });
+
+  it('keeps EM1 approval endpoints administrator-only and delegates site scope', async () => {
+    const approval = { endpoint: '192.0.2.20', sourceId: 'shelly-http-em1', selector: 'EM1.GetStatus?id=0' };
+    const getHttpEm1PowerApproval = jest.fn().mockResolvedValue(approval);
+    const approveHttpEm1Power = jest.fn().mockResolvedValue({ ...approval, approved: true });
+    const controller = Object.assign(Object.create(PortalController.prototype), {
+      deviceRegistry: { getSnapshot: () => ({ tenant: { id: 'tenant-a' }, site: { id: 'site-home' } }) },
+      shellyOperational: { getHttpEm1PowerApproval, approveHttpEm1Power },
+    }) as PortalController;
+
+    await expect(controller.getShellyHttpEm1Approval('device:em1:0', admin)).resolves.toEqual(approval);
+    expect(getHttpEm1PowerApproval).toHaveBeenCalledWith('tenant-a', 'site-home', 'device:em1:0');
+    await expect(controller.getShellyHttpEm1Approval('device:em1:0', anonymous)).rejects.toThrow(UnauthorizedException);
+    expect(getHttpEm1PowerApproval).toHaveBeenCalledTimes(1);
+
+    await expect(controller.approveShellyHttpEm1('device:em1:0', {
+      confirmedDeviceId: 'device:em1:0', approvedFields: ['power'], confirmedSourceId: approval.sourceId,
+      confirmedSelector: approval.selector, confirmedEndpoint: approval.endpoint,
+    }, admin)).resolves.toMatchObject({ approved: true });
+    expect(approveHttpEm1Power).toHaveBeenCalledWith(expect.objectContaining({
+      tenantId: 'tenant-a', siteId: 'site-home', deviceId: 'device:em1:0', confirmedEndpoint: approval.endpoint,
+    }));
+    await expect(controller.approveShellyHttpEm1('device:em1:0', {}, anonymous)).rejects.toThrow(UnauthorizedException);
+    expect(approveHttpEm1Power).toHaveBeenCalledTimes(1);
   });
 
   it('derives measurement scope from the registry and rejects anonymous calls', async () => {

@@ -23,6 +23,23 @@ export interface AuthorizedLocalShellyStatusTarget {
   interfaceAddress: string
 }
 
+export type ShellyReadRouteFailureCategory =
+  | 'observation_dependencies_or_enrollment_missing'
+  | 'identity_or_component_binding_invalid'
+  | 'observer_configuration_invalid'
+  | 'site_scope_authorization_missing'
+  | 'site_scope_authorization_ambiguous'
+  | 'observer_identity_not_authorized'
+  | 'observer_component_not_authorized'
+  | 'observer_assignment_ambiguous'
+  | 'component_or_interface_not_explicitly_authorized'
+  | 'scope_not_authorized_for_local_observation'
+  | 'observer_host_mismatch'
+  | 'observer_interface_scope_mismatch'
+  | 'physical_inventory_assignment_mismatch'
+  | 'saved_identity_or_component_evidence_missing'
+  | 'saved_endpoint_ambiguous'
+
 /** Shared site-owned installation, identity, and observer route validation.
  * No polling, command dispatch, or state mutation belongs here.
  */
@@ -43,7 +60,26 @@ export class ShellyRouteResolver {
     device: RegisteredDevice,
     expectedIpAddress?: string,
   ): Promise<AuthorizedLocalShellyStatusTarget | null> {
-    const reject = (reason: string, context: Record<string, string | number | boolean> = {}): null => {
+    return this.resolveAuthorizedLocalShellyReadTarget(device, 'switch', expectedIpAddress)
+  }
+
+  /** EM1 read authorization is independent of switch-control authorization. */
+  async resolveAuthorizedLocalShellyEm1Target(
+    device: RegisteredDevice,
+    expectedIpAddress?: string,
+    onRejected?: (category: ShellyReadRouteFailureCategory) => void,
+  ): Promise<AuthorizedLocalShellyStatusTarget | null> {
+    return this.resolveAuthorizedLocalShellyReadTarget(device, 'em1', expectedIpAddress, onRejected)
+  }
+
+  private async resolveAuthorizedLocalShellyReadTarget(
+    device: RegisteredDevice,
+    expectedKind: 'switch' | 'em1',
+    expectedIpAddress?: string,
+    onRejected?: (category: ShellyReadRouteFailureCategory) => void,
+  ): Promise<AuthorizedLocalShellyStatusTarget | null> {
+    const reject = (reason: ShellyReadRouteFailureCategory, context: Record<string, string | number | boolean> = {}): null => {
+      onRejected?.(reason)
       const key = `${device.id}:${reason}`
       if (!this.localShellyResolutionWarnings.has(key)) {
         this.localShellyResolutionWarnings.add(key)
@@ -59,8 +95,9 @@ export class ShellyRouteResolver {
         !device.tenantId || !device.siteId) return reject('observation_dependencies_or_enrollment_missing')
     const physicalId = String(device.metadata?.physicalId || '')
     const component = String(device.metadata?.component || '')
-    const match = /^(switch):(0|[1-9]|[12][0-9]|3[01])$/.exec(component)
+    const match = /^(switch|em1):(0|[1-9]|[12][0-9]|3[01])$/.exec(component)
     if (!/^shelly[a-z0-9._-]{1,114}$/i.test(physicalId) || !match ||
+        match[1] !== expectedKind ||
         device.id !== `${physicalId}:${component}`) return reject('identity_or_component_binding_invalid')
     const installationScope = String(device.metadata?.networkScope || '').trim()
     const installationScopeId = installationScope.includes(':')
@@ -140,7 +177,7 @@ export class ShellyRouteResolver {
           item.value === observer.id && item.scopeId === scopeId && item.interfaceName === observer.interfaceName) &&
         observations.some(item => item.source === 'site_local_http_rpc' && item.attribute === 'shelly.component_status' &&
           item.value === component && item.scopeId === scopeId && item.interfaceName === observer.interfaceName &&
-          item.method === `Switch.GetStatus?id=${match[2]}`)
+          item.method === `${expectedKind === 'switch' ? 'Switch' : 'EM1'}.GetStatus?id=${match[2]}`)
     }).map(record => [`${record.device.networkZoneId}:${record.device.ipAddress}`, record])).values()]
     if (endpoints.length !== 1) return reject(endpoints.length === 0
       ? 'saved_identity_or_component_evidence_missing'

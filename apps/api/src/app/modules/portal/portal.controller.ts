@@ -167,6 +167,7 @@ export class PortalController {
     @Optional()
     private readonly shellyRoutes?: ShellyRouteResolver,
     @Optional()
+    @Inject(ShellyOperationalCollectionService)
     private readonly shellyOperational?: ShellyOperationalCollectionService,
   ) {}
 
