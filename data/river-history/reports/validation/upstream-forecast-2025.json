@@ -1,0 +1,319 @@
+{
+  "developmentYear": 2024,
+  "evaluationYear": 2025,
+  "evaluationDates": 365,
+  "pairedComparison": "All models use the intersection of target dates with complete values required by all three predictors.",
+  "candidateSet": {
+    "localAlpha": [
+      -0.5,
+      0,
+      0.5,
+      1,
+      1.5
+    ],
+    "upstreamLagDays": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "upstreamBeta": [
+      -1,
+      -0.5,
+      0.5,
+      1
+    ]
+  },
+  "forecastAssumption": "Forecast issue date is target minus horizon. Inputs are observations no later than issue date; APPD publication latency is unknown. This is an offline daily hindcast, not operational accuracy.",
+  "horizons": {
+    "1": {
+      "developmentSelection": {
+        "localTrend": {
+          "developmentMaeCm": 12.0536,
+          "alpha": 0.5,
+          "beta": 0.0,
+          "upstreamLagDays": null,
+          "n": 364
+        },
+        "upstreamInformed": {
+          "developmentMaeCm": 13.0936,
+          "alpha": 0.5,
+          "beta": 0.5,
+          "upstreamLagDays": 6,
+          "n": 358
+        }
+      },
+      "evaluation": {
+        "persistence": {
+          "n": 365,
+          "maeCm": 12.0356,
+          "medianAbsErrorCm": 10.0,
+          "p90AbsErrorCm": 24.0,
+          "maxAbsErrorCm": 71.0,
+          "largestMisses": [
+            {
+              "date": "2025-04-01",
+              "errorCm": 71.0
+            },
+            {
+              "date": "2025-01-11",
+              "errorCm": 60.0
+            },
+            {
+              "date": "2025-03-21",
+              "errorCm": 55.0
+            },
+            {
+              "date": "2025-04-10",
+              "errorCm": 50.0
+            },
+            {
+              "date": "2025-08-05",
+              "errorCm": 43.0
+            }
+          ],
+          "rising": {
+            "n": 149,
+            "maeCm": 14.1342
+          },
+          "falling": {
+            "n": 202,
+            "maeCm": 11.3218
+          },
+          "unchanged": {
+            "n": 14,
+            "maeCm": 0.0
+          }
+        },
+        "localTrend": {
+          "n": 365,
+          "maeCm": 9.5397,
+          "medianAbsErrorCm": 7.0,
+          "p90AbsErrorCm": 21.5,
+          "maxAbsErrorCm": 65.5,
+          "largestMisses": [
+            {
+              "date": "2025-04-01",
+              "errorCm": 65.5
+            },
+            {
+              "date": "2025-01-11",
+              "errorCm": 55.5
+            },
+            {
+              "date": "2025-04-10",
+              "errorCm": 48.5
+            },
+            {
+              "date": "2025-03-21",
+              "errorCm": 46.0
+            },
+            {
+              "date": "2025-04-30",
+              "errorCm": 34.0
+            }
+          ],
+          "rising": {
+            "n": 149,
+            "maeCm": 10.896
+          },
+          "falling": {
+            "n": 202,
+            "maeCm": 8.953
+          },
+          "unchanged": {
+            "n": 14,
+            "maeCm": 3.5714
+          }
+        },
+        "upstreamInformed": {
+          "n": 365,
+          "maeCm": 12.4589,
+          "medianAbsErrorCm": 9.5,
+          "p90AbsErrorCm": 27.0,
+          "maxAbsErrorCm": 76.0,
+          "largestMisses": [
+            {
+              "date": "2025-04-01",
+              "errorCm": 76.0
+            },
+            {
+              "date": "2025-01-11",
+              "errorCm": 69.5
+            },
+            {
+              "date": "2025-03-21",
+              "errorCm": 51.0
+            },
+            {
+              "date": "2025-04-21",
+              "errorCm": 49.0
+            },
+            {
+              "date": "2025-05-19",
+              "errorCm": 49.0
+            }
+          ],
+          "rising": {
+            "n": 149,
+            "maeCm": 13.7919
+          },
+          "falling": {
+            "n": 202,
+            "maeCm": 11.8292
+          },
+          "unchanged": {
+            "n": 14,
+            "maeCm": 7.3571
+          }
+        }
+      }
+    },
+    "2": {
+      "developmentSelection": {
+        "localTrend": {
+          "developmentMaeCm": 19.3705,
+          "alpha": 0.5,
+          "beta": 0.0,
+          "upstreamLagDays": null,
+          "n": 363
+        },
+        "upstreamInformed": {
+          "developmentMaeCm": 20.3039,
+          "alpha": 0.5,
+          "beta": 0.5,
+          "upstreamLagDays": 6,
+          "n": 357
+        }
+      },
+      "evaluation": {
+        "persistence": {
+          "n": 365,
+          "maeCm": 21.8822,
+          "medianAbsErrorCm": 18.0,
+          "p90AbsErrorCm": 45.0,
+          "maxAbsErrorCm": 102.0,
+          "largestMisses": [
+            {
+              "date": "2025-01-12",
+              "errorCm": 102.0
+            },
+            {
+              "date": "2025-03-22",
+              "errorCm": 92.0
+            },
+            {
+              "date": "2025-04-02",
+              "errorCm": 84.0
+            },
+            {
+              "date": "2025-04-01",
+              "errorCm": 82.0
+            },
+            {
+              "date": "2025-03-21",
+              "errorCm": 73.0
+            }
+          ],
+          "rising": {
+            "n": 149,
+            "maeCm": 25.5101
+          },
+          "falling": {
+            "n": 202,
+            "maeCm": 20.2277
+          },
+          "unchanged": {
+            "n": 14,
+            "maeCm": 7.1429
+          }
+        },
+        "localTrend": {
+          "n": 365,
+          "maeCm": 19.0082,
+          "medianAbsErrorCm": 15.5,
+          "p90AbsErrorCm": 39.5,
+          "maxAbsErrorCm": 97.5,
+          "largestMisses": [
+            {
+              "date": "2025-01-12",
+              "errorCm": 97.5
+            },
+            {
+              "date": "2025-03-22",
+              "errorCm": 83.0
+            },
+            {
+              "date": "2025-04-02",
+              "errorCm": 78.5
+            },
+            {
+              "date": "2025-01-11",
+              "errorCm": 73.5
+            },
+            {
+              "date": "2025-04-01",
+              "errorCm": 71.5
+            }
+          ],
+          "rising": {
+            "n": 149,
+            "maeCm": 21.9832
+          },
+          "falling": {
+            "n": 202,
+            "maeCm": 17.7351
+          },
+          "unchanged": {
+            "n": 14,
+            "maeCm": 5.7143
+          }
+        },
+        "upstreamInformed": {
+          "n": 365,
+          "maeCm": 20.9315,
+          "medianAbsErrorCm": 17.0,
+          "p90AbsErrorCm": 44.0,
+          "maxAbsErrorCm": 111.5,
+          "largestMisses": [
+            {
+              "date": "2025-01-12",
+              "errorCm": 111.5
+            },
+            {
+              "date": "2025-04-02",
+              "errorCm": 89.0
+            },
+            {
+              "date": "2025-03-22",
+              "errorCm": 88.0
+            },
+            {
+              "date": "2025-04-01",
+              "errorCm": 88.0
+            },
+            {
+              "date": "2025-01-11",
+              "errorCm": 82.5
+            }
+          ],
+          "rising": {
+            "n": 149,
+            "maeCm": 24.1879
+          },
+          "falling": {
+            "n": 202,
+            "maeCm": 19.2426
+          },
+          "unchanged": {
+            "n": 14,
+            "maeCm": 10.6429
+          }
+        }
+      }
+    }
+  }
+}

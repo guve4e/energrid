@@ -10,6 +10,23 @@ The isolated baseline report is `data/river-history/reports/validation/lom-persi
 
 APPD's annual daily tables do not establish when a reading was published or first became available. The availability assumption is therefore hypothetical, and these retrospective scores are **not real-time operational accuracy**. The data supports a reproducible next-stage offline investigation, but not a claim of operational forecast readiness or a production forecast change.
 
+## M2.2 upstream forecast experiment (offline, verified 5 November 2026)
+
+The reproducible comparison is `apps/core/scripts/river-history/backtest-daily-persistence.py`; machine-readable results are `data/river-history/reports/validation/upstream-forecast-2025.json`. All three predictors were compared on the same 365 Lom target dates in 2025 at both horizons. Persistence predicts the Lom level at issue date. Local trend adds `alpha ×` the most recent daily Lom level change. Upstream-informed adds `beta ×` a lagged Novo Selo daily level change to that local trend. Changes are within-station differences, so the gauges' distinct zero elevations are not mixed as absolute levels.
+
+Model selection used 2024 only. The predefined local coefficient set was −0.5, 0, 0.5, 1, 1.5. Upstream candidates added coefficients −1, −0.5, 0.5, 1 and daily lags 1–7. For each horizon, 2024 MAE selected local alpha 0.5 and upstream alpha 0.5, beta 0.5, lag 6 days. No 2025 error selected parameters. Inputs end no later than issue date `target − horizon`; absent upstream history makes a candidate date ineligible during development. The reported 2025 comparison is paired on the common eligible target dates.
+
+| Horizon / approach | MAE (cm) | Change vs persistence | Rising MAE (n) | Falling MAE (n) | Unchanged MAE (n) | Median / p90 / max absolute error (cm) |
+|---|---:|---:|---:|---:|---:|---:|
+| +1 persistence | 12.0356 | baseline | 14.1342 (149) | 11.3218 (202) | 0.0000 (14) | 10 / 24 / 71 |
+| +1 local trend | 9.5397 | 20.7% lower | 10.8960 (149) | 8.9530 (202) | 3.5714 (14) | 7 / 21.5 / 65.5 |
+| +1 upstream-informed | 12.4589 | 3.5% higher | 13.7919 (149) | 11.8292 (202) | 7.3571 (14) | 9.5 / 27 / 76 |
+| +2 persistence | 21.8822 | baseline | 25.5101 (149) | 20.2277 (202) | 7.1429 (14) | 18 / 45 / 102 |
+| +2 local trend | 19.0082 | 13.1% lower | 21.9832 (149) | 17.7351 (202) | 5.7143 (14) | 15.5 / 39.5 / 97.5 |
+| +2 upstream-informed | 20.9315 | 4.3% lower | 24.1879 (149) | 19.2426 (202) | 10.6429 (14) | 17 / 44 / 111.5 |
+
+Largest misses were concentrated on fast changes: persistence missed by 71 cm on 2025-04-01 at +1 and 102 cm on 2025-01-12 at +2; local trend's corresponding largest misses were 65.5 cm (2025-04-01) and 97.5 cm (2025-01-12); upstream-informed reached 76 cm (2025-04-01) and 111.5 cm (2025-01-12). Local trend improved both horizons in this single holdout year. The upstream-informed approach did not consistently beat persistence and had larger worst misses, so the evidence does not justify adding upstream model complexity. This is one retrospective year and assumes daily values are available at the issue date; true publication latency remains unknown, so operational accuracy cannot be claimed.
+
 **Status:** prepared source change; database migration and end-to-end collection are **not yet verified or deployed**. Do not run the full Core migration backlog on the Pi or another shared database for this milestone.
 
 ## The two distinct records

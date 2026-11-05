@@ -26,6 +26,12 @@ class OfflineDailyTests(unittest.TestCase):
   targets={d:v for d,v in history.items() if d.year==2025}
   self.assertEqual(backtest.evaluate(history,targets,1)['all']['n'],2)
   self.assertEqual(backtest.evaluate(history,targets,2)['all']['n'],2)
+ def test_forecast_uses_only_issue_date_or_earlier_and_station_changes(self):
+  lom={date(2024,1,1):100.,date(2024,1,2):110.,date(2024,1,3):115.,date(2024,1,4):999.}
+  novo={date(2024,1,1):20.,date(2024,1,2):25.,date(2024,1,3):30.}
+  target=date(2024,1,4)
+  self.assertEqual(backtest.forecast(lom,novo,target,1,alpha=.5),117.5)
+  self.assertEqual(backtest.forecast(lom,novo,target,1,alpha=0,beta=1,lag=1),120.)
  def test_missing_metric_is_not_zero(self):
   row=extract.Reading(date(2024,1,1),10.,None,None)
   self.assertIsNone(row.discharge_m3s);self.assertIsNone(row.temperature_c)
