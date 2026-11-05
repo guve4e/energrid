@@ -13,7 +13,9 @@ Native site-bus readings / supported Shelly messages
   -> runtime-validated ElectricalReading v1
   -> local disk outbox (fsync; MQTT QoS 1 acknowledgment only after admission)
   -> retry/replay worker
-  -> telemetry.readings + durable dirty-hour queue (one transaction)
+  -> telemetry.measurements (canonical accepted measurement history)
+  -> telemetry.readings compatibility projection where the electrical rollup path is enabled
+  -> durable dirty-hour queue (one transaction with telemetry.readings)
   -> UTC hourly summaries (background worker)
 
 History reader -> pure consumption analysis -> portal API -> any dashboard
@@ -69,7 +71,8 @@ The adapter also accepts the existing full-status publisher's `shelly/status/<ph
 
 Do not wait a month to summarize. Every committed new reading marks its UTC hour and any adjacent hour within the integration boundary dirty. Every five minutes by default, the worker rebuilds up to 500 pending hours. It also runs after startup, catching up from the durable queue. Late/backfilled points dirty the same historical buckets. Workers claim work with row locks; successful work replaces the bucket rather than adding energy again.
 
-- `telemetry.readings`: immutable canonical samples, scoped by tenant/site/device/channel/metric/time.
+- `telemetry.measurements`: canonical raw history for accepted, normalized measurements across protocols and transports. The Portal generic-history API and electrical-chart compatibility API read this store under site/device/metric authorization.
+- `telemetry.readings`: electrical-specific rollup input samples, scoped by tenant/site/device/channel/metric/time. It is not the universal Portal history store. The Shelly Pro MQTT path currently writes a compatibility projection here for existing electrical rollups; HTTP EM1 and ESP8266 history are not projected into this table.
 - `telemetry.dirty_hours`: durable pending summary work, committed with each raw sample.
 - `telemetry.hourly`: versioned UTC summaries, sample counts, invalid counts, endpoint values/times, source and timestamp provenance, sample mean/min/max, counter resets, bracketed import/export power estimates and coverage.
 
@@ -78,6 +81,10 @@ Identical replay at the same measurement timestamp is a no-op. A conflicting val
 **No raw retention deletion is enabled.** Keep raw data until a separate retention policy is chosen and validated against archive/replay needs. Hourly summaries cannot preserve every detail of heating cycles or support arbitrary new statistics. Monthly/daily totals can be built from hourly energy/coverage; time-weighted averages must use covered time, not an average of averages. Local dates and DST stay presentation concerns; UTC hours remain unique.
 
 The existing page reads raw history (up to 31 days) for its detailed schedule/activity calculations. A separate authorized summary endpoint supports up to 366 days; it does not claim that pending/missing summary buckets are complete. Partial meter-assignment hours require raw history.
+
+The Devices electrical chart retains its existing `deviceId`, `metric`, `unit`, `from`, `to`, `measurements[]` contract and reads authorized rows from `telemetry.measurements`, bounded to 5,000 rows and downsampled to 1,200 chart points. That history is separate from Energy-page rollups: EM50 HTTP history can appear in the device chart while its readings remain absent from `telemetry.readings` and `telemetry.hourly`. No automatic store fallback or historical backfill is performed.
+
+Device history charts use the shared Portal `TimeSeriesChart` for normalized numeric points, axes, gap-separated trends, accessible sample markers, and summary statistics. Climate history and authorized Shelly electrical history keep their existing data-loading and authorization wrappers. Dense display markers are reduced to per-pixel minima and maxima using actual samples; summary values use all returned in-range samples. Long recording gaps are not joined. Min/median/max are shown for instantaneous power, temperature, and humidity; cumulative energy counters retain their kWh units and trend but do not present counter statistics as energy consumed.
 
 ## Durable delivery and its limits
 

@@ -43,7 +43,15 @@ export class PortalDeviceMeasurementsService {
         historyStatus = 'unavailable';
       } else {
         try {
-          summaries = await this.repository.summarize({ ...scope, deviceId: canonicalDeviceId, metrics });
+          const authorizedSourcesByMetric = Object.fromEntries(metrics.map(metric => [
+            metric,
+            this.intelligence.authorizedSourcesForMetric(model, metric),
+          ]));
+          summaries = await this.repository.summarize({
+            ...scope,
+            deviceId: canonicalDeviceId,
+            authorizedSourcesByMetric,
+          });
           historyStatus = summaries.length ? 'available'
             : metrics.some(metric => !CORE_MEASUREMENT_DEFINITIONS.some(definition => definition.metric === metric))
               ? 'unknown' : 'empty';
@@ -97,48 +105,22 @@ export class PortalDeviceMeasurementsService {
     toValue: unknown,
     limitValue?: unknown,
   ) {
-    const device = await this.intelligence.describeDevice(scope, deviceId);
-    if (!device || device.deviceId !== deviceId) throw new NotFoundException('Enrolled device was not found');
     const metric = parseMetric(metricValue);
     const { from, to, limit } = parseRange(fromValue, toValue, limitValue);
-
-    // Current Core state is also the active installation-authority check. Stale
-    // values remain authorized historical context; they are not current values.
-    let observations;
-    try {
-      observations = await this.intelligence.readObservations(scope, deviceId);
-    } catch {
-      throw new ServiceUnavailableException('Current observation authority is unavailable');
-    }
-    const authorized = observations?.fields[metric];
-    if (!authorized || typeof authorized.value !== 'number' || !Number.isFinite(authorized.value)) {
-      throw new ForbiddenException('Measurement history is not authorized for this device field');
-    }
-    if (!this.repository) throw new ServiceUnavailableException('Measurement history is unavailable');
-
-    let rows: Awaited<ReturnType<PostgresGenericMeasurementRepository['read']>>;
-    try {
-      rows = await this.repository.read({
-        ...scope,
-        deviceId,
-        componentId: 'device',
-        channel: metric,
-        metric,
-        from,
-        to,
-        limit,
-      });
-    } catch {
-      throw new ServiceUnavailableException('Measurement history is unavailable');
-    }
-    const definition = CORE_MEASUREMENT_DEFINITIONS.find(item => item.metric === metric);
+    const result = await this.intelligence.readAuthorizedMeasurementHistory(
+      scope, deviceId, metric, from, to, limit,
+    );
+    if (result.status === 'not_found') throw new NotFoundException('Enrolled device was not found');
+    if (result.status === 'unauthorized') throw new ForbiddenException('Measurement history is not authorized for this device field');
+    if (result.status === 'invalid_request') throw new BadRequestException('Choose a supported past range of up to 7 days');
+    if (result.status === 'unavailable') throw new ServiceUnavailableException('Measurement history is unavailable');
     return {
       deviceId,
       metric,
-      unit: rows[0]?.unit ?? definition?.unit ?? null,
+      unit: result.unit,
       from,
       to,
-      measurements: rows.map(({ observedAt, value, unit, quality }) => ({
+      measurements: result.measurements.map(({ observedAt, value, unit, quality }) => ({
         observedAt, value, unit, quality,
       })),
     };

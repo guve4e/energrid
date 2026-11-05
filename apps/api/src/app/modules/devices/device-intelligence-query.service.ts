@@ -3,7 +3,7 @@ import {
   type DeviceTargetRequest,
 } from './device-intelligence-target-resolver';
 import { randomUUID } from 'node:crypto';
-import { Inject } from '@nestjs/common';
+import { Inject, Optional } from '@nestjs/common';
 import { DEVICE_ENROLLMENT_SERVICE } from './enrollment/device-enrollment.module';
 import { Injectable } from '@nestjs/common';
 import { AuthorizedDeviceObservationReader } from './device-intelligence-observation-reader';
@@ -16,7 +16,13 @@ import {
 import { DeviceRegistryService } from './device-registry.service';
 import { DeviceInstallationStore } from './device-installation.store';
 import { DeviceEnrollmentService } from './enrollment/device-enrollment.service';
-import { CORE_MEASUREMENT_DEFINITIONS } from '@energrid/domain-telemetry';
+import { canonicalUtcInstant, CORE_MEASUREMENT_DEFINITIONS } from '@energrid/domain-telemetry';
+import { PostgresGenericMeasurementRepository } from '../telemetry/generic-measurements/postgres-generic-measurement.repository';
+import { TELEMETRY_CONFIG, type TelemetryConfig } from '../telemetry/telemetry.config';
+import {
+  DEFAULT_MAX_POWER_INTEGRATION_INTERVAL_MS,
+  estimatePowerEnergy,
+} from './power-energy-estimate';
 
 export interface IntelligenceScope {
   tenantId: string;
@@ -30,9 +36,15 @@ export interface IntelligenceDeviceDescription {
   assistantEnabled: boolean;
 }
 
+export interface MeasurementSourceBinding {
+  sourceId: string;
+  fields: readonly string[];
+}
+
 @Injectable()
 export class DeviceIntelligenceQueryService {
   private readonly installationDecisionsInProgress = new Set<string>();
+  private readonly maximumIntegratedPowerIntervalMs: number;
 
   constructor(
     private readonly registry: DeviceRegistryService,
@@ -40,7 +52,20 @@ export class DeviceIntelligenceQueryService {
     @Inject(DEVICE_ENROLLMENT_SERVICE)
     private readonly enrollment: DeviceEnrollmentService,
     private readonly observationReader: AuthorizedDeviceObservationReader,
-  ) {}
+    @Optional() @Inject(PostgresGenericMeasurementRepository)
+    private readonly measurementHistory: PostgresGenericMeasurementRepository | null = null,
+    @Optional() @Inject(TELEMETRY_CONFIG)
+    telemetryConfig: TelemetryConfig | null = null,
+  ) {
+    // Use the configured heartbeat when stricter, capped at the generic power
+    // writer's current five-minute default. This is an integration limit, not
+    // the chart's visual gap rule, and config cannot loosen it.
+    this.maximumIntegratedPowerIntervalMs = Math.min(
+      telemetryConfig?.historyPolicies?.power?.maxHeartbeatMs ??
+        DEFAULT_MAX_POWER_INTEGRATION_INTERVAL_MS,
+      DEFAULT_MAX_POWER_INTEGRATION_INTERVAL_MS,
+    );
+  }
 
   async listDevices(
     scope: IntelligenceScope,
@@ -578,6 +603,217 @@ export class DeviceIntelligenceQueryService {
     );
   }
 
+  /** Shared, site-scoped history read used by the Portal and assistant. */
+  async readAuthorizedMeasurementHistory(
+    scope: IntelligenceScope,
+    deviceId: string,
+    metric: string,
+    fromValue: string,
+    toValue: string,
+    limit = 1000,
+  ) {
+    if (!scope.tenantId?.trim() || !scope.siteId?.trim() || !deviceId?.trim() ||
+        !CORE_MEASUREMENT_DEFINITIONS.some(item => item.metric === metric) ||
+        !Number.isSafeInteger(limit) || limit < 1 || limit > 5000) {
+      return { status: 'invalid_request' as const };
+    }
+    let from: string;
+    let to: string;
+    try {
+      from = canonicalUtcInstant(fromValue, 'from');
+      to = canonicalUtcInstant(toValue, 'to');
+    } catch {
+      return { status: 'invalid_request' as const };
+    }
+    const duration = Date.parse(to) - Date.parse(from);
+    if (duration <= 0 || duration > 7 * 24 * 60 * 60_000 || Date.parse(to) > Date.now() + 30_000) {
+      return { status: 'invalid_request' as const };
+    }
+
+    const model = await this.readDeviceModel(scope, deviceId);
+    if (!model || model.identity.id.toLowerCase() !== deviceId.toLowerCase() ||
+        model.installation.status !== 'enrolled' ||
+        model.installation.tenantId !== scope.tenantId ||
+        model.installation.siteId !== scope.siteId) {
+      return { status: 'not_found' as const };
+    }
+    const authorizedMetrics: readonly string[] = model.history.authorizedMetrics;
+    if (!authorizedMetrics.includes(metric)) {
+      return { status: 'unauthorized' as const, deviceId: model.identity.id, metric };
+    }
+    const authorizedSources = this.authorizedSourcesForMetric(
+      model,
+      metric,
+    );
+    if (!authorizedSources.length) {
+      return { status: 'unauthorized' as const, deviceId: model.identity.id, metric };
+    }
+    if (!this.measurementHistory) {
+      return { status: 'unavailable' as const, deviceId: model.identity.id, metric };
+    }
+
+    try {
+      const measurements = await this.measurementHistory.read({
+        tenantId: scope.tenantId,
+        siteId: scope.siteId,
+        deviceId: model.identity.id,
+        componentId: 'device',
+        channel: metric,
+        metric,
+        from,
+        to,
+        limit,
+        sources: authorizedSources,
+      });
+      return {
+        status: 'available' as const,
+        deviceId: model.identity.id,
+        metric,
+        unit: measurements[0]?.unit ?? CORE_MEASUREMENT_DEFINITIONS.find(item => item.metric === metric)!.unit,
+        authorizedSources,
+        measurements,
+      };
+    } catch {
+      return { status: 'unavailable' as const, deviceId: model.identity.id, metric };
+    }
+  }
+
+  /** The persisted source/field bindings are the single authority for history reads. */
+  authorizedSourcesForMetric(
+    model: { observationAuthorization: { bindings: readonly MeasurementSourceBinding[] } },
+    metric: string,
+  ): string[] {
+    return [...new Set(model.observationAuthorization.bindings
+      .filter(binding => binding.fields.includes(metric))
+      .map(binding => binding.sourceId)
+      .filter(sourceId => typeof sourceId === 'string' && sourceId.trim().length > 0))];
+  }
+
+  /**
+   * Read a bounded summary from canonical accepted measurement history.
+   * Installation source/field authority and enrollment are resolved from the
+   * same device read model used by Portal history before PostgreSQL is queried.
+   */
+  async readMeasurementSummary(
+    scope: IntelligenceScope,
+    deviceQuery: string,
+    metricQuery: string,
+    rangeQuery: '1h' | '24h' | '7d' = '24h',
+  ) {
+    const metric = metricQuery.trim().toLowerCase();
+    const definition = CORE_MEASUREMENT_DEFINITIONS.find(item => item.metric === metric);
+    if (!scope.tenantId?.trim() || !scope.siteId?.trim() ||
+        !deviceQuery?.trim() || deviceQuery.length > 160 || !definition ||
+        !['1h', '24h', '7d'].includes(rangeQuery)) {
+      return { status: 'invalid_request' as const };
+    }
+
+    const query = deviceQuery.trim().toLocaleLowerCase();
+    const devices = await this.listDevices(scope);
+    const exactId = devices.filter(device => device.deviceId.toLocaleLowerCase() === query);
+    const exactName = exactId.length ? [] : devices.filter(device =>
+      device.displayName.trim().toLocaleLowerCase() === query,
+    );
+    const matches = exactId.length ? exactId : exactName;
+    if (!matches.length) return { status: 'not_found' as const };
+    if (matches.length !== 1) return { status: 'ambiguous' as const };
+
+    const device = matches[0];
+    if (!this.measurementHistory) {
+      return { status: 'unavailable' as const, deviceId: device.deviceId, metric };
+    }
+
+    const now = Date.now();
+    const to = new Date(now).toISOString();
+    const rangeMs = rangeQuery === '1h' ? 60 * 60_000
+      : rangeQuery === '7d' ? 7 * 24 * 60 * 60_000
+        : 24 * 60 * 60_000;
+    const from = new Date(now - rangeMs).toISOString();
+    try {
+      const historyResult = await this.readAuthorizedMeasurementHistory(
+        scope, device.deviceId, metric, from, to, 5000,
+      );
+      if (historyResult.status !== 'available') return historyResult;
+      const rows = historyResult.measurements;
+      const latest = await this.measurementHistory.latest({
+        tenantId: scope.tenantId,
+        siteId: scope.siteId,
+        deviceId: device.deviceId,
+        componentId: 'device',
+        channel: metric,
+        metric,
+        sources: historyResult.authorizedSources,
+      });
+      const measured = rows.filter(row => row.quality === 'measured' &&
+        typeof row.value === 'number' && Number.isFinite(row.value));
+      const values = measured.map(row => row.value as number).sort((a, b) => a - b);
+      const freshnessLimitSeconds = observationFreshnessLimitSeconds();
+      const latestAgeSeconds = latest && Number.isFinite(Date.parse(latest.observedAt)) &&
+        Date.parse(latest.observedAt) <= now && Date.parse(latest.receivedAt) <= now
+        ? Math.floor((now - Date.parse(latest.observedAt)) / 1000)
+        : null;
+      const current = !latest
+        ? { status: 'unavailable' as const }
+        : latest.quality !== 'measured' || typeof latest.value !== 'number'
+          ? { status: 'invalid' as const, value: null, unit: latest.unit,
+              observedAt: latest.observedAt, receivedAt: latest.receivedAt,
+              source: latest.source, provenance: latest.provenance,
+              authority: 'approved' as const }
+          : {
+              status: latestAgeSeconds !== null && latestAgeSeconds <= freshnessLimitSeconds
+                ? 'fresh' as const : latestAgeSeconds === null ? 'invalid' as const : 'stale' as const,
+              value: latest.value,
+              unit: latest.unit,
+              observedAt: latest.observedAt,
+              receivedAt: latest.receivedAt,
+              source: latest.source,
+              provenance: latest.provenance,
+              authority: 'approved' as const,
+              ageSeconds: latestAgeSeconds,
+              freshnessLimitSeconds,
+            };
+
+      return {
+        status: 'available' as const,
+        deviceId: device.deviceId,
+        displayName: device.displayName,
+        metric,
+        authority: 'approved' as const,
+        authorizedSources: historyResult.authorizedSources,
+        unit: latest?.unit ?? definition.unit,
+        range: { from, to, duration: rangeQuery },
+        current,
+        history: {
+          status: rows.length === 0 ? 'empty' as const
+            : rows.length === 5000 ? 'possibly_incomplete' as const : 'available' as const,
+          sampleCount: measured.length,
+          invalidSampleCount: rows.length - measured.length,
+          sources: [...new Set(rows.map(row => row.source))],
+          coverage: {
+            windowStart: from,
+            windowEnd: to,
+            firstObservedAt: rows[0]?.observedAt ?? null,
+            lastObservedAt: rows.at(-1)?.observedAt ?? null,
+            possiblyTruncated: rows.length === 5000,
+          },
+          ...(values.length ? {
+            minimum: values[0],
+            median: median(values),
+            maximum: values[values.length - 1],
+          } : {}),
+          ...(metric === 'power' ? {
+            energyEstimate: estimatePowerEnergy(
+              rows, from, to, this.maximumIntegratedPowerIntervalMs,
+            ),
+          } : {}),
+          unit: rows[0]?.unit ?? definition.unit,
+        },
+      };
+    } catch {
+      return { status: 'unavailable' as const, deviceId: device.deviceId, metric };
+    }
+  }
+
   /**
    * Canonical, read-only projection of an enrolled installation. Support,
    * observation authority, current state and command routing deliberately
@@ -809,4 +1045,11 @@ function normalizeRoom(value: string): string {
     return 'kitchen';
   }
   return normalized;
+}
+
+function median(sortedValues: readonly number[]): number {
+  const middle = Math.floor(sortedValues.length / 2);
+  return sortedValues.length % 2
+    ? sortedValues[middle]
+    : (sortedValues[middle - 1] + sortedValues[middle]) / 2;
 }

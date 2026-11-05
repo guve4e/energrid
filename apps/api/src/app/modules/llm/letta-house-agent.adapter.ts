@@ -24,6 +24,7 @@ import { DeviceControlService } from '../devices/device-control.service';
 import { ApprovedMqttObservationRuntime } from '../devices/mqtt/approved-mqtt-observation.runtime';
 import { FinanceAssistantTools } from './finance-assistant-tools';
 import { WeatherAssistantTools } from './weather-assistant-tools';
+import { CORE_MEASUREMENT_DEFINITIONS } from '@energrid/domain-telemetry';
 
 const HOUSE_CONVERSATION_TTL_MS = 30 * 60 * 1000;
 
@@ -194,6 +195,7 @@ export class LettaHouseAgentAdapter implements HouseAgentPort {
           'execute_approved_lighting_action',
           'propose_device_installation',
           'read_device_observation',
+          'read_device_measurement_history',
           'read_room_measurement',
           'read_device_health_history',
           'control_device',
@@ -219,6 +221,7 @@ export class LettaHouseAgentAdapter implements HouseAgentPort {
           toolName === 'execute_approved_lighting_action' ||
           toolName === 'propose_device_installation' ||
           toolName === 'read_device_observation' ||
+          toolName === 'read_device_measurement_history' ||
           toolName === 'read_room_measurement'
           || toolName === 'read_device_health_history'
           || weatherTools.some(tool => tool.name === toolName)
@@ -620,6 +623,40 @@ export class LettaHouseAgentAdapter implements HouseAgentPort {
           }
 
           return toolResult(observation);
+        },
+      },
+      {
+        name: 'read_device_measurement_history',
+        label: 'Read authorized device measurement history',
+        description: 'Read the latest accepted measurement and a bounded summary from Energrid canonical history. Requires an enrolled device and persisted source/field approval for the requested metric. Includes units, timestamps, freshness and sample coverage. Power history also includes a signed trapezoidal energy estimate over covered intervals only; partial coverage and gaps are explicit, and this is not measured cumulative energy or cost.',
+        parameters: {
+          type: 'object',
+          properties: {
+            device: { type: 'string', description: 'Exact enrolled device ID or saved friendly name.' },
+            metric: { type: 'string', enum: CORE_MEASUREMENT_DEFINITIONS.map(definition => definition.metric) },
+            range: { type: 'string', enum: ['1h', '24h', '7d'], description: 'History window; defaults to 24h.' },
+          },
+          required: ['device', 'metric'],
+          additionalProperties: false,
+        },
+        execute: async (_toolCallId, raw) => {
+          const args = raw && typeof raw === 'object' && !Array.isArray(raw)
+            ? raw as { device?: unknown; metric?: unknown; range?: unknown }
+            : {};
+          if (typeof args.device !== 'string' || !args.device.trim() || args.device.length > 160 ||
+              !CORE_MEASUREMENT_DEFINITIONS.some(definition => definition.metric === args.metric) ||
+              (args.range !== undefined && !['1h', '24h', '7d'].includes(String(args.range)))) {
+            return toolError('Provide an enrolled device, supported metric, and optional 1h, 24h or 7d range.');
+          }
+          const result = await this.intelligence.readMeasurementSummary(
+            scope,
+            args.device,
+            args.metric as string,
+            args.range as '1h' | '24h' | '7d' | undefined,
+          );
+          return result.status === 'invalid_request'
+            ? toolError('A supported measurement and bounded history range are required.')
+            : toolResult(result);
         },
       },
       {

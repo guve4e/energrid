@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { Pool } from 'pg';
 import { ClassicLevel } from 'classic-level';
 import { DeviceRegistryService } from './device-registry.service';
+import { DeviceIntelligenceQueryService } from './device-intelligence-query.service';
 import { DeviceInstallationStore } from './device-installation.store';
 import { DeviceEnrollmentService } from './enrollment/device-enrollment.service';
 import { PostgresDeviceEnrollmentRepository } from './enrollment/postgres-device-enrollment.repository';
@@ -22,22 +23,24 @@ import { TelemetrySpool } from '../telemetry/telemetry-spool';
 import { TelemetryIngestService } from '../telemetry/telemetry-ingest.service';
 import { telemetryConfig } from '../telemetry/telemetry.config';
 import { PortalDeviceElectricalMeasurementsService } from '../portal/portal-device-electrical-measurements.service';
+import { PortalDeviceMeasurementsService } from '../portal/portal-device-measurements.service';
 
-const databaseUrl = process.env.SHELLY_ACCEPTANCE_DATABASE_URL;
+const databaseUrl = process.env.SHELLY_ACCEPTANCE_DATABASE_URL || process.env.ENERGRID_ENROLLMENT_TEST_DATABASE_URL;
 const e2e = databaseUrl ? describe : describe.skip;
-const tenantId = 'tenant-demo';
-const siteId = 'site-home';
-const physicalId = 'shellypro2pm-ec6260888084';
-const physicalInventoryId = '8e15ec60-a22b-4f8c-ab09-5e61d44030f9';
-const topic = 'shelly/washer@other/events/rpc';
+const tenantId = `shelly-mqtt-test-${randomUUID()}`;
+const siteId = `site-${randomUUID()}`;
+const physicalId = `shellye2e${randomUUID().replaceAll('-', '').slice(0, 16)}`;
+const physicalInventoryId = randomUUID();
+const topic = `shelly/${physicalId}@other/events/rpc`;
 const components = ['switch:0', 'switch:1'] as const;
 const reportId = `site-observer-e2e-${randomUUID()}`;
 let evidenceAt: string;
 
 /**
- * Opt-in integration test for a disposable, migrated PostgreSQL database.
- * The test refuses remote or non-test databases and uses temporary LevelDB
- * directories. Set SHELLY_ACCEPTANCE_DATABASE_URL only for that isolated DB.
+ * Integration test for a disposable, migrated PostgreSQL database.
+ * The test refuses remote or non-test databases and uses unique identities
+ * plus temporary LevelDB directories. It accepts the repository's named
+ * enrollment integration database or a dedicated Shelly acceptance database.
  */
 e2e('Shelly MQTT measurement end-to-end acceptance (isolated PostgreSQL)', () => {
   let pool: Pool;
@@ -51,15 +54,17 @@ e2e('Shelly MQTT measurement end-to-end acceptance (isolated PostgreSQL)', () =>
   let telemetryStore: TelemetryStore;
   let genericRepository: PostgresGenericMeasurementRepository;
   let config: ReturnType<typeof telemetryConfig>;
+  let enrollment: DeviceEnrollmentService;
   let oldEnvironment: NodeJS.ProcessEnv;
   let schemaReady = false;
   let frozenNow: Date;
 
   beforeAll(async () => {
     const url = new URL(databaseUrl!);
+    const databaseName = url.pathname.slice(1);
     if (!['127.0.0.1', 'localhost', '::1'].includes(url.hostname) ||
-        !/^energrid_shelly_e2e_[a-z0-9_]+$/i.test(url.pathname.slice(1))) {
-      throw new Error('SHELLY_ACCEPTANCE_DATABASE_URL must point to a disposable localhost energrid_shelly_e2e_* database.');
+        !(databaseName === 'energrid_physical_inventory_test' || /^energrid_shelly_e2e_[a-z0-9_]+$/i.test(databaseName))) {
+      throw new Error('Shelly acceptance tests require a disposable localhost integration database.');
     }
     oldEnvironment = { ...process.env };
     frozenNow = new Date();
@@ -82,7 +87,7 @@ e2e('Shelly MQTT measurement end-to-end acceptance (isolated PostgreSQL)', () =>
     schemaReady = true;
     await cleanDisposableRecords();
     const now = frozenNow.toISOString();
-    const enrollment = new DeviceEnrollmentService(new PostgresDeviceEnrollmentRepository(pool), () => now,
+    enrollment = new DeviceEnrollmentService(new PostgresDeviceEnrollmentRepository(pool), () => now,
       () => randomUUID());
     tempDirectory = await mkdtemp(join(tmpdir(), 'energrid-shelly-acceptance-'));
     process.env.HOME_OBSERVATION_STORE_DIRECTORY = join(tempDirectory, 'observation-state');
@@ -190,8 +195,11 @@ e2e('Shelly MQTT measurement end-to-end acceptance (isolated PostgreSQL)', () =>
   it('writes and reads zero-watt observations for both existing logical components, while rejecting other source/site/identity and unapproved fields', async () => {
     const router = new DeviceMqttMessageRouter(registry, new DeviceObservationService(), telemetry,
       undefined, undefined, new PostgresDeviceEnrollmentRepository(pool), runtime);
-    const payload = { ...shellyPro2PmNotifyStatusFixture, params: {
+    const historyFrom = new Date(frozenNow.getTime() - 60_000).toISOString();
+    const historyTo = new Date(Date.now() + 5_000).toISOString();
+    const payload = { ...shellyPro2PmNotifyStatusFixture, src: physicalId, params: {
       ...shellyPro2PmNotifyStatusFixture.params,
+      ts: Math.floor(frozenNow.getTime() / 1000),
       'switch:0': { ...shellyPro2PmNotifyStatusFixture.params['switch:0'], apower: 0, current: 0.1, voltage: 230 },
       'switch:1': { ...shellyPro2PmNotifyStatusFixture.params['switch:1'], apower: 0, current: 0.2, voltage: 230 },
     } };
@@ -210,20 +218,26 @@ e2e('Shelly MQTT measurement end-to-end acceptance (isolated PostgreSQL)', () =>
     for (const component of components) {
       const deviceId = `${physicalId}:${component}`;
       const reading = await telemetryStore.read({ tenantId, siteId, deviceId, channel: component, metric: 'power' },
-        '2026-10-27T08:33:00.000Z', evidenceAt);
+        historyFrom, historyTo);
       expect(reading).toHaveLength(1);
       expect(reading[0]).toMatchObject({ value: 0, unit: 'W', timestampBasis: 'device-observed', source: 'shelly-mqtt' });
       const generic = await genericRepository.read({
         tenantId, siteId, deviceId, componentId: 'device', channel: 'power', metric: 'power',
-        from: '2026-10-27T08:33:00.000Z', to: new Date(Date.now() + 60_000).toISOString(), limit: 10,
+        from: historyFrom, to: historyTo, limit: 10,
       });
       expect(generic).toHaveLength(1);
       expect(generic[0]).toMatchObject({ value: 0, unit: 'W', quality: 'measured', source: 'shelly-mqtt' });
 
-      const portal = new PortalDeviceElectricalMeasurementsService(registry, telemetryStore);
-      await expect(portal.history(deviceId, 'power', '2026-10-27T08:33:00.000Z', evidenceAt))
+      const intelligence = new DeviceIntelligenceQueryService(registry, installStore, enrollment, {
+        read: (scope, requestedDeviceId) => runtime.getAuthorizedObservation(scope, requestedDeviceId),
+      } as never, genericRepository);
+      const genericHistory = new PortalDeviceMeasurementsService(intelligence, genericRepository);
+      const portal = new PortalDeviceElectricalMeasurementsService(registry, genericHistory);
+      const genericPortalHistory = await genericHistory.history({ tenantId, siteId }, deviceId, 'power', historyFrom, historyTo, 5000);
+      expect(genericPortalHistory.measurements).toEqual([expect.objectContaining({ value: 0, quality: 'measured' })]);
+      await expect(portal.history(deviceId, 'power', historyFrom, historyTo))
         .resolves.toMatchObject({ deviceId, metric: 'power', unit: 'W', measurements: [expect.objectContaining({ value: 0 })] });
-      const installation = await installStore.get(siteId, deviceId);
+      const installation = await installStore.get({ tenantId, siteId }, deviceId);
       expect(installation?.device.metadata?.physicalId).toBe(physicalId);
       expect(installation?.device.metadata?.component).toBe(component);
       expect(installation?.device.metadata?.identityEvidenceSource).toBe('verified_site_local_shelly_rpc');
@@ -251,7 +265,7 @@ e2e('Shelly MQTT measurement end-to-end acceptance (isolated PostgreSQL)', () =>
     expect(unapprovedEnergy).toMatchObject({ outcome: 'rejected', reasonCode: 'observation_authority_missing' });
     const stillPowerOnly = await genericRepository.read({
       tenantId, siteId, deviceId: `${physicalId}:switch:0`, componentId: 'device', channel: 'energy_import_total',
-      metric: 'energy_import_total', from: '2026-10-27T08:33:00.000Z', to: new Date(Date.now() + 60_000).toISOString(),
+      metric: 'energy_import_total', from: historyFrom, to: historyTo,
     });
     expect(stillPowerOnly).toHaveLength(0);
   });

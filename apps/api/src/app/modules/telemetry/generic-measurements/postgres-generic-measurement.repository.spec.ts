@@ -34,22 +34,91 @@ describe('PostgresGenericMeasurementRepository', () => {
     expect(query.mock.calls[0][0]).toContain("'History enrollment reference','enrolled',now(),now(),1");
   });
 
-  it('summarizes only explicitly authorized supported measurement streams', async () => {
+  it('summarizes each metric only from its own authorized sources and exact device scope', async () => {
     const query = jest.fn().mockResolvedValue({ rows: [
       { metric: 'temperature', count: 8, oldest: new Date('2026-10-23T10:00:00.000Z'), newest: new Date('2026-10-24T10:00:00.000Z') },
     ] });
     const repository = new PostgresGenericMeasurementRepository({ query } as never);
     await expect(repository.summarize({
       tenantId: 'tenant-a', siteId: 'site-a', deviceId: 'device-a',
-      metrics: ['temperature', 'humidity', 'not_a_measurement'],
+      authorizedSourcesByMetric: {
+        temperature: ['source-temperature'],
+        humidity: ['source-humidity'],
+        not_a_measurement: ['source-other'],
+      },
     })).resolves.toEqual([{
       metric: 'temperature', count: 8,
       oldest: '2026-10-23T10:00:00.000Z', newest: '2026-10-24T10:00:00.000Z',
     }]);
     expect(query).toHaveBeenCalledWith(expect.stringContaining("component_id='device'"), [
-      'tenant-a', 'site-a', 'device-a', ['temperature', 'humidity'],
+      'tenant-a', 'site-a', 'device-a', 'temperature', ['source-temperature'],
+      'humidity', ['source-humidity'],
+    ]);
+    expect(query.mock.calls[0][0]).toContain('(metric=$4 AND source=ANY($5::text[]))');
+    expect(query.mock.calls[0][0]).toContain('(metric=$6 AND source=ANY($7::text[]))');
+    expect(query.mock.calls[0][0]).toContain('tenant_id=$1 AND site_id=$2 AND device_id=$3');
+  });
+
+  it('does not run an unrestricted summary query when no metric has an approved source', async () => {
+    const query = jest.fn();
+    const repository = new PostgresGenericMeasurementRepository({ query } as never);
+
+    await expect(repository.summarize({
+      tenantId: 'tenant-a', siteId: 'site-a', deviceId: 'device-a',
+      authorizedSourcesByMetric: { temperature: [], humidity: ['  '] },
+    })).resolves.toEqual([]);
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('reads the latest sample by exact tenant, site, component, channel and metric', async () => {
+    const row = {
+      schema_version: 1, tenant_id: 'tenant-a', site_id: 'site-a', device_id: 'device-a',
+      physical_device_id: null, component_id: 'device', channel: 'power', metric: 'power',
+      unit: 'W', value: 42, quality: 'measured', source: 'approved-http-adapter',
+      provenance: 'binding-1', sample_id: 'sample-latest',
+      observed_at: new Date('2026-10-24T10:00:00.000Z'),
+      received_at: new Date('2026-10-24T10:00:01.000Z'),
+    };
+    const query = jest.fn().mockResolvedValue({ rows: [row] });
+    const repository = new PostgresGenericMeasurementRepository({ query } as never);
+
+    await expect(repository.latest({
+      tenantId: 'tenant-a', siteId: 'site-a', deviceId: 'device-a',
+      componentId: 'device', channel: 'power', metric: 'power',
+    })).resolves.toMatchObject({
+      deviceId: 'device-a', metric: 'power', value: 42,
+      observedAt: '2026-10-24T10:00:00.000Z',
+    });
+    expect(query).toHaveBeenCalledWith(expect.stringContaining(
+      'ORDER BY observed_at DESC,received_at DESC,sample_id DESC LIMIT 1',
+    ), ['tenant-a', 'site-a', 'device-a', 'device', 'power', 'power']);
+  });
+
+  it('restricts history and latest sample to approved observation sources when provided', async () => {
+    const query = jest.fn().mockResolvedValue({ rows: [] });
+    const repository = new PostgresGenericMeasurementRepository({ query } as never);
+    const identity = {
+      tenantId: 'tenant-a', siteId: 'site-a', deviceId: 'device-a',
+      componentId: 'device', channel: 'power', metric: 'power',
+      sources: ['approved-http-adapter'],
+    };
+    const from = '2026-10-24T09:00:00.000Z';
+    const to = '2026-10-24T10:00:00.000Z';
+
+    await repository.latest(identity);
+    await repository.read({ ...identity, from, to, limit: 25 });
+
+    expect(query.mock.calls[0][0]).toContain('source=ANY($7::text[])');
+    expect(query.mock.calls[0][1]).toEqual([
+      'tenant-a', 'site-a', 'device-a', 'device', 'power', 'power', ['approved-http-adapter'],
+    ]);
+    expect(query.mock.calls[1][0]).toContain('source=ANY($10::text[])');
+    expect(query.mock.calls[1][1]).toEqual([
+      'tenant-a', 'site-a', 'device-a', 'device', 'power', 'power', from, to, 25,
+      ['approved-http-adapter'],
     ]);
   });
+
 
   it('validates before writing and inserts with full tenant/site/sample identity', async () => {
     const query = jest.fn().mockResolvedValue({ rowCount: 1, rows: [{ sample_id: 'sample-1' }] });

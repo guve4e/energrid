@@ -1,5 +1,7 @@
 import { DeviceIntelligenceQueryService } from './device-intelligence-query.service';
 import { energridHttpObservationApproval } from './adapters/inbound/energrid/energrid-http-observation-approval';
+import { shellyHttpEm1Approval } from './integrations/shelly/shelly-http-em1-observation-approval';
+import { shellyMqttObservationApproval } from './adapters/inbound/shelly/shelly-mqtt-observation-approval';
 
 const scope = { tenantId: 'tenant-lab', siteId: 'site-lab' };
 const observedAt = new Date().toISOString();
@@ -15,10 +17,13 @@ function fixture(input: {
   control?: any;
   configured?: boolean;
   discovery?: any;
+  displayName?: string;
+  measurementHistory?: any;
+  telemetryConfig?: any;
 }) {
   const device = {
     id: input.id, ...scope, siteName: 'LAB', kind: 'physical' as const,
-    trustStatus: input.trustStatus ?? 'approved', displayName: input.id,
+    trustStatus: input.trustStatus ?? 'approved', displayName: input.displayName ?? input.id,
     zoneId: 'room', zoneName: 'Room', metadata: { physicalId: input.id },
     capabilities: input.capabilities ?? [],
     supportedCapabilities: input.supportedCapabilities ?? [],
@@ -48,6 +53,7 @@ function fixture(input: {
   };
   const service = new DeviceIntelligenceQueryService(
     registry as never, installations as never, enrollment as never, observationReader as never,
+    input.measurementHistory as never, input.telemetryConfig as never,
   );
   return { service, device, installation, enrollment, installations, observationReader };
 }
@@ -109,6 +115,25 @@ describe('DeviceIntelligenceQueryService canonical device read model', () => {
     expect(model?.current.observations).toHaveProperty('energy');
   });
 
+  it.each([
+    ['HTTP EM50', 'shellyproem50-8c4f00dbd258:em1:0', (id: string) => shellyHttpEm1Approval(id)],
+    ['MQTT Pro 2PM', 'shellypro2pm-ec6260888084:switch:0', (id: string) => shellyMqttObservationApproval(id)],
+  ])('projects transport-independent power history authorization for %s', async (_label, id, approval) => {
+    const h = fixture({ id, authority: approval(id), observedFields: undefined });
+    const model = await h.service.readDeviceModel(scope, id);
+    expect(model?.history.authorizedMetrics).toEqual(['power']);
+    expect(model?.observationAuthorization.bindings).toEqual([expect.objectContaining({ fields: ['power'] })]);
+    expect(model?.history.endpoint).toContain(encodeURIComponent(id));
+  });
+
+  it('updates history eligibility when the persisted source authority is removed', async () => {
+    const id = 'shellyproem50-8c4f00dbd258:em1:0';
+    const h = fixture({ id, authority: shellyHttpEm1Approval(id) });
+    await expect(h.service.readDeviceModel(scope, id)).resolves.toMatchObject({ history: { authorizedMetrics: ['power'] } });
+    h.installation.observationAuthority = undefined;
+    await expect(h.service.readDeviceModel(scope, id)).resolves.toMatchObject({ history: { authorizedMetrics: [] } });
+  });
+
   it('combines sensing and switching without conflating their authorities', async () => {
     const id = 'multi-device';
     const h = fixture({ id, authority: energridHttpObservationApproval('device:lab-lan:esp8266:324864'), observedFields: { temperature: 21 } });
@@ -153,5 +178,125 @@ describe('DeviceIntelligenceQueryService canonical device read model', () => {
     const model = await h.service.readDeviceModel(scope, id.toUpperCase());
     expect(model?.identity.id).toBe(id);
     expect(model?.observationAuthorization.status).toBe('approved');
+  });
+
+  describe('authorized canonical measurement summaries', () => {
+    const em50Id = 'shellyproem50-8c4f00dbd258:em1:0';
+
+    function measurementRow(id = em50Id, source = 'shelly-http-em1', overrides: Record<string, unknown> = {}) {
+      const timestamp = new Date(Date.now() - 2_000).toISOString();
+      return {
+        tenantId: scope.tenantId, siteId: scope.siteId, deviceId: id,
+        physicalDeviceId: id.split(':')[0], componentId: 'device',
+        channel: 'power', metric: 'power', unit: 'W', value: 1483.3,
+        quality: 'measured', source, provenance: `approved:${source}`,
+        sampleId: 'sample-1', observedAt: timestamp, receivedAt: timestamp,
+        ...overrides,
+      };
+    }
+
+    it.each([
+      ['HTTP EM50', em50Id, (id: string) => shellyHttpEm1Approval(id), 'shelly-http-em1'],
+      ['MQTT Pro 2PM', 'shellypro2pm-ec6260888084:switch:0', (id: string) => shellyMqttObservationApproval(id), 'shelly-mqtt'],
+    ])('%s measurements use the same PostgreSQL read for current and history', async (_label, id, approve, source) => {
+      const latest = measurementRow(id as string, source as string);
+      const prior = measurementRow(id as string, source as string, { sampleId: 'sample-0', value: 1200, observedAt: new Date(Date.now() - 60_000).toISOString() });
+      const history = { latest: jest.fn().mockResolvedValue(latest), read: jest.fn().mockResolvedValue([prior, latest]) };
+      const h = fixture({
+        id: id as string,
+        displayName: 'House Mainline',
+        authority: (approve as (id: string) => unknown)(id as string),
+        observedFields: undefined,
+        measurementHistory: history,
+      });
+
+      const byId = await h.service.readMeasurementSummary(scope, id as string, 'power', '24h');
+      const byName = await h.service.readMeasurementSummary(scope, 'House Mainline', 'power', '24h');
+      expect(byId).toMatchObject({
+        status: 'available', deviceId: id, displayName: 'House Mainline', metric: 'power', unit: 'W',
+        current: { status: 'fresh', value: 1483.3, source, observedAt: latest.observedAt },
+        history: {
+          status: 'available', sampleCount: 2, minimum: 1200, median: 1341.65, maximum: 1483.3, unit: 'W', sources: [source],
+          energyEstimate: {
+            status: 'partial_estimate', method: 'trapezoidal', signedEnergyKwh: expect.any(Number),
+            coveredDurationSeconds: expect.any(Number), requestedDurationSeconds: 86400,
+            maximumIntegratedIntervalSeconds: 300, uncoveredGaps: expect.any(Array),
+          },
+        },
+      });
+      const coveredSeconds = (byId as { history: { energyEstimate: { coveredDurationSeconds: number } } })
+        .history.energyEstimate.coveredDurationSeconds;
+      expect(coveredSeconds).toBeGreaterThanOrEqual(50);
+      expect(coveredSeconds).toBeLessThanOrEqual(60);
+      expect(byName).toMatchObject({ status: 'available', deviceId: id });
+      expect(history.latest).toHaveBeenCalledWith(expect.objectContaining({ tenantId: scope.tenantId, siteId: scope.siteId, deviceId: id, componentId: 'device', channel: 'power', metric: 'power', sources: [source] }));
+      expect(history.read).toHaveBeenCalledWith(expect.objectContaining({ tenantId: scope.tenantId, siteId: scope.siteId, deviceId: id, componentId: 'device', channel: 'power', metric: 'power', limit: 5000, sources: [source] }));
+    });
+
+    it('rejects a field without persisted source approval and never resolves outside the authenticated site', async () => {
+      const history = { latest: jest.fn(), read: jest.fn() };
+      const h = fixture({ id: em50Id, authority: shellyHttpEm1Approval(em50Id), measurementHistory: history });
+      await expect(h.service.readMeasurementSummary(scope, em50Id, 'humidity'))
+        .resolves.toEqual({ status: 'unauthorized', deviceId: em50Id, metric: 'humidity' });
+      await expect(h.service.readMeasurementSummary({ ...scope, siteId: 'site-other' }, em50Id, 'power'))
+        .resolves.toEqual({ status: 'not_found' });
+      await expect(h.service.readMeasurementSummary(scope, `${em50Id}-other`, 'power'))
+        .resolves.toEqual({ status: 'not_found' });
+      expect(history.latest).not.toHaveBeenCalled();
+      expect(history.read).not.toHaveBeenCalled();
+    });
+
+    it('rechecks source and field authority on each read and adds no device permissions', async () => {
+      const latest = measurementRow();
+      const history = { latest: jest.fn().mockResolvedValue(latest), read: jest.fn().mockResolvedValue([latest]) };
+      const h = fixture({ id: em50Id, authority: shellyHttpEm1Approval(em50Id), measurementHistory: history });
+      const before = structuredClone(h.device.capabilities);
+      await expect(h.service.readMeasurementSummary(scope, em50Id, 'power'))
+        .resolves.toMatchObject({ status: 'available', authority: 'approved' });
+      h.installation.observationAuthority = undefined;
+      await expect(h.service.readMeasurementSummary(scope, em50Id, 'power'))
+        .resolves.toEqual({ status: 'unauthorized', deviceId: em50Id, metric: 'power' });
+      expect(h.device.capabilities).toEqual(before);
+      expect(history.latest).toHaveBeenCalledTimes(1);
+      expect(history.read).toHaveBeenCalledTimes(1);
+    });
+
+    it('uses a stricter configured power heartbeat but never loosens the five-minute integration cap', async () => {
+      const latest = measurementRow(em50Id, 'shelly-http-em1', { observedAt: new Date(Date.now() - 2_000).toISOString() });
+      const prior = measurementRow(em50Id, 'shelly-http-em1', { sampleId: 'older', observedAt: new Date(Date.now() - 8 * 60_000).toISOString() });
+      const history = { latest: jest.fn().mockResolvedValue(latest), read: jest.fn().mockResolvedValue([prior, latest]) };
+      const h = fixture({
+        id: em50Id,
+        authority: shellyHttpEm1Approval(em50Id),
+        measurementHistory: history,
+        telemetryConfig: { historyPolicies: { power: { meaningfulChange: 5, maxHeartbeatMs: 10 * 60_000 } } },
+      });
+      await expect(h.service.readMeasurementSummary(scope, em50Id, 'power', '1h'))
+        .resolves.toMatchObject({ history: { energyEstimate: { status: 'insufficient_coverage', signedEnergyKwh: null, maximumIntegratedIntervalSeconds: 300 } } });
+    });
+
+    it('distinguishes missing, stale, invalid, and possibly incomplete history', async () => {
+      const emptyHistory = { latest: jest.fn().mockResolvedValue(null), read: jest.fn().mockResolvedValue([]) };
+      const missing = fixture({ id: em50Id, authority: shellyHttpEm1Approval(em50Id), measurementHistory: emptyHistory });
+      await expect(missing.service.readMeasurementSummary(scope, em50Id, 'power'))
+        .resolves.toMatchObject({ current: { status: 'unavailable' }, history: { status: 'empty', sampleCount: 0, coverage: { firstObservedAt: null } } });
+
+      const staleRow = measurementRow(em50Id, 'shelly-http-em1', { observedAt: '2020-01-01T00:00:00.000Z', receivedAt: '2020-01-01T00:00:01.000Z' });
+      const staleHistory = { latest: jest.fn().mockResolvedValue(staleRow), read: jest.fn().mockResolvedValue([]) };
+      const stale = fixture({ id: em50Id, authority: shellyHttpEm1Approval(em50Id), measurementHistory: staleHistory });
+      await expect(stale.service.readMeasurementSummary(scope, em50Id, 'power'))
+        .resolves.toMatchObject({ current: { status: 'stale', value: 1483.3 }, history: { status: 'empty' } });
+
+      const invalidHistory = { latest: jest.fn().mockResolvedValue(measurementRow(em50Id, 'shelly-http-em1', { quality: 'invalid', value: null })), read: jest.fn().mockResolvedValue([]) };
+      const invalid = fixture({ id: em50Id, authority: shellyHttpEm1Approval(em50Id), measurementHistory: invalidHistory });
+      await expect(invalid.service.readMeasurementSummary(scope, em50Id, 'power'))
+        .resolves.toMatchObject({ current: { status: 'invalid', value: null } });
+
+      const boundedRows = Array.from({ length: 5000 }, (_, index) => measurementRow(em50Id, 'shelly-http-em1', { sampleId: `sample-${index}`, value: index }));
+      const fullHistory = { latest: jest.fn().mockResolvedValue(measurementRow()), read: jest.fn().mockResolvedValue(boundedRows) };
+      const full = fixture({ id: em50Id, authority: shellyHttpEm1Approval(em50Id), measurementHistory: fullHistory });
+      await expect(full.service.readMeasurementSummary(scope, em50Id, 'power'))
+        .resolves.toMatchObject({ history: { status: 'possibly_incomplete', sampleCount: 5000 } });
+    });
   });
 });

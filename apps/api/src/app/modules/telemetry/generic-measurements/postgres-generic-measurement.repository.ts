@@ -180,6 +180,7 @@ export class PostgresGenericMeasurementRepository {
     from: string;
     to: string;
     limit?: number;
+    sources?: readonly string[];
   }): Promise<GenericMeasurement[]> {
     const from = new Date(canonicalReadTime(input.from));
     const to = new Date(canonicalReadTime(input.to));
@@ -195,14 +196,54 @@ export class PostgresGenericMeasurementRepository {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100_000) {
       throw new Error('Invalid measurement history limit');
     }
+    const sources = input.sources ? [...new Set(input.sources)].filter(value => value.trim()) : null;
+    if (sources && !sources.length) return [];
+    const sourceClause = sources ? ' AND source=ANY($10::text[])' : '';
+    const params: unknown[] = [...identifiers, from.toISOString(), to.toISOString(), limit];
+    if (sources) params.push(sources);
     const result = await this.pool.query(
       `SELECT ${COLUMNS} FROM telemetry.measurements
        WHERE tenant_id=$1 AND site_id=$2 AND device_id=$3 AND component_id=$4
          AND channel=$5 AND metric=$6 AND observed_at >= $7 AND observed_at < $8
+         ${sourceClause}
        ORDER BY observed_at,sample_id LIMIT $9`,
-      [...identifiers, from.toISOString(), to.toISOString(), limit],
+      params,
     );
     return result.rows.map(row => fromRow(row, this.definitions));
+  }
+
+  /** Return the newest accepted sample for one already-authorized stream. */
+  async latest(input: {
+    tenantId: string;
+    siteId: string;
+    deviceId: string;
+    componentId: string;
+    channel: string;
+    metric: string;
+    sources?: readonly string[];
+  }): Promise<GenericMeasurement | null> {
+    const identifiers = [input.tenantId, input.siteId, input.deviceId,
+      input.componentId, input.channel, input.metric];
+    if (identifiers.some(item => typeof item !== 'string' || !item.trim())) {
+      throw new Error('Measurement history identity is required');
+    }
+    if (!this.definitions.some(definition => definition.metric === input.metric)) {
+      throw new Error('Unsupported measurement metric');
+    }
+    const sources = input.sources ? [...new Set(input.sources)].filter(value => value.trim()) : null;
+    if (sources && !sources.length) return null;
+    const sourceClause = sources ? ' AND source=ANY($7::text[])' : '';
+    const params: unknown[] = identifiers;
+    if (sources) params.push(sources);
+    const result = await this.pool.query(
+      `SELECT ${COLUMNS} FROM telemetry.measurements
+       WHERE tenant_id=$1 AND site_id=$2 AND device_id=$3 AND component_id=$4
+         AND channel=$5 AND metric=$6
+         ${sourceClause}
+       ORDER BY observed_at DESC,received_at DESC,sample_id DESC LIMIT 1`,
+      params,
+    );
+    return result.rows[0] ? fromRow(result.rows[0], this.definitions) : null;
   }
 
   /** Return bounded stream metadata without exposing measurement values. */
@@ -210,21 +251,34 @@ export class PostgresGenericMeasurementRepository {
     tenantId: string;
     siteId: string;
     deviceId: string;
-    metrics: string[];
+    authorizedSourcesByMetric: Readonly<Record<string, readonly string[]>>;
   }): Promise<Array<{ metric: string; count: number; oldest: string; newest: string }>> {
     if ([input.tenantId, input.siteId, input.deviceId].some(value => !value?.trim()))
       throw new Error('Measurement history identity is required');
-    const metrics = [...new Set(input.metrics)].filter(metric =>
-      this.definitions.some(definition => definition.metric === metric),
-    );
-    if (!metrics.length) return [];
+    const authorizedStreams = Object.entries(input.authorizedSourcesByMetric)
+      .filter(([metric]) => this.definitions.some(definition => definition.metric === metric))
+      .map(([metric, values]) => ({
+        metric,
+        sources: [...new Set(values)].filter(source => source.trim().length > 0),
+      }))
+      .filter(stream => stream.sources.length > 0);
+    if (!authorizedStreams.length) return [];
+
+    const params: unknown[] = [input.tenantId, input.siteId, input.deviceId];
+    const sourceClauses = authorizedStreams.map(stream => {
+      params.push(stream.metric);
+      const metricParameter = `$${params.length}`;
+      params.push(stream.sources);
+      const sourcesParameter = `$${params.length}`;
+      return `(metric=${metricParameter} AND source=ANY(${sourcesParameter}::text[]))`;
+    });
     const result = await this.pool.query(
       `SELECT metric,count(*)::int AS count,min(observed_at) AS oldest,max(observed_at) AS newest
        FROM telemetry.measurements
        WHERE tenant_id=$1 AND site_id=$2 AND device_id=$3 AND component_id='device'
-         AND metric=ANY($4::text[])
+         AND (${sourceClauses.join(' OR ')})
        GROUP BY metric`,
-      [input.tenantId, input.siteId, input.deviceId, metrics],
+      params,
     );
     return result.rows.map(row => ({
       metric: String(row.metric),

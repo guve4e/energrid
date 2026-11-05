@@ -89,10 +89,12 @@ describe('accepted observation to PostgreSQL history integration', () => {
         humidity: { meaningfulChange: 2, maxHeartbeatMs: 900_000 },
       }, historyOutbox(join(directory, 'history-outbox')));
       await writer.onModuleInit();
+      ingress = new DeviceIntelligenceObservationIngress(registry as never, installations as never,
+        enrollment as never, store, writer);
       const firstResult = await ingress.ingest(first);
       expect(firstResult).toMatchObject({ historyWrites: [
-        { field: 'temperature', outcome: 'duplicate' },
-        { field: 'humidity', outcome: 'duplicate' },
+        { field: 'temperature', outcome: 'stored', reason: 'initial' },
+        { field: 'humidity', outcome: 'stored', reason: 'initial' },
       ] });
       const initialReference = await pool.query(
         `SELECT tenant_id,site_id,device_id,display_name FROM device_inventory.enrollments
@@ -149,6 +151,7 @@ describe('accepted observation to PostgreSQL history integration', () => {
       const reboot = await inputFor({ uptimeMs: 1_000, sampleCount: 1, lastSampleUptimeMs: 0 }, 48_000, 22.9, 49);
       expect(reboot.evidenceId).not.toBe(changed.evidenceId);
       expect(await ingress.ingest(reboot)).toMatchObject({ outcome: 'processed', accepted: true });
+      await writer.onModuleDestroy();
       await store.close();
       await pool.end();
 
@@ -176,7 +179,6 @@ describe('accepted observation to PostgreSQL history integration', () => {
         from: '2020-01-01T00:00:00.000Z', to: '2099-01-01T00:00:00.000Z',
       });
       expect(temperatureHistory).toHaveLength(1);
-      await restartPool.end();
     } finally {
       await store.close().catch(() => undefined);
       await cleanupPool.query('DELETE FROM telemetry.measurements WHERE tenant_id=$1', [tenantId]).catch(() => undefined);

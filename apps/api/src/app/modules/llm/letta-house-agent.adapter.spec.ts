@@ -18,6 +18,10 @@ describe('LettaHouseAgentAdapter measurement tools', () => {
     };
     const intelligence = {
       readRoomMeasurement: jest.fn().mockResolvedValue(measurement),
+      readMeasurementSummary: jest.fn().mockResolvedValue({
+        status: 'available', current: { status: 'fresh', value: 1483.3, unit: 'W' },
+        history: { energyEstimate: { status: 'partial_estimate', signedEnergyKwh: 0.31, coveredDurationSeconds: 3500 } },
+      }),
     };
     const adapter = new LettaHouseAgentAdapter(
       {} as never, {} as never, {} as never, intelligence as never, {} as never,
@@ -31,6 +35,7 @@ describe('LettaHouseAgentAdapter measurement tools', () => {
     expect(roomTool).toBeDefined();
     expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining([
       'list_devices', 'read_device_observation', 'read_room_measurement',
+      'read_device_measurement_history',
       'control_device', 'execute_approved_lighting_action',
     ]));
     const result = await roomTool.execute('call-1', { room: 'кухнята', metric: 'temperature' });
@@ -39,6 +44,23 @@ describe('LettaHouseAgentAdapter measurement tools', () => {
     );
     expect(result.details).toEqual(measurement);
     expect(roomTool.parameters.properties.metric.enum).toEqual(['temperature', 'humidity']);
+
+    const historyTool = tools.find(tool => tool.name === 'read_device_measurement_history');
+    expect(historyTool.parameters.properties.range.enum).toEqual(['1h', '24h', '7d']);
+    expect(historyTool.description).toContain('signed trapezoidal energy estimate');
+    const historyResult = await historyTool.execute('call-history', {
+      device: 'House Mainline', metric: 'power', range: '24h',
+    });
+    expect(intelligence.readMeasurementSummary).toHaveBeenCalledWith(
+      scope, 'House Mainline', 'power', '24h',
+    );
+    expect(historyResult.details).toMatchObject({
+      current: { status: 'fresh', value: 1483.3, unit: 'W' },
+      history: { energyEstimate: { status: 'partial_estimate', signedEnergyKwh: 0.31 } },
+    });
+    await expect(historyTool.execute('call-history', { device: 'House Mainline', metric: 'power', range: '30d' }))
+      .resolves.toMatchObject({ isError: true });
+    expect(intelligence.readMeasurementSummary).toHaveBeenCalledTimes(1);
   });
 
   it('rejects invalid tool arguments without consulting Core', async () => {
@@ -167,6 +189,7 @@ describe('LettaHouseAgentAdapter measurement tools', () => {
     expect(financeTool.name).toBe('finance.query_expenses');
     await expect(options.canUseTool('finance_query_expenses')).resolves.toMatchObject({ behavior: 'allow' });
     await expect(options.canUseTool('read_room_measurement')).resolves.toMatchObject({ behavior: 'allow' });
+    await expect(options.canUseTool('read_device_measurement_history')).resolves.toMatchObject({ behavior: 'allow' });
 
     await adapter.talk({ ...scope, conversationId: first.conversationId }, 'And October?');
     expect(client.resumeSession.mock.calls[1][0]).toBe('conv-letta-a');
