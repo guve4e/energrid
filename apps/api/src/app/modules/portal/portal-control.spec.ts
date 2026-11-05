@@ -89,7 +89,6 @@ describe('portal control configuration authorization', () => {
         deviceHttpPoll as never,
         undefined,
         undefined,
-        undefined,
         portalSites as never,
         shellyRoutes as never,
       ),
@@ -253,7 +252,7 @@ describe('portal control configuration authorization', () => {
         { listIdentityEvidence: jest.fn(async (owner: { tenantId: string; siteId: string }) =>
           owner.tenantId === record.ownership.tenantId && owner.siteId === record.ownership.siteId ? [record] : [],
         ) } as never,
-        undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        undefined, undefined, undefined, undefined, undefined, undefined,
         { list: jest.fn().mockResolvedValue([]) } as never,
       );
       return { controller, registry };
@@ -325,7 +324,7 @@ describe('portal control configuration authorization', () => {
         { getState: () => ({ devices: [] }) } as never, { getLastScan: () => [] } as never, {} as never, {} as never,
         registry as never, {} as never,
         { listIdentityEvidence } as never,
-        undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        undefined, undefined, undefined, undefined, undefined, undefined,
         { list: jest.fn().mockResolvedValue([]) } as never,
       );
       return { controller, registerDiscoveredDevice, listIdentityEvidence };
@@ -395,7 +394,7 @@ describe('portal control configuration authorization', () => {
       { listIdentityEvidence: jest.fn().mockResolvedValue(history) } as never,
       undefined, undefined,
       { list: jest.fn().mockResolvedValue([]), listRecentMqttPublisherEvidence: jest.fn().mockResolvedValue([]) } as never,
-      undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined,
       { list: jest.fn().mockResolvedValue([]) } as never,
     );
 
@@ -444,7 +443,7 @@ describe('portal control configuration authorization', () => {
       {} as never,
       { listIdentityEvidence: jest.fn().mockResolvedValue([]) } as never,
       undefined, undefined, { list: inventoryList } as never,
-      undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined,
       { list: jest.fn().mockResolvedValue([]) } as never,
     );
 
