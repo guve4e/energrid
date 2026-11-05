@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -34,6 +35,20 @@ export class WeatherInvestigatorController {
   ) {
     this.authorize(authorization);
     return this.investigator.context(siteId, tenantId);
+  }
+
+  @Get('read-model')
+  readModel(
+    @Headers('authorization') authorization: string | undefined,
+    @Query('siteId') siteId?: string,
+    @Query('tenantId') tenantId?: string,
+  ) {
+    this.authorize(authorization);
+    // Never silently default to the LAB site in a site-scoped read boundary.
+    if (!siteId || !tenantId ||
+        !/^[\w.-]{1,120}$/.test(siteId) || !/^[\w.-]{1,120}$/.test(tenantId))
+      throw new BadRequestException('Explicit tenant and site are required');
+    return this.investigator.readModel(siteId, tenantId);
   }
 
   @Post('run')

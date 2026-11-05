@@ -48,6 +48,7 @@ import { DeviceControlService } from '../devices/device-control.service'
 import { DeviceDiagnosticsService } from '../devices/device-diagnostics.service'
 import { DeviceHttpPollService } from '../devices/device-http-poll.service'
 import { ShellyRouteResolver } from '../devices/shelly-route.resolver'
+import { ShellyOperationalCollectionService } from '../devices/integrations/shelly/shelly-operational-collection.service'
 import { DeviceDiscoveryMemoryStore } from '../devices/device-discovery-memory.store'
 import type { DiscoveryOwnership } from '../devices/device-discovery-memory.store'
 import { DeviceLanDiscoveryService } from '../devices/device-lan-discovery.service'
@@ -168,6 +169,8 @@ export class PortalController {
     private readonly portalSites?: PortalSiteService,
     @Optional()
     private readonly shellyRoutes?: ShellyRouteResolver,
+    @Optional()
+    private readonly shellyOperational?: ShellyOperationalCollectionService,
   ) {}
 
   @Get()
@@ -485,6 +488,55 @@ export class PortalController {
     } catch (error) {
       if (error instanceof NotFoundException || error instanceof BadRequestException || error instanceof ConflictException) throw error
       if (error instanceof Error && error.message.includes('different observation authority')) {
+        throw new ConflictException(error.message)
+      }
+      throw error
+    }
+  }
+
+  @Get('devices/:deviceId/shelly-http-em1-approval')
+  async getShellyHttpEm1Approval(
+    @Param('deviceId') deviceId: string,
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalAdministrator(request)
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+    if (!this.shellyOperational) throw new ServiceUnavailableException('Shelly read-only collection is unavailable')
+    const result = await this.shellyOperational.getHttpEm1PowerApproval(tenant.id, site.id, deviceId)
+    if (!result) throw new NotFoundException('An enrolled, verified Shelly EM1 HTTP component was not found in this site')
+    return result
+  }
+
+  @Post('devices/:deviceId/shelly-http-em1-approval')
+  async approveShellyHttpEm1(
+    @Param('deviceId') deviceId: string,
+    @Body() body: { confirmedDeviceId?: unknown; approvedFields?: unknown; confirmedSourceId?: unknown;
+      confirmedSelector?: unknown; confirmedEndpoint?: unknown },
+    @Req() request: DeviceProxyRequest,
+  ) {
+    assertPortalAdministrator(request)
+    const { tenant, site } = this.deviceRegistry.getSnapshot()
+    if (!this.shellyOperational) throw new ServiceUnavailableException('Shelly read-only collection is unavailable')
+    const status = await this.shellyOperational.getHttpEm1PowerApproval(tenant.id, site.id, deviceId)
+    if (!status) throw new NotFoundException('An enrolled, verified Shelly EM1 HTTP component was not found in this site')
+    if (body?.confirmedDeviceId !== deviceId || !Array.isArray(body.approvedFields) ||
+        body.approvedFields.length !== 1 || body.approvedFields[0] !== 'power' ||
+        body.confirmedSourceId !== status.sourceId || body.confirmedSelector !== status.selector ||
+        body.confirmedEndpoint !== status.endpoint) {
+      throw new BadRequestException('Explicitly confirm the exact EM1 device, HTTP endpoint, source, selector and power field.')
+    }
+    try {
+      const result = await this.shellyOperational.approveHttpEm1Power({
+        tenantId: tenant.id, siteId: site.id, deviceId, actor: request.user?.email || 'portal-admin',
+        confirmedEndpoint: status.endpoint,
+      })
+      if (!result) throw new NotFoundException('Verified Shelly EM1 component was not found in this site')
+      return result
+    } catch (error) {
+      if (error instanceof NotFoundException || error instanceof BadRequestException ||
+          error instanceof ConflictException || error instanceof BadGatewayException) throw error
+      if (error instanceof Error && (error.message.includes('different observation authority') ||
+          error.message.includes('Installation changed') || error.message.includes('Fresh exact identity'))) {
         throw new ConflictException(error.message)
       }
       throw error

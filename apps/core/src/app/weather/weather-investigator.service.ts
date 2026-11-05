@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 import { PG_POOL } from '../db.module';
 import { WeatherProviderService } from './weather-provider.service';
 import type { WeatherFinding } from './weather-investigator.types';
+import { buildWeatherReadModel, StoredWeatherFinding, StoredWeatherSnapshot } from './weather-read-model';
 import { assessWeather } from './weather-data-quality';
 import {
   buildWeatherEvidence,
@@ -285,7 +286,7 @@ export class WeatherInvestigatorService {
     tenantId = process.env.WEATHER_INVESTIGATOR_TENANT_ID || 'lab',
   ) {
     const result = await this.pool.query(
-      `SELECT id::text,event_type AS "eventType",starts_at AS "startsAt",ends_at AS "endsAt",
+      `SELECT id::text,evidence_snapshot_id::text AS "evidenceSnapshotId",event_type AS "eventType",starts_at AS "startsAt",ends_at AS "endsAt",
       location,severity,confidence,uncertainty,evidence_refs AS "evidenceRefs",consequences,preparation,
       explanation_bg AS "explanationBg",reasoning_summary AS "reasoningSummary",provider,model,
       notification_state AS "notificationState",first_notified_at AS "firstNotifiedAt",last_updated_at AS "lastUpdatedAt",
@@ -304,7 +305,7 @@ export class WeatherInvestigatorService {
     const [findings, latest] = await Promise.all([
       this.list(siteId, tenantId),
       this.pool.query(
-        `SELECT captured_at AS "capturedAt",provider,model,location,latitude,longitude,evidence
+        `SELECT id::text,captured_at AS "capturedAt",provider,model,location,latitude,longitude,evidence
         FROM weather_investigation_snapshots WHERE tenant_id=$1 AND site_id=$2 ORDER BY created_at DESC LIMIT 1`,
         [tenantId, siteId],
       ),
@@ -319,6 +320,17 @@ export class WeatherInvestigatorService {
           'Официалните предупреждения не се поддържат от текущия метеорологичен източник.',
       },
     };
+  }
+
+  async readModel(siteId: string, tenantId: string) {
+    const context = await this.context(siteId, tenantId);
+    return buildWeatherReadModel(
+      { siteId, tenantId },
+      {
+        findings: context.findings as StoredWeatherFinding[],
+        latestForecast: context.latestForecast as StoredWeatherSnapshot | null,
+      },
+    );
   }
 
   async acknowledge(

@@ -25,7 +25,7 @@ export class WeatherAssistantQueryService {
     });
     try {
       const response = await fetch(
-        `${base}/core/weather/investigator/context?${query}`,
+        `${base}/core/weather/investigator/read-model?${query}`,
         {
           headers: { authorization: `Bearer ${token}` },
           signal: AbortSignal.timeout(10000),
@@ -34,6 +34,8 @@ export class WeatherAssistantQueryService {
       if (!response.ok)
         return 'Запазените данни за времето в момента не са достъпни.';
       const context = (await response.json()) as {
+        version?: number;
+        status?: 'available' | 'partial' | 'stale' | 'unavailable';
         findings?: Array<{
           eventType: string;
           startsAt: string;
@@ -49,13 +51,12 @@ export class WeatherAssistantQueryService {
           lastUpdatedAt: string;
           notificationState: string;
         }>;
-        latestForecast?: {
+        forecast?: {
           capturedAt: string;
           provider: string;
           model: string | null;
           location: string;
-          evidence?: {
-            hours?: Array<{
+          hours?: Array<{
               id: string;
               time: string;
               temperatureC: number | null;
@@ -64,12 +65,18 @@ export class WeatherAssistantQueryService {
               gustKmh: number | null;
               weatherCode: number | null;
             }>;
-          };
         } | null;
-        officialAlerts?: { available: boolean; explanation: string };
+        officialAlerts?: { status: 'unsupported'; explanation: string };
       };
+      if (context.version !== 1)
+        return 'Данните за времето са с неподдържан формат и не могат да бъдат проверени.';
+      if (context.status !== 'available') {
+        const reason = context.status === 'stale' ? 'остаряла' :
+          context.status === 'partial' ? 'непълна' : 'недостъпна';
+        return `Запазената прогноза е ${reason}. Няма достатъчно надеждни данни за текуща оценка. ${context.officialAlerts?.explanation ?? 'Официалните предупреждения не са проверени.'}`;
+      }
       const findings = Array.isArray(context.findings) ? context.findings : [];
-      const latest = context.latestForecast;
+      const latest = context.forecast;
       if (!findings.length && !latest)
         return 'Все още няма запазена прогноза за този дом. Официалните предупреждения не са налични от текущия източник.';
       const rows = findings
@@ -78,7 +85,7 @@ export class WeatherAssistantQueryService {
           (finding) =>
             `${finding.explanationBg} Период: ${new Date(finding.startsAt).toLocaleString('bg-BG', { timeZone: 'Europe/Sofia' })} – ${new Date(finding.endsAt).toLocaleString('bg-BG', { timeZone: 'Europe/Sofia' })}. ${finding.consequences?.length ? `Възможни последици: ${finding.consequences.join(' ')}` : ''} ${finding.preparation?.length ? `Подготовка: ${finding.preparation.join(' ')}` : ''} Доказателства: ${finding.evidenceRefs.join(', ')}; източник ${finding.provider}/${finding.model}, обновено ${new Date(finding.lastUpdatedAt).toLocaleString('bg-BG', { timeZone: 'Europe/Sofia' })}. ${finding.uncertainty}`,
         );
-      const hours = latest?.evidence?.hours ?? [];
+      const hours = latest?.hours ?? [];
       const events = hours
         .filter(
           (hour) =>
@@ -111,7 +118,7 @@ export class WeatherAssistantQueryService {
         return `${new Date(hour.time).toLocaleString('bg-BG', { timeZone: 'Europe/Sofia' })}: ${kinds.join(', ')} [${hour.id}]`;
       });
       const location = latest?.location ?? findings[0]?.location ?? 'дома';
-      return `Данни за ${location}, прогноза от ${latest?.provider}/${latest?.model ?? 'непосочен модел'}, получена ${latest?.capturedAt ? new Date(latest.capturedAt).toLocaleString('bg-BG', { timeZone: 'Europe/Sofia' }) : 'неизвестно време'}. ${rows.length ? rows.join(' ') : 'Няма запазени активни констатации.'} ${forecastSummary.length ? `В прогнозата се виждат: ${forecastSummary.join('; ')}.` : 'В наличните часове не се виждат посочените значими метеорологични сигнали.'} ${context.officialAlerts?.explanation ?? 'Официалните предупреждения не са проверени.'}`;
+      return `Данни за ${location}, прогноза от ${latest?.provider}/${latest?.model ?? 'непосочен модел'}, получена ${latest?.capturedAt ? new Date(latest.capturedAt).toLocaleString('bg-BG', { timeZone: 'Europe/Sofia' }) : 'неизвестно време'}. ${rows.length ? rows.join(' ') : 'Няма запазени активни констатации.'} ${forecastSummary.length ? `В прогнозата се виждат: ${forecastSummary.join('; ')}.` : 'В наличните часове не са открити посочените сигнали, което не гарантира безопасни условия.'} ${context.officialAlerts?.explanation ?? 'Официалните предупреждения не са проверени.'}`;
     } catch {
       return 'Запазените данни за времето в момента не са достъпни.';
     }

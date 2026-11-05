@@ -15,28 +15,28 @@ describe('weather assistant evidence lookup', () => {
     const fetch = jest.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
       json: async () => ({
+        version: 1,
+        status: 'available',
         findings: [],
-        latestForecast: {
+        forecast: {
           capturedAt: '2026-10-24T09:00:00.000Z',
           provider: 'open-meteo',
           model: 'icon_seamless',
           location: 'Vidin',
-          evidence: {
-            hours: [
-              {
-                id: 'hour:1',
-                time: '2026-10-26T09:00:00.000Z',
-                temperatureC: -2,
-                rainProbabilityPercent: 10,
-                precipitationMm: 0,
-                gustKmh: 12,
-                weatherCode: 71,
-              },
-            ],
-          },
+          hours: [
+            {
+              id: 'hour:1',
+              time: '2026-10-26T09:00:00.000Z',
+              temperatureC: -2,
+              rainProbabilityPercent: 10,
+              precipitationMm: 0,
+              gustKmh: 12,
+              weatherCode: 71,
+            },
+          ],
         },
         officialAlerts: {
-          available: false,
+          status: 'unsupported',
           explanation: 'Официалните предупреждения не се поддържат.',
         },
       }),
@@ -52,6 +52,7 @@ describe('weather assistant evidence lookup', () => {
     expect(String(fetch.mock.calls[0][0])).toContain(
       'tenantId=tenant-test&siteId=site-test',
     );
+    expect(String(fetch.mock.calls[0][0])).toContain('/read-model?');
   });
 
   it('does not call Core for unrelated questions', async () => {
@@ -63,5 +64,20 @@ describe('weather assistant evidence lookup', () => {
       ),
     ).toBeNull();
     expect(fetch).not.toHaveBeenCalled();
+  });
+  it('does not describe stale or incomplete saved evidence as a current forecast', async () => {
+    process.env = { ...originalEnv, WEATHER_INVESTIGATOR_API_TOKEN: 'lab-bridge-test' };
+    jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        version: 1, status: 'stale', findings: [{ explanationBg: 'Силна буря!' }],
+        forecast: { location: 'Vidin', hours: [{ weatherCode: 95 }] },
+        officialAlerts: { status: 'unsupported', explanation: 'Официалните предупреждения не са проверени.' },
+      }),
+    } as Response);
+    const reply = await new WeatherAssistantQueryService().answer(
+      { tenantId: 'tenant-test', siteId: 'site-test' }, 'Има ли буря?');
+    expect(reply).toContain('остаряла');
+    expect(reply).not.toContain('Силна буря!');
   });
 });

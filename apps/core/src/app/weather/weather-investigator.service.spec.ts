@@ -145,6 +145,20 @@ function rainSnapshot(indices: number[]): WeatherSnapshot {
 }
 
 describe('weather investigator persistence and recovery policy', () => {
+  it('projects site-scoped persisted evidence without a live provider call', async () => {
+    const { service, pool, weather } = setup();
+    const result = await service.readModel('site-a', 'tenant-a');
+    expect(result).toMatchObject({
+      version: 1,
+      scope: { siteId: 'site-a', tenantId: 'tenant-a' },
+      status: 'unavailable',
+      automationEligible: false,
+    });
+    expect(pool.query).toHaveBeenCalledWith(expect.stringContaining('weather_investigation_findings'), ['tenant-a', 'site-a']);
+    expect(pool.query).toHaveBeenCalledWith(expect.stringContaining('weather_investigation_snapshots'), ['tenant-a', 'site-a']);
+    expect(weather.getSnapshotForLocation).not.toHaveBeenCalled();
+  });
+
   const original = process.env;
   afterEach(() => {
     process.env = original;

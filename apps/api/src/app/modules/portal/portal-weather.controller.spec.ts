@@ -31,4 +31,21 @@ describe('portal weather read bridge', () => {
       body: JSON.stringify({ tenantId: 'tenant-test', siteId: 'site-test' }),
     }));
   });
+  it('exposes only the authenticated site-scoped read model through the Portal', async () => {
+    process.env = { ...original, WEATHER_INVESTIGATOR_API_TOKEN: 'lab-bridge-test' };
+    const fetch = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true, json: async () => ({ version: 1, status: 'stale' }),
+    } as Response);
+    const request = { headers: {}, user: {
+      userId: 'test-user', email: 'admin@example.test', name: 'Admin',
+      role: 'admin', sessionId: 'test-session', sessionVersion: 0,
+    } } as never;
+    await expect(new PortalWeatherController(registry).readModel(request))
+      .resolves.toEqual({ version: 1, status: 'stale' });
+    expect(fetch).toHaveBeenCalledWith(
+      'http://127.0.0.1:3020/core/weather/investigator/read-model?tenantId=tenant-test&siteId=site-test',
+      expect.objectContaining({ headers: expect.objectContaining({ authorization: 'Bearer lab-bridge-test' }) }),
+    );
+  });
+
 });

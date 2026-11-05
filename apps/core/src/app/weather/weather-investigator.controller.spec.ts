@@ -1,4 +1,4 @@
-import { UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { WeatherInvestigatorController } from './weather-investigator.controller';
 
 describe('weather investigator controller', () => {
@@ -51,4 +51,20 @@ describe('weather investigator controller', () => {
     ).resolves.toEqual({ status: 'completed' });
     expect(investigator.run).toHaveBeenCalledWith('site-a', 'tenant-a');
   });
+  it('enforces authentication and explicit scope on the read-only weather model', async () => {
+    process.env = {
+      ...original,
+      WEATHER_INVESTIGATOR_API_TOKEN: 'token',
+      ENERGRID_LAB_MODE: 'true',
+    };
+    const investigator = { readModel: jest.fn().mockResolvedValue({ version: 1 }) };
+    const controller = new WeatherInvestigatorController(investigator as never);
+    expect(() => controller.readModel(undefined, 'site-a', 'tenant-a')).toThrow(UnauthorizedException);
+    expect(() => controller.readModel('Bearer token', undefined, 'tenant-a')).toThrow(BadRequestException);
+    expect(() => controller.readModel('Bearer token', 'site-a', '../../tenant')).toThrow(BadRequestException);
+    await expect(controller.readModel('Bearer token', 'site-a', 'tenant-a'))
+      .resolves.toEqual({ version: 1 });
+    expect(investigator.readModel).toHaveBeenCalledWith('site-a', 'tenant-a');
+  });
+
 });
