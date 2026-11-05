@@ -32,6 +32,14 @@ class OfflineDailyTests(unittest.TestCase):
   target=date(2024,1,4)
   self.assertEqual(backtest.forecast(lom,novo,target,1,alpha=.5),117.5)
   self.assertEqual(backtest.forecast(lom,novo,target,1,alpha=0,beta=1,lag=1),120.)
+ def test_chronological_window_and_coefficient_selection(self):
+  from datetime import timedelta
+  d=date(2020,1,1)
+  yearly={2020:{d:10.,d+timedelta(days=1):11.,d+timedelta(days=2):13.},2021:{d+timedelta(days=3):14.5}}
+  training=backtest.development_window(yearly,2021)
+  self.assertEqual(set(training),set(yearly[2020]))
+  selection_data={**training,d+timedelta(days=3):14.5}
+  self.assertEqual(backtest.choose(selection_data,{},[d+timedelta(days=3)],1)['alpha'],.5)
  def test_missing_metric_is_not_zero(self):
   row=extract.Reading(date(2024,1,1),10.,None,None)
   self.assertIsNone(row.discharge_m3s);self.assertIsNone(row.temperature_c)

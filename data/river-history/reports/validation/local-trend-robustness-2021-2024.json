@@ -1,0 +1,1019 @@
+{
+  "developmentRule": "Expanding chronological history; choose alpha from fixed grid [-0.5,0,0.5,1,1.5] by training MAE for the requested horizon. 2025 is contextual only and was previously examined.",
+  "evaluationRule": "Paired persistence/local-trend target dates; issue-date input is target minus horizon; prior-year history supplies January origins. Seasonal and regime labels describe outcomes only. Large-change threshold is 90th percentile of absolute daily Lom changes in training history.",
+  "forecastAssumption": "Daily observations are assumed available by issue date; APPD publication latency is unknown. Hindcasts are not prospective operational validation.",
+  "horizons": {
+    "1": {
+      "2021": {
+        "selectionHistoryYears": [
+          2020
+        ],
+        "selectedAlpha": 0.5,
+        "trainingTargetDates": 366,
+        "coefficientSelectionSamples": 364,
+        "selectionMaeCm": 12.4327,
+        "largeChangeThresholdCm": 32.0,
+        "evaluation": {
+          "targetDates": 365,
+          "pairedDates": 365,
+          "persistence": {
+            "n": 365,
+            "maeCm": 14.5288,
+            "medianAbsErrorCm": 11.0,
+            "p90AbsErrorCm": 31.0,
+            "maxAbsErrorCm": 84.0,
+            "largestMisses": [
+              {
+                "date": "2021-11-09",
+                "errorCm": 84.0
+              },
+              {
+                "date": "2021-12-07",
+                "errorCm": 73.0
+              },
+              {
+                "date": "2021-01-01",
+                "errorCm": 63.0
+              }
+            ]
+          },
+          "localTrend": {
+            "n": 365,
+            "maeCm": 11.7918,
+            "medianAbsErrorCm": 8.0,
+            "p90AbsErrorCm": 26.5,
+            "maxAbsErrorCm": 76.0,
+            "largestMisses": [
+              {
+                "date": "2021-11-09",
+                "errorCm": 76.0
+              },
+              {
+                "date": "2021-04-20",
+                "errorCm": 74.0
+              },
+              {
+                "date": "2021-12-07",
+                "errorCm": 67.0
+              }
+            ]
+          },
+          "improvementPct": 18.84,
+          "pairedAbsoluteErrorDifferenceMeanCm": 2.737,
+          "regimes": {
+            "rising": {
+              "n": 154,
+              "persistenceMaeCm": 17.5455,
+              "localTrendMaeCm": 14.3734
+            },
+            "falling": {
+              "n": 199,
+              "persistenceMaeCm": 13.0704,
+              "localTrendMaeCm": 10.2085
+            },
+            "unchanged": {
+              "n": 12,
+              "persistenceMaeCm": 0.0,
+              "localTrendMaeCm": 4.9167
+            }
+          },
+          "seasons": {
+            "DJF": {
+              "n": 90,
+              "persistenceMaeCm": 19.7556,
+              "localTrendMaeCm": 15.1167
+            },
+            "MAM": {
+              "n": 92,
+              "persistenceMaeCm": 15.163,
+              "localTrendMaeCm": 14.1848
+            },
+            "JJA": {
+              "n": 92,
+              "persistenceMaeCm": 12.4891,
+              "localTrendMaeCm": 10.5272
+            },
+            "SON": {
+              "n": 91,
+              "persistenceMaeCm": 10.7802,
+              "localTrendMaeCm": 7.3626
+            }
+          },
+          "largeChangeThresholdCm": 32.0,
+          "largeChanges": {
+            "n": 33,
+            "persistenceMaeCm": 43.5758,
+            "localTrendMaeCm": 34.3333
+          }
+        }
+      },
+      "2022": {
+        "selectionHistoryYears": [
+          2020,
+          2021
+        ],
+        "selectedAlpha": 0.5,
+        "trainingTargetDates": 731,
+        "coefficientSelectionSamples": 729,
+        "selectionMaeCm": 12.1118,
+        "largeChangeThresholdCm": 31.0,
+        "evaluation": {
+          "targetDates": 365,
+          "pairedDates": 365,
+          "persistence": {
+            "n": 365,
+            "maeCm": 11.7808,
+            "medianAbsErrorCm": 9.0,
+            "p90AbsErrorCm": 27.0,
+            "maxAbsErrorCm": 74.0,
+            "largestMisses": [
+              {
+                "date": "2022-04-05",
+                "errorCm": 74.0
+              },
+              {
+                "date": "2022-11-26",
+                "errorCm": 63.0
+              },
+              {
+                "date": "2022-11-25",
+                "errorCm": 61.0
+              }
+            ]
+          },
+          "localTrend": {
+            "n": 365,
+            "maeCm": 9.3877,
+            "medianAbsErrorCm": 6.5,
+            "p90AbsErrorCm": 22.0,
+            "maxAbsErrorCm": 66.0,
+            "largestMisses": [
+              {
+                "date": "2022-04-05",
+                "errorCm": 66.0
+              },
+              {
+                "date": "2022-12-29",
+                "errorCm": 48.5
+              },
+              {
+                "date": "2022-09-23",
+                "errorCm": 44.5
+              }
+            ]
+          },
+          "improvementPct": 20.31,
+          "pairedAbsoluteErrorDifferenceMeanCm": 2.3932,
+          "regimes": {
+            "rising": {
+              "n": 151,
+              "persistenceMaeCm": 14.5497,
+              "localTrendMaeCm": 11.5199
+            },
+            "falling": {
+              "n": 197,
+              "persistenceMaeCm": 10.6751,
+              "localTrendMaeCm": 8.297
+            },
+            "unchanged": {
+              "n": 17,
+              "persistenceMaeCm": 0.0,
+              "localTrendMaeCm": 3.0882
+            }
+          },
+          "seasons": {
+            "DJF": {
+              "n": 90,
+              "persistenceMaeCm": 15.7444,
+              "localTrendMaeCm": 13.2111
+            },
+            "MAM": {
+              "n": 92,
+              "persistenceMaeCm": 10.6957,
+              "localTrendMaeCm": 10.5109
+            },
+            "JJA": {
+              "n": 92,
+              "persistenceMaeCm": 7.9348,
+              "localTrendMaeCm": 5.3641
+            },
+            "SON": {
+              "n": 91,
+              "persistenceMaeCm": 12.8462,
+              "localTrendMaeCm": 8.5385
+            }
+          },
+          "largeChangeThresholdCm": 31.0,
+          "largeChanges": {
+            "n": 24,
+            "persistenceMaeCm": 43.9583,
+            "localTrendMaeCm": 31.8542
+          }
+        }
+      },
+      "2023": {
+        "selectionHistoryYears": [
+          2020,
+          2021,
+          2022
+        ],
+        "selectedAlpha": 0.5,
+        "trainingTargetDates": 1096,
+        "coefficientSelectionSamples": 1094,
+        "selectionMaeCm": 11.2029,
+        "largeChangeThresholdCm": 30.0,
+        "evaluation": {
+          "targetDates": 365,
+          "pairedDates": 365,
+          "persistence": {
+            "n": 365,
+            "maeCm": 14.5452,
+            "medianAbsErrorCm": 10.0,
+            "p90AbsErrorCm": 34.0,
+            "maxAbsErrorCm": 69.0,
+            "largestMisses": [
+              {
+                "date": "2023-06-25",
+                "errorCm": 69.0
+              },
+              {
+                "date": "2023-02-25",
+                "errorCm": 63.0
+              },
+              {
+                "date": "2023-04-07",
+                "errorCm": 62.0
+              }
+            ]
+          },
+          "localTrend": {
+            "n": 365,
+            "maeCm": 12.1014,
+            "medianAbsErrorCm": 9.0,
+            "p90AbsErrorCm": 27.0,
+            "maxAbsErrorCm": 60.5,
+            "largestMisses": [
+              {
+                "date": "2023-04-07",
+                "errorCm": 60.5
+              },
+              {
+                "date": "2023-01-02",
+                "errorCm": 60.0
+              },
+              {
+                "date": "2023-01-03",
+                "errorCm": 60.0
+              }
+            ]
+          },
+          "improvementPct": 16.8,
+          "pairedAbsoluteErrorDifferenceMeanCm": 2.4438,
+          "regimes": {
+            "rising": {
+              "n": 178,
+              "persistenceMaeCm": 15.2528,
+              "localTrendMaeCm": 12.6404
+            },
+            "falling": {
+              "n": 175,
+              "persistenceMaeCm": 14.8229,
+              "localTrendMaeCm": 12.1657
+            },
+            "unchanged": {
+              "n": 12,
+              "persistenceMaeCm": 0.0,
+              "localTrendMaeCm": 3.1667
+            }
+          },
+          "seasons": {
+            "DJF": {
+              "n": 90,
+              "persistenceMaeCm": 15.6778,
+              "localTrendMaeCm": 12.2611
+            },
+            "MAM": {
+              "n": 92,
+              "persistenceMaeCm": 14.5,
+              "localTrendMaeCm": 14.0163
+            },
+            "JJA": {
+              "n": 92,
+              "persistenceMaeCm": 16.087,
+              "localTrendMaeCm": 13.3424
+            },
+            "SON": {
+              "n": 91,
+              "persistenceMaeCm": 11.9121,
+              "localTrendMaeCm": 8.7527
+            }
+          },
+          "largeChangeThresholdCm": 30.0,
+          "largeChanges": {
+            "n": 49,
+            "persistenceMaeCm": 41.3673,
+            "localTrendMaeCm": 32.2143
+          }
+        }
+      },
+      "2024": {
+        "selectionHistoryYears": [
+          2020,
+          2021,
+          2022,
+          2023
+        ],
+        "selectedAlpha": 0.5,
+        "trainingTargetDates": 1461,
+        "coefficientSelectionSamples": 1459,
+        "selectionMaeCm": 11.4277,
+        "largeChangeThresholdCm": 31.0,
+        "evaluation": {
+          "targetDates": 366,
+          "pairedDates": 366,
+          "persistence": {
+            "n": 366,
+            "maeCm": 12.347,
+            "medianAbsErrorCm": 9.0,
+            "p90AbsErrorCm": 26.0,
+            "maxAbsErrorCm": 86.0,
+            "largestMisses": [
+              {
+                "date": "2024-09-19",
+                "errorCm": 86.0
+              },
+              {
+                "date": "2024-06-27",
+                "errorCm": 82.0
+              },
+              {
+                "date": "2024-09-18",
+                "errorCm": 79.0
+              }
+            ]
+          },
+          "localTrend": {
+            "n": 366,
+            "maeCm": 12.0178,
+            "medianAbsErrorCm": 8.5,
+            "p90AbsErrorCm": 28.0,
+            "maxAbsErrorCm": 83.5,
+            "largestMisses": [
+              {
+                "date": "2024-06-27",
+                "errorCm": 83.5
+              },
+              {
+                "date": "2024-09-18",
+                "errorCm": 68.5
+              },
+              {
+                "date": "2024-05-24",
+                "errorCm": 57.5
+              }
+            ]
+          },
+          "improvementPct": 2.67,
+          "pairedAbsoluteErrorDifferenceMeanCm": 0.3292,
+          "regimes": {
+            "rising": {
+              "n": 155,
+              "persistenceMaeCm": 13.6323,
+              "localTrendMaeCm": 13.0452
+            },
+            "falling": {
+              "n": 197,
+              "persistenceMaeCm": 12.2132,
+              "localTrendMaeCm": 11.5635
+            },
+            "unchanged": {
+              "n": 14,
+              "persistenceMaeCm": 0.0,
+              "localTrendMaeCm": 7.0357
+            }
+          },
+          "seasons": {
+            "DJF": {
+              "n": 91,
+              "persistenceMaeCm": 10.2088,
+              "localTrendMaeCm": 9.7857
+            },
+            "MAM": {
+              "n": 92,
+              "persistenceMaeCm": 14.0326,
+              "localTrendMaeCm": 15.3587
+            },
+            "JJA": {
+              "n": 92,
+              "persistenceMaeCm": 11.7174,
+              "localTrendMaeCm": 11.75
+            },
+            "SON": {
+              "n": 91,
+              "persistenceMaeCm": 13.4176,
+              "localTrendMaeCm": 11.1429
+            }
+          },
+          "largeChangeThresholdCm": 31.0,
+          "largeChanges": {
+            "n": 22,
+            "persistenceMaeCm": 45.9545,
+            "localTrendMaeCm": 37.5682
+          }
+        }
+      },
+      "2025_context": {
+        "source": "M2.2 previously examined holdout; not an independent confirmation",
+        "persistence": {
+          "n": 365,
+          "maeCm": 12.0356,
+          "medianAbsErrorCm": 10.0,
+          "p90AbsErrorCm": 24.0,
+          "maxAbsErrorCm": 71.0,
+          "largestMisses": [
+            {
+              "date": "2025-04-01",
+              "errorCm": 71.0
+            },
+            {
+              "date": "2025-01-11",
+              "errorCm": 60.0
+            },
+            {
+              "date": "2025-03-21",
+              "errorCm": 55.0
+            },
+            {
+              "date": "2025-04-10",
+              "errorCm": 50.0
+            },
+            {
+              "date": "2025-08-05",
+              "errorCm": 43.0
+            }
+          ],
+          "rising": {
+            "n": 149,
+            "maeCm": 14.1342
+          },
+          "falling": {
+            "n": 202,
+            "maeCm": 11.3218
+          },
+          "unchanged": {
+            "n": 14,
+            "maeCm": 0.0
+          }
+        },
+        "localTrend": {
+          "n": 365,
+          "maeCm": 9.5397,
+          "medianAbsErrorCm": 7.0,
+          "p90AbsErrorCm": 21.5,
+          "maxAbsErrorCm": 65.5,
+          "largestMisses": [
+            {
+              "date": "2025-04-01",
+              "errorCm": 65.5
+            },
+            {
+              "date": "2025-01-11",
+              "errorCm": 55.5
+            },
+            {
+              "date": "2025-04-10",
+              "errorCm": 48.5
+            },
+            {
+              "date": "2025-03-21",
+              "errorCm": 46.0
+            },
+            {
+              "date": "2025-04-30",
+              "errorCm": 34.0
+            }
+          ],
+          "rising": {
+            "n": 149,
+            "maeCm": 10.896
+          },
+          "falling": {
+            "n": 202,
+            "maeCm": 8.953
+          },
+          "unchanged": {
+            "n": 14,
+            "maeCm": 3.5714
+          }
+        },
+        "selectedAlpha": 0.5
+      }
+    },
+    "2": {
+      "2021": {
+        "selectionHistoryYears": [
+          2020
+        ],
+        "selectedAlpha": 1.0,
+        "trainingTargetDates": 366,
+        "coefficientSelectionSamples": 363,
+        "selectionMaeCm": 22.6033,
+        "largeChangeThresholdCm": 32.0,
+        "evaluation": {
+          "targetDates": 365,
+          "pairedDates": 365,
+          "persistence": {
+            "n": 365,
+            "maeCm": 25.4822,
+            "medianAbsErrorCm": 19.0,
+            "p90AbsErrorCm": 54.0,
+            "maxAbsErrorCm": 137.0,
+            "largestMisses": [
+              {
+                "date": "2021-11-10",
+                "errorCm": 137.0
+              },
+              {
+                "date": "2021-12-31",
+                "errorCm": 110.0
+              },
+              {
+                "date": "2021-01-01",
+                "errorCm": 102.0
+              }
+            ]
+          },
+          "localTrend": {
+            "n": 365,
+            "maeCm": 22.4192,
+            "medianAbsErrorCm": 17.0,
+            "p90AbsErrorCm": 48.0,
+            "maxAbsErrorCm": 136.0,
+            "largestMisses": [
+              {
+                "date": "2021-04-19",
+                "errorCm": 136.0
+              },
+              {
+                "date": "2021-11-10",
+                "errorCm": 121.0
+              },
+              {
+                "date": "2021-04-21",
+                "errorCm": 106.0
+              }
+            ]
+          },
+          "improvementPct": 12.02,
+          "pairedAbsoluteErrorDifferenceMeanCm": 3.063,
+          "regimes": {
+            "rising": {
+              "n": 154,
+              "persistenceMaeCm": 29.8377,
+              "localTrendMaeCm": 27.2273
+            },
+            "falling": {
+              "n": 199,
+              "persistenceMaeCm": 23.0553,
+              "localTrendMaeCm": 19.6583
+            },
+            "unchanged": {
+              "n": 12,
+              "persistenceMaeCm": 9.8333,
+              "localTrendMaeCm": 6.5
+            }
+          },
+          "seasons": {
+            "DJF": {
+              "n": 90,
+              "persistenceMaeCm": 36.3444,
+              "localTrendMaeCm": 28.3778
+            },
+            "MAM": {
+              "n": 92,
+              "persistenceMaeCm": 23.2065,
+              "localTrendMaeCm": 25.5
+            },
+            "JJA": {
+              "n": 92,
+              "persistenceMaeCm": 21.6087,
+              "localTrendMaeCm": 19.5435
+            },
+            "SON": {
+              "n": 91,
+              "persistenceMaeCm": 20.956,
+              "localTrendMaeCm": 16.3187
+            }
+          },
+          "largeChangeThresholdCm": 32.0,
+          "largeChanges": {
+            "n": 33,
+            "persistenceMaeCm": 63.2727,
+            "localTrendMaeCm": 60.7576
+          }
+        }
+      },
+      "2022": {
+        "selectionHistoryYears": [
+          2020,
+          2021
+        ],
+        "selectedAlpha": 1.0,
+        "trainingTargetDates": 731,
+        "coefficientSelectionSamples": 728,
+        "selectionMaeCm": 22.511,
+        "largeChangeThresholdCm": 31.0,
+        "evaluation": {
+          "targetDates": 365,
+          "pairedDates": 365,
+          "persistence": {
+            "n": 365,
+            "maeCm": 21.2192,
+            "medianAbsErrorCm": 14.0,
+            "p90AbsErrorCm": 45.0,
+            "maxAbsErrorCm": 124.0,
+            "largestMisses": [
+              {
+                "date": "2022-11-26",
+                "errorCm": 124.0
+              },
+              {
+                "date": "2022-11-25",
+                "errorCm": 109.0
+              },
+              {
+                "date": "2022-11-24",
+                "errorCm": 101.0
+              }
+            ]
+          },
+          "localTrend": {
+            "n": 365,
+            "maeCm": 17.7671,
+            "medianAbsErrorCm": 13.0,
+            "p90AbsErrorCm": 41.0,
+            "maxAbsErrorCm": 95.0,
+            "largestMisses": [
+              {
+                "date": "2022-01-04",
+                "errorCm": 95.0
+              },
+              {
+                "date": "2022-12-14",
+                "errorCm": 86.0
+              },
+              {
+                "date": "2022-04-05",
+                "errorCm": 83.0
+              }
+            ]
+          },
+          "improvementPct": 16.27,
+          "pairedAbsoluteErrorDifferenceMeanCm": 3.4521,
+          "regimes": {
+            "rising": {
+              "n": 151,
+              "persistenceMaeCm": 25.404,
+              "localTrendMaeCm": 21.0728
+            },
+            "falling": {
+              "n": 197,
+              "persistenceMaeCm": 19.3096,
+              "localTrendMaeCm": 16.066
+            },
+            "unchanged": {
+              "n": 17,
+              "persistenceMaeCm": 6.1765,
+              "localTrendMaeCm": 8.1176
+            }
+          },
+          "seasons": {
+            "DJF": {
+              "n": 90,
+              "persistenceMaeCm": 27.1667,
+              "localTrendMaeCm": 24.7333
+            },
+            "MAM": {
+              "n": 92,
+              "persistenceMaeCm": 18.3913,
+              "localTrendMaeCm": 18.9348
+            },
+            "JJA": {
+              "n": 92,
+              "persistenceMaeCm": 14.75,
+              "localTrendMaeCm": 10.5435
+            },
+            "SON": {
+              "n": 91,
+              "persistenceMaeCm": 24.7363,
+              "localTrendMaeCm": 17.0
+            }
+          },
+          "largeChangeThresholdCm": 31.0,
+          "largeChanges": {
+            "n": 24,
+            "persistenceMaeCm": 68.1667,
+            "localTrendMaeCm": 57.7917
+          }
+        }
+      },
+      "2023": {
+        "selectionHistoryYears": [
+          2020,
+          2021,
+          2022
+        ],
+        "selectedAlpha": 1.0,
+        "trainingTargetDates": 1096,
+        "coefficientSelectionSamples": 1093,
+        "selectionMaeCm": 20.9268,
+        "largeChangeThresholdCm": 30.0,
+        "evaluation": {
+          "targetDates": 365,
+          "pairedDates": 365,
+          "persistence": {
+            "n": 365,
+            "maeCm": 26.5781,
+            "medianAbsErrorCm": 21.0,
+            "p90AbsErrorCm": 56.0,
+            "maxAbsErrorCm": 115.0,
+            "largestMisses": [
+              {
+                "date": "2023-06-26",
+                "errorCm": 115.0
+              },
+              {
+                "date": "2023-09-06",
+                "errorCm": 109.0
+              },
+              {
+                "date": "2023-06-25",
+                "errorCm": 104.0
+              }
+            ]
+          },
+          "localTrend": {
+            "n": 365,
+            "maeCm": 21.8219,
+            "medianAbsErrorCm": 16.0,
+            "p90AbsErrorCm": 48.0,
+            "maxAbsErrorCm": 96.0,
+            "largestMisses": [
+              {
+                "date": "2023-09-06",
+                "errorCm": 96.0
+              },
+              {
+                "date": "2023-02-13",
+                "errorCm": 95.0
+              },
+              {
+                "date": "2023-06-25",
+                "errorCm": 88.0
+              }
+            ]
+          },
+          "improvementPct": 17.9,
+          "pairedAbsoluteErrorDifferenceMeanCm": 4.7562,
+          "regimes": {
+            "rising": {
+              "n": 178,
+              "persistenceMaeCm": 27.3876,
+              "localTrendMaeCm": 22.7472
+            },
+            "falling": {
+              "n": 175,
+              "persistenceMaeCm": 27.1429,
+              "localTrendMaeCm": 21.96
+            },
+            "unchanged": {
+              "n": 12,
+              "persistenceMaeCm": 6.3333,
+              "localTrendMaeCm": 6.0833
+            }
+          },
+          "seasons": {
+            "DJF": {
+              "n": 90,
+              "persistenceMaeCm": 28.4222,
+              "localTrendMaeCm": 22.7222
+            },
+            "MAM": {
+              "n": 92,
+              "persistenceMaeCm": 25.5761,
+              "localTrendMaeCm": 22.7391
+            },
+            "JJA": {
+              "n": 92,
+              "persistenceMaeCm": 29.7283,
+              "localTrendMaeCm": 24.4239
+            },
+            "SON": {
+              "n": 91,
+              "persistenceMaeCm": 22.5824,
+              "localTrendMaeCm": 17.3736
+            }
+          },
+          "largeChangeThresholdCm": 30.0,
+          "largeChanges": {
+            "n": 49,
+            "persistenceMaeCm": 60.6531,
+            "localTrendMaeCm": 49.8776
+          }
+        }
+      },
+      "2024": {
+        "selectionHistoryYears": [
+          2020,
+          2021,
+          2022,
+          2023
+        ],
+        "selectedAlpha": 1.0,
+        "trainingTargetDates": 1461,
+        "coefficientSelectionSamples": 1458,
+        "selectionMaeCm": 21.1509,
+        "largeChangeThresholdCm": 31.0,
+        "evaluation": {
+          "targetDates": 366,
+          "pairedDates": 366,
+          "persistence": {
+            "n": 366,
+            "maeCm": 20.3497,
+            "medianAbsErrorCm": 16.0,
+            "p90AbsErrorCm": 42.0,
+            "maxAbsErrorCm": 165.0,
+            "largestMisses": [
+              {
+                "date": "2024-09-19",
+                "errorCm": 165.0
+              },
+              {
+                "date": "2024-09-20",
+                "errorCm": 151.0
+              },
+              {
+                "date": "2024-09-21",
+                "errorCm": 102.0
+              }
+            ]
+          },
+          "localTrend": {
+            "n": 366,
+            "maeCm": 20.5683,
+            "medianAbsErrorCm": 14.0,
+            "p90AbsErrorCm": 47.0,
+            "maxAbsErrorCm": 144.0,
+            "largestMisses": [
+              {
+                "date": "2024-09-19",
+                "errorCm": 144.0
+              },
+              {
+                "date": "2024-06-28",
+                "errorCm": 96.0
+              },
+              {
+                "date": "2024-09-18",
+                "errorCm": 94.0
+              }
+            ]
+          },
+          "improvementPct": -1.07,
+          "pairedAbsoluteErrorDifferenceMeanCm": -0.2186,
+          "regimes": {
+            "rising": {
+              "n": 155,
+              "persistenceMaeCm": 22.6258,
+              "localTrendMaeCm": 24.0516
+            },
+            "falling": {
+              "n": 197,
+              "persistenceMaeCm": 19.0051,
+              "localTrendMaeCm": 18.1878
+            },
+            "unchanged": {
+              "n": 14,
+              "persistenceMaeCm": 14.0714,
+              "localTrendMaeCm": 15.5
+            }
+          },
+          "seasons": {
+            "DJF": {
+              "n": 91,
+              "persistenceMaeCm": 17.4725,
+              "localTrendMaeCm": 16.4066
+            },
+            "MAM": {
+              "n": 92,
+              "persistenceMaeCm": 21.5978,
+              "localTrendMaeCm": 26.0326
+            },
+            "JJA": {
+              "n": 92,
+              "persistenceMaeCm": 18.5435,
+              "localTrendMaeCm": 19.2935
+            },
+            "SON": {
+              "n": 91,
+              "persistenceMaeCm": 23.7912,
+              "localTrendMaeCm": 20.4945
+            }
+          },
+          "largeChangeThresholdCm": 31.0,
+          "largeChanges": {
+            "n": 22,
+            "persistenceMaeCm": 62.7273,
+            "localTrendMaeCm": 57.2727
+          }
+        }
+      },
+      "2025_context": {
+        "source": "M2.2 previously examined holdout; not an independent confirmation",
+        "persistence": {
+          "n": 365,
+          "maeCm": 21.8822,
+          "medianAbsErrorCm": 18.0,
+          "p90AbsErrorCm": 45.0,
+          "maxAbsErrorCm": 102.0,
+          "largestMisses": [
+            {
+              "date": "2025-01-12",
+              "errorCm": 102.0
+            },
+            {
+              "date": "2025-03-22",
+              "errorCm": 92.0
+            },
+            {
+              "date": "2025-04-02",
+              "errorCm": 84.0
+            },
+            {
+              "date": "2025-04-01",
+              "errorCm": 82.0
+            },
+            {
+              "date": "2025-03-21",
+              "errorCm": 73.0
+            }
+          ],
+          "rising": {
+            "n": 149,
+            "maeCm": 25.5101
+          },
+          "falling": {
+            "n": 202,
+            "maeCm": 20.2277
+          },
+          "unchanged": {
+            "n": 14,
+            "maeCm": 7.1429
+          }
+        },
+        "localTrend": {
+          "n": 365,
+          "maeCm": 19.0082,
+          "medianAbsErrorCm": 15.5,
+          "p90AbsErrorCm": 39.5,
+          "maxAbsErrorCm": 97.5,
+          "largestMisses": [
+            {
+              "date": "2025-01-12",
+              "errorCm": 97.5
+            },
+            {
+              "date": "2025-03-22",
+              "errorCm": 83.0
+            },
+            {
+              "date": "2025-04-02",
+              "errorCm": 78.5
+            },
+            {
+              "date": "2025-01-11",
+              "errorCm": 73.5
+            },
+            {
+              "date": "2025-04-01",
+              "errorCm": 71.5
+            }
+          ],
+          "rising": {
+            "n": 149,
+            "maeCm": 21.9832
+          },
+          "falling": {
+            "n": 202,
+            "maeCm": 17.7351
+          },
+          "unchanged": {
+            "n": 14,
+            "maeCm": 5.7143
+          }
+        },
+        "selectedAlpha": 0.5
+      }
+    }
+  }
+}

@@ -73,15 +73,62 @@ def _direction(series,errors,direction):
       state='rising' if series[day]>series[prev] else 'falling' if series[day]<series[prev] else 'unchanged'
       if state==direction:selected.append(error)
     return {'n':len(selected),'maeCm':round(statistics.mean(selected),4) if selected else None}
+
+def select_local_alpha(history,train_targets,horizon):
+    return choose(history,{},train_targets,horizon)['alpha']
+
+def development_window(yearly_series,evaluation_year):
+    years=range(min(yearly_series),evaluation_year)
+    return {d:value for year in years for d,value in yearly_series[year].items()}
+
+def expanding_year(lom,year,horizon,alpha,large_change_cm):
+    targets=sorted(d for d in lom if d.year==year)
+    paired=[]
+    for target in targets:
+      persistence=forecast(lom,{},target,horizon)
+      trend=forecast(lom,{},target,horizon,alpha)
+      if persistence is not None and trend is not None:
+       actual=lom[target]; paired.append((target,abs(actual-persistence),abs(actual-trend)))
+    def summarize(column):
+      vals=sorted((row[0],row[column]) for row in paired); errors=sorted(value for _,value in vals)
+      return {'n':len(vals),'maeCm':round(statistics.mean(errors),4) if errors else None,'medianAbsErrorCm':round(errors[len(errors)//2],4) if errors else None,'p90AbsErrorCm':round(errors[(9*len(errors)+9)//10-1],4) if errors else None,'maxAbsErrorCm':round(errors[-1],4) if errors else None,'largestMisses':[{'date':d.isoformat(),'errorCm':round(e,4)} for d,e in sorted(vals,key=lambda x:(-x[1],x[0]))[:3]]}
+    result={'targetDates':len(targets),'pairedDates':len(paired),'persistence':summarize(1),'localTrend':summarize(2)}
+    if paired:
+      result['improvementPct']=round(100*(result['persistence']['maeCm']-result['localTrend']['maeCm'])/result['persistence']['maeCm'],2)
+      result['pairedAbsoluteErrorDifferenceMeanCm']=round(statistics.mean(p-t for _,p,t in paired),4)
+      regimes={k:[] for k in ('rising','falling','unchanged')}; seasons={k:[] for k in ('DJF','MAM','JJA','SON')}; large=[]
+      for d,p,t in paired:
+       prev=d-timedelta(days=1)
+       if prev in lom:
+        state='rising' if lom[d]>lom[prev] else 'falling' if lom[d]<lom[prev] else 'unchanged'; regimes[state].append((p,t))
+       seasons[{12:'DJF',1:'DJF',2:'DJF',3:'MAM',4:'MAM',5:'MAM',6:'JJA',7:'JJA',8:'JJA',9:'SON',10:'SON',11:'SON'}[d.month]].append((p,t))
+       if prev in lom and abs(lom[d]-lom[prev])>=large_change_cm: large.append((p,t))
+      def pair_stats(rows):
+       return {'n':len(rows),'persistenceMaeCm':round(statistics.mean(x[0] for x in rows),4) if rows else None,'localTrendMaeCm':round(statistics.mean(x[1] for x in rows),4) if rows else None}
+      result['regimes']={k:pair_stats(v) for k,v in regimes.items()}; result['seasons']={k:pair_stats(v) for k,v in seasons.items()}; result['largeChangeThresholdCm']=large_change_cm; result['largeChanges']=pair_stats(large)
+    return result
+
+def percentile90(values):
+    ordered=sorted(values)
+    return ordered[(9*len(ordered)+9)//10-1]
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--development-2024',required=True,type=Path);p.add_argument('--evaluation-2025',required=True,type=Path);p.add_argument('--novo-selo-2024',required=True,type=Path);p.add_argument('--novo-selo-2025',required=True,type=Path);p.add_argument('--output',required=True,type=Path);a=p.parse_args()
-    dev=load(a.development_2024); test=load(a.evaluation_2025); history={**dev,**test}; ndev=load(a.novo_selo_2024); ntest=load(a.novo_selo_2025); nhistory={**ndev,**ntest}
-    targets=sorted(d for d in test if d.year==2025)
-    horizons={}
-    for h in (1,2):
-      local=choose(dev,ndev,sorted(d for d in dev if d.year==2024),h)
-      upstream=choose(dev,ndev,sorted(d for d in dev if d.year==2024),h,True)
-      horizons[str(h)]={'developmentSelection':{'localTrend':local,'upstreamInformed':upstream},'evaluation':compare(dev,ndev,history,nhistory,targets,h,{'localTrend':local,'upstreamInformed':upstream})}
-    result={'developmentYear':2024,'evaluationYear':2025,'evaluationDates':len(targets),'pairedComparison':'All models use the intersection of target dates with complete values required by all three predictors.','candidateSet':{'localAlpha':[-0.5,0,0.5,1,1.5],'upstreamLagDays':[1,2,3,4,5,6,7],'upstreamBeta':[-1,-0.5,0.5,1]},'forecastAssumption':'Forecast issue date is target minus horizon. Inputs are observations no later than issue date; APPD publication latency is unknown. This is an offline daily hindcast, not operational accuracy.','horizons':horizons}
+    p=argparse.ArgumentParser();p.add_argument('--data-dir',type=Path,default=Path('data/river-history/normalized/annual'));p.add_argument('--output',required=True,type=Path);a=p.parse_args()
+    lom={y:load(a.data_dir/f'lom-water-level-{y}.csv') for y in range(2020,2026)}
+    reports={}
+    for horizon in (1,2):
+      years={}
+      for year in range(2021,2025):
+       train=development_window(lom,year)
+       train_targets=sorted(train)
+       selection=choose(train,{},train_targets,horizon); alpha=selection['alpha']
+       deltas=[abs(train[d]-train[d-timedelta(days=1)]) for d in train if d-timedelta(days=1) in train]
+       threshold=percentile90(deltas)
+       combined={**train,**lom[year]}
+       years[str(year)]={'selectionHistoryYears':list(range(2020,year)),'selectedAlpha':alpha,'trainingTargetDates':len(train_targets),'coefficientSelectionSamples':selection['n'],'selectionMaeCm':selection['developmentMaeCm'],'largeChangeThresholdCm':threshold,'evaluation':expanding_year(combined,year,horizon,alpha,threshold)}
+      # Context only: cite the already-examined M2.2 holdout without refitting it.
+      previous=json.loads(Path('data/river-history/reports/validation/upstream-forecast-2025.json').read_text())['horizons'][str(horizon)]['evaluation']
+      years['2025_context']={'source':'M2.2 previously examined holdout; not an independent confirmation','persistence':previous['persistence'],'localTrend':previous['localTrend'],'selectedAlpha':0.5}
+      reports[str(horizon)]=years
+    result={'developmentRule':'Expanding chronological history; choose alpha from fixed grid [-0.5,0,0.5,1,1.5] by training MAE for the requested horizon. 2025 is contextual only and was previously examined.','evaluationRule':'Paired persistence/local-trend target dates; issue-date input is target minus horizon; prior-year history supplies January origins. Seasonal and regime labels describe outcomes only. Large-change threshold is 90th percentile of absolute daily Lom changes in training history.','forecastAssumption':'Daily observations are assumed available by issue date; APPD publication latency is unknown. Hindcasts are not prospective operational validation.','horizons':reports}
     a.output.parent.mkdir(parents=True,exist_ok=True);a.output.write_text(json.dumps(result,indent=2));print(json.dumps(result,indent=2))
 if __name__=='__main__':main()
