@@ -81,6 +81,7 @@ describe('DeviceHttpPollService', () => {
     const shelly = {
       pollLegacyShellyHttp: jest.fn(),
       pollAuthorizedLocalShellyStatus: jest.fn().mockResolvedValue(null),
+      pollApprovedEm1Measurements: jest.fn().mockResolvedValue(undefined),
       refreshRemoteShellyObservers: jest.fn().mockResolvedValue(undefined),
       stop: jest.fn(),
     }

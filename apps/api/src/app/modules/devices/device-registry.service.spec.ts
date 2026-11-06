@@ -93,6 +93,7 @@ describe('DeviceRegistryService', () => {
       physicalInventoryId: '3e709572-76c5-4d5f-8c89-ec23a8d7c55b', ipAddress: '172.30.250.11',
       networkScope: 'observer-lab:virtual-device-lab', identityVerifiedAt: verifiedAt,
       componentVerifiedAt: verifiedAt, observerId: 'virtual-observer',
+      evidenceScanId: 'site-observer-test-run-1', evidenceCompletedAt: verifiedAt,
     });
     expect(result?.metadata).toEqual(expect.objectContaining({
       identityEvidenceSource: 'verified_site_local_shelly_rpc',
@@ -105,6 +106,52 @@ describe('DeviceRegistryService', () => {
     expect(saved.observationAuthority).toBe(authority);
     expect(saved.device.metadata).not.toHaveProperty('measurementApproval');
     expect(result?.metadata).not.toHaveProperty('controlBinding');
+  });
+  it('reconciles fresh EM1 identity without granting measurement or switching authority', async () => {
+    const physicalId = 'shellyproem50-8c4f00dbd258';
+    const component = 'em1:0';
+    const deviceId = `${physicalId}:${component}`;
+    const verifiedAt = new Date().toISOString();
+    const authority = { source: 'pre-existing-authority', bindings: [{ deviceId, sourceId: 'existing-source', fields: { power: true } }] };
+    process.env.PORTAL_TENANT_ID = 'tenant-demo';
+    process.env.PORTAL_SITE_ID = 'site-home';
+    const initialDevice = {
+      id: deviceId, tenantId: 'tenant-demo', siteId: 'site-home', displayName: 'EM50',
+      trustStatus: 'approved', kind: 'physical', zoneId: 'unassigned', zoneName: 'Unassigned',
+      adapter: { protocol: 'http', transport: 'http', driver: 'shelly-lan', target: 'http://192.168.7.54/rpc', configured: true },
+      capabilities: [{ kind: 'power', actions: ['read'] }],
+      supportedCapabilities: [{ kind: 'power', actions: ['read'] }],
+      control: { status: 'unavailable', routeId: null }, assistantEnabled: false,
+      metadata: { physicalId, component, ipAddress: '192.168.7.54', networkScope: 'gateway-unknown:eero-lan' },
+      state: { values: {}, observedAt: null, status: 'unknown' },
+    } as any;
+    const record = { schemaVersion: 1, device: initialDevice, observationAuthority: authority,
+      physicalOutcome: { status: 'not_confirmed', confirmedAt: null, confirmedBy: null }, updatedAt: verifiedAt };
+    let saved: any = record;
+    const store = { listAll: jest.fn(async () => [record]), save: jest.fn(async value => { saved = value; }), append: jest.fn() };
+    const enrollment = { list: jest.fn(async () => [{ deviceId, status: 'enrolled' }]),
+      find: jest.fn(async () => ({ status: 'enrolled' })) };
+    const registry = new DeviceRegistryService(undefined, store as any, enrollment as any);
+    await registry.ensureInstallationsLoaded();
+
+    const result = await registry.reconcileShellyIdentityEvidence({
+      tenantId: 'tenant-demo', siteId: 'site-home', deviceId, physicalId, component,
+      physicalInventoryId: 'inventory-em50', evidenceScanId: 'site-observer-test-2', evidenceCompletedAt: verifiedAt,
+      observerId: 'mac-eero-en0', ipAddress: '192.168.7.54', networkScope: 'mac-eero-en0:eero-lan',
+      identityVerifiedAt: verifiedAt, componentVerifiedAt: verifiedAt, verifiedMeasurementFields: ['power'],
+    });
+
+    expect(result?.trustStatus).toBe('approved');
+    expect(result?.metadata).toEqual(expect.objectContaining({ physicalId, component, siteLocalObserverId: 'mac-eero-en0' }));
+    expect(result?.control).toMatchObject({ status: 'read-only', binding: null });
+    expect(result?.capabilities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'power', actions: ['read'] }),
+    ]));
+    expect(result?.capabilities?.some(capability => capability.kind === 'switch')).toBe(false);
+    expect(result?.assistantEnabled).toBe(false);
+    expect(saved.observationAuthority).toBe(authority);
+    expect(saved.device.metadata).not.toHaveProperty('measurementApproval');
+    expect(saved.device.metadata).not.toHaveProperty('controlPermission');
   });
   afterEach(() => {});
 

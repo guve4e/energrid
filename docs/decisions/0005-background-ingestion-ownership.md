@@ -18,6 +18,9 @@ Every background observation, diagnostic event, discovery snapshot and candidate
 - Explicitly configured routes can be authorized without relying on Portal state.
 - Missing ownership is a rejection or unscoped historical evidence, not an invitation to use the current site.
 - The generic background MQTT fallback is a documented risk until its broker/device-to-site binding is explicit.
+- A matching tenant/site string is not evidence that two API instances share an inventory authority. Development instances must be explicitly marked isolated; each deployed site designates one canonical writer. `ENERGRID_INSTANCE_ID` / `ENERGRID_INSTANCE_MODE` currently expose this intended role in an administrator diagnostic but do not enforce uniqueness or attest deployment.
+- Network observers may be authorized at the network/site boundary while persisted, operator-approved Physical Inventory assignments narrow which physical identity/components can be verified. Optional per-device allowlists can further restrict that path; omission does not grant enrollment, observation, measurement, or control authority.
+- The existing API-owned SSH stdio observer is a scoped pull path for read-only Shelly switch status, not a general observer push protocol. Operator-attested Portal evidence and the internal observation ingress must not be treated as machine authentication. A separate, narrowly scoped authenticated reporting boundary with replay/order validation is required before remote observers can submit to a distinct site authority.
 
 ## Source references
 

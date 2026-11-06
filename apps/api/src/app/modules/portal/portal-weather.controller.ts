@@ -18,6 +18,13 @@ export class PortalWeatherController {
   @Get('river-performance')
   riverPerformance(@Req() request: DeviceProxyRequest) { return this.read(request, '/river/forecast-performance/Vidin'); }
 
+  @Get('investigator/health')
+  investigatorHealth(@Req() request: DeviceProxyRequest) {
+    assertPortalAdministrator(request);
+    const scope = this.registry.getSnapshot();
+    return this.investigatorRequest(`/weather/investigator/health?tenantId=${encodeURIComponent(scope.tenant.id)}&siteId=${encodeURIComponent(scope.site.id)}`);
+  }
+
   @Get('read-model')
   readModel(@Req() request: DeviceProxyRequest) {
     assertPortalAdministrator(request);

@@ -408,7 +408,13 @@ export class PortalController {
     const rpcVerified = metadata?.identityEvidenceSource === 'verified_site_local_shelly_rpc' &&
       metadata?.componentEvidenceSource === 'verified_site_local_shelly_rpc' &&
       typeof metadata?.siteLocalObserverId === 'string' && !!metadata.siteLocalObserverId &&
-      typeof metadata?.identityVerifiedAt === 'string' && typeof metadata?.componentVerifiedAt === 'string'
+      typeof metadata?.identityVerifiedAt === 'string' && typeof metadata?.componentVerifiedAt === 'string' &&
+      typeof metadata?.siteLocalEvidenceScanId === 'string' && metadata.siteLocalEvidenceScanId.startsWith('site-observer-') &&
+      typeof metadata?.physicalId === 'string' && typeof metadata?.component === 'string' &&
+      deviceId === `${metadata.physicalId}:${metadata.component}` &&
+      typeof metadata?.ipAddress === 'string' && typeof metadata?.networkScope === 'string' &&
+      isFreshSiteLocalRpcEvidence(metadata.identityVerifiedAt) &&
+      isFreshSiteLocalRpcEvidence(metadata.componentVerifiedAt)
     const rpcVerification = {
       status: rpcVerified ? 'verified' : 'not_verified',
       identityVerifiedAt: rpcVerified ? metadata!.identityVerifiedAt : null,
@@ -1331,4 +1337,9 @@ export class PortalController {
     const path = Array.isArray(proxyPath) ? proxyPath.join('/') : proxyPath
     return this.deviceProxy.proxy(deviceId, path, request, response)
   }
+}
+
+function isFreshSiteLocalRpcEvidence(value: string, now = Date.now()): boolean {
+  const observedAt = Date.parse(value)
+  return Number.isFinite(observedAt) && observedAt <= now + 30_000 && now - observedAt <= 15 * 60_000
 }

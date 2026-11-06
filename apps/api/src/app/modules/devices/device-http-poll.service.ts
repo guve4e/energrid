@@ -34,7 +34,7 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     @Optional() energrid?: EnergridEspHttpCollectionService,
   ) {
     // Direct-constructor tests still work; production Nest provides the shared instance.
-    this.shelly = shelly ?? new ShellyOperationalCollectionService(registry, discovery, lanDiscovery, physicalInventory, routes)
+    this.shelly = shelly ?? new ShellyOperationalCollectionService(registry, discovery, lanDiscovery, physicalInventory, routes, observations)
     this.energrid = energrid ?? new EnergridEspHttpCollectionService(registry, observations, discovery, lanDiscovery, firmwareDiagnostics)
   }
 
@@ -60,9 +60,11 @@ export class DeviceHttpPollService implements OnModuleInit, OnModuleDestroy {
     try {
       // One explicit selection rule for scheduled HTTP reads. MQTT subscriptions
       // and command authorization are independent of this schedule.
-      const work = selectScheduledHttpCollection(this.registry.getDevices(true))
+      const devices = this.registry.getDevices(true)
+      const work = selectScheduledHttpCollection(devices)
       await Promise.all(work.httpDevices.map(device => this.pollDevice(device)))
       await Promise.all(work.shellySwitches.map(device => this.shelly.pollAuthorizedLocalShellyStatus(device)))
+      await this.shelly.pollApprovedEm1Measurements(devices)
       await this.refreshRemoteShellyObservers(work.shellySwitches)
     } finally {
       this.polling = false

@@ -1,4 +1,4 @@
-import type { PhysicalDeviceInventoryRecord } from '../devices/enrollment/physical-device-inventory.repository'
+import { hasPhysicalDeviceIdentityClaim, type PhysicalDeviceInventoryRecord } from '../devices/enrollment/physical-device-inventory.repository'
 
 /** Matches only an existing, server-owned physical inventory assignment for this exact Shelly component. */
 export function findExactShellyInventoryAssignment(
@@ -10,8 +10,7 @@ export function findExactShellyInventoryAssignment(
 ): PhysicalDeviceInventoryRecord | null {
   const identityClaims = inventories.filter(inventory =>
     inventory.scope.tenantId === ownership.tenantId && inventory.scope.siteId === ownership.siteId &&
-    inventory.identity?.namespace === 'mqtt:shelly-protocol-id' &&
-    inventory.identity.value.toLowerCase() === physicalId.toLowerCase(),
+    hasPhysicalDeviceIdentityClaim(inventory, 'mqtt:shelly-protocol-id', physicalId),
   )
   if (identityClaims.length !== 1) return null
   const matches = identityClaims.filter(inventory => {

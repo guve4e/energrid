@@ -434,4 +434,153 @@ describe('coordinate-based station precipitation collection', () => {
     expect(result).toMatchObject({ status: 'configuration-required' });
     expect(fetch).not.toHaveBeenCalled();
   });
+
+  it('inspects an unapproved station without storing or scoring its raw evidence', async () => {
+    configure();
+    const ingest = jest.fn();
+    const store = {
+      claimCollection: jest.fn(),
+      saveCollectionStatus: jest.fn(),
+    };
+    const fetch = jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValueOnce(
+        response([
+          { id: 'UNAPPROVED1', distance: 1200 },
+          { id: 'UNAPPROVED1', distance: 1200 },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        response(
+          station('UNAPPROVED1', { latitude: 43.998, longitude: 22.8728 }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        response([
+          { time: '2026-02-30 09:00:00', prcp: 1 },
+          { time: '2026-11-06 07:00:00', prcp: 4 },
+          { time: '2026-11-06 08:00:00', prcp: 0 },
+          { time: '2026-11-06 09:00:00', prcp: null },
+          { time: '2026-11-06 09:30:00', prcp: 'missing' },
+          { time: '2026-11-06 10:00:00', prcp: 2 },
+        ]),
+      );
+    const collector = new WeatherObservationCollector(
+      { ingest } as never,
+      store as never,
+    );
+
+    const result = await collector.diagnoseAtCoordinates(
+      {
+        latitude: 43.9916,
+        longitude: 22.8728,
+        metric: 'precipitation_mm',
+        startAt: '2026-11-06T08:00:00.000Z',
+        endAt: '2026-11-06T10:00:00.000Z',
+      },
+      now,
+    );
+
+    expect(result).toMatchObject({
+      status: 'available',
+      interval: { requestedHours: 2 },
+      stations: [
+        {
+          stationId: 'UNAPPROVED1',
+          status: 'inspected',
+          returnedRows: 6,
+          validTimestampRows: 5,
+          invalidTimestampRows: 1,
+          uniqueTimestampLabels: 5,
+          timestampRowsInRequestedInterval: 3,
+          precipitationValues: 4,
+          missingPrecipitationValues: 1,
+          explicitZeroValues: 1,
+          invalidPrecipitationValues: 1,
+          intervalPrecipitationValues: 1,
+          intervalMissingPrecipitationValues: 1,
+          intervalExplicitZeroValues: 1,
+          intervalInvalidPrecipitationValues: 1,
+          firstTimestampLabel: '2026-11-06 07:00:00',
+          lastTimestampLabel: '2026-11-06 10:00:00',
+        },
+      ],
+    });
+    expect(result.note).toContain(
+      'without assigning start/end interval semantics',
+    );
+    expect(fetch).toHaveBeenCalledTimes(3);
+    const hourlyRequest = new URL(String(fetch.mock.calls[2][0]));
+    expect(hourlyRequest.pathname).toBe('/stations/hourly');
+    expect(hourlyRequest.searchParams.get('model')).toBe('false');
+    expect(hourlyRequest.searchParams.get('units')).toBe('metric');
+    expect(hourlyRequest.searchParams.get('tz')).toBe('UTC');
+    expect(ingest).not.toHaveBeenCalled();
+    expect(store.claimCollection).not.toHaveBeenCalled();
+    expect(store.saveCollectionStatus).not.toHaveBeenCalled();
+  });
+
+  it('bounds diagnostic intervals and does not call Meteostat without credentials', async () => {
+    configure();
+    const fetch = jest.spyOn(global, 'fetch');
+    const collector = new WeatherObservationCollector({} as never, {} as never);
+    const request = {
+      latitude: 40.8136,
+      longitude: -96.7026,
+      metric: 'precipitation_mm' as const,
+      startAt: '2026-10-30T07:00:00.000Z',
+      endAt: '2026-11-06T08:00:00.000Z',
+    };
+    expect(await collector.diagnoseAtCoordinates(request, now)).toMatchObject({
+      status: 'unavailable',
+      stations: [],
+    });
+    expect(fetch).not.toHaveBeenCalled();
+
+    delete process.env.METEOSTAT_API_KEY;
+    expect(
+      await collector.diagnoseAtCoordinates(
+        { ...request, startAt: '2026-11-06T07:00:00.000Z' },
+        now,
+      ),
+    ).toMatchObject({ status: 'configuration-required', stations: [] });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('reports an unapproved station with no requested-period inventory as unavailable', async () => {
+    configure();
+    const fetch = jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValueOnce(response([{ id: 'OLD01', distance: 900 }]))
+      .mockResolvedValueOnce(
+        response({
+          ...station('OLD01', { latitude: 43.99, longitude: 22.87 }),
+          inventory: { hourly: { start: '2000-01-01', end: '2020-01-01' } },
+        }),
+      );
+    const collector = new WeatherObservationCollector({} as never, {} as never);
+
+    const result = await collector.diagnoseAtCoordinates(
+      {
+        latitude: 43.9916,
+        longitude: 22.8728,
+        metric: 'precipitation_mm',
+        startAt: '2026-11-06T08:00:00.000Z',
+        endAt: '2026-11-06T10:00:00.000Z',
+      },
+      now,
+    );
+
+    expect(result).toMatchObject({
+      status: 'unavailable',
+      stations: [
+        {
+          stationId: 'OLD01',
+          reportedDistanceKm: 0.9,
+          status: 'no-hourly-inventory',
+        },
+      ],
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
 });

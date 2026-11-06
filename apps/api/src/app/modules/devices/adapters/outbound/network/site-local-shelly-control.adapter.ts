@@ -123,8 +123,8 @@ function validateInput(input: SiteLocalShellyRpcInput, mode: 'read' | 'set'): vo
       input.observer.cidr !== input.zone.cidr || isIP(input.ipAddress) !== 4 ||
       !ipInCidr(input.ipAddress, input.zone.cidr) || !physicalIdentityValid || !componentMatch ||
       !input.expectedComponentKeys.includes(input.component) ||
-      !input.observer.expectedDeviceIds.some(id => id.toLowerCase() === input.physicalId.toLowerCase()) ||
-      !input.observer.expectedComponentKeys?.includes(input.component) ||
+      (input.observer.expectedDeviceIds && !input.observer.expectedDeviceIds.some(id => id.toLowerCase() === input.physicalId.toLowerCase())) ||
+      (input.observer.expectedComponentKeys && !input.observer.expectedComponentKeys.includes(input.component)) ||
       (mode === 'set' && (!input.route || input.route.observerId !== input.observer.id ||
         input.route.tenantId !== input.tenantId || input.route.siteId !== input.siteId ||
         input.route.scopeId !== input.zone.id || input.route.physicalId.toLowerCase() !== input.physicalId.toLowerCase() ||

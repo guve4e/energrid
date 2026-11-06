@@ -39,6 +39,21 @@ interface InvestigatorFinding {
   explanationBg: string; reasoningSummary: string; provider: string; model: string; notificationState: string;
   firstNotifiedAt: string | null; lastUpdatedAt: string;
 }
+interface InvestigatorReadiness {
+  version: 1;
+  status: 'ready' | 'collecting' | 'waiting_for_first_snapshot' | 'disabled' |
+    'misconfigured' | 'storage_unavailable' | 'provider_unavailable' |
+    'collection_failed' | 'incomplete_forecast' | 'stale_forecast';
+  reason: string | null;
+  schedule: {
+    enabled: boolean; running: boolean; intervalMinutes: number;
+    consecutiveFailures: number; lastAttemptAt: string | null;
+    lastCompletedAt: string | null; lastOutcome: string | null;
+    nextAttemptAt: string | null;
+  };
+  evidence: null | { capturedAt: string; ageMinutes: number | null; provider: string;
+    model: string | null; coverage: { validHours: number; expectedHours: number; complete: boolean } };
+}
 const dashboard = ref<Dashboard | null>(null);
 const selectedDate = ref<string | null>(null);
 const selectedDay = computed(() => {
@@ -49,6 +64,19 @@ const selectedDay = computed(() => {
 const selectedDetail = computed(() => dashboard.value?.dayDetails?.find(detail => detail.date === selectedDay.value?.date));
 const weather = ref<{ status: string; summary: WeatherScore[]; pending?: { scheduled: number; awaitingObservations: number }; note?: string; daily?: DailyPerformance; collection?: ObservationCollection } | null>(null);
 const river = ref<{ status?: string; summary: RiverScore[]; note?: string } | null>(null);
+const investigatorHealth = ref<InvestigatorReadiness | null>(null);
+const investigatorStatusLabel = (status: InvestigatorReadiness['status']) => ({
+  ready: 'Работи · прогнозата е актуална',
+  collecting: 'Първо събиране на прогноза…',
+  waiting_for_first_snapshot: 'Очаква се първа прогноза',
+  disabled: 'Автоматичното събиране е изключено',
+  misconfigured: 'Липсва конфигурация на обекта',
+  storage_unavailable: 'Хранилището за прогнози не е достъпно',
+  provider_unavailable: 'Метеорологичният източник е недостъпен',
+  collection_failed: 'Последното автоматично събиране е неуспешно',
+  incomplete_forecast: 'Прогнозата е непълна',
+  stale_forecast: 'Прогнозата е остаряла',
+})[status];
 const errors = ref<Record<string, string>>({});
 const findings = ref<InvestigatorFinding[]>([]);
 const investigationBusy = ref(false);
@@ -60,6 +88,9 @@ let timer: ReturnType<typeof setInterval> | undefined;
 let disposed = false;
 const number = (value: number | null | undefined, digits = 1) => value == null || !Number.isFinite(Number(value)) ? '—' : Number(value).toFixed(digits);
 const time = (value: string | null) => value ? new Date(value).toLocaleString() : '—';
+const healthTime = (value: string | null) => value
+  ? new Intl.DateTimeFormat('bg-BG', { timeZone: 'Europe/Sofia', dateStyle: 'short', timeStyle: 'short' }).format(new Date(value))
+  : '—';
 const hour = (value: string | null | undefined) => value ? new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—';
 const label = (value: string) => value.replaceAll('-', ' ').replaceAll('_', ' ');
 const metric = (value: string) => ({ temperature_c: 'Temperature · °C', gust_kmh: 'Hourly gust · km/h', precipitation_mm: 'Hourly rain · mm', rain_probability: 'Rain probability' })[value] || value;
@@ -116,7 +147,7 @@ async function refresh() {
   controller = new AbortController();
   const timeout = setTimeout(() => controller?.abort(), 25000);
   try {
-    const results = await Promise.allSettled(['dashboard','performance','river-performance','investigator/findings'].map(async endpoint => {
+    const results = await Promise.allSettled(['dashboard','performance','river-performance','investigator/findings','investigator/health'].map(async endpoint => {
       const response = await authFetch(`${props.apiBase}/portal/weather/${endpoint}`, {
         headers: { Authorization: `Bearer ${props.accessToken}` }, signal: controller!.signal,
       });
@@ -131,7 +162,9 @@ async function refresh() {
     weather.value = results[1].status === 'fulfilled' ? results[1].value : null;
     river.value = results[2].status === 'fulfilled' ? results[2].value : null;
     findings.value = results[3].status === 'fulfilled' ? results[3].value as InvestigatorFinding[] : [];
+    investigatorHealth.value = results[4].status === 'fulfilled' ? results[4].value as InvestigatorReadiness : null;
     if (results[3].status === 'rejected') nextErrors['3'] = String(results[3].reason?.message || results[3].reason);
+    if (results[4].status === 'rejected') nextErrors['4'] = String(results[4].reason?.message || results[4].reason);
     errors.value = nextErrors;
     lastRefresh.value = new Date().toISOString();
   } finally { clearTimeout(timeout); loading.value = false; }
@@ -174,6 +207,27 @@ onBeforeUnmount(() => { disposed = true; controller?.abort(); if (timer) clearIn
       <button type="button" :disabled="loading" @click="refresh">{{ loading ? 'Refreshing…' : 'Refresh' }}</button>
     </header>
     <p class="weather-muted">Last refresh attempt: {{ time(lastRefresh) }} · Automatic device actions are disabled.</p>
+
+    <section aria-labelledby="weather-readiness" class="weather-readiness">
+      <h3 id="weather-readiness">Автоматично събиране · Weather LAB</h3>
+      <p v-if="errors['4']" class="weather-notice" role="alert">Състоянието не е достъпно: {{ errors['4'] }}</p>
+      <template v-else-if="investigatorHealth">
+        <p :class="['weather-notice', { caution: investigatorHealth.status !== 'ready' }]" role="status">
+          <strong>{{ investigatorStatusLabel(investigatorHealth.status) }}</strong>
+          <span v-if="investigatorHealth.reason"> · {{ label(investigatorHealth.reason) }}</span>
+        </p>
+        <p class="weather-muted">Последен опит: {{ healthTime(investigatorHealth.schedule.lastAttemptAt) }} ·
+          Успешно събиране: {{ healthTime(investigatorHealth.schedule.lastCompletedAt) }} ·
+          Следващ опит: {{ healthTime(investigatorHealth.schedule.nextAttemptAt) }}</p>
+        <p v-if="investigatorHealth.evidence" class="weather-muted">
+          Източник: {{ investigatorHealth.evidence.provider }}/{{ investigatorHealth.evidence.model || '—' }} ·
+          Прогноза: {{ healthTime(investigatorHealth.evidence.capturedAt) }} ·
+          Покритие: {{ investigatorHealth.evidence.coverage.validHours }}/{{ investigatorHealth.evidence.coverage.expectedHours }} часа
+        </p>
+        <p class="weather-muted">Това е техническо състояние, не официално предупреждение.</p>
+      </template>
+      <p v-else class="weather-muted">Проверявам автоматичното събиране…</p>
+    </section>
 
     <section aria-labelledby="weather-investigator">
       <div class="section-title"><h3 id="weather-investigator">Предупреждения за времето</h3>

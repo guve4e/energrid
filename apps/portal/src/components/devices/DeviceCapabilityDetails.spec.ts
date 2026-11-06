@@ -14,6 +14,7 @@ const baseDevice: any = {
   state: { values: {}, observedAt: currentTime, status: 'online' },
 };
 let wrapper: ReturnType<typeof mount> | undefined;
+let readModelHistoryMetrics: string[] = ['power'];
 
 const approvedClimateBinding = {
   approved: true,
@@ -25,8 +26,28 @@ const approvedClimateBinding = {
     { metric: 'humidity', rawKey: 'humidityPct', unit: '%RH', displayUnit: '%RH' },
   ],
 };
-function installFetch(fields: Record<string, unknown> = {}, authority = { ...approvedClimateBinding, approved: false, approvalStatus: 'missing' }) {
+function installFetch(
+  fields: Record<string, unknown> = {},
+  authority = { ...approvedClimateBinding, approved: false, approvalStatus: 'missing' },
+  authorizedHistoryMetrics: string[] = ['power'],
+  httpPowerApproved = false,
+) {
+  readModelHistoryMetrics = authorizedHistoryMetrics;
   const fetchMock = vi.fn(async (url: string) => {
+    if (url.includes('/read-model')) {
+      const deviceId = decodeURIComponent(new URL(url, window.location.origin).pathname.split('/').slice(-2)[0]);
+      return { ok: true, json: async () => ({ identity: { id: deviceId, kind: 'physical' }, installation: { status: 'enrolled' }, history: { authorizedMetrics: readModelHistoryMetrics } }) };
+    }
+    if (url.includes('/shelly-observation-approval')) return { ok: true, json: async () => ({
+      approved: true, approvalStatus: 'approved', sourceId: 'shelly-mqtt', broker: '127.0.0.1:1883', selector: 'shelly/meter/events/rpc', approvedFields: ['power'], evidenceFresh: true,
+      evidence: { provenance: 'rpc', observerId: 'observer', snapshotId: 'snapshot', endpoint: '192.168.7.39', networkScope: 'eero-lan', identityVerifiedAt: currentTime, componentVerifiedAt: currentTime },
+      fields: [{ metric: 'power', rawKey: 'apower', unit: 'W', displayUnit: 'W' }],
+    }) };
+    if (url.includes('/shelly-http-em1-approval')) return { ok: true, json: async () => ({
+      approved: httpPowerApproved, approvalStatus: httpPowerApproved ? 'approved' : 'missing', sourceId: 'shelly-http-em1', selector: 'EM1.GetStatus?id=0',
+      endpoint: '192.168.7.54', networkScope: 'gateway-unknown:eero-lan',
+      fields: [{ metric: 'power', rawKey: 'power', unit: 'W' }],
+    }) };
     if (url.includes('/observations')) {
       const deviceId = decodeURIComponent(new URL(url, window.location.origin).pathname.split('/').slice(-2)[0]);
       return { ok: true, json: async () => ({ deviceId, freshnessLimitSeconds: 60, fields }) };
@@ -105,7 +126,7 @@ describe('capability-driven Device Details', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
   it('shows both relay control and authorized power and energy series for a power-monitoring switch', async () => {
-    installFetch();
+    installFetch({}, undefined, ['power', 'energy_import_total', 'energy_export_total']);
     const page = await render({ ...baseDevice, capabilities: [switchCapability, powerCapability], supportedCapabilities: [switchCapability, powerCapability], control: { status: 'ready', binding: { kind: 'generic-mqtt', enabled: true, topic: 'site/device/command' }, reason: '' }, state: { values: { on: false }, observedAt: currentTime, status: 'online' } });
     expect(page.text()).toContain('Relay is Off');
     expect(page.text()).toContain('Electrical measurements');
@@ -127,6 +148,67 @@ describe('capability-driven Device Details', () => {
     expect(page.text()).toContain('Measurement approval required');
     expect(page.text()).toContain('No authorized temperature or humidity observations are available');
     expect(page.findAll('.measurement-chart')).toHaveLength(0);
+  });
+  it('renders the EM1 approval review for the exact approved HTTP Shelly component', async () => {
+    const fetchMock = installFetch({}, undefined, []);
+    const id = 'shellyproem50-8c4f00dbd258:em1:0';
+    const page = await render({
+      ...baseDevice, id, displayName: 'Energy meter 1', kind: 'physical', trustStatus: 'approved',
+      adapter: { protocol: 'http', driver: 'shelly-lan', target: 'http://192.168.7.54/rpc/EM1.GetStatus?id=0', configured: true },
+      metadata: { component: 'em1:0', physicalId: 'shellyproem50-8c4f00dbd258', channel: 0 },
+      capabilities: [], supportedCapabilities: [powerCapability],
+    });
+    expect(page.text()).toContain('HTTP power observation approval required');
+    expect(page.text()).toContain('Review HTTP power source');
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining(`/portal/devices/${encodeURIComponent(id)}/shelly-http-em1-approval`), expect.anything());
+  });
+  it('loads HTTP EM50 power history from the source-independent authorized history projection', async () => {
+    const fetchMock = installFetch({}, undefined, ['power'], true);
+    const id = 'shellyproem50-8c4f00dbd258:em1:0';
+    const page = await render({
+      ...baseDevice, id, displayName: 'Energy meter', kind: 'physical', trustStatus: 'approved',
+      adapter: { protocol: 'http', driver: 'shelly-lan', target: 'http://192.168.7.54/rpc/EM1.GetStatus?id=0', configured: true },
+      metadata: { component: 'em1:0', physicalId: 'shellyproem50-8c4f00dbd258' },
+      capabilities: [], supportedCapabilities: [powerCapability],
+    });
+    expect(page.text()).toContain('Power is authorized from');
+    expect(page.text()).toContain('Electrical measurements');
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/electrical-measurements?'))).toHaveLength(1);
+    expect(page.find('.device-switch-control').exists()).toBe(false);
+  });
+  it('loads MQTT Pro 2PM power history through the same authorization projection without implying relay control', async () => {
+    const fetchMock = installFetch({}, undefined, ['power']);
+    const id = 'shellypro2pm-ec6260888084:switch:0';
+    const page = await render({
+      ...baseDevice, id, kind: 'physical', trustStatus: 'approved',
+      adapter: { protocol: 'mqtt', driver: 'shelly-discovered', target: 'shellypro2pm-ec6260888084' },
+      metadata: { component: 'switch:0', physicalId: 'shellypro2pm-ec6260888084',
+        identityEvidenceSource: 'verified_site_local_shelly_rpc', componentEvidenceSource: 'verified_site_local_shelly_rpc', shellyMqttObservationApprovalRequired: true },
+      capabilities: [switchCapability], supportedCapabilities: [switchCapability, powerCapability],
+      control: { status: 'read-only', binding: null, reason: 'No switching authorization.' },
+      state: { values: { on: false }, observedAt: currentTime, status: 'online' },
+    });
+    expect(page.text()).toContain('Electrical measurements');
+    expect(page.find('.device-switch-control').exists()).toBe(false);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/electrical-measurements?'))).toHaveLength(1);
+  });
+  it('does not request electrical history when power is supported but source authorization is absent', async () => {
+    const fetchMock = installFetch({}, undefined, []);
+    const page = await render({ ...baseDevice, capabilities: [], supportedCapabilities: [powerCapability] });
+    expect(page.text()).not.toContain('Electrical measurements');
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/electrical-measurements?'))).toBe(false);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/read-model'))).toBe(true);
+  });
+  it('updates history eligibility when the approved source projection changes', async () => {
+    const fetchMock = installFetch({}, undefined, []);
+    const page = await render({ ...baseDevice, capabilities: [], supportedCapabilities: [powerCapability] });
+    expect(page.text()).not.toContain('Electrical measurements');
+    // Simulate a persisted source approval followed by the existing Portal approval revision.
+    readModelHistoryMetrics = ['power'];
+    await page.setProps({ approvalRevision: 1 });
+    await flushPromises();
+    expect(page.text()).toContain('Electrical measurements');
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/electrical-measurements?metric=power'))).toBe(true);
   });
   it('keeps source-bound sensor measurements visible while awaiting observation approval', async () => {
     const missingApproval = { ...approvedClimateBinding, approved: false, approvalStatus: 'missing' };

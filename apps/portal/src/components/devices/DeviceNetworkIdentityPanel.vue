@@ -69,6 +69,14 @@ const displayedIdentity = computed(() =>
 );
 const isShelly = computed(() => physicalDevice.value?.vendor === 'Shelly' ||
   displayedIdentity.value?.namespace === 'mqtt:shelly-protocol-id' || /^shelly/i.test(props.deviceId));
+const enrolledShellyVerificationTarget = computed(() => {
+  if (!isShelly.value || props.enrollmentStatus !== 'enrolled' || rpcVerification.value?.status !== 'not_verified') return null;
+  const match = /^(shelly[a-z0-9._-]{1,114}):((?:switch|em1):(?:[0-9]|[12][0-9]|3[01]))$/i.exec(props.deviceId);
+  const assignment = logicalAssignment.value;
+  if (!match || !assignment || assignment.deviceId !== props.deviceId ||
+      assignment.physicalDeviceId !== physicalDevice.value?.physicalDeviceId || assignment.componentKey !== match[2]) return null;
+  return { physicalId: match[1], componentKey: match[2] };
+});
 const logicalRole = ref('');
 const editingRole = ref(false);
 const busy = ref(false);
@@ -120,23 +128,33 @@ async function load() {
 }
 
 async function verifySelectedDevice() {
-  if (busy.value || recovery.value?.status !== 'verification_required' ||
-      !recovery.value.physicalId || !recovery.value.componentKey) return;
+  const recoveryTarget = recovery.value?.status === 'verification_required' && recovery.value.physicalId && recovery.value.componentKey
+    ? { physicalId: recovery.value.physicalId, componentKey: recovery.value.componentKey }
+    : null;
+  const target = recoveryTarget || enrolledShellyVerificationTarget.value;
+  if (busy.value || !target) return;
+  const refreshOnly = !recoveryTarget;
   busy.value = true;
   error.value = '';
   try {
-    const selected = recovery.value;
     const response = await authFetch(
-      `${props.apiBase}/portal/discovery/${encodeURIComponent(`${selected.physicalId}:${selected.componentKey}`)}/verify-shelly`,
+      `${props.apiBase}/portal/discovery/${encodeURIComponent(`${target.physicalId}:${target.componentKey}`)}/verify-shelly`,
       { method: 'POST', headers: { Authorization: `Bearer ${props.accessToken}` } },
     );
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(typeof result.message === 'string' ? result.message : 'Selected-device verification failed.');
-    if (result.status !== 'verified' || result.physicalId !== selected.physicalId ||
-        !Array.isArray(result.componentKeys) || !result.componentKeys.includes(selected.componentKey)) {
+    if (result.status !== 'verified' || result.physicalId !== target.physicalId ||
+        !Array.isArray(result.componentKeys) || !result.componentKeys.includes(target.componentKey)) {
       throw new Error('Verification returned without confirming this physical identity and component.');
     }
     if (!await fetchIdentity()) return;
+    if (refreshOnly) {
+      if (rpcVerification.value?.status !== 'verified' || rpcVerification.value.physicalId !== target.physicalId ||
+          rpcVerification.value.component !== target.componentKey) {
+        throw new Error('The fresh RPC evidence was not reflected in this enrolled component.');
+      }
+      return;
+    }
     const refreshedRecovery = recovery.value as IdentityRecovery | null;
     if (refreshedRecovery?.status !== 'ready') {
       throw new Error(refreshedRecovery?.reason || 'Fresh verification did not make the existing association recoverable.');
@@ -296,6 +314,9 @@ watch(() => [props.deviceId, props.enrollmentStatus], load);
       <button v-if="recovery.status === 'verification_required'" type="button" class="ghost" :disabled="busy" @click="verifySelectedDevice">
         {{ busy ? 'Verifying…' : 'Verify selected device' }}
       </button>
+      <button v-else-if="enrolledShellyVerificationTarget" type="button" class="ghost" :disabled="busy" @click="verifySelectedDevice">
+        {{ busy ? 'Verifying…' : 'Refresh verified identity and component evidence' }}
+      </button>
       <button v-else-if="recovery.status === 'ready'" type="button" class="primary" :disabled="busy" @click="completeIdentityAssociation">
         {{ busy ? 'Completing…' : 'Complete identity association' }}
       </button>
@@ -310,7 +331,7 @@ watch(() => [props.deviceId, props.enrollmentStatus], load);
         <div><dt>Evidence source</dt><dd>{{ evidenceSourceLabel(association?.evidenceSource) }}</dd></div>
         <div><dt>Last observed</dt><dd>{{ observedAt(association?.observedAt) }}</dd></div>
         <div><dt>MAC address last verified</dt><dd>{{ association?.hardwareVerifiedAt || association?.verificationStatus === 'hardware_verified' ? observedAt(association?.hardwareVerifiedAt || association?.observedAt) : 'No independent MAC verification recorded' }}</dd></div>
-        <div v-if="rpcVerification && isShelly"><dt>Shelly RPC identity and component</dt><dd>{{ rpcVerification.status === 'verified' ? 'Verified' : 'Not verified' }}</dd><small v-if="rpcVerification.status === 'verified'">{{ rpcVerification.physicalId }} · {{ rpcVerification.component }} · {{ rpcVerification.endpoint }} · {{ rpcVerification.networkScope }}</small><small v-else>The stored protocol identity claim is not fresh, site-local RPC evidence for this component.</small></div>
+        <div v-if="rpcVerification && isShelly"><dt>Shelly RPC identity and component</dt><dd>{{ rpcVerification.status === 'verified' ? 'Verified' : 'Not verified' }}</dd><small v-if="rpcVerification.status === 'verified'">{{ rpcVerification.physicalId }} · {{ rpcVerification.component }} · {{ rpcVerification.endpoint }} · {{ rpcVerification.networkScope }}</small><small v-else>The stored protocol identity claim is not fresh, site-local RPC evidence for this component. Refreshing evidence does not approve measurement or switching.</small></div>
         <div v-if="rpcVerification?.status === 'verified'"><dt>RPC evidence</dt><dd>{{ observedAt(rpcVerification.identityVerifiedAt || undefined) }}</dd><small>Identity verified by {{ rpcVerification.observerId || 'authorized site observer' }}; component status at {{ observedAt(rpcVerification.componentVerifiedAt || undefined) }}. This is historical verification evidence, separate from the MAC association.</small></div>
         <div><dt>Hostname</dt><dd>{{ association?.hostname || 'Unknown' }}</dd></div>
         <div><dt>Protocol identity</dt><dd>{{ displayedIdentity ? `${displayedIdentity.namespace} · ${displayedIdentity.value}` : 'Unknown' }}</dd></div>

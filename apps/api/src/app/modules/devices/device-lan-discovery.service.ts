@@ -37,6 +37,7 @@ import { EnergridHttpIdentityAdapter } from './adapters/outbound/network/energri
 import { VirtualLabNetworkEvidenceAdapter, type RemoteShellyObserverRuntime, type RemoteShellyStatusAssignment, type RemoteShellyStatusObserverHandle, type VirtualLabEnergridHttpEvidence, type VirtualLabScanResult, type VirtualLabShellyControlResult } from './adapters/outbound/network/virtual-lab-network-evidence.adapter'
 import type { AuthorizedSiteLocalObserver } from './site-local-shelly-evidence-intake'
 import { configuredSiteLocalObservers, selectAuthorizedSiteLocalObserver } from './site-local-shelly-evidence-intake'
+import { ipv4NetmaskPrefix } from './network/ipv4-netmask-prefix'
 import { SiteLocalShellyControlAdapter } from './adapters/outbound/network/site-local-shelly-control.adapter'
 
 const execFileAsync = promisify(execFile)
@@ -289,13 +290,13 @@ export class DeviceLanDiscoveryService {
     const registered = registryMatches.find(device => device.tenantId === ownership.tenantId && device.siteId === ownership.siteId)
     const registeredPhysicalId = typeof registered?.metadata?.physicalId === 'string'
       ? registered.metadata.physicalId : ''
-    const partialEnrollment = !!registered && registered.trustStatus === 'approved' &&
+    const partialEnrollmentCandidate = !!registered && registered.trustStatus === 'approved' &&
       registered.metadata?.approvedFromDiscovery === true &&
       registeredPhysicalId.toLowerCase() === physicalId.toLowerCase() &&
       registered.metadata?.component === component;
-    if (registered && registered.trustStatus !== 'discovered' && !partialEnrollment) {
-      throw new ConflictException('The selected Shelly component is already enrolled or is no longer pending.')
-    }
+    const enrolledVerificationRefresh = !!registered && registered.trustStatus === 'approved' &&
+      registered.kind === 'physical' && registeredPhysicalId.toLowerCase() === physicalId.toLowerCase() &&
+      registered.metadata?.component === component;
     if (registered && registered.adapter.driver !== 'shelly-lan') {
       throw new ConflictException('The selected component is not registered as a Shelly LAN candidate.')
     }
@@ -309,6 +310,20 @@ export class DeviceLanDiscoveryService {
       throw new ConflictException('More than one site-owned physical inventory record matches this Shelly identity.')
     }
     const inventory = matchingInventory[0]
+    const exactInventoryAssignment = !!inventory && inventory.assignments.some(item =>
+      item.deviceId === candidateId && item.physicalDeviceId === inventory.physicalDeviceId &&
+      item.componentKey === component,
+    )
+    // Discovery-origin metadata can remain on an approved installation after
+    // enrollment. The exact site-owned assignment, not that historical flag,
+    // determines whether this is an enrolled refresh or partial recovery.
+    const fullyEnrolledVerificationRefresh = enrolledVerificationRefresh && exactInventoryAssignment;
+    const partialEnrollment = partialEnrollmentCandidate && !fullyEnrolledVerificationRefresh;
+    if (registered && registered.trustStatus !== 'discovered' && !partialEnrollment && !fullyEnrolledVerificationRefresh) {
+      throw new ConflictException(enrolledVerificationRefresh
+        ? 'The enrolled Shelly component has no exact same-site physical inventory assignment.'
+        : 'The selected Shelly component is already enrolled or is no longer pending.')
+    }
 
     const history = await this.discoveryMemory.listIdentityEvidence(ownership)
     const matchingHistory = history
@@ -348,6 +363,14 @@ export class DeviceLanDiscoveryService {
     }
     if (!inventory && !virtualLab) {
       throw new ConflictException('No unique site-owned physical inventory record matches this Shelly identity.')
+    }
+    if (fullyEnrolledVerificationRefresh && inventory) {
+      const decision = await this.registry.getShellyReconciliationTargetDecision(
+        ownership.tenantId, ownership.siteId, candidateId, physicalId, component, inventory.physicalDeviceId,
+      )
+      if (!decision.matched || !exactInventoryAssignment) {
+        throw new ConflictException(`The enrolled Shelly has no exact same-site physical component assignment (${decision.matched ? 'inventory_assignment_missing' : decision.reasonCode}).`)
+      }
     }
     if (inventory && !inventory.components.some(item => item.key === component)) {
       throw new ConflictException(`Physical inventory ${inventory.physicalDeviceId} has no expected ${component} component.`)
@@ -389,7 +412,8 @@ export class DeviceLanDiscoveryService {
     let identity: NonNullable<ReturnType<typeof readOnlyShellyRpcDeviceInfoFromBody>>
     let componentEvidence: ShellyComponentProbeEvidence | undefined
     let observerIdentity: { id: string; host: string; interfaceName: string } | undefined
-    const observationSource: 'http_rpc' | 'site_local_http_rpc' = virtualLab ? 'site_local_http_rpc' : 'http_rpc'
+    let observerAuthorization: AuthorizedSiteLocalObserver | undefined
+    const observationSource: 'http_rpc' | 'site_local_http_rpc' = 'site_local_http_rpc'
     if (virtualLab) {
       const remote = await this.virtualLabEvidence.verifyShellyComponent(zone, ipAddress, physicalId, expectedKeys, signal)
       const parsedIdentity = readOnlyShellyRpcDeviceInfoFromBody(remote.identity)
@@ -404,6 +428,31 @@ export class DeviceLanDiscoveryService {
       componentEvidence = shellyComponentEvidenceFromRpcStatuses(expectedKeys, remote.componentStatuses, zone.id, zone.interfaceName || remote.observer.interfaceName, verifiedAt, 'site_local_http_rpc')
       if (componentEvidence.failureReason) throw new BadGatewayException(componentEvidence.failureReason)
     } else {
+      const observers = configuredSiteLocalObservers()
+      const selection = selectAuthorizedSiteLocalObserver({
+        observers, tenantId: ownership.tenantId, siteId: ownership.siteId,
+        scopeId: zone.id, physicalId, component,
+      })
+      const authorizedObserver = selection.observer
+      observerAuthorization = authorizedObserver || undefined
+      if (!authorizedObserver) {
+        throw new ConflictException(`No authorized local observer matches this site and component (${selection.reason}).`)
+      }
+      const interfaceName = authorizedObserver.interfaceName
+      const [authorizedNetwork, prefixText] = (authorizedObserver.cidr || '').split('/')
+      const prefix = Number(prefixText)
+      const matchingInterfaces = interfaceName && authorizedNetwork && Number.isInteger(prefix)
+        ? (networkInterfaces()[interfaceName] || []).filter(address => !address.internal && address.family === 'IPv4' &&
+          ipv4NetmaskPrefix(address.netmask) === prefix && ipInCidr(address.address, authorizedObserver.cidr) &&
+          ipInCidr(authorizedNetwork, authorizedObserver.cidr))
+        : []
+      const normalizedHost = (value: string) => normalizeNetworkHostname(value).replace(/\.local$/, '')
+      if (!interfaceName || authorizedObserver.cidr !== zone.cidr || !zone.cidr ||
+          !ipInCidr(ipAddress, authorizedObserver.cidr) ||
+          normalizedHost(localHostname()) !== normalizedHost(authorizedObserver.host) || matchingInterfaces.length !== 1) {
+        throw new ConflictException('The selected endpoint is not directly reachable from the configured site-local observer interface and scope.')
+      }
+      observerIdentity = { id: authorizedObserver.id, host: authorizedObserver.host, interfaceName }
       const reachability = await probeTcpConnection(ipAddress, 80, 1_500, signal)
       if (reachability.status !== 'connected') {
         throw new BadGatewayException(reachability.message || `The observer could not connect to ${ipAddress}:80.`)
@@ -432,7 +481,7 @@ export class DeviceLanDiscoveryService {
       throw new ConflictException('The device-reported MAC differs from the known physical candidate; no evidence was saved.')
     }
     if (!componentEvidence) {
-      const savedInterfaceName = prior.device.observations?.find(item =>
+      const savedInterfaceName = observerAuthorization?.interfaceName || prior.device.observations?.find(item =>
         item.attribute === 'shelly.device_id' && item.interfaceName,
       )?.interfaceName
       componentEvidence = await probeShellyComponentsWithEvidence(ipAddress, zone.id, savedInterfaceName, signal)
@@ -473,10 +522,25 @@ export class DeviceLanDiscoveryService {
       reason: 'Fresh read-only Shelly RPC identity and component status verified from the selected candidate endpoint.',
       observations: [
         ...(prior.device.observations || []),
-        ...(observerIdentity ? [{ source: 'site_local_http_rpc' as const, attribute: 'observer.identity', value: observerIdentity.id, observedAt: identityVerifiedAt, scopeId: zone.id }] : []),
+        ...(observerIdentity ? [
+          { source: 'site_local_http_rpc' as const, attribute: 'observer.identity', value: observerIdentity.id,
+            observedAt: identityVerifiedAt, scopeId: zone.id, interfaceName: observerIdentity.interfaceName,
+            method: 'authorized-local-observer-runtime' },
+          { source: 'http_identity' as const, attribute: 'identity.verified', value: true,
+            observedAt: identityVerifiedAt, scopeId: zone.id, interfaceName: observerIdentity.interfaceName,
+            method: identity.method || 'GET /rpc/Shelly.GetDeviceInfo' },
+          { source: 'http_identity' as const, attribute: 'identity.device_id', value: physicalId,
+            observedAt: identityVerifiedAt, scopeId: zone.id, interfaceName: observerIdentity.interfaceName,
+            method: identity.method || 'GET /rpc/Shelly.GetDeviceInfo' },
+          ...(identity.mac ? [{ source: 'http_identity' as const, attribute: 'identity.mac', value: identity.mac,
+            observedAt: identityVerifiedAt, scopeId: zone.id, interfaceName: observerIdentity.interfaceName,
+            method: identity.method || 'GET /rpc/Shelly.GetDeviceInfo' }] : []),
+        ] : []),
         { source: observationSource, attribute: 'shelly.device_id', value: physicalId, observedAt: identityVerifiedAt, scopeId: zone.id, method: identity.method || 'GET /rpc/Shelly.GetDeviceInfo' },
         ...(identity.mac ? [{ source: observationSource, attribute: 'shelly.device_reported_mac', value: identity.mac, observedAt: identityVerifiedAt, scopeId: zone.id, method: identity.method || 'GET /rpc/Shelly.GetDeviceInfo' }] : []),
-        ...componentEvidence.observations,
+        ...componentEvidence.observations.map(item => observerIdentity ? {
+          ...item, source: 'site_local_http_rpc' as const, interfaceName: observerIdentity.interfaceName,
+        } : item),
       ],
     }
     const candidates = shellyLanCandidates(verifiedDevice)
@@ -484,7 +548,7 @@ export class DeviceLanDiscoveryService {
       throw new ConflictException('Fresh RPC evidence did not reproduce the selected logical component candidate.')
     }
     throwIfScanAborted(signal)
-    const scanId = randomUUID()
+    const scanId = observerIdentity ? `site-observer-${randomUUID()}` : randomUUID()
     const savedInterfaceName = prior.device.observations?.find(item =>
       item.attribute === 'shelly.device_id' && item.interfaceName,
     )?.interfaceName
@@ -518,13 +582,29 @@ export class DeviceLanDiscoveryService {
     }])
     throwIfScanAborted(signal)
     const activeSiteName = this.registry.getSnapshot().site.name
-    if (partialEnrollment && registered) {
+    if (fullyEnrolledVerificationRefresh && registered && inventory && observerIdentity) {
+      const verifiedMeasurementFields = [...new Set(componentEvidence.observations
+        .filter(item => item.attribute === 'shelly.measurement_capability' &&
+          typeof item.value === 'string' && item.value.startsWith(`${component}:`))
+        .map(item => String(item.value).slice(component.length + 1)))].filter(field =>
+          ['power', 'energy_import_total', 'energy_export_total'].includes(field),
+        )
+      const reconciled = await this.registry.reconcileShellyIdentityEvidence({
+        tenantId: ownership.tenantId, siteId: ownership.siteId, deviceId: candidateId,
+        physicalId, component, physicalInventoryId: inventory.physicalDeviceId,
+        evidenceScanId: scanId, evidenceCompletedAt: completedAt, observerId: observerIdentity.id,
+        ipAddress, networkScope: `${prior.device.gatewayId || observerIdentity.id}:${zone.id}`,
+        identityVerifiedAt, componentVerifiedAt: componentsVerifiedAt, verifiedMeasurementFields,
+      })
+      if (!reconciled) throw new ConflictException('The enrolled Shelly component changed during verification; its evidence was not reconciled.')
+    } else if (partialEnrollment && registered) {
       const refreshed = await this.registry.refreshShellyVerificationEvidence({
         tenantId: ownership.tenantId, siteId: ownership.siteId, deviceId: candidateId,
         physicalId, component, physicalInventoryId: verifiedInventory.physicalDeviceId,
         ipAddress, networkScope: `${prior.device.gatewayId || observerIdentity?.id || 'gateway-unknown'}:${zone.id}`,
         identityVerifiedAt, componentVerifiedAt: componentsVerifiedAt,
         ...(observerIdentity ? { observerId: observerIdentity.id } : {}),
+        evidenceScanId: scanId, evidenceCompletedAt: completedAt,
       })
       if (!refreshed) throw new ConflictException('The approved component changed during verification; no identity association was recorded.')
     } else {

@@ -171,9 +171,31 @@ describe('Portal network discovery read boundary (P6b)', () => {
     expect(memory.summary).toHaveBeenLastCalledWith({ tenantId: owner.tenantId, siteId: 'lab' });
   });
 
-  it('preserves the admin-only capability response', async () => {
+  it('preserves the admin-only capability response and reports the configured instance role without secrets', async () => {
     const { controller, discovery } = subject();
-    await expect(controller.networkCapabilities(admin)).resolves.toEqual({ scanSupported: true });
-    expect(discovery.getRuntimeCapabilities).toHaveBeenCalledTimes(1);
+    const priorId = process.env.ENERGRID_INSTANCE_ID;
+    const priorMode = process.env.ENERGRID_INSTANCE_MODE;
+    const priorNodeEnv = process.env.NODE_ENV;
+    process.env.ENERGRID_INSTANCE_ID = 'mac-local-dev';
+    process.env.ENERGRID_INSTANCE_MODE = 'development-isolated';
+    try {
+      await expect(controller.networkCapabilities(admin)).resolves.toMatchObject({
+        scanSupported: true,
+        instance: { instanceId: 'mac-local-dev', mode: 'development-isolated', configured: true,
+          authorityModeIsConfigured: false },
+      });
+      process.env.ENERGRID_INSTANCE_ID = '';
+      process.env.ENERGRID_INSTANCE_MODE = '';
+      process.env.NODE_ENV = 'production';
+      await expect(controller.networkCapabilities(admin)).resolves.toMatchObject({
+        instance: { instanceId: null, mode: 'unconfigured-production', configured: false,
+          authorityModeIsConfigured: false },
+      });
+    } finally {
+      if (priorId === undefined) delete process.env.ENERGRID_INSTANCE_ID; else process.env.ENERGRID_INSTANCE_ID = priorId;
+      if (priorMode === undefined) delete process.env.ENERGRID_INSTANCE_MODE; else process.env.ENERGRID_INSTANCE_MODE = priorMode;
+      if (priorNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = priorNodeEnv;
+    }
+    expect(discovery.getRuntimeCapabilities).toHaveBeenCalledTimes(2);
   });
 });

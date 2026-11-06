@@ -66,8 +66,9 @@ export function projectShellyEndpointRecoveryProposals(input: {
       const scope = snapshot.scopes.find(item => item.id === endpoint.networkZoneId);
       const matchingObservers = (input.observers || []).filter(observer => observer.tenantId === owner.tenantId &&
         observer.siteId === owner.siteId && observer.scopeId === endpoint.networkZoneId &&
-        observer.cidr === scope?.cidr && observer.expectedDeviceIds.some(id => id.toLowerCase() === endpoint.id.toLowerCase()) &&
-        observer.expectedComponentKeys?.includes(component));
+        observer.cidr === scope?.cidr &&
+        (!observer.expectedDeviceIds || observer.expectedDeviceIds.some(id => id.toLowerCase() === endpoint.id.toLowerCase())) &&
+        (!observer.expectedComponentKeys || observer.expectedComponentKeys.includes(component)));
       const scannedEndpoints = snapshot.endpoints.filter(other => other.vendor === 'Shelly' &&
         other.id.toLowerCase() === endpoint.id.toLowerCase() &&
         other.observations?.some(item => (item.source === 'http_rpc' && item.attribute === 'shelly.device_id' && item.value === endpoint.id) ||

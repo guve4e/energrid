@@ -123,7 +123,7 @@ export class PortalSiteLocalShellyEvidenceWorkflow {
     const endpoint = snapshot.endpoints.find(item => item.id === endpointId)
     if (!observer || !endpoint || observer.scopeId !== endpoint.networkZoneId ||
         observer.host !== snapshot.collector.host || observer.cidr !== snapshot.scopes.find(item => item.id === observer.scopeId)?.cidr ||
-        !observer.expectedDeviceIds.some(id => id.toLowerCase() === endpoint.id.toLowerCase())) {
+        (observer.expectedDeviceIds && !observer.expectedDeviceIds.some(id => id.toLowerCase() === endpoint.id.toLowerCase()))) {
       throw new ConflictException('Saved evidence no longer matches the authorized site-local observer and network scope.')
     }
     await this.deviceRegistry.ensureInstallationsLoaded()
@@ -254,7 +254,8 @@ export class PortalSiteLocalShellyEvidenceWorkflow {
       throw new BadRequestException('The accepted report has an invalid completion timestamp.')
     }
     const endpoint = snapshot.endpoints.find(item => item.id === physicalId && item.networkZoneId === observer.scopeId)
-    if (!endpoint || endpoint.vendor !== 'Shelly' || !observer.expectedDeviceIds.some(id => id.toLowerCase() === endpoint.id.toLowerCase())) {
+    if (!endpoint || endpoint.vendor !== 'Shelly' ||
+        (observer.expectedDeviceIds && !observer.expectedDeviceIds.some(id => id.toLowerCase() === endpoint.id.toLowerCase()))) {
       throw new BadRequestException('Evidence does not match the observer allowlist and selected physical identity.')
     }
     const candidate = shellyLanCandidates(endpoint).find(item => item.id === body.deviceId && item.metadata?.component === body.component)

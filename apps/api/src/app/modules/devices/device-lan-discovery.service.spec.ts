@@ -40,6 +40,12 @@ const TEST_REGISTRY = {
 jest.mock('node:child_process', () => ({
   execFile: jest.fn((_command, _args, _options, callback) => callback(new Error('mocked'))),
 }))
+jest.mock('node:os', () => {
+  const actual = jest.requireActual('node:os')
+  return { ...actual, hostname: jest.fn(() => 'test-eero-observer'), networkInterfaces: jest.fn(() => ({ en0: [{
+    address: '192.168.7.25', netmask: '255.255.255.0', family: 'IPv4', internal: false,
+  }] })) }
+})
 jest.mock('node:dns/promises', () => ({
   reverse: jest.fn().mockRejectedValue(new Error('mocked')),
 }))
@@ -107,6 +113,11 @@ describe('LAN discovery evidence persistence', () => {
     process.env.HOME_NETWORK_ZONES_JSON = JSON.stringify({
       zones: [{ id: 'eero-lan', name: 'Eero LAN', cidr: '192.168.7.0/24' }],
     })
+    process.env.HOME_SITE_LOCAL_OBSERVERS_JSON = JSON.stringify([{
+      id: 'mac-eero-en0', host: 'test-eero-observer', tenantId: TEST_OWNER.tenantId,
+      siteId: TEST_OWNER.siteId, scopeId: 'eero-lan', cidr: '192.168.7.0/24',
+      interfaceName: 'en0', expectedDeviceIds: [physicalId], expectedComponentKeys: ['em1:0'],
+    }])
     const candidate = {
       id: candidateId, tenantId: TEST_OWNER.tenantId, siteId: TEST_OWNER.siteId,
       displayName: 'Shelly Pro EM-50 em1:0', trustStatus: 'discovered', kind: 'physical',
@@ -250,8 +261,86 @@ describe('LAN discovery evidence persistence', () => {
     })
     const saved = await memory.listIdentityEvidence(TEST_OWNER)
     expect(saved.find(item => item.device.id === fixture.physicalId)?.device.observations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ source: 'http_rpc', attribute: 'shelly.device_id', observedAt: result.identityVerifiedAt }),
+      expect.objectContaining({ source: 'http_identity', attribute: 'identity.device_id', value: fixture.physicalId, observedAt: result.identityVerifiedAt, interfaceName: 'en0' }),
+      expect.objectContaining({ source: 'site_local_http_rpc', attribute: 'observer.identity', value: 'mac-eero-en0', interfaceName: 'en0' }),
     ]))
+  })
+
+  it('persists verified evidence for an enrolled EM50 only through its authorized local observer', async () => {
+    const fixture = selectedShellyVerifier()
+    const candidate = fixture.candidate
+    // Establish the exact site-owned assignment required for an enrolled refresh.
+    const inventoryRecord = {
+      physicalDeviceId: 'physical-eero-inventory', scope: TEST_OWNER,
+      identity: { namespace: 'mqtt:shelly-protocol-id', value: fixture.physicalId },
+      components: ['em1:0', 'em1:1', 'switch:0'].map(key => ({ key, capabilities: ['power'] })),
+      assignments: [{ deviceId: fixture.candidateId, physicalDeviceId: 'physical-eero-inventory', componentKey: 'em1:0' }],
+      endpoints: [], networkObservations: [], verificationStatus: 'protocol_observed',
+    }
+    fixture.physicalInventory.list.mockResolvedValue([inventoryRecord] as any)
+    fixture.physicalInventory.discover.mockResolvedValue(inventoryRecord as any)
+    fixture.registry.getDevices = () => [{ ...candidate, trustStatus: 'approved', metadata: {
+      ...candidate.metadata, physicalId: fixture.physicalId, component: 'em1:0', approvedFromDiscovery: true,
+    } }]
+    ;(fixture.registry as any).getShellyReconciliationTargetDecision = jest.fn().mockResolvedValue({
+      matched: true, device: fixture.registry.getDevices()[0],
+    })
+    ;(fixture.registry as any).reconcileShellyIdentityEvidence = jest.fn().mockResolvedValue(fixture.registry.getDevices()[0])
+    ;(fixture.registry as any).refreshShellyVerificationEvidence = jest.fn()
+    await memory.recordScan(fixture.prior.discoveredAt, [fixture.prior], TEST_OWNER)
+    mockReachableTcpPorts.add(80)
+    mockFreshShellyRpc(['em1:0', 'em1:1', 'switch:0'])
+
+    const result = await fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER)
+
+    expect(result.status).toBe('verified')
+    expect(result.physicalDeviceId).toBe('physical-eero-inventory')
+    expect((fixture.registry as any).reconcileShellyIdentityEvidence).toHaveBeenCalledWith(expect.objectContaining({
+      deviceId: fixture.candidateId, physicalId: fixture.physicalId, component: 'em1:0',
+      physicalInventoryId: 'physical-eero-inventory', observerId: 'mac-eero-en0',
+      networkScope: 'mac-eero-en0:eero-lan', verifiedMeasurementFields: ['power'],
+      evidenceScanId: expect.stringMatching(/^site-observer-/),
+    }))
+    expect((fixture.registry as any).refreshShellyVerificationEvidence).not.toHaveBeenCalled()
+    const snapshot = await memory.getSnapshot(result.scanId, TEST_OWNER)
+    expect(snapshot?.endpoints[0].observations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'http_identity', attribute: 'identity.verified', value: true, interfaceName: 'en0' }),
+      expect.objectContaining({ source: 'http_identity', attribute: 'identity.device_id', value: fixture.physicalId, interfaceName: 'en0' }),
+      expect.objectContaining({ source: 'site_local_http_rpc', attribute: 'observer.identity', value: 'mac-eero-en0', interfaceName: 'en0' }),
+      expect.objectContaining({ source: 'site_local_http_rpc', attribute: 'shelly.component_status', value: 'em1:0', interfaceName: 'en0' }),
+    ]))
+    expect(fixture.registry.registerDiscoveredDevice).not.toHaveBeenCalled()
+  })
+
+  it('rejects an enrolled refresh when the local observer allowlist excludes the device', async () => {
+    const fixture = selectedShellyVerifier()
+    const candidate = fixture.candidate
+    const inventoryRecord = {
+      physicalDeviceId: 'physical-eero-inventory', scope: TEST_OWNER,
+      identity: { namespace: 'mqtt:shelly-protocol-id', value: fixture.physicalId },
+      components: [{ key: 'em1:0', capabilities: ['power'] }],
+      assignments: [{ deviceId: fixture.candidateId, physicalDeviceId: 'physical-eero-inventory', componentKey: 'em1:0' }],
+    }
+    fixture.physicalInventory.list.mockResolvedValue([inventoryRecord] as any)
+    fixture.registry.getDevices = () => [{ ...candidate, trustStatus: 'approved', metadata: {
+      ...candidate.metadata, approvedFromDiscovery: true,
+    } }]
+    ;(fixture.registry as any).getShellyReconciliationTargetDecision = jest.fn().mockResolvedValue({ matched: true })
+    process.env.HOME_SITE_LOCAL_OBSERVERS_JSON = JSON.stringify([{
+      id: 'mac-eero-en0', host: 'test-eero-observer', tenantId: TEST_OWNER.tenantId,
+      siteId: TEST_OWNER.siteId, scopeId: 'eero-lan', cidr: '192.168.7.0/24', interfaceName: 'en0',
+      expectedDeviceIds: ['shellypro2pm-otherdevice'], expectedComponentKeys: ['em1:0'],
+    }])
+    await memory.recordScan(fixture.prior.discoveredAt, [fixture.prior], TEST_OWNER)
+    const savedBefore = await memory.listIdentityEvidence(TEST_OWNER)
+
+    await expect(fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER))
+      .rejects.toThrow('No authorized local observer matches this site and component')
+
+    expect(global.fetch).not.toHaveBeenCalled()
+    expect(fixture.physicalInventory.discover).not.toHaveBeenCalled()
+    expect(fixture.registry.registerDiscoveredDevice).not.toHaveBeenCalled()
+    expect(await memory.listIdentityEvidence(TEST_OWNER)).toEqual(savedBefore)
   })
 
   it('rebuilds the selected candidate from site-owned Discovery Memory after runtime candidate state is lost', async () => {
@@ -403,6 +492,57 @@ describe('LAN discovery evidence persistence', () => {
     expect(fixture.inventoryRecord.assignments).toEqual([])
   })
 
+  it('keeps partial-enrollment recovery blocked when the existing assignment conflicts', async () => {
+    const fixture = virtualShellyVerifier()
+    const candidate = fixture.registry.getDevices()[0]
+    fixture.registry.getDevices = () => [{ ...candidate, trustStatus: 'approved', metadata: {
+      ...candidate.metadata, approvedFromDiscovery: true,
+    } }]
+    fixture.inventoryRecord.assignments = [{
+      deviceId: fixture.candidateId, physicalDeviceId: fixture.inventoryRecord.physicalDeviceId,
+      componentKey: 'switch:1',
+    }]
+    fixture.physicalInventory.list.mockResolvedValue([fixture.inventoryRecord])
+    ;(fixture.registry as any).getShellyReconciliationTargetDecision = jest.fn().mockResolvedValue({ matched: true })
+    await memory.recordScan(fixture.prior.discoveredAt, [fixture.prior], TEST_OWNER)
+    const savedBefore = await memory.listIdentityEvidence(TEST_OWNER)
+
+    await expect(fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER))
+      .rejects.toThrow('already has a component assignment')
+
+    expect(fixture.virtualLabEvidence.verifyShellyComponent).not.toHaveBeenCalled()
+    expect(fixture.physicalInventory.discover).not.toHaveBeenCalled()
+    expect(fixture.registry.registerDiscoveredDevice).not.toHaveBeenCalled()
+    expect(await memory.listIdentityEvidence(TEST_OWNER)).toEqual(savedBefore)
+  })
+
+  it('rejects a second logical device claiming the enrolled physical component before any write', async () => {
+    const fixture = selectedShellyVerifier()
+    fixture.physicalInventory.list.mockResolvedValue([{
+      physicalDeviceId: 'physical-eero-inventory', scope: TEST_OWNER,
+      identity: { namespace: 'mqtt:shelly-protocol-id', value: fixture.physicalId },
+      components: [{ key: 'em1:0', capabilities: ['power'] }],
+      assignments: [
+        { deviceId: fixture.candidateId, physicalDeviceId: 'physical-eero-inventory', componentKey: 'em1:0' },
+        { deviceId: 'other-logical-device', physicalDeviceId: 'physical-eero-inventory', componentKey: 'em1:0' },
+      ],
+    }] as any)
+    fixture.registry.getDevices = () => [{ ...fixture.candidate, trustStatus: 'approved', metadata: {
+      ...fixture.candidate.metadata, approvedFromDiscovery: true,
+    } }]
+    ;(fixture.registry as any).getShellyReconciliationTargetDecision = jest.fn().mockResolvedValue({ matched: true })
+    await memory.recordScan(fixture.prior.discoveredAt, [fixture.prior], TEST_OWNER)
+    const savedBefore = await memory.listIdentityEvidence(TEST_OWNER)
+
+    await expect(fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER))
+      .rejects.toThrow('already assigned to another logical device')
+
+    expect(global.fetch).not.toHaveBeenCalled()
+    expect(fixture.physicalInventory.discover).not.toHaveBeenCalled()
+    expect(fixture.registry.registerDiscoveredDevice).not.toHaveBeenCalled()
+    expect(await memory.listIdentityEvidence(TEST_OWNER)).toEqual(savedBefore)
+  })
+
   it('rejects a remote observer identity that differs from the server-resolved physical candidate', async () => {
     const fixture = virtualShellyVerifier()
     await memory.recordScan(fixture.prior.discoveredAt, [fixture.prior], TEST_OWNER)
@@ -445,6 +585,22 @@ describe('LAN discovery evidence persistence', () => {
     expect(fixture.virtualLabEvidence.verifyShellyComponent).not.toHaveBeenCalled()
     expect(fixture.physicalInventory.discover).not.toHaveBeenCalled()
     expect(fixture.registry.registerDiscoveredDevice).not.toHaveBeenCalled()
+  })
+
+  it('rejects a registered Shelly from another tenant before inventory lookup or evidence writes', async () => {
+    const fixture = virtualShellyVerifier()
+    const candidate = fixture.registry.getDevices()[0]
+    fixture.registry.getDevices = () => [{ ...candidate, tenantId: 'tenant-other' }]
+    await memory.recordScan(fixture.prior.discoveredAt, [fixture.prior], TEST_OWNER)
+    const savedBefore = await memory.listIdentityEvidence(TEST_OWNER)
+
+    await expect(fixture.service.verifyShellyCandidate(fixture.candidateId, TEST_OWNER))
+      .rejects.toThrow('registered under a different tenant or site')
+
+    expect(fixture.physicalInventory.list).not.toHaveBeenCalled()
+    expect(fixture.virtualLabEvidence.verifyShellyComponent).not.toHaveBeenCalled()
+    expect(fixture.physicalInventory.discover).not.toHaveBeenCalled()
+    expect(await memory.listIdentityEvidence(TEST_OWNER)).toEqual(savedBefore)
   })
 
   it('rejects saved evidence whose network scope is no longer configured for the site', async () => {
@@ -554,7 +710,21 @@ describe('LAN discovery evidence persistence', () => {
 
   it('rejects a fresh RPC hardware identity mismatch before writing evidence', async () => {
     const fixture = selectedShellyVerifier()
+    const candidate = fixture.candidate
+    const inventoryRecord = {
+      physicalDeviceId: 'physical-eero-inventory', scope: TEST_OWNER,
+      identity: { namespace: 'mqtt:shelly-protocol-id', value: fixture.physicalId },
+      components: [{ key: 'em1:0', capabilities: ['power'] }],
+      assignments: [{ deviceId: fixture.candidateId, physicalDeviceId: 'physical-eero-inventory', componentKey: 'em1:0' }],
+    }
+    fixture.physicalInventory.list.mockResolvedValue([inventoryRecord] as any)
+    fixture.registry.getDevices = () => [{ ...candidate, trustStatus: 'approved', metadata: {
+      ...candidate.metadata, approvedFromDiscovery: true,
+    } }]
+    ;(fixture.registry as any).getShellyReconciliationTargetDecision = jest.fn().mockResolvedValue({ matched: true })
+    ;(fixture.registry as any).reconcileShellyIdentityEvidence = jest.fn()
     await memory.recordScan(new Date(Date.now() - 16 * 60_000).toISOString(), [fixture.prior], TEST_OWNER)
+    const savedBefore = await memory.listIdentityEvidence(TEST_OWNER)
     mockReachableTcpPorts.add(80)
     global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => ({
       id: 'shellyproem50-other', mac: '8C:4F:00:00:00:00', model: 'SPEM-50', gen: 2,
@@ -564,6 +734,8 @@ describe('LAN discovery evidence persistence', () => {
       .rejects.toThrow(/identity mismatch/)
     expect(fixture.physicalInventory.discover).not.toHaveBeenCalled()
     expect(fixture.registry.registerDiscoveredDevice).not.toHaveBeenCalled()
+    expect((fixture.registry as any).reconcileShellyIdentityEvidence).not.toHaveBeenCalled()
+    expect(await memory.listIdentityEvidence(TEST_OWNER)).toEqual(savedBefore)
   })
 
   it('rejects a component profile mismatch without refreshing the candidate', async () => {

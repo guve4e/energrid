@@ -73,7 +73,8 @@ export class PortalNetworkDiscoveryReadController {
   @Get('network/capabilities')
   async networkCapabilities(@Req() request: DeviceProxyRequest) {
     assertPortalAdministrator(request)
-    return this.lanDiscovery.getRuntimeCapabilities()
+    const runtime = await this.lanDiscovery.getRuntimeCapabilities()
+    return { ...runtime, instance: instanceAuthorityDiagnostics() }
   }
 
   @Get('network/snapshots/:fromScanId/compare/:toScanId')
@@ -111,5 +112,24 @@ export class PortalNetworkDiscoveryReadController {
   ) {
     assertPortalAdministrator(request)
     return this.discoveryMemory.summary(this.discoveryOwner())
+  }
+}
+
+function instanceAuthorityDiagnostics() {
+  const allowedModes = ['development-isolated', 'site-authority', 'observer'] as const
+  const configuredMode = process.env.ENERGRID_INSTANCE_MODE?.trim()
+  const mode = configuredMode && (allowedModes as readonly string[]).includes(configuredMode)
+    ? configuredMode as typeof allowedModes[number]
+    : configuredMode
+      ? 'invalid-configuration'
+      : process.env.NODE_ENV === 'production' ? 'unconfigured-production' : 'development-isolated'
+  const configuredId = process.env.ENERGRID_INSTANCE_ID?.trim() || ''
+  const instanceId = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(configuredId) ? configuredId : null
+  return {
+    instanceId,
+    mode,
+    configured: !!instanceId && mode !== 'invalid-configuration' && mode !== 'unconfigured-production',
+    authorityModeIsConfigured: !!configuredMode && mode === 'site-authority',
+    note: 'This diagnostic describes local configuration only; it does not enforce uniqueness or transfer authority between instances.',
   }
 }

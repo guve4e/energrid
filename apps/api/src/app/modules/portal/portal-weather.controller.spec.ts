@@ -48,4 +48,24 @@ describe('portal weather read bridge', () => {
     );
   });
 
+  it('exposes LAB readiness only to the authenticated administrator using the fixed site scope', async () => {
+    process.env = { ...original, WEATHER_INVESTIGATOR_API_TOKEN: 'lab-bridge-test' };
+    const fetch = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true, json: async () => ({ version: 1, status: 'waiting_for_first_snapshot' }),
+    } as Response);
+    const controller = new PortalWeatherController(registry);
+    const unauthorized = { headers: {} } as never;
+    expect(() => controller.investigatorHealth(unauthorized)).toThrow();
+    expect(fetch).not.toHaveBeenCalled();
+    const request = { headers: {}, user: {
+      userId: 'test-user', email: 'admin@example.test', name: 'Admin',
+      role: 'admin', sessionId: 'test-session', sessionVersion: 0,
+    } } as never;
+    expect(await controller.investigatorHealth(request)).toMatchObject({ status: 'waiting_for_first_snapshot' });
+    expect(fetch).toHaveBeenCalledWith(
+      'http://127.0.0.1:3020/core/weather/investigator/health?tenantId=tenant-test&siteId=site-test',
+      expect.objectContaining({ headers: expect.objectContaining({ authorization: 'Bearer lab-bridge-test' }) }),
+    );
+  });
+
 });

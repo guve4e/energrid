@@ -22,8 +22,17 @@ const forecast = { location: 'Vidin', fetchedAt: new Date().toISOString(), summa
   ], selectionReason: 'Selected because it reports the highest weather risk among usable models.' }, dataQuality: { status: 'available' } };
 let wrapper: ReturnType<typeof mount> | undefined;
 afterEach(() => { wrapper?.unmount(); wrapper = undefined; vi.unstubAllGlobals(); vi.useRealTimers(); });
+const health = {
+  version: 1, status: 'ready', reason: null,
+  schedule: { enabled: true, running: false, intervalMinutes: 15, consecutiveFailures: 0,
+    lastAttemptAt: '2026-11-05T10:00:00.000Z', lastCompletedAt: '2026-11-05T10:00:00.000Z',
+    nextAttemptAt: '2026-11-05T10:15:00.000Z', lastOutcome: 'completed' },
+  evidence: { capturedAt: '2026-11-05T10:00:00.000Z', ageMinutes: 5,
+    provider: 'open-meteo', model: 'icon_seamless',
+    coverage: { expectedHours: 24, validHours: 24, complete: true } },
+};
 function responses(weather: object = { status: 'awaiting-observations', summary: [], pending: { scheduled: 4, awaitingObservations: 2 } }, dashboard: object = forecast) {
-  return vi.fn(async (url: string) => ({ ok: true, json: async () => url.endsWith('/dashboard') ? dashboard : url.endsWith('/river-performance') ? { summary: [] } : url.endsWith('/investigator/findings') ? [] : weather }));
+  return vi.fn(async (url: string) => ({ ok: true, json: async () => url.endsWith('/dashboard') ? dashboard : url.endsWith('/river-performance') ? { summary: [] } : url.endsWith('/investigator/findings') ? [] : url.endsWith('/investigator/health') ? health : weather }));
 }
 function responsesWithRiver(river: object) {
   return vi.fn(async (url: string) => ({
@@ -31,9 +40,37 @@ function responsesWithRiver(river: object) {
     json: async () => url.endsWith('/dashboard') ? forecast :
       url.endsWith('/river-performance') ? river :
         url.endsWith('/investigator/findings') ? [] :
+        url.endsWith('/investigator/health') ? health :
         { status: 'awaiting-observations', summary: [], pending: { scheduled: 4, awaitingObservations: 2 } },
   }));
 }
+describe('Weather operator readiness', () => {
+  it('shows automatic collection health and next refresh without claiming official alerts', async () => {
+    const fetch = responses(); vi.stubGlobal('fetch', fetch);
+    wrapper = mount(WeatherDashboard, { props: { apiBase: '', accessToken: 'test' } });
+    await flushPromises();
+    expect(wrapper.get('.weather-readiness').text()).toContain('Работи · прогнозата е актуална');
+    expect(wrapper.get('.weather-readiness').text()).toContain('24/24 часа');
+    expect(wrapper.get('.weather-readiness').text()).toContain('Следващ опит:');
+    expect(wrapper.get('.weather-readiness').text()).toContain('не официално предупреждение');
+    expect(fetch).toHaveBeenCalledWith('/portal/weather/investigator/health', expect.anything());
+  });
+  it('shows failed collection without hiding an independently successful dashboard', async () => {
+    const fetch = responses();
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const response = await fetch(url);
+      if (url.endsWith('/investigator/health')) return { ok: true, json: async () => ({
+        ...health, status: 'provider_unavailable', reason: 'upstream_unavailable',
+      }) };
+      return response;
+    }));
+    wrapper = mount(WeatherDashboard, { props: { apiBase: '', accessToken: 'test' } });
+    await flushPromises();
+    expect(wrapper.get('.weather-readiness').text()).toContain('Метеорологичният източник е недостъпен');
+    expect(wrapper.text()).toContain('Storm risk in one model');
+  });
+});
+
 describe('weather page', () => {
   it('shows incomplete rainfall coverage and does not display a fabricated zero total', async () => {
     vi.stubGlobal('fetch', responses(undefined, {

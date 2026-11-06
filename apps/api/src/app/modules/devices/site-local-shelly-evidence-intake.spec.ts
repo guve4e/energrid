@@ -41,6 +41,13 @@ describe('site-local Shelly evidence intake', () => {
         .toEqual({ observer: secondObserver, reason: 'selected' });
     });
 
+    it('supports a network-level observer whose enrolled targets are selected from persisted site inventory', () => {
+      const networkObserver = { ...observer, expectedDeviceIds: undefined, expectedComponentKeys: undefined };
+      expect(selectAuthorizedSiteLocalObserver({ observers: [networkObserver], tenantId: owner.tenantId,
+        siteId: owner.siteId, scopeId: zone.id, physicalId: secondIdentity, component: 'em1:0' }))
+        .toEqual({ observer: networkObserver, reason: 'selected' });
+    });
+
     it('fails closed for a wrong site, device, component, or duplicate assignment', () => {
       const input = { observers: [observer, secondObserver], tenantId: owner.tenantId,
         siteId: owner.siteId, scopeId: zone.id, physicalId: secondIdentity, component: 'switch:0' };
@@ -64,6 +71,14 @@ describe('site-local Shelly evidence intake', () => {
       expect.objectContaining({ source: 'site_local_http_rpc', attribute: 'shelly.measurement_capability', value: 'switch:0:energy_import_total' }),
     ]));
     expect(result.scanId).toBe(validate(report({ reportId: 'different-report-id' })).scanId);
+  });
+
+  it('accepts fresh evidence from a scope-authorized observer without per-device environment allowlists', () => {
+    const networkObserver = { id: observer.id, host: observer.host, tenantId: owner.tenantId, siteId: owner.siteId,
+      scopeId: zone.id, cidr: zone.cidr };
+    const result = validateSiteLocalShellyEvidence(report(), { ownership: owner, zones: [zone], observers: [networkObserver], now });
+    expect(result.device.id).toBe(physicalId);
+    expect(result.device.networkZoneId).toBe(zone.id);
   });
 
   it('supports real switch status evidence and does not infer another switch channel', () => {
@@ -91,7 +106,7 @@ describe('site-local Shelly evidence intake', () => {
 
   it('rejects identity/MAC mismatch, stale evidence, incomplete host discovery and unsupported components', () => {
     expect(() => validate(report({ identity: { ...report().identity, response: { ...report().identity.response, id: 'shellyplus1-000000000001' } } })))
-      .toThrow(/physical identity allowlist/);
+      .toThrow(/physical identity restriction/);
     expect(() => validate(report({ endpoint: { ...report().endpoint, observedMacAddress: '00:11:22:33:44:55' } })))
       .toThrow(/MAC conflicts/);
     const stale = '2026-10-27T06:00:00.000Z';

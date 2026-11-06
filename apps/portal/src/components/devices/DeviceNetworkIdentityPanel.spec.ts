@@ -211,6 +211,37 @@ describe('DeviceNetworkIdentityPanel', () => {
     expect(page.emitted('recovered')).toBeUndefined();
   });
 
+  it('lets an exactly assigned enrolled Shelly refresh identity evidence without invoking enrollment', async () => {
+    const physicalId = 'shellyproem50-8c4f00dbd258';
+    const deviceId = `${physicalId}:em1:0`;
+    const physicalDeviceId = 'physical-em50';
+    let refreshed = false;
+    fetchMock.mockImplementation((url: string, options) => {
+      if (String(url).includes('/verify-shelly')) {
+        refreshed = true;
+        return Promise.resolve(response({ status: 'verified', physicalId, componentKeys: ['em1:0'] }));
+      }
+      return Promise.resolve(response({
+        association: null, history: [],
+        physicalDevice: { physicalDeviceId, vendor: 'Shelly', components: [{ key: 'em1:0', capabilities: ['power'] }], endpoints: [], assignments: [
+          { deviceId, physicalDeviceId, componentKey: 'em1:0' },
+        ] },
+        logicalAssignment: { deviceId, physicalDeviceId, componentKey: 'em1:0' },
+        rpcVerification: refreshed ? { status: 'verified', physicalId, component: 'em1:0' } : { status: 'not_verified' },
+        recovery: { status: 'not_recoverable', reason: 'Already enrolled.' },
+      }));
+    });
+    const page = mountPanel(deviceId);
+    await flushPromises();
+    expect(page.text()).toContain('Refresh verified identity and component evidence');
+    await page.get('button.ghost').trigger('click');
+    await flushPromises();
+    expect(fetchMock.mock.calls.some(call => String(call[0]).includes(`/portal/discovery/${encodeURIComponent(deviceId)}/verify-shelly`))).toBe(true);
+    expect(fetchMock.mock.calls.some(call => String(call[0]).includes('/approve'))).toBe(false);
+    expect(page.text()).toContain('Shelly RPC identity and component');
+    expect(page.text()).toContain('Verified');
+  });
+
   it('assigns a protocol-identified component and an explicit logical role', async () => {
     const inventory = {
       physicalDevice: {

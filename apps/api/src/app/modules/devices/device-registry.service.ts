@@ -941,12 +941,14 @@ export class DeviceRegistryService implements OnModuleInit {
     tenantId: string; siteId: string; deviceId: string; physicalId: string; component: string;
     physicalInventoryId: string; ipAddress: string; networkScope: string;
     identityVerifiedAt: string; componentVerifiedAt: string; observerId?: string;
+    evidenceScanId: string; evidenceCompletedAt: string;
   }): Promise<RegisteredDevice | null> {
     const { tenantId, siteId, deviceId, physicalId, component } = input;
     if (!/^shelly[a-z0-9._-]{1,114}$/i.test(physicalId) ||
         !/^(?:switch|em1):(?:[0-9]|[12][0-9]|3[01])$/.test(component) ||
         deviceId !== `${physicalId}:${component}` || !input.physicalInventoryId ||
         !input.networkScope || isIP(input.ipAddress) !== 4 ||
+        !input.evidenceScanId.startsWith('site-observer-') || !validHistoricalEvidenceTime(input.evidenceCompletedAt, input.evidenceCompletedAt) ||
         !freshSiteEvidenceTime(input.identityVerifiedAt) || !freshSiteEvidenceTime(input.componentVerifiedAt)) {
       throw new Error('Fresh, exact Shelly RPC identity and component evidence is required.');
     }
@@ -968,6 +970,8 @@ export class DeviceRegistryService implements OnModuleInit {
       identityVerifiedAt: input.identityVerifiedAt,
       componentVerificationMethod: `${component.startsWith('switch:') ? 'Switch' : 'EM1'}.GetStatus?id=${component.split(':')[1]}`,
       componentVerifiedAt: input.componentVerifiedAt,
+      siteLocalEvidenceCompletedAt: input.evidenceCompletedAt,
+      siteLocalEvidenceScanId: input.evidenceScanId,
       ipAddress: input.ipAddress,
       networkScope: input.networkScope,
       networkObservedAt: input.componentVerifiedAt,

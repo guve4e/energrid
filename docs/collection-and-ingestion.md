@@ -31,7 +31,7 @@ flowchart TD
     Router --> OtherAdapters[Energrid / legacy adapters]
     Shelly --> ShellyAdmission[Shelly integration MQTT handler]
     ShellyAdmission --> HttpIngress
-    ShellyAdmission --> OptionalHistory[Electrical history after Core acceptance]
+    ShellyAdmission --> OptionalHistory[Electrical rollup compatibility projection]
     Router --> Approved[Exact ApprovedMqttObservationRoute]
     Approved --> DirectStore[Observation state store directly<br/>normal configured route]
     Approved --> CommonIngress[Shared ingress<br/>identity-bound Lab route]
@@ -79,9 +79,25 @@ The **T1.2a boundary extraction** moves Shelly switch candidate matching and the
 
 The poller also has an enrolled Shelly switch-status path. It resolves the exact tenant/site-owned physical assignment and component, saved endpoint, configured scope, and matching observer; verifies device identity; then reads `Switch.GetStatus?id=N`. Accepted boolean output is written as operational state through `DeviceRegistryService.ingestDeviceTelemetry`, not as electrical measurement history. The operator-triggered one-shot status endpoint uses the same target validation and writer. Read-only status collection does not require switching permission. A previous scan or IP address alone does not authorize a route.
 
+#### Selected-device evidence refresh and EM1 approval preflight (local source, 5 November 2026)
+
+The authenticated **Refresh verified identity and component evidence** action is available for an enrolled Shelly only when the API's Physical Inventory read model confirms the exact logical-device/physical-device/component assignment and current site-owned discovery evidence provides the endpoint. It performs bounded read-only `Shelly.GetDeviceInfo`, component-list, and selected component-status RPC checks. For a local observer, the API additionally requires an exact configured tenant/site/scope observer, matching host, directly attached authorized interface/CIDR, and endpoint inside that CIDR. The normal verifier persists `http_identity` identity claims and `site_local_http_rpc` observer/component evidence into existing Discovery Memory, and uses the existing identity-evidence reconciliation writer for enrolled records. It does not submit an operator-created report, approve power ingestion, enroll, or grant switch/assistant control. The Portal reports evidence as verified only when its site-observer scan marker and both identity/component timestamps satisfy the existing 15-minute freshness window; stale or malformed evidence returns to “not verified” and exposes the refresh action when the exact inventory assignment is still present.
+
+Electrical history authorization is resolved from the enrolled installation's persisted, field-specific observation bindings through `DeviceIntelligenceQueryService.readDeviceModel().history.authorizedMetrics`. Transport-specific HTTP EM1 and MQTT approvals remain separate records; either can authorize only its explicitly bound fields. A hardware `power` capability or legacy `power:read` display permission is not sufficient. The Portal history read model exposes this source-authorized metadata, and the electrical-history API independently checks the same projection before returning history. Historical data remains site/device scoped, and switching/assistant permissions are not involved.
+
+For approved discovery-origin components, the historical `approvedFromDiscovery` marker does not mean enrollment is still partial. The verifier classifies an exact same-site logical-device/physical-device/component assignment as an enrolled refresh and sends it through the normal reconciliation writer. Partial-enrollment recovery remains limited to incomplete, unassigned records; conflicting assignments, ambiguous inventory, wrong ownership, mismatched identity, or an unauthorized observer are rejected before fresh evidence is written. This distinction fixes the case where a fully assigned EM50 `em1:0` was incorrectly sent through the partial-recovery guard and rejected with HTTP 409. It changes only identity-evidence refresh; measurement and switching authority are unchanged.
+
+The observer configuration may be network-level: omitting per-device/component allowlists does not create a new authority source. The configured observer still has exact tenant, site, scope, CIDR, host and interface; the verifier resolves the target from current site-owned inventory assignment and exact saved identity evidence, and the route resolver repeats its own identity/site/scope/assignment checks. Optional allowlists only narrow that authorization. HTTP EM1 read-route readiness remains distinct from the separate administrator approval for power fields. This source correction has focused unit coverage; the live EM50 evidence refresh and subsequent explicit approval/readings are still pending. No local evidence refresh is claimed as an accepted electrical measurement.
+
+#### Runtime instance roles and remote evidence delivery
+
+`ENERGRID_INSTANCE_ID` and `ENERGRID_INSTANCE_MODE` distinguish local development (`development-isolated`), the designated site writer (`site-authority`), and an observer process (`observer`). The administrator-only network capabilities response reports the sanitized configured values. This is a diagnostic/configuration contract, not uniqueness enforcement, deployment attestation, or authority transfer. The observed Mac development API and Pi 5 API use separate PostgreSQL databases and separate local state directories; matching tenant/site labels do not make their inventories or histories replicas. The Pi remains the proposed Home authority, while the Mac remains isolated development. No Pi change or data migration is part of this milestone.
+
+There is not yet a secure machine-authenticated observer-to-site-Core measurement/evidence submission endpoint in this checkout. The existing Portal site-local evidence intake is authenticated administrator/operator-attested evidence, not a signed machine channel; the internal deterministic observation ingress is not exposed for arbitrary observer claims. The existing remote Shelly worker is API-initiated SSH stdio pull for its specific read-only switch-state path, not a reusable inbound reporting contract. Until a server-validated machine credential, tenant/site/scope-bound envelope, replay/ordering protection and API admission boundary are implemented, a Mac observer cannot safely report new eero-lan EM50 measurements to the separate Pi authority. Do not expose Core ingress or treat an operator report as machine authentication to bridge this gap.
+
 For an enrolled Shelly whose authorized scope is reachable only from a configured remote site observer, the API can supervise one persistent read-only worker over an authenticated, host-key-verified SSH stdio session. The worker runs on that observer and performs only bounded identity, component-list, and switch-status RPC reads for the exact tenant/site/scope/device/component assignments. It validates its host, interface and directly attached CIDR at session startup. The API validates session, sequence, endpoint, physical identity, component set and observation time again, parses through the same Shelly status parser, and submits accepted state through the canonical registry writer. Observer errors update observer-relative reachability only; they do not invent a relay transition. The worker has bounded concurrency and request timeouts, retries with backoff, and is stopped/recreated with the API-owned SSH session; it is not a separately installed Pi service and does not survive an API stop. API startup begins assignment reconciliation and collection again. No API port is exposed on the Pi and the Pi does not connect to Mac loopback.
 
-This remote worker collects relay operational status only. It does not enroll, reconcile endpoints, authorize measurements, or grant switching/assistant control. Site-local observer authorization is explicit in protected runtime configuration and includes tenant, site, scope/CIDR, interface, physical-ID and component allowlists. Multiple observer entries are selected only by an exact authorized match; ambiguous matches fail closed. The continuous worker is source-implemented and covered by focused tests. On 3 November 2026, after a local API restart, logs showed `pi-upstream-bathroom` start and repeated identity/component-validated results submitted to the canonical writer. The authenticated Home Portal SSE connection remained connected and displayed the Bathroom relay as Off with its update timestamp advancing without reload. A worker-only pause did not make the component stale because the independent configured MQTT source continued updating it. This proves the worker and API recovery path, but not which source supplied each Portal update or the stale transition after all sources stop. This is local development evidence, not a production deployment.
+This remote worker collects relay operational status only. It does not enroll, reconcile endpoints, authorize measurements, or grant switching/assistant control. Site-local observer authorization is explicit in protected runtime configuration and binds tenant, site, scope/CIDR, interface and host; optional physical-ID/component allowlists can narrow it further. Persisted site-owned inventory assignments still select the exact authorized target when those optional lists are omitted. Multiple observer entries are selected only by an exact authorized match; ambiguous matches fail closed. The continuous worker is source-implemented and covered by focused tests. On 3 November 2026, after a local API restart, logs showed `pi-upstream-bathroom` start and repeated identity/component-validated results submitted to the canonical writer. The authenticated Home Portal SSE connection remained connected and displayed the Bathroom relay as Off with its update timestamp advancing without reload. A worker-only pause did not make the component stale because the independent configured MQTT source continued updating it. This proves the worker and API recovery path, but not which source supplied each Portal update or the stale transition after all sources stop. This is local development evidence, not a production deployment.
 
 After the registry accepts and projects state for an approved device, it emits a typed, process-local event. The authenticated Portal SSE route filters events to the requesting principal's tenant/site. The Portal reconciles from `/portal/state` on stream readiness/reconnect and applies subsequent ordered events to the affected device. The heartbeat describes stream liveness, not device reachability. The event sequence and stream are in memory; reconnect snapshot reconciliation is the recovery mechanism. Live external-toggle-to-Portal timing and physical Home channel-1 delivery were not demonstrated in the 2 November 2026 runtime check.
 
@@ -277,24 +293,130 @@ source for the same field: inspection reports each without inventing priority.
 installed field binding does not prove HTTP polling or MQTT delivery is active.
 Neither method checks current subscriber connection, broker origin, observer
 route, fresh measurements or safe switching authorization. Shelly MQTT still
-has additional integration-specific identity/broker validation. No Portal
-endpoint is wired by this patch; the methods provide a tested internal read-only
-inspection seam. Future operator diagnostics must combine these existing facts
-with *actual runtime* evidence, without calling the result an active collection
-plan prematurely. The later T1.3c1 change disables the legacy generic JSON and Shelly EM1
-HTTP fallback, rather than silently admitting unsupported measurements. Other
-registry writers and normal configured MQTT history divergence still need review;
-EM1 power integration remains unavailable. Remote/local operational observer
-scheduling and cross-process collection duplication have not been changed.
+has additional integration-specific identity/broker validation. At the T1.3b
+milestone no Portal endpoint was wired; these methods provided an internal
+read-only inspection seam. T1.3c2d later added the explicit local EM1 approval
+endpoint and UI described below. The later T1.3c1 change disables the legacy
+generic JSON and Shelly EM1 HTTP fallback, rather than silently admitting
+unsupported measurements. Other registry writers and normal configured MQTT
+history divergence still need review. Remote observer scheduling and
+cross-process collection duplication have not been changed.
 
-### T1.3c2a — Shelly EM1 verified read-only adapter (pending repository tests)
+### T1.3c2a — Shelly EM1 verified read-only adapter
 
 The Shelly-specific outbound HTTP adapter now supports bounded identity verification
 followed by `EM1.GetStatus` on the exact requested channel. It normalizes finite
 `act_power` to canonical `power` (W) and rejects wrong identity, channel and
 invalid responses. Negative power is valid. This adapter does not write state,
-enroll anything, or authorize a network route or control. It is not yet scheduled:
-EM1 measurements remain inactive until an independently authorized, scoped
-read-only route and persisted source/field binding are used to submit the
-normalized value through existing approved observation ingress. The switch-only
-route resolver must NOT be widened to permit EM component control.
+enroll anything, or authorize a network route or control. At this adapter
+milestone it was not yet scheduled. T1.3c2c later wired it only behind an
+independently authorized, scoped read-only route and persisted source/field
+binding, using existing approved observation ingress. The switch-only route
+resolver was not widened to permit EM component control.
+
+### T1.3c2b — EM1 existing-ingress contract characterization
+
+A Shelly-integration test verifies that the **existing** protocol-independent
+observation ingress can accept canonical EM1 `power` from an explicitly persisted
+`sourceId=shelly-http-em1`, `selector=EM1.GetStatus?id=0` field binding and
+write accepted evidence to measurement history. An MQTT-only approval does not
+authorize HTTP; missing, duplicate, cross-site, or unenrolled observations fail
+closed. No new observation admission mechanism is introduced.
+
+This characterizes authority only. It does not approve any real EM1 installation
+or demonstrate physical EM1 telemetry. The later local HTTP path obtains a
+site-owned read route independently of switch control permission, uses the
+existing adapter and `ingestHttpObservation`, and fails closed when MQTT already
+owns the power field.
+
+
+### T1.3c2c — Scoped, approved local Shelly EM1 HTTP collection
+
+The existing HTTP tick also invokes the Shelly integration's EM1 measurement
+collector. **No new scheduler and no device-specific JSON parsing in Core.**
+Only an approved physical EM1 installation with a *persisted* HTTP authority
+binding (`sourceId=shelly-http-em1`, `selector=EM1.GetStatus?id=N`, canonical
+field `power`) is eligible. MQTT-only approval does not authorize HTTP reads.
+The read-only route resolver checks exact same-site physical inventory assignment,
+site-owned identity/EM1 component evidence, explicit observer allowlists, and a
+matching directly connected observer interface before attempting any RPC. The
+adapter rechecks physical identity and channel, then submits through the existing
+`ingestHttpObservation` admission/history/projection path; failed reads never
+write fabricated zero/offline measurements.
+
+**Limitations:** This initial path is only for a directly connected, authorized
+local observer process. Pi/SSH and virtual-lab remote EM1 collection is **not**
+implemented, and no observation approval is granted automatically. Existing
+Shelly MQTT measurement approval alone does not create an HTTP binding. An
+explicit reviewed source/field approval workflow is still necessary for actual
+sites without this persisted binding. The existing switch-control resolver and
+permissions remain unchanged. The `DeviceHttpPollService` integration dispatch
+remains transitional until a general binding-driven dispatch is justified.
+
+
+### Operator approval for local Shelly EM1 HTTP power (T1.3c2d)
+
+The existing Devices detail view offers a read-only HTTP `power` approval for a verified,
+enrolled Shelly `em1:N` component. This reuses the installation observation authority
+record; it does not create another source registry or grant control. The administrator
+reviews the precise device, endpoint, `shelly-http-em1` source, `EM1.GetStatus?id=N`
+selector and `power` field. The server resolves the exact site-owned *local* observer,
+checks the reviewed endpoint and performs fresh identity + channel RPCs before
+persisting authority and an installation audit event. A conflicting MQTT authority is
+never silently replaced. Remote Pi/SSH EM1 collection remains unsupported; approval
+requires a directly executable, explicitly authorized local observer.
+
+Route rejection returns a safe `code`, `message`, and `action`; the API logs the
+same reason code with the logical device ID and no credentials or RPC payload.
+Reasons distinguish missing or ambiguous site/scope authorization, observer
+identity/component allowlist failures, physical-inventory assignment mismatch,
+and missing or ambiguous saved evidence. Diagnostics do not change route
+eligibility.
+
+**Local preflight on 5 November 2026 (not power-approved):** the authenticated
+Home Devices view displayed the HTTP power approval card for
+`shellyproem50-8c4f00dbd258:em1:0`, endpoint `192.168.7.54`, source
+`shelly-http-em1`, selector `EM1.GetStatus?id=0`, and field `power` in W. The
+saved installation scope `gateway-unknown:eero-lan` normalizes to `eero-lan`;
+that representation is accepted by the existing scope resolver. The card was
+visible and its exact-device review opened; the approval action was not
+submitted. The device remains without HTTP power authority or accepted power
+history, and no switching permission was changed.
+
+The local API loads `.env.auth.local` with override semantics in development.
+The ignored WebStorm `api` run configuration also contained an older
+`HOME_SITE_LOCAL_OBSERVERS_JSON` value with only a Pi observer; that duplicate
+override has been removed so the local file is the single source. The Mac
+`mac-eero-en0` entry now explicitly allows this EM50 identity and `em1:0`, while
+retaining Pro 2PM `switch:0`/`switch:1`. Both Pi definitions remain: the
+`pi-upstream-bathroom` worker references the `pi-housenet` SSH alias, so neither
+was removed. This is observer evidence authorization only; it does not grant
+power collection or control authority. The Mac's `en0` address was
+`192.168.7.25/24`, matching the explicitly configured Eero `/24`. No Home MQTT
+settings were changed. The Lab MQTT broker is configured separately through
+the SSH-only loopback tunnel, but no listener was present on local port 18884;
+Lab MQTT availability is therefore unverified/unavailable in this run.
+
+The live Portal showed the existing logical component linked to physical
+inventory `839b86b9-5cad-4486-819e-e47b7be21ba9`, with the protocol identity,
+`em1:0`, endpoint and scope. Network Intelligence nevertheless reported an
+unmatched inventory assignment. Source review found its shared exact-assignment
+matcher considered only the legacy primary `identity` field, although the
+inventory contract supports multiple current claims in `identities`. That
+could reject a valid secondary Shelly protocol claim (the same primary-MAC /
+secondary-protocol shape is covered by existing onboarding fixtures). The
+matcher now uses the existing `hasPhysicalDeviceIdentityClaim` helper and has a
+focused regression. This corrects candidate/reconciliation matching without
+creating or changing any inventory record. The live Portal's aggregate
+projection does not expose the raw primary-versus-secondary claim array, so the
+specific stored claim ordering remains unverified without a subsequent
+authenticated read after sign-in.
+
+The last prior approval attempt was blocked before device RPC because the Mac
+observer allowlist omitted this physical identity and component. The local
+allowlist correction and matcher fix are prepared, but fresh site-local RPC,
+approval persistence, accepted observations, and history have not been
+verified in the restarted runtime. The administrator must review and submit the
+visible approval action to authorize this read-only power source. Pro 2PM MQTT
+power remains governed by its separate explicit MQTT source/topic authority;
+it does not authorize this EM50 HTTP source.

@@ -33,6 +33,18 @@ describe('exact Shelly physical inventory assignment', () => {
     expect(findExactShellyInventoryAssignment([record()], owner, device1, physicalId, 'switch:1')?.physicalDeviceId).toBe(inventoryId)
   })
 
+  it('matches the protocol identity when it is a secondary claim behind the primary MAC claim', () => {
+    const primaryMac = record({
+      identity: { namespace: 'mac', value: '8c:4f:00:db:d2:58' },
+      identities: [
+        { namespace: 'mac', value: '8c:4f:00:db:d2:58' },
+        { namespace: 'mqtt:shelly-protocol-id', value: physicalId },
+      ],
+    })
+
+    expect(findExactShellyInventoryAssignment([primaryMac], owner, device0, physicalId, 'switch:0')?.physicalDeviceId).toBe(inventoryId)
+  })
+
   it('rejects wrong component, identity, physical record, cross-site, duplicate assignments, and ambiguous physical records', () => {
     expect(findExactShellyInventoryAssignment([record()], owner, device0, physicalId, 'switch:1')).toBeNull()
     expect(findExactShellyInventoryAssignment([record()], owner, `${physicalId}:switch:2`, physicalId, 'switch:2')).toBeNull()

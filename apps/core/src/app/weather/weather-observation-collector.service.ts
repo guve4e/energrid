@@ -87,10 +87,62 @@ export interface HourlyPrecipitationRequest {
   endAt: string;
 }
 
+export interface MeteostatStationDiagnostic {
+  stationId: string;
+  station?: Station;
+  reportedDistanceKm: number;
+  status:
+    | 'inspected'
+    | 'no-hourly-inventory'
+    | 'metadata-or-hourly-request-failed';
+  returnedRows?: number;
+  validTimestampRows?: number;
+  invalidTimestampRows?: number;
+  uniqueTimestampLabels?: number;
+  duplicateTimestampRows?: number;
+  timestampRowsInRequestedInterval?: number;
+  precipitationValues?: number;
+  missingPrecipitationValues?: number;
+  explicitZeroValues?: number;
+  invalidPrecipitationValues?: number;
+  intervalPrecipitationValues?: number;
+  intervalMissingPrecipitationValues?: number;
+  intervalExplicitZeroValues?: number;
+  intervalInvalidPrecipitationValues?: number;
+  firstTimestampLabel?: string;
+  lastTimestampLabel?: string;
+  timestampLabelSamples?: string[];
+  note?: string;
+}
+
+export interface MeteostatStationDiagnosticResult {
+  status: 'configuration-required' | 'available' | 'unavailable';
+  targetCoordinates?: string;
+  interval?: { startAt: string; endAt: string; requestedHours: number };
+  stations: MeteostatStationDiagnostic[];
+  note: string;
+}
+
 const DEFAULT_NEARBY_STATION_LIMIT = 3;
 const MAX_NEARBY_STATION_LIMIT = 10;
 const DEFAULT_NEARBY_RADIUS_KM = 25;
 const MAX_NEARBY_RADIUS_KM = 200;
+const MAX_DIAGNOSTIC_STATIONS = 3;
+const MAX_DIAGNOSTIC_HOURS = 7 * 24;
+const MAX_DIAGNOSTIC_ROWS = 8 * 24 + 1;
+
+function utcTimestampFromLabel(value: unknown): number | undefined {
+  if (
+    typeof value !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
+  )
+    return undefined;
+  const timestamp = Date.parse(`${value.replace(' ', 'T')}Z`);
+  return Number.isFinite(timestamp) &&
+    new Date(timestamp).toISOString().replace('T', ' ').slice(0, 19) === value
+    ? timestamp
+    : undefined;
+}
 
 @Injectable()
 export class WeatherObservationCollector {
@@ -196,6 +248,264 @@ export class WeatherObservationCollector {
     );
     if (!response.ok) throw new Error('Station request failed');
     return response.json();
+  }
+
+  private nearbySearchBounds() {
+    const radiusKm = Number(
+      process.env.METEOSTAT_NEARBY_RADIUS_KM ?? DEFAULT_NEARBY_RADIUS_KM,
+    );
+    const stationLimit = Number(
+      process.env.METEOSTAT_NEARBY_STATION_LIMIT ??
+        DEFAULT_NEARBY_STATION_LIMIT,
+    );
+    return Number.isFinite(radiusKm) &&
+      radiusKm >= 1 &&
+      radiusKm <= MAX_NEARBY_RADIUS_KM &&
+      Number.isInteger(stationLimit) &&
+      stationLimit >= 1 &&
+      stationLimit <= MAX_NEARBY_STATION_LIMIT
+      ? { radiusKm, stationLimit }
+      : null;
+  }
+
+  async diagnoseAtCoordinates(
+    request: HourlyPrecipitationRequest,
+    now = new Date(),
+  ): Promise<MeteostatStationDiagnosticResult> {
+    const { latitude, longitude, startAt, endAt } = request;
+    const start = Date.parse(startAt);
+    const end = Date.parse(endAt);
+    const validUtcHour = (value: string, timestamp: number) =>
+      /^\d{4}-\d{2}-\d{2}T\d{2}:00:00\.000Z$/.test(value) &&
+      Number.isFinite(timestamp) &&
+      timestamp % HOUR_MS === 0 &&
+      new Date(timestamp).toISOString() === value;
+    const unavailable = (
+      status: MeteostatStationDiagnosticResult['status'],
+      note: string,
+    ): MeteostatStationDiagnosticResult => ({
+      status,
+      stations: [],
+      note,
+    });
+    if (!process.env.METEOSTAT_API_KEY)
+      return unavailable(
+        'configuration-required',
+        'Set METEOSTAT_API_KEY in the isolated development environment to inspect stations.',
+      );
+    if (
+      request.metric !== 'precipitation_mm' ||
+      !validWeatherCoordinates(request) ||
+      !validUtcHour(startAt, start) ||
+      !validUtcHour(endAt, end) ||
+      end <= start ||
+      end - start > MAX_DIAGNOSTIC_HOURS * HOUR_MS ||
+      end > now.getTime()
+    )
+      return unavailable(
+        'unavailable',
+        'Provide valid coordinates and a past UTC-hour interval of at most seven days.',
+      );
+    const bounds = this.nearbySearchBounds();
+    if (!bounds)
+      return unavailable(
+        'configuration-required',
+        `Set METEOSTAT_NEARBY_RADIUS_KM from 1 to ${MAX_NEARBY_RADIUS_KM} and METEOSTAT_NEARBY_STATION_LIMIT from 1 to ${MAX_NEARBY_STATION_LIMIT}.`,
+      );
+
+    const result: MeteostatStationDiagnosticResult = {
+      status: 'available',
+      targetCoordinates: weatherCoordinateKey(request),
+      interval: {
+        startAt,
+        endAt,
+        requestedHours: (end - start) / HOUR_MS,
+      },
+      stations: [],
+      note: 'Read-only station evidence. Raw timestamp labels are reported without assigning start/end interval semantics; nothing is stored or scored.',
+    };
+    try {
+      const nearby = await this.request('nearby', {
+        lat: String(latitude),
+        lon: String(longitude),
+        radius: String(bounds.radiusKm * 1000),
+        limit: String(Math.min(bounds.stationLimit, MAX_DIAGNOSTIC_STATIONS)),
+      });
+      if (
+        !Array.isArray(nearby?.data) ||
+        nearby.data.length > MAX_DIAGNOSTIC_STATIONS
+      )
+        throw new Error('Invalid nearby station response');
+
+      const startDate = startAt.slice(0, 10);
+      const endDate = new Date(end - 1).toISOString().slice(0, 10);
+      const inspectedIds = new Set<string>();
+      for (const candidate of nearby.data) {
+        if (
+          typeof candidate?.id !== 'string' ||
+          !/^[A-Za-z0-9]{1,12}$/.test(candidate.id) ||
+          inspectedIds.has(candidate.id) ||
+          typeof candidate.distance !== 'number' ||
+          !Number.isFinite(candidate.distance) ||
+          candidate.distance < 0 ||
+          candidate.distance > bounds.radiusKm * 1000
+        )
+          continue;
+        inspectedIds.add(candidate.id);
+        let station: Station | undefined;
+        try {
+          const metadata = await this.request('meta', { id: candidate.id });
+          const data = metadata?.data;
+          const stationLatitude = data?.location?.latitude;
+          const stationLongitude = data?.location?.longitude;
+          if (
+            data?.id !== candidate.id ||
+            !validWeatherCoordinates({
+              latitude: stationLatitude,
+              longitude: stationLongitude,
+            })
+          )
+            continue;
+          const distanceKm = stationDistanceKm(
+            stationLatitude,
+            stationLongitude,
+            latitude,
+            longitude,
+          );
+          if (distanceKm > bounds.radiusKm) continue;
+          station = {
+            id: candidate.id,
+            name: data.name?.en || candidate.id,
+            latitude: stationLatitude,
+            longitude: stationLongitude,
+            distanceKm,
+            reportedDistanceKm: candidate.distance / 1000,
+            country: data.country,
+            region: data.region,
+            timezone: data.timezone,
+            identifiers: data.identifiers ?? data.identifier,
+            inventory: data.inventory,
+          };
+          const inventory = data.inventory?.hourly;
+          if (
+            typeof inventory?.start !== 'string' ||
+            typeof inventory?.end !== 'string' ||
+            inventory.start > endDate ||
+            inventory.end < startDate
+          ) {
+            result.stations.push({
+              stationId: candidate.id,
+              station,
+              reportedDistanceKm: candidate.distance / 1000,
+              status: 'no-hourly-inventory',
+            });
+            continue;
+          }
+          const hourly = await this.request('hourly', {
+            station: candidate.id,
+            start: startDate,
+            end: endDate,
+            tz: 'UTC',
+            model: 'false',
+            units: 'metric',
+          });
+          if (
+            !Array.isArray(hourly?.data) ||
+            hourly.data.length > MAX_DIAGNOSTIC_ROWS
+          )
+            throw new Error('Invalid station data');
+
+          const hourlyRows = hourly.data as MeteostatHour[];
+          const timestamps = hourlyRows
+            .map((row) => row?.time)
+            .filter((time: unknown): time is string =>
+              Number.isFinite(utcTimestampFromLabel(time)),
+            );
+          const uniqueTimestamps = [...new Set(timestamps)].sort();
+          const timestampRowsInRequestedInterval = timestamps.filter((time) => {
+            const timestamp = utcTimestampFromLabel(time)!;
+            return timestamp >= start && timestamp < end;
+          }).length;
+          let precipitationValues = 0;
+          let missingPrecipitationValues = 0;
+          let explicitZeroValues = 0;
+          let invalidPrecipitationValues = 0;
+          let intervalPrecipitationValues = 0;
+          let intervalMissingPrecipitationValues = 0;
+          let intervalExplicitZeroValues = 0;
+          let intervalInvalidPrecipitationValues = 0;
+          for (const row of hourlyRows) {
+            const timestamp = utcTimestampFromLabel(row.time) ?? Number.NaN;
+            const inRequestedInterval = timestamp >= start && timestamp < end;
+            if (row.prcp === null || row.prcp === undefined) {
+              missingPrecipitationValues++;
+              if (inRequestedInterval) intervalMissingPrecipitationValues++;
+            } else if (
+              typeof row.prcp === 'number' &&
+              Number.isFinite(row.prcp) &&
+              row.prcp >= 0
+            ) {
+              precipitationValues++;
+              if (inRequestedInterval) intervalPrecipitationValues++;
+              if (row.prcp === 0) explicitZeroValues++;
+              if (inRequestedInterval && row.prcp === 0)
+                intervalExplicitZeroValues++;
+            } else {
+              invalidPrecipitationValues++;
+              if (inRequestedInterval) intervalInvalidPrecipitationValues++;
+            }
+          }
+          result.stations.push({
+            stationId: candidate.id,
+            station,
+            reportedDistanceKm: candidate.distance / 1000,
+            status: 'inspected',
+            returnedRows: hourlyRows.length,
+            validTimestampRows: timestamps.length,
+            invalidTimestampRows: hourlyRows.length - timestamps.length,
+            uniqueTimestampLabels: uniqueTimestamps.length,
+            duplicateTimestampRows: timestamps.length - uniqueTimestamps.length,
+            timestampRowsInRequestedInterval,
+            precipitationValues,
+            missingPrecipitationValues,
+            explicitZeroValues,
+            invalidPrecipitationValues,
+            intervalPrecipitationValues,
+            intervalMissingPrecipitationValues,
+            intervalExplicitZeroValues,
+            intervalInvalidPrecipitationValues,
+            firstTimestampLabel: uniqueTimestamps[0],
+            lastTimestampLabel: uniqueTimestamps.at(-1),
+            timestampLabelSamples: [
+              ...new Set([
+                ...uniqueTimestamps.slice(0, 6),
+                ...uniqueTimestamps.slice(-6),
+              ]),
+            ],
+            note: 'Raw Meteostat time labels; precipitation timestamps have no inferred interval boundary.',
+          });
+        } catch {
+          result.stations.push({
+            stationId: candidate.id,
+            station,
+            reportedDistanceKm: candidate.distance / 1000,
+            status: 'metadata-or-hourly-request-failed',
+            note: 'Station metadata or hourly request failed; no data was stored.',
+          });
+        }
+      }
+      if (!result.stations.some(({ status }) => status === 'inspected')) {
+        result.status = 'unavailable';
+        result.note =
+          'No nearby station hourly observations could be inspected for this coordinate and interval.';
+      }
+      return result;
+    } catch {
+      return unavailable(
+        'unavailable',
+        'Meteostat station discovery failed. No data was stored or scored.',
+      );
+    }
   }
 
   async collect(
@@ -541,21 +851,8 @@ export class WeatherObservationCollector {
         note: 'Provide valid coordinates and a past, hour-aligned UTC interval of at most 30 days.',
       };
     }
-    const radiusKm = Number(
-      process.env.METEOSTAT_NEARBY_RADIUS_KM ?? DEFAULT_NEARBY_RADIUS_KM,
-    );
-    const stationLimit = Number(
-      process.env.METEOSTAT_NEARBY_STATION_LIMIT ??
-        DEFAULT_NEARBY_STATION_LIMIT,
-    );
-    if (
-      !Number.isFinite(radiusKm) ||
-      radiusKm < 1 ||
-      radiusKm > MAX_NEARBY_RADIUS_KM ||
-      !Number.isInteger(stationLimit) ||
-      stationLimit < 1 ||
-      stationLimit > MAX_NEARBY_STATION_LIMIT
-    ) {
+    const bounds = this.nearbySearchBounds();
+    if (!bounds) {
       return {
         status: 'configuration-required',
         source: null,
@@ -563,6 +860,7 @@ export class WeatherObservationCollector {
         note: `Set METEOSTAT_NEARBY_RADIUS_KM from 1 to ${MAX_NEARBY_RADIUS_KM} and METEOSTAT_NEARBY_STATION_LIMIT from 1 to ${MAX_NEARBY_STATION_LIMIT}.`,
       };
     }
+    const { radiusKm, stationLimit } = bounds;
 
     const coordinateKey = weatherCoordinateKey(request);
     const claimSource = `meteostat:nearby:${coordinateKey}:hourly-${label}`;

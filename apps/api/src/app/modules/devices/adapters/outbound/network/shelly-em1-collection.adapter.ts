@@ -1,5 +1,18 @@
 import { isIP } from 'node:net'
+import type { RegisteredDevice } from '../../../device-registry.types'
 import { readJsonResponse } from './read-bounded-json-response'
+
+/** Eligibility only, never proof of observer reachability or measurement authority. */
+export function isShellyEm1CollectionCandidate(device: RegisteredDevice): boolean {
+  const physicalId = String(device.metadata?.physicalId || '')
+  const component = String(device.metadata?.component || '')
+  const channel = device.metadata?.channel
+  return device.trustStatus === 'approved' && device.kind === 'physical' &&
+    (device.adapter.driver === 'shelly-lan' || device.adapter.driver === 'shelly-discovered') &&
+    /^shelly[a-z0-9._-]{1,114}$/i.test(physicalId) &&
+    Number.isInteger(channel) && typeof channel === 'number' && channel >= 0 && channel <= 31 &&
+    component === `em1:${channel}` && device.id === `${physicalId}:${component}`
+}
 
 export function shellyEm1StatusRpcUrl(ipAddress: string, channel: number): string {
   return `http://${ipAddress}/rpc/EM1.GetStatus?id=${channel}`

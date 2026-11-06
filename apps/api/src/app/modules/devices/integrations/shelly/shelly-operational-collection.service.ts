@@ -14,7 +14,8 @@ import { parseShellySwitchStatus } from '../../adapters/inbound/shelly/shelly-sw
 import { readOnlyShellyRpcDeviceInfoFromBody } from '../../adapters/inbound/shelly/read-only-shelly-rpc'
 import { readVerifiedShellySwitchStatus, shellySwitchStatusRpcUrl } from '../../adapters/outbound/network/shelly-switch-collection.adapter'
 import { ShellyRemoteObserverSupervisor, safeRemoteObserverError } from './shelly-remote-observer.supervisor'
-import { readVerifiedShellyEm1Status } from '../../adapters/outbound/network/shelly-em1-collection.adapter'
+import { isShellyEm1CollectionCandidate, readVerifiedShellyEm1Status, shellyEm1StatusRpcUrl } from '../../adapters/outbound/network/shelly-em1-collection.adapter'
+import { ApprovedMqttObservationRuntime } from '../../mqtt/approved-mqtt-observation.runtime'
 import { isShellyHttpEm1Approval, shellyHttpEm1Approval, SHELLY_HTTP_EM1_SOURCE } from './shelly-http-em1-observation-approval'
 
 interface AcceptedShellyStatusObservation {
@@ -39,6 +40,7 @@ export class ShellyOperationalCollectionService {
     @Optional() @Inject(PHYSICAL_DEVICE_INVENTORY_SERVICE)
     private readonly physicalInventory?: PhysicalDeviceInventoryService,
     @Optional() routes?: ShellyRouteResolver,
+    @Optional() private readonly observations?: ApprovedMqttObservationRuntime,
   ) {
     this.routes = routes ?? new ShellyRouteResolver(registry, discovery, lanDiscovery, physicalInventory)
     this.remoteSupervisor = new ShellyRemoteObserverSupervisor(registry, this.routes, lanDiscovery, physicalInventory, discovery)
@@ -243,6 +245,102 @@ export class ShellyOperationalCollectionService {
         ipAddress: target.ipAddress, verifiedAt: reading.observedAt },
     })
     return saved ? this.getHttpEm1PowerApproval(input.tenantId, input.siteId, input.deviceId) : null
+  }
+
+  /**
+   * Collect explicitly approved EM1 power from a directly connected site-local observer.
+   * Remote SSH collection is deliberately NOT enabled by this method.
+   * No MQTT approval, control binding or discovered endpoint grants HTTP authority.
+   */
+  async pollApprovedEm1Measurements(devices: ReadonlyArray<RegisteredDevice>): Promise<void> {
+    if (!this.observations?.inspectPersistedObservationAuthority) return
+    const candidates = devices.filter(isShellyEm1CollectionCandidate)
+    // Do not create unbounded concurrent network requests on large installations.
+    for (let offset = 0; offset < candidates.length; offset += 4) {
+      await Promise.all(candidates.slice(offset, offset + 4).map(device => this.pollApprovedLocalEm1(device)))
+    }
+  }
+
+  private async pollApprovedLocalEm1(device: RegisteredDevice): Promise<void> {
+    const sourceId = SHELLY_HTTP_EM1_SOURCE
+    const component = String(device.metadata?.component || '')
+    const channel = Number(device.metadata?.channel)
+    const selector = `EM1.GetStatus?id=${channel}`
+    const scope = { tenantId: device.tenantId, siteId: device.siteId }
+
+    // Inspect the very same persisted authority used by canonical ingress.
+    // No HTTP request is sent for an MQTT-only or ambiguous binding.
+    let authority: Awaited<ReturnType<ApprovedMqttObservationRuntime['inspectPersistedObservationAuthority']>>
+    try {
+      authority = await this.observations!.inspectPersistedObservationAuthority(scope, device.id)
+    } catch (error) {
+      this.logger.warn(JSON.stringify({ event: 'shelly_em1_http_poll', outcome: 'skipped',
+        deviceId: device.id, reason: 'authority_inspection_failed', error: safeRemoteObserverError(error) }))
+      return
+    }
+    if (authority.status !== 'installation_approved' || !authority.sources.some(source =>
+      source.sourceId === sourceId && source.selector === selector && source.fields.includes('power'))) return
+
+    // This resolver requires same-site inventory assignment, identity/component
+    // evidence, exact observer allowlist, and a directly connected interface.
+    let target: Awaited<ReturnType<ShellyRouteResolver['resolveAuthorizedLocalShellyEm1Target']>>
+    try {
+      target = await this.routes.resolveAuthorizedLocalShellyEm1Target(device)
+    } catch (error) {
+      this.logger.warn(JSON.stringify({ event: 'shelly_em1_http_poll', outcome: 'skipped',
+        deviceId: device.id, reason: 'route_resolution_failed', error: safeRemoteObserverError(error) }))
+      return
+    }
+    if (!target || target.component !== component || target.channel !== channel) return
+
+    const { observer, ipAddress, zone, physicalId } = target
+    const statusUrl = shellyEm1StatusRpcUrl(ipAddress, channel)
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), Math.min(httpPollTimeoutMs(), 2_500))
+    let reading: Awaited<ReturnType<typeof readVerifiedShellyEm1Status>>
+    try {
+      reading = await readVerifiedShellyEm1Status(
+        { ipAddress, physicalId, component, channel }, controller.signal,
+      )
+    } catch (error) {
+      this.registry.recordObserverReachability(device.id, {
+        status: 'unreachable', checkedAt: new Date().toISOString(), endpoint: statusUrl,
+        targetIpAddress: ipAddress, networkScopeId: zone.id,
+        observer: { id: observer.id, host: observer.host, platform: process.platform,
+          localScopes: [{ interfaceName: observer.interfaceName!, cidr: zone.cidr!, address: target.interfaceAddress }] },
+        reason: safeRemoteObserverError(error),
+      }, scope)
+      this.logger.warn(JSON.stringify({ event: 'shelly_em1_http_poll', outcome: 'rejected',
+        deviceId: device.id, reason: controller.signal.aborted ? 'timeout' : 'verified_rpc_failed',
+        error: safeRemoteObserverError(error) }))
+      return
+    } finally {
+      clearTimeout(timeout)
+    }
+
+    this.registry.recordObserverReachability(device.id, {
+      status: 'reachable', checkedAt: reading.observedAt, endpoint: statusUrl,
+      targetIpAddress: ipAddress, networkScopeId: zone.id,
+      observer: { id: observer.id, host: observer.host, platform: process.platform,
+        localScopes: [{ interfaceName: observer.interfaceName!, cidr: zone.cidr!, address: target.interfaceAddress }] },
+    }, scope)
+    const evidenceId = `shelly-em1-http:${createHash('sha256').update([
+      scope.tenantId, scope.siteId, device.id, sourceId, selector,
+      reading.observedAt, String(reading.values.power),
+    ].join('\u0000')).digest('hex')}`
+    try {
+      const result = await this.observations!.ingestHttpObservation({
+        scope, deviceId: device.id, sourceId, selector, payload: reading.values, evidenceId,
+      })
+      this.logger.log(JSON.stringify({ event: 'shelly_em1_http_poll',
+        outcome: result.outcome === 'processed' && result.accepted ? 'accepted' : 'rejected',
+        deviceId: device.id, observerId: observer.id, sourceId, selector,
+        reason: result.outcome === 'rejected' ? result.reasonCode : result.reason }))
+    } catch (error) {
+      // A storage/ingress failure is not proof that the physical EM is unreachable.
+      this.logger.error(JSON.stringify({ event: 'shelly_em1_http_poll', outcome: 'failed',
+        deviceId: device.id, reason: 'observation_ingress_failed', error: safeRemoteObserverError(error) }))
+    }
   }
 
   /** Transitional wrapper for existing read-only poller tests and callers.

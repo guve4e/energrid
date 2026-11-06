@@ -16,7 +16,8 @@ export interface AuthorizedSiteLocalObserver {
   scopeId: string;
   cidr: string;
   interfaceName?: string;
-  expectedDeviceIds: string[];
+  /** Optional legacy restriction. When omitted, site-owned inventory and assignments authorize targets. */
+  expectedDeviceIds?: string[];
   expectedComponentKeys?: string[];
 }
 
@@ -24,7 +25,7 @@ export type SiteLocalObserverSelection =
   | { observer: AuthorizedSiteLocalObserver; reason: 'selected' }
   | { observer: null; reason: 'observer_identity_not_authorized' | 'observer_component_not_authorized' | 'observer_assignment_ambiguous' };
 
-/** Select an observer only after applying its explicit site, scope, physical-ID and component allowlists. */
+/** Select one observer for the exact site/scope. Persisted inventory owns target authorization; optional legacy allowlists can further narrow it. */
 export function selectAuthorizedSiteLocalObserver(input: {
   observers: AuthorizedSiteLocalObserver[];
   tenantId: string;
@@ -35,10 +36,11 @@ export function selectAuthorizedSiteLocalObserver(input: {
 }): SiteLocalObserverSelection {
   const scoped = input.observers.filter(observer => observer.tenantId === input.tenantId &&
     observer.siteId === input.siteId && observer.scopeId === input.scopeId);
-  const identityMatches = scoped.filter(observer => observer.expectedDeviceIds.some(id =>
+  const identityMatches = scoped.filter(observer => !observer.expectedDeviceIds || observer.expectedDeviceIds.some(id =>
     id.toLowerCase() === input.physicalId.toLowerCase()));
   if (!identityMatches.length) return { observer: null, reason: 'observer_identity_not_authorized' };
-  const assignmentMatches = identityMatches.filter(observer => observer.expectedComponentKeys?.includes(input.component));
+  const assignmentMatches = identityMatches.filter(observer => !observer.expectedComponentKeys ||
+    observer.expectedComponentKeys.includes(input.component));
   if (!assignmentMatches.length) return { observer: null, reason: 'observer_component_not_authorized' };
   if (assignmentMatches.length !== 1) return { observer: null, reason: 'observer_assignment_ambiguous' };
   return { observer: assignmentMatches[0], reason: 'selected' };
@@ -73,9 +75,9 @@ export function configuredSiteLocalObservers(raw = process.env.HOME_SITE_LOCAL_O
         !/^[a-zA-Z0-9][a-zA-Z0-9_.@-]{0,127}$/.test(value.sshTarget))) {
       throw new Error('Site-local observer SSH target must be a safe configured SSH alias or host.');
     }
-    if (!Array.isArray(value.expectedDeviceIds) || !value.expectedDeviceIds.length || value.expectedDeviceIds.length > 32 ||
-        value.expectedDeviceIds.some(id => typeof id !== 'string' || !/^shelly[a-z0-9._-]{1,114}$/i.test(id))) {
-      throw new Error('Site-local observer authorization requires a bounded allowlist of Shelly physical identities.');
+    if (value.expectedDeviceIds !== undefined && (!Array.isArray(value.expectedDeviceIds) || !value.expectedDeviceIds.length || value.expectedDeviceIds.length > 32 ||
+        value.expectedDeviceIds.some(id => typeof id !== 'string' || !/^shelly[a-z0-9._-]{1,114}$/i.test(id)))) {
+      throw new Error('Site-local observer identity restrictions must be a bounded list of Shelly physical identities.');
     }
     if (value.expectedComponentKeys !== undefined && (!Array.isArray(value.expectedComponentKeys) ||
         value.expectedComponentKeys.length === 0 || value.expectedComponentKeys.length > 32 ||
@@ -122,7 +124,9 @@ export function validateSiteLocalShellyEvidence(input: unknown, options: {
       typeof info.mac !== 'string' || !normalizeMac(info.mac) || typeof info.model !== 'string' || !info.model.trim()) {
     throw new Error('Fresh exact Shelly Gen2+ device identity evidence is required.');
   }
-  if (!observer.expectedDeviceIds.some(id => id.toLowerCase() === info.id.toLowerCase())) throw new Error('Reported Shelly identity does not match the server-authorized physical identity allowlist.');
+  if (observer.expectedDeviceIds && !observer.expectedDeviceIds.some(id => id.toLowerCase() === info.id.toLowerCase())) {
+    throw new Error('Reported Shelly identity does not match the server-authorized physical identity restriction.');
+  }
   if (body.endpoint.observedMacAddress && normalizeMac(body.endpoint.observedMacAddress) !== normalizeMac(info.mac)) {
     throw new Error('Observed LAN MAC conflicts with the Shelly device-reported MAC.');
   }

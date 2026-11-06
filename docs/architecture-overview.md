@@ -43,6 +43,12 @@ flowchart LR
 
 The diagram shows repository-level relationships, not a deployment guarantee. API and Core database connections are configured independently; a particular deployment may use the same or separate PostgreSQL databases. Provider calls and LAB-only features are opt-in/configuration-dependent.
 
+## Deployed authority and isolated development
+
+Each deployed site has one designated inventory/observation authority and canonical state writer. Local development is an isolated instance even when its tenant/site labels match Home. `ENERGRID_INSTANCE_ID` and `ENERGRID_INSTANCE_MODE` make the intended role visible in configuration and the administrator-only runtime diagnostic; the current diagnostic is not an attestation or uniqueness-enforcement mechanism. The Mac development API and Pi 5 Home API currently use separate PostgreSQL databases and separate local stores. They are not replicas, and their independently generated Physical Inventory IDs must not be copied between them. The Pi 5 remains the proposed Home authority; the M0 source change does not migrate or deploy it.
+
+Network observers provide evidence under an exact site/scope authorization. They do not own enrollment, observation authority, canonical state, or control policy. The current API-owned SSH stdio worker is a read-only pull mechanism for its existing Shelly switch-state path. There is not yet a general authenticated machine-reporting boundary for remote observers to submit evidence or electrical observations to a designated site Core. The operator-attested Portal evidence workflow and internal observation ingress are not substitutes for that boundary. See [ADR 0005](decisions/0005-background-ingestion-ownership.md) and [Collection and ingestion](collection-and-ingestion.md#selected-device-evidence-refresh-and-em1-approval-preflight-local-source-5-november-2026).
+
 ## Dependency boundaries
 
 - Domain libraries should carry deterministic rules and typed contracts, without NestJS, SQL, MQTT or network clients. Enrollment uses a repository port; the API supplies the PostgreSQL adapter.

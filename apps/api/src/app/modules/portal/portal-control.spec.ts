@@ -485,13 +485,15 @@ describe('portal control configuration authorization', () => {
     expect(setEnrollmentStatus).toHaveBeenCalledWith('temp-kitchen', 'retired');
   });
   it('returns persisted identity without requiring a live Discovery scan', async () => {
+    const deviceId = 'shellypro2pm-ec6260888084:switch:0';
+    const verifiedAt = new Date().toISOString();
     const enrolledDevice = {
-      id: 'temp-kitchen', tenantId: 'tenant-a', siteId: 'site-a',
+      id: deviceId, tenantId: 'tenant-a', siteId: 'site-a',
       metadata: {
         identityEvidenceSource: 'verified_site_local_shelly_rpc',
         componentEvidenceSource: 'verified_site_local_shelly_rpc',
-        siteLocalObserverId: 'mac-eero-en0', identityVerifiedAt: '2026-10-19T12:00:00.000Z',
-        componentVerifiedAt: '2026-10-19T12:00:01.000Z', networkScope: 'eero-lan:192.168.7.0/24',
+        siteLocalObserverId: 'mac-eero-en0', identityVerifiedAt: verifiedAt,
+        componentVerifiedAt: verifiedAt, siteLocalEvidenceScanId: 'site-observer-test-1', networkScope: 'eero-lan:192.168.7.0/24',
         ipAddress: '192.168.7.39', physicalId: 'shellypro2pm-ec6260888084', component: 'switch:0',
       },
     };
@@ -525,9 +527,10 @@ describe('portal control configuration authorization', () => {
       } as never,
     );
 
-    await expect(controller.getDeviceNetworkIdentity('temp-kitchen', {
+    const request = {
       method: 'GET', url: '/', headers: {}, user: { userId: 'test-user', email: 'admin@example.test', name: 'Admin', role: 'admin', sessionId: 'test-session', sessionVersion: 0 },
-    })).resolves.toMatchObject({
+    } as const;
+    await expect(controller.getDeviceNetworkIdentity(deviceId, request)).resolves.toMatchObject({
       association: expect.objectContaining({ ipAddress: '192.168.1.204' }),
       physicalDevice,
       installationRoute: { endpoint: '192.168.7.39', networkScope: 'eero-lan:192.168.7.0/24' },
@@ -536,6 +539,10 @@ describe('portal control configuration authorization', () => {
         networkScope: 'eero-lan:192.168.7.0/24', physicalId: 'shellypro2pm-ec6260888084', component: 'switch:0',
       },
       recovery: { status: 'verification_required', physicalDeviceId: 'physical-proem', componentKey: 'em1:0' },
+    });
+    enrolledDevice.metadata.identityVerifiedAt = new Date(Date.now() - 16 * 60_000).toISOString();
+    await expect(controller.getDeviceNetworkIdentity(deviceId, request)).resolves.toMatchObject({
+      rpcVerification: { status: 'not_verified', observerId: null, endpoint: null },
     });
   });
   it('projects one physical identity onto two logical devices with distinct components', async () => {

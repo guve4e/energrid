@@ -1,10 +1,23 @@
-import { readVerifiedShellyEm1Status, shellyEm1StatusRpcUrl } from './shelly-em1-collection.adapter'
+import type { RegisteredDevice } from '../../../device-registry.types'
+import { isShellyEm1CollectionCandidate, readVerifiedShellyEm1Status, shellyEm1StatusRpcUrl } from './shelly-em1-collection.adapter'
 
 const target = { ipAddress: '192.0.2.20', physicalId: 'shellyproem50-001122334455', component: 'em1:0', channel: 0 }
 const response = (body: unknown, status = 200) => ({ status, json: async () => body }) as Response
-describe('Shelly EM1 read-only RPC adapter', () => {
+const device = (id: string, component: string, trustStatus = 'approved') => ({
+  id, kind: 'physical', trustStatus, adapter: { driver: 'shelly-lan' },
+  metadata: { physicalId: target.physicalId, component, channel: 0 },
+}) as unknown as RegisteredDevice
+
+describe('Shelly EM1 read-only collection adapter', () => {
   const originalFetch = global.fetch
   afterEach(() => { global.fetch = originalFetch })
+
+  it('selects an approved EM1 component but not a switch or an unapproved device', () => {
+    expect(isShellyEm1CollectionCandidate(device(`${target.physicalId}:em1:0`, 'em1:0'))).toBe(true)
+    expect(isShellyEm1CollectionCandidate(device(`${target.physicalId}:switch:0`, 'switch:0'))).toBe(false)
+    expect(isShellyEm1CollectionCandidate(device(`${target.physicalId}:em1:0`, 'em1:0', 'discovered'))).toBe(false)
+    expect(isShellyEm1CollectionCandidate(device('shellyproem50-other:em1:0', 'em1:0'))).toBe(false)
+  })
 
   it('verifies physical identity before reading exactly EM1 channel 0 and maps act_power', async () => {
     const mockFetch = jest.fn()

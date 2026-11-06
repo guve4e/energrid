@@ -61,7 +61,7 @@ describe('device measurement history', () => {
     expect(page.text()).toContain('°C');
     expect(page.text()).toContain('%RH');
     expect(page.text()).toContain('Last observed');
-    expect(page.text()).toContain('Blue dots are saved readings. Lines connect nearby readings; long gaps stay unconnected.');
+    expect(page.text()).toContain('Markers and trends use recorded samples only. Lines connect nearby readings; long gaps stay unconnected.');
     expect(page.text()).toContain('Median');
     const summaries = page.findAll('.measurement-chart').at(0)!.find('.chart-summary');
     expect(summaries.text()).toContain('Min17.8');
@@ -116,6 +116,13 @@ describe('device measurement history', () => {
     const sevenDayQuery = new URL(String(after.at(-1)), window.location.origin).searchParams;
     expect(Date.parse(sevenDayQuery.get('to')!) - Date.parse(sevenDayQuery.get('from')!)).toBeGreaterThan(6 * 24 * 60 * 60_000);
     expect(page.find('button[aria-pressed="true"]').text()).toBe('7 days');
+    await page.findAll('button').find(button => button.text() === '1 hour')?.trigger('click');
+    await flushPromises();
+    const oneHourUrl = fetchMock.mock.calls.filter(([url]) => String(url).includes('/measurements?')).at(-1)?.[0];
+    const oneHourQuery = new URL(String(oneHourUrl), window.location.origin).searchParams;
+    const oneHourMs = Date.parse(oneHourQuery.get('to')!) - Date.parse(oneHourQuery.get('from')!);
+    expect(oneHourMs).toBeGreaterThan(59 * 60_000);
+    expect(oneHourMs).toBeLessThan(61 * 60_000);
   });
 
   it('shows a clear empty-history state without synthesizing samples', async () => {
